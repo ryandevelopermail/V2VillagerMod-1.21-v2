@@ -646,11 +646,24 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         this.targetSelector.add(3, new HeroHurtByTargetGoal(this));
         this.targetSelector.add(3, new HeroHurtTargetGoal(this));
         this.targetSelector.add(3, new ActiveTargetGoal<>(this, RaiderEntity.class, true));
-        if (GuardVillagersConfig.attackAllMobs)
-            this.targetSelector.add(3, new ActiveTargetGoal<>(this, MobEntity.class, 5, true, true, (mob) -> mob instanceof Monster && !GuardVillagersConfig.mobBlackList.contains(mob.getSavedEntityId())));
+        this.targetSelector.add(2, new ActiveTargetGoal<>(this, HostileEntity.class, 5, true, true, this::shouldTargetHostile));
         this.targetSelector.add(3, new ActiveTargetGoal<>(this, PlayerEntity.class, 10, true, false, this::shouldAngerAt));
         this.targetSelector.add(4, new ActiveTargetGoal<>(this, ZombieEntity.class, true));
         this.targetSelector.add(4, new UniversalAngerGoal<>(this, false));
+    }
+
+    private boolean shouldTargetHostile(LivingEntity livingEntity) {
+        if (!(livingEntity instanceof HostileEntity)) {
+            return false;
+        }
+        if (!this.canTarget(livingEntity)) {
+            return false;
+        }
+        if (!this.getVisibilityCache().canSee(livingEntity)) {
+            return false;
+        }
+
+        return this.squaredDistanceTo(livingEntity) <= 225.0D;
     }
 
     @Override
