@@ -5,6 +5,7 @@
   "mixins": [
     "MobEntityMixin",
     "ServerWorldMixin",
+    "VillagerEntityMixin",
     "VillagerTaskListProviderMixin"
   ],
   "injectors": {
