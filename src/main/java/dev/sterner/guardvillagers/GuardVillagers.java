@@ -147,26 +147,6 @@ public class GuardVillagers implements ModInitializer {
     }
 
     private ActionResult villagerConvert(PlayerEntity player, World world, Hand hand, Entity entity, @Nullable EntityHitResult entityHitResult) {
-        ItemStack itemStack = player.getStackInHand(hand);
-        if ((itemStack.getItem() instanceof SwordItem || itemStack.getItem() instanceof CrossbowItem) && player.isSneaking()) {
-            if (entityHitResult != null) {
-                Entity target = entityHitResult.getEntity();
-                if (target instanceof VillagerEntity villagerEntity) {
-                    if (!villagerEntity.isBaby()) {
-                        if (villagerEntity.getVillagerData().getProfession() == VillagerProfession.NONE || villagerEntity.getVillagerData().getProfession() == VillagerProfession.NITWIT) {
-                            if (!GuardVillagersConfig.convertVillagerIfHaveHotv || player.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE) && GuardVillagersConfig.convertVillagerIfHaveHotv) {
-                                convertVillager(villagerEntity, player, world);
-                                if (!player.getAbilities().creativeMode)
-                                    itemStack.decrement(1);
-                                return ActionResult.SUCCESS;
-                            }
-                        }
-                    }
-                }
-            }
-
-        }
-
         return ActionResult.PASS;
     }
 
