@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "guardvillagers",
   "version": "${version}",
-  "name": "GuardVillagers",
+  "name": "V2VillagerMod-1.21",
   "description": "Better village pest controll!",
   "authors": [
     "MrSterner"
