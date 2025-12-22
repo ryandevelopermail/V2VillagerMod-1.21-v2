@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import com.google.common.collect.Sets;
+import dev.sterner.guardvillagers.common.logging.VillagePopulationLogger;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -68,6 +69,7 @@ public final class JobBlockPairingHelper {
 
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
+            VillagePopulationLogger.logChestPairing(world, villager, globalPos.pos(), placedPos);
         }
     }
 

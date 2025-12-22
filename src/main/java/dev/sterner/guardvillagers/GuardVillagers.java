@@ -3,12 +3,14 @@ package dev.sterner.guardvillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
+import dev.sterner.guardvillagers.common.logging.VillagePopulationLogger;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
@@ -38,11 +40,9 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.EntityHitResult;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
-import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -83,6 +83,7 @@ public class GuardVillagers implements ModInitializer {
         Registry.register(Registries.SOUND_EVENT, id( "entity.guard.hurt"), GUARD_HURT);
         Registry.register(Registries.SOUND_EVENT, id( "entity.guard.death"), GUARD_DEATH);
 
+        VillagePopulationLogger.init();
         PayloadTypeRegistry.playC2S().register(GuardFollowPacket.ID, GuardFollowPacket.PACKET_CODEC);
         PayloadTypeRegistry.playC2S().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
 
@@ -95,8 +96,14 @@ public class GuardVillagers implements ModInitializer {
         ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(GUARD_SPAWN_EGG));
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
+            if (entity instanceof VillagerEntity villagerEntity) {
+                VillagePopulationLogger.logVillagerDeath(villagerEntity, source);
+            }
+        });
         UseEntityCallback.EVENT.register(this::villagerConvert);
         JobBlockPlacementHandler.register();
+        ServerChunkEvents.CHUNK_LOAD.register(VillagePopulationLogger::onChunkLoaded);
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity && villagerEntity.isNatural()) {
