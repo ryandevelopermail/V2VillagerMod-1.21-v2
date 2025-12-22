@@ -32,5 +32,11 @@
   },
   "suggests": {
     "another-mod": "*"
+  },
+  "custom": {
+    "activeMods": [
+      "GuardVillagers",
+      "V2VillagerMod-1.21"
+    ]
   }
 }
