@@ -28,6 +28,7 @@ public final class JobBlockPairingHelper {
 
     static {
         registerPairingBlock(Blocks.CHEST);
+        registerPairingBlock(Blocks.TRAPPED_CHEST);
     }
 
     private JobBlockPairingHelper() {

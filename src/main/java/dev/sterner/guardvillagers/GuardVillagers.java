@@ -2,16 +2,15 @@ package dev.sterner.guardvillagers;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
+import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
-import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
-import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -19,7 +18,6 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
-import net.minecraft.block.BlockState;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
@@ -98,32 +96,7 @@ public class GuardVillagers implements ModInitializer {
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
         UseEntityCallback.EVENT.register(this::villagerConvert);
-        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (!(world instanceof ServerWorld serverWorld)) {
-                return ActionResult.PASS;
-            }
-
-            ItemStack stack = player.getStackInHand(hand);
-            if (!(stack.getItem() instanceof BlockItem blockItem)) {
-                return ActionResult.PASS;
-            }
-
-            if (!JobBlockPairingHelper.isPairingBlock(blockItem.getBlock())) {
-                return ActionResult.PASS;
-            }
-
-            ItemPlacementContext placementContext = new ItemPlacementContext(player, hand, stack, hitResult);
-            BlockPos placementPos = serverWorld.getBlockState(placementContext.getBlockPos()).canReplace(placementContext) ? placementContext.getBlockPos() : placementContext.getBlockPos().offset(placementContext.getSide());
-
-            serverWorld.getServer().execute(() -> {
-                BlockState placedState = serverWorld.getBlockState(placementPos);
-                if (JobBlockPairingHelper.isPairingBlock(placedState)) {
-                    JobBlockPairingHelper.handlePairingBlockPlacement(serverWorld, placementPos, placedState);
-                }
-            });
-
-            return ActionResult.PASS;
-        });
+        JobBlockPlacementHandler.register();
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity && villagerEntity.isNatural()) {
