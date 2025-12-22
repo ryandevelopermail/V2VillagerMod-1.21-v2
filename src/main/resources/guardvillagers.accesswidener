@@ -1,4 +1,4 @@
-accessWidener v1 named
+accessWidener v2 named
 accessible field net/minecraft/entity/mob/MobEntity armorItems Lnet/minecraft/util/collection/DefaultedList;
 accessible field net/minecraft/entity/mob/MobEntity handItems Lnet/minecraft/util/collection/DefaultedList;
 accessible method net/minecraft/entity/LivingEntity knockback (Lnet/minecraft/entity/LivingEntity;)V

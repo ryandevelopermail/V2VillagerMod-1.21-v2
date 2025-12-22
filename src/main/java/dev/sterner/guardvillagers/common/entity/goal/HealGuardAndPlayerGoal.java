@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.TargetPredicate;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -14,7 +15,6 @@ import net.minecraft.entity.projectile.thrown.PotionEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.potion.Potion;
-import net.minecraft.potion.PotionUtil;
 import net.minecraft.potion.Potions;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.MathHelper;
@@ -118,14 +118,14 @@ public class HealGuardAndPlayerGoal extends Goal {
         double d1 = target.getEyeY() - (double) 1.1F - healer.getY();
         double d2 = target.getZ() + vec3d.z - healer.getZ();
         float f = MathHelper.sqrt((float) (d0 * d0 + d2 * d2));
-        Potion potion = Potions.REGENERATION;
+        var potion = Potions.REGENERATION;
         if (target.getHealth() <= 4.0F) {
             potion = Potions.HEALING;
         } else {
             potion = Potions.REGENERATION;
         }
         PotionEntity potionentity = new PotionEntity(healer.getWorld(), healer);
-        potionentity.setItem(PotionUtil.setPotion(new ItemStack(Items.SPLASH_POTION), potion));
+        potionentity.setItem(PotionContentsComponent.createStack(Items.SPLASH_POTION, potion));
         potionentity.setPitch(-20.0F);
         potionentity.setVelocity(d0, d1 + (double) (f * 0.2F), d2, 0.75F, 8.0F);
         healer.getWorld().playSound(null, healer.getX(), healer.getY(), healer.getZ(), SoundEvents.ENTITY_SPLASH_POTION_THROW, healer.getSoundCategory(), 1.0F, 0.8F + healer.getRandom().nextFloat() * 0.4F);

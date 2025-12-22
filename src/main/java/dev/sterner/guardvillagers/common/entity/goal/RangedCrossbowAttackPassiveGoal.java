@@ -8,8 +8,11 @@ import net.minecraft.entity.ai.NoPenaltyTargeting;
 import net.minecraft.entity.ai.RangedAttackMob;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.mob.PathAwareEntity;
+import net.minecraft.entity.projectile.ProjectileUtil;
+import net.minecraft.entity.raid.RaiderEntity;
 import net.minecraft.item.CrossbowItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.util.TimeHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.intprovider.UniformIntProvider;
@@ -139,7 +142,7 @@ public class RangedCrossbowAttackPassiveGoal<T extends PathAwareEntity & RangedA
                 }
                 int i = this.mob.getItemUseTime();
                 ItemStack itemstack = this.mob.getActiveItem();
-                if (i >= CrossbowItem.getPullTime(itemstack) || CrossbowItem.isCharged(itemstack)) {
+                if (i >= CrossbowItem.getPullTime(itemstack, livingentity) || CrossbowItem.isCharged(itemstack)) {
                     this.mob.stopUsingItem();
                     this.crossbowState = CrossbowState.CHARGED;
                     this.attackDelay = 10 + this.mob.getRandom().nextInt(5);
@@ -151,9 +154,10 @@ public class RangedCrossbowAttackPassiveGoal<T extends PathAwareEntity & RangedA
                     this.crossbowState = CrossbowState.READY_TO_ATTACK;
                 }
             } else if (this.crossbowState == CrossbowState.READY_TO_ATTACK && canSee) {
-                this.mob.attack(livingentity, 1.0F);
+                this.mob.shootAt(livingentity, 1.0F);
                 ItemStack itemstack1 = this.mob.getStackInHand(GuardVillagers.getHandWith(this.mob, item -> item instanceof CrossbowItem));
-                CrossbowItem.setCharged(itemstack1, false);
+                ((LivingEntity)this.mob).setCurrentHand(ProjectileUtil.getHandPossiblyHolding(livingentity, Items.CROSSBOW));
+                ((CrossbowUser)this.mob).setCharging(false);
                 this.crossbowState = CrossbowState.UNCHARGED;
             }
         }

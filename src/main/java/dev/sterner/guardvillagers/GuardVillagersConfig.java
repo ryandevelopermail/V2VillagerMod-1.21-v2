@@ -63,4 +63,6 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static boolean villagersRunFromPolarBears = true;
     @Entry
     public static boolean guardArrowsHurtVillagers = true;
+    @Entry
+    public static float spawnChancePerVillager = 0.5f;
 }

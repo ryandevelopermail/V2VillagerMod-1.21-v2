@@ -1,14 +1,18 @@
 package dev.sterner.guardvillagers;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
+import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
+import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
@@ -26,25 +30,31 @@ import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
 import net.minecraft.screen.ScreenHandlerType;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
+import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
+import org.lwjgl.system.MathUtil;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
 
-    public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER = new ExtendedScreenHandlerType<>(GuardVillagerScreenHandler::new);
+    public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
+            new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
 
-    public static final EntityType<GuardEntity> GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, new Identifier(GuardVillagers.MODID, "guard"),
+    public static final EntityType<GuardEntity> GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("guard"),
             FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, GuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
 
     public static final Item GUARD_SPAWN_EGG = new SpawnEggItem(GUARD_VILLAGER, 5651507, 8412749, new Item.Settings());
@@ -53,29 +63,66 @@ public class GuardVillagers implements ModInitializer {
         return itemPredicate.test(livingEntity.getMainHandStack().getItem()) ? Hand.MAIN_HAND : Hand.OFF_HAND;
     }
 
-    public static SoundEvent GUARD_AMBIENT = SoundEvent.of(new Identifier(MODID, "entity.guard.ambient"));
-    public static SoundEvent GUARD_HURT = SoundEvent.of(new Identifier(MODID, "entity.guard.hurt"));
-    public static SoundEvent GUARD_DEATH = SoundEvent.of(new Identifier(MODID, "entity.guard.death"));
+    public static SoundEvent GUARD_AMBIENT = SoundEvent.of(id( "entity.guard.ambient"));
+    public static SoundEvent GUARD_HURT = SoundEvent.of(id( "entity.guard.hurt"));
+    public static SoundEvent GUARD_DEATH = SoundEvent.of(id("entity.guard.death"));
+
+    public static Identifier id(String name){
+        return Identifier.of(MODID, name);
+    }
 
     @Override
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
 
-        Registry.register(Registries.ITEM, new Identifier(MODID, "guard_spawn_egg"), GUARD_SPAWN_EGG);
-        Registry.register(Registries.SCREEN_HANDLER, new Identifier("guard_screen"), GUARD_SCREEN_HANDLER);
-        Registry.register(Registries.SOUND_EVENT, new Identifier(MODID, "entity.guard.ambient"), GUARD_AMBIENT);
-        Registry.register(Registries.SOUND_EVENT, new Identifier(MODID, "entity.guard.hurt"), GUARD_HURT);
-        Registry.register(Registries.SOUND_EVENT, new Identifier(MODID, "entity.guard.death"), GUARD_DEATH);
+        Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
+        Registry.register(Registries.SCREEN_HANDLER, id("guard_screen"), GUARD_SCREEN_HANDLER);
+        Registry.register(Registries.SOUND_EVENT, id("entity.guard.ambient"), GUARD_AMBIENT);
+        Registry.register(Registries.SOUND_EVENT, id( "entity.guard.hurt"), GUARD_HURT);
+        Registry.register(Registries.SOUND_EVENT, id( "entity.guard.death"), GUARD_DEATH);
 
-        ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.PACKET_TYPE, GuardFollowPacket::handle);
-        ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.PACKET_TYPE, GuardPatrolPacket::handle);
+        PayloadTypeRegistry.playC2S().register(GuardFollowPacket.ID, GuardFollowPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playC2S().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
+
+        PayloadTypeRegistry.playS2C().register(GuardFollowPacket.ID, GuardFollowPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playS2C().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
+
+        ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
+        ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
 
         ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(GUARD_SPAWN_EGG));
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
         UseEntityCallback.EVENT.register(this::villagerConvert);
+
+        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            if (entity instanceof VillagerEntity villagerEntity && villagerEntity.isNatural()) {
+                var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
+                if (world.random.nextFloat() < spawnChance) {
+                    GuardEntity guardEntity = GUARD_VILLAGER.create(world);
+                    guardEntity.spawnWithArmor= true;
+                    guardEntity.initialize(world, world.getLocalDifficulty(villagerEntity.getBlockPos()), SpawnReason.NATURAL, null);
+                    guardEntity.refreshPositionAndAngles(villagerEntity.getBlockPos(), 0.0f, 0.0f);
+
+                    int i = GuardEntity.getRandomTypeForBiome(guardEntity.getWorld(), guardEntity.getBlockPos());
+                    guardEntity.setGuardVariant(i);
+                    guardEntity.setPersistent();
+                    guardEntity.setCustomName(villagerEntity.getCustomName());
+                    guardEntity.setCustomNameVisible(villagerEntity.isCustomNameVisible());
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
+                    guardEntity.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+
+                    world.spawnEntityAndPassengers(guardEntity);
+                }
+            }
+        });
     }
+
 
     private boolean onDamage(LivingEntity entity, DamageSource source, float amount) {
         Entity attacker = source.getAttacker();
@@ -100,26 +147,6 @@ public class GuardVillagers implements ModInitializer {
     }
 
     private ActionResult villagerConvert(PlayerEntity player, World world, Hand hand, Entity entity, @Nullable EntityHitResult entityHitResult) {
-        ItemStack itemStack = player.getStackInHand(hand);
-        if ((itemStack.getItem() instanceof SwordItem || itemStack.getItem() instanceof CrossbowItem) && player.isSneaking()) {
-            if (entityHitResult != null) {
-                Entity target = entityHitResult.getEntity();
-                if (target instanceof VillagerEntity villagerEntity) {
-                    if (!villagerEntity.isBaby()) {
-                        if (villagerEntity.getVillagerData().getProfession() == VillagerProfession.NONE || villagerEntity.getVillagerData().getProfession() == VillagerProfession.NITWIT) {
-                            if (!GuardVillagersConfig.convertVillagerIfHaveHotv || player.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE) && GuardVillagersConfig.convertVillagerIfHaveHotv) {
-                                convertVillager(villagerEntity, player, world);
-                                if (!player.getAbilities().creativeMode)
-                                    itemStack.decrement(1);
-                                return ActionResult.SUCCESS;
-                            }
-                        }
-                    }
-                }
-            }
-
-        }
-
         return ActionResult.PASS;
     }
 

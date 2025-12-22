@@ -28,14 +28,14 @@ public class ShareGossipWithGuard extends MultiTickTask<VillagerEntity> {
     @Override
     protected void run(ServerWorld serverWorld, VillagerEntity villagerEntity, long time) {
         GuardEntity guard = (GuardEntity) villagerEntity.getBrain().getOptionalRegisteredMemory(MemoryModuleType.INTERACTION_TARGET).get();
-        LookTargetUtil.lookAtAndWalkTowardsEachOther(villagerEntity, guard, 0.5F);
+        LookTargetUtil.lookAtAndWalkTowardsEachOther(villagerEntity, guard, 0.5F, 2);
     }
 
     @Override
     protected void keepRunning(ServerWorld serverWorld, VillagerEntity villagerEntity, long time) {
         GuardEntity guard = (GuardEntity) villagerEntity.getBrain().getOptionalRegisteredMemory(MemoryModuleType.INTERACTION_TARGET).get();
         if (villagerEntity.squaredDistanceTo(guard) < 5.0D) {
-            LookTargetUtil.lookAtAndWalkTowardsEachOther(villagerEntity, guard, 0.5F);
+            LookTargetUtil.lookAtAndWalkTowardsEachOther(villagerEntity, guard, 0.5F, 2);
             guard.gossip(villagerEntity, time);
         }
     }

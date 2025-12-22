@@ -16,10 +16,10 @@ import static dev.sterner.guardvillagers.GuardVillagers.*;
 
 public class GuardVillagersClient implements ClientModInitializer {
 
-    public static EntityModelLayer GUARD = new EntityModelLayer(new Identifier(GuardVillagers.MODID + "guard"), "main");
-    public static EntityModelLayer GUARD_STEVE = new EntityModelLayer(new Identifier(GuardVillagers.MODID + "guard_steve"), "main");
-    public static EntityModelLayer GUARD_ARMOR_OUTER = new EntityModelLayer(new Identifier(GuardVillagers.MODID + "guard_armor_outer"), "main");
-    public static EntityModelLayer GUARD_ARMOR_INNER = new EntityModelLayer(new Identifier(GuardVillagers.MODID + "guard_armor_inner"), "main");
+    public static EntityModelLayer GUARD = new EntityModelLayer(GuardVillagers.id( "guard"), "main");
+    public static EntityModelLayer GUARD_STEVE = new EntityModelLayer(GuardVillagers.id( "guard_steve"), "main");
+    public static EntityModelLayer GUARD_ARMOR_OUTER = new EntityModelLayer(GuardVillagers.id( "guard_armor_outer"), "main");
+    public static EntityModelLayer GUARD_ARMOR_INNER = new EntityModelLayer(GuardVillagers.id( "guard_armor_inner"), "main");
 
 
     @Override

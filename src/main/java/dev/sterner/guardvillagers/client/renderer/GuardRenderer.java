@@ -117,9 +117,9 @@ public class GuardRenderer extends BipedEntityRenderer<GuardEntity, BipedEntityM
     @Override
     public Identifier getTexture(GuardEntity entity) {
         return !GuardVillagersConfig.useSteveModel
-                ? new Identifier(GuardVillagers.MODID,
+                ? GuardVillagers.id(
                 "textures/entity/guard/guard_" + entity.getGuardVariant() + ".png")
-                : new Identifier(GuardVillagers.MODID,
+                : GuardVillagers.id(
                 "textures/entity/guard/guard_steve_" + entity.getGuardVariant() + ".png");
     }
 }
