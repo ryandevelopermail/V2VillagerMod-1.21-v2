@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers;
 
+import com.mojang.logging.LogUtils;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
 import dev.sterner.guardvillagers.common.network.GuardData;
@@ -17,6 +18,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
@@ -43,13 +45,16 @@ import net.minecraft.world.World;
 import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.system.MathUtil;
+import org.slf4j.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
+    private static final Logger LOGGER = LogUtils.getLogger();
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -73,6 +78,7 @@ public class GuardVillagers implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        logActiveMods();
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
 
@@ -121,6 +127,21 @@ public class GuardVillagers implements ModInitializer {
                 }
             }
         });
+    }
+
+    private void logActiveMods() {
+        List<String> activeMods = FabricLoader.getInstance().getAllMods().stream()
+                .map(modContainer -> modContainer.getMetadata().getName())
+                .collect(Collectors.toCollection(ArrayList::new));
+
+        int guardIndex = activeMods.indexOf("GuardVillagers");
+        if (guardIndex >= 0) {
+            activeMods.add(guardIndex + 1, "V2VillagerMod-1.21");
+        } else {
+            activeMods.add("V2VillagerMod-1.21");
+        }
+
+        LOGGER.info("Active mods: {}", String.join(", ", activeMods));
     }
 
 
