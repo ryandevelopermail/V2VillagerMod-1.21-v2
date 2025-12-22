@@ -8,7 +8,12 @@ import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkPos;
@@ -16,6 +21,7 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,10 +45,15 @@ public final class VillagePopulationLogger {
     private static final Logger LOGGER = LoggerFactory.getLogger("GuardVillagers/VillagePopulationLogger");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final int POPULATION_SCAN_RADIUS = 64;
+    private static final int DISCOVERY_RADIUS = 50;
+    private static final int DISCOVERY_CHECK_INTERVAL_TICKS = 20;
+    private static final int BROADCAST_INTERVAL_TICKS = 600;
     private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_INSTANT;
     private static Path logRoot;
     private static final Map<VillageKey, VillageLog> LOG_CACHE = new HashMap<>();
     private static final Set<VillageKey> DISCOVERED_VILLAGES = new HashSet<>();
+    private static int discoveryCheckCooldown = DISCOVERY_CHECK_INTERVAL_TICKS;
+    private static int broadcastCooldown = BROADCAST_INTERVAL_TICKS;
 
     private VillagePopulationLogger() {
     }
@@ -67,6 +78,23 @@ public final class VillagePopulationLogger {
                     logVillageDiscovery(world, meetingPoint);
                 }
             });
+        }
+    }
+
+    public static void onServerTick(MinecraftServer server) {
+        discoveryCheckCooldown--;
+        broadcastCooldown--;
+
+        if (discoveryCheckCooldown <= 0) {
+            discoveryCheckCooldown = DISCOVERY_CHECK_INTERVAL_TICKS;
+            for (ServerWorld world : server.getWorlds()) {
+                checkNearbyVillageDiscoveries(world);
+            }
+        }
+
+        if (broadcastCooldown <= 0) {
+            broadcastCooldown = BROADCAST_INTERVAL_TICKS;
+            broadcastVillageSnapshots(server);
         }
     }
 
@@ -104,6 +132,18 @@ public final class VillagePopulationLogger {
         if (DISCOVERED_VILLAGES.add(key)) {
             LOGGER.info("Discovered new village at {} in {}. Creating log file.", formatPos(meetingPoint.pos()), meetingPoint.dimension().getValue());
             logSnapshot(world, meetingPoint, "Village entered render distance");
+        }
+    }
+
+    private static void checkNearbyVillageDiscoveries(ServerWorld world) {
+        for (ServerPlayerEntity player : world.getPlayers(playerEntity -> !playerEntity.isSpectator())) {
+            Box searchBox = Box.of(player.getPos(), DISCOVERY_RADIUS * 2.0, world.getHeight(), DISCOVERY_RADIUS * 2.0);
+            for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, searchBox, LivingEntity::isAlive)) {
+                villager.getBrain().getOptionalMemory(MemoryModuleType.MEETING_POINT)
+                        .filter(pos -> pos.dimension().equals(world.getRegistryKey()))
+                        .filter(pos -> player.getBlockPos().isWithinDistance(pos.pos(), DISCOVERY_RADIUS))
+                        .ifPresent(pos -> logVillageDiscovery(world, pos));
+            }
         }
     }
 
@@ -202,6 +242,25 @@ public final class VillagePopulationLogger {
                             LOGGER.error("Failed to load existing village log {}", path, e);
                         }
                     });
+        }
+    }
+
+    private static void broadcastVillageSnapshots(MinecraftServer server) {
+        Set<VillageKey> keys = Set.copyOf(DISCOVERED_VILLAGES);
+        for (VillageKey key : keys) {
+            Identifier id = Identifier.tryParse(key.dimension());
+            if (id == null) {
+                LOGGER.warn("Skipping village broadcast with invalid dimension id {}", key.dimension());
+                continue;
+            }
+            RegistryKey<World> worldKey = RegistryKey.of(RegistryKeys.WORLD, id);
+            ServerWorld world = server.getWorld(worldKey);
+            if (world == null) {
+                LOGGER.warn("Skipping village broadcast for {} because the world is unavailable", key.describe());
+                continue;
+            }
+            GlobalPos anchor = GlobalPos.create(worldKey, key.meetingPoint());
+            logSnapshot(world, anchor, "Periodic status (30s)");
         }
     }
 

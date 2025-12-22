@@ -13,6 +13,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -104,6 +105,7 @@ public class GuardVillagers implements ModInitializer {
         UseEntityCallback.EVENT.register(this::villagerConvert);
         JobBlockPlacementHandler.register();
         ServerChunkEvents.CHUNK_LOAD.register(VillagePopulationLogger::onChunkLoaded);
+        ServerTickEvents.START_SERVER_TICK.register(VillagePopulationLogger::onServerTick);
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity && villagerEntity.isNatural()) {
