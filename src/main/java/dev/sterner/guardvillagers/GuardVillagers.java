@@ -130,15 +130,23 @@ public class GuardVillagers implements ModInitializer {
     }
 
     private void logActiveMods() {
-        List<String> activeMods = FabricLoader.getInstance().getAllMods().stream()
-                .map(modContainer -> modContainer.getMetadata().getName())
-                .collect(Collectors.toCollection(ArrayList::new));
+        List<String> activeMods = new ArrayList<>();
+        List<String> activeModIds = new ArrayList<>();
 
-        int guardIndex = activeMods.indexOf("GuardVillagers");
-        if (guardIndex >= 0) {
-            activeMods.add(guardIndex + 1, "V2VillagerMod-1.21");
-        } else {
-            activeMods.add("V2VillagerMod-1.21");
+        FabricLoader.getInstance().getAllMods().forEach(mod -> {
+            var metadata = mod.getMetadata();
+            activeMods.add(metadata.getName());
+            activeModIds.add(metadata.getId());
+        });
+
+        int guardIndex = activeModIds.indexOf(MODID);
+        boolean alreadyListed = activeMods.contains("V2VillagerMod-1.21");
+        if (!alreadyListed) {
+            if (guardIndex >= 0) {
+                activeMods.add(guardIndex + 1, "V2VillagerMod-1.21");
+            } else {
+                activeMods.add("V2VillagerMod-1.21");
+            }
         }
 
         LOGGER.info("Active mods: {}", String.join(", ", activeMods));
