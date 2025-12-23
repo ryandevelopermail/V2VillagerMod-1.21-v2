@@ -60,6 +60,11 @@ public final class JobBlockPairingHelper {
                 .forEach(villager -> tryPlayPairingAnimation(world, villager, placedPos));
     }
 
+    public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
+        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+                .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
+    }
+
     private static void tryPlayPairingAnimation(ServerWorld world, VillagerEntity villager, BlockPos placedPos) {
         Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSite.isEmpty()) {
@@ -76,11 +81,39 @@ public final class JobBlockPairingHelper {
         }
     }
 
+    private static void tryPlayPairingAnimationWithCrafting(ServerWorld world, VillagerEntity villager, BlockPos placedPos) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            return;
+        }
+
+        BlockPos jobPos = globalPos.pos();
+        if (!jobPos.isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
+            return;
+        }
+
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        if (nearbyChest.isEmpty()) {
+            return;
+        }
+
+        if (!nearbyChest.get().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
+            return;
+        }
+
+        playPairingAnimation(world, placedPos, villager, jobPos);
+    }
+
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
         if (villager instanceof VillagerEntity villagerEntity) {
             VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
             Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
-            LOGGER.info("{} paired with chest [{}] - {} ID: {}",
+            LOGGER.info("{} paired with block [{}] - {} ID: {}",
                     professionId,
                     blockPos.toShortString(),
                     professionId,
@@ -107,5 +140,23 @@ public final class JobBlockPairingHelper {
 
     private static void spawnHappyParticles(ServerWorld world, LivingEntity entity) {
         world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, entity.getX(), entity.getBodyY(0.5D), entity.getZ(), 12, 0.35D, 0.5D, 0.35D, 0.0D);
+    }
+
+    public static boolean isCraftingTable(BlockState state) {
+        return isCraftingTable(state.getBlock());
+    }
+
+    public static boolean isCraftingTable(Block block) {
+        return block == Blocks.CRAFTING_TABLE;
+    }
+
+    private static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center) {
+        int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
+        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isPairingBlock(world.getBlockState(checkPos))) {
+                return Optional.of(checkPos.toImmutable());
+            }
+        }
+        return Optional.empty();
     }
 }
