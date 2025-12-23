@@ -91,13 +91,14 @@ public final class VillagerBellTracker {
 
         int totalPairedChests = professionWithChests.values().stream().mapToInt(Integer::intValue).sum();
         int totalPairedCraftingTables = professionWithCraftingTables.values().stream().mapToInt(Integer::intValue).sum();
+        int totalEmployed = villagersWithJobs + guardVillagers;
 
         LOGGER.info("Bell at [{}] triggered villager summary ({} block radius)", bellPos.toShortString(), BELL_TRACKING_RANGE);
         LOGGER.info("Golems: {}", ironGolems);
         LOGGER.info("Total villagers: {}", totalVillagers);
         LOGGER.info("     Guards: {}", guardVillagers);
         LOGGER.info("     Armor Stands: {}", armorStands);
-        LOGGER.info("     Employed: {}", villagersWithJobs);
+        LOGGER.info("     Employed: {}", totalEmployed);
         LOGGER.info("     Unemployed: {}", villagersWithoutJobs);
         LOGGER.info("Beds: {}", villagersWithBeds);
         LOGGER.info("Workstations: {}", villagersWithJobs);
@@ -130,7 +131,9 @@ public final class VillagerBellTracker {
 
         var guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
         for (GuardEntity guard : guards) {
-            BlockPos targetPos = getGuardReportPosition(world, guard).orElse(bellPos);
+            Optional<BlockPos> standPos = getGuardReportPosition(world, guard);
+            standPos.ifPresent(pos -> highlightGuardStand(world, pos));
+            BlockPos targetPos = standPos.orElse(bellPos);
             guard.setTarget(null);
             guard.setHornTarget(targetPos, JOB_REPORT_DURATION_TICKS);
         }
@@ -179,6 +182,15 @@ public final class VillagerBellTracker {
 
     private static void highlightJobSite(ServerWorld world, BlockPos jobPos) {
         world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, jobPos.getX() + 0.5D, jobPos.getY() + 1.0D, jobPos.getZ() + 0.5D, JOB_HIGHLIGHT_PARTICLE_COUNT, 0.35D, 0.35D, 0.35D, 0.0D);
+    }
+
+    private static void highlightGuardStand(ServerWorld world, BlockPos standPos) {
+        world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, standPos.getX() + 0.5D, standPos.getY() + 1.0D, standPos.getZ() + 0.5D, JOB_HIGHLIGHT_PARTICLE_COUNT, 0.35D, 0.35D, 0.35D, 0.0D);
+        for (ArmorStandEntity stand : world.getEntitiesByClass(ArmorStandEntity.class, new Box(standPos).expand(0.5D), Entity::isAlive)) {
+            if (stand.getBlockPos().equals(standPos) && stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
+                stand.addStatusEffect(new StatusEffectInstance(StatusEffects.GLOWING, (int) JOB_REPORT_DURATION_TICKS, 0, false, false, true));
+            }
+        }
     }
 
     private static boolean isEmployedVillager(VillagerEntity villager) {
