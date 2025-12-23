@@ -40,7 +40,6 @@ public final class VillagerBellTracker {
         int villagersWithBeds = 0;
         int villagersWithJobs = 0;
         int villagersWithoutJobs = 0;
-        int totalVillagers = villagers.size();
 
         Map<VillagerProfession, Integer> professionCounts = new HashMap<>();
         Map<VillagerProfession, Integer> professionWithChests = new HashMap<>();
@@ -76,6 +75,7 @@ public final class VillagerBellTracker {
 
         int ironGolems = world.getEntitiesByClass(IronGolemEntity.class, searchBox, Entity::isAlive).size();
         int guardVillagers = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive).size();
+        int totalVillagers = villagers.size() + guardVillagers;
         int armorStands = VillageGuardStandManager.getGuardArmorStands(world, bellPos).size();
 
         int totalPairedChests = professionWithChests.values().stream().mapToInt(Integer::intValue).sum();

@@ -253,38 +253,40 @@ public final class VillageGuardStandManager {
     }
 
     private static Optional<CobblePad> prepareCobblePad(ServerWorld world, BlockPos bellPos) {
-        for (BlockPos center : getPadCenters(world, bellPos)) {
-            Optional<CobblePad> pad = tryCreateCobblePad(world, center);
-            if (pad.isPresent()) {
-                return pad;
+        int[] padHeights = new int[]{bellPos.getY() - 1, bellPos.getY()};
+        for (int padY : padHeights) {
+            for (BlockPos center : getPadCenters(world, bellPos)) {
+                Optional<CobblePad> pad = tryCreateCobblePad(world, center, padY);
+                if (pad.isPresent()) {
+                    return pad;
+                }
             }
         }
-        return tryCreateFallbackPad(world, bellPos);
+        return tryCreateFallbackPad(world, bellPos, padHeights);
     }
 
-    private static Optional<CobblePad> tryCreateCobblePad(ServerWorld world, BlockPos center) {
+    private static Optional<CobblePad> tryCreateCobblePad(ServerWorld world, BlockPos center, int padY) {
         List<BlockPos> groundPositions = new ArrayList<>();
         List<BlockPos> standPositions = new ArrayList<>();
-        int targetY = Integer.MIN_VALUE;
 
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
                 BlockPos column = center.add(dx, 0, dz);
                 BlockPos ground = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, column);
-                targetY = Math.max(targetY, ground.getY());
+                if (ground.getY() > padY) {
+                    return Optional.empty();
+                }
+
+                BlockPos padTop = new BlockPos(ground.getX(), padY, ground.getZ());
+                if (!world.isAir(padTop.up()) || !world.isAir(padTop.up(2))) {
+                    return Optional.empty();
+                }
+
                 groundPositions.add(ground);
+                standPositions.add(padTop.up());
             }
         }
 
-        for (BlockPos ground : groundPositions) {
-            BlockPos base = new BlockPos(ground.getX(), targetY, ground.getZ());
-            if (!world.isAir(base.up()) || !world.isAir(base.up(2))) {
-                return Optional.empty();
-            }
-            standPositions.add(base.up());
-        }
-
-        final int padY = targetY;
         groundPositions.forEach(pos -> {
             BlockPos columnTop = new BlockPos(pos.getX(), pos.getY(), pos.getZ());
             for (int y = columnTop.getY(); y <= padY; y++) {
@@ -296,9 +298,15 @@ public final class VillageGuardStandManager {
         return Optional.of(new CobblePad(Collections.unmodifiableList(standPositions)));
     }
 
-    private static Optional<CobblePad> tryCreateFallbackPad(ServerWorld world, BlockPos bellPos) {
+    private static Optional<CobblePad> tryCreateFallbackPad(ServerWorld world, BlockPos bellPos, int[] padHeights) {
         BlockPos fallbackCenter = bellPos.add(5, 0, 0);
-        return tryCreateCobblePad(world, fallbackCenter);
+        for (int padY : padHeights) {
+            Optional<CobblePad> pad = tryCreateCobblePad(world, fallbackCenter, padY);
+            if (pad.isPresent()) {
+                return pad;
+            }
+        }
+        return Optional.empty();
     }
 
     public record GuardStandAssignment(BlockPos guardPos, BlockPos standPos) {
