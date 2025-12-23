@@ -140,107 +140,34 @@ public final class VillageGuardStandManager {
     }
 
     private static List<ArmorStandEntity> ensureArmorStands(ServerWorld world, BlockPos bellPos, int guardCount) {
+        Optional<CobblePad> cobblePad = prepareCobblePad(world, bellPos);
+        if (cobblePad.isEmpty()) {
+            return List.of();
+        }
+
         Box searchBox = new Box(bellPos).expand(ARMOR_STAND_SEARCH_RANGE);
         List<ArmorStandEntity> existingStands = world.getEntitiesByClass(ArmorStandEntity.class, searchBox,
                 stand -> stand.isAlive() && stand.getCommandTags().contains(GUARD_STAND_TAG));
+        existingStands.forEach(Entity::discard);
 
-        Optional<CobblePad> cobblePad = prepareCobblePad(world, bellPos);
-        if (cobblePad.isEmpty()) {
-            return existingStands;
-        }
+        List<BlockPos> padPositions = cobblePad.get().standPositions();
+        int spawnCount = Math.min(guardCount, padPositions.size());
+        List<ArmorStandEntity> newStands = spawnArmorStands(world, padPositions.subList(0, spawnCount));
 
-        Set<BlockPos> padStandPositions = new HashSet<>(cobblePad.get().standPositions());
-        List<ArmorStandEntity> standsOnPad = existingStands.stream()
-                .filter(stand -> padStandPositions.contains(BlockPos.ofFloored(stand.getPos())))
-                .collect(Collectors.toList());
-
-        List<ArmorStandEntity> standsOffPad = new ArrayList<>(existingStands);
-        standsOffPad.removeAll(standsOnPad);
-        standsOffPad.forEach(Entity::discard);
-
-        int standsToSpawn = Math.min(guardCount, padStandPositions.size()) - standsOnPad.size();
-        if (standsToSpawn > 0) {
-            List<BlockPos> availablePositions = cobblePad.get().standPositions().stream()
-                    .filter(pos -> standsOnPad.stream().noneMatch(stand -> BlockPos.ofFloored(stand.getPos()).equals(pos)))
-                    .limit(standsToSpawn)
-                    .collect(Collectors.toList());
-            standsOnPad.addAll(spawnArmorStands(world, availablePositions));
-        }
-
-        if (standsOnPad.size() > guardCount) {
-            int toRemove = standsOnPad.size() - guardCount;
-            List<ArmorStandEntity> removable = standsOnPad.stream()
-                    .sorted(Comparator.comparingDouble(stand -> -stand.squaredDistanceTo(Vec3d.ofCenter(bellPos))))
-                    .limit(toRemove)
-                    .collect(Collectors.toList());
-            removable.forEach(Entity::discard);
-            standsOnPad.removeAll(removable);
-        }
-
-        return standsOnPad;
+        return newStands;
     }
 
-    private static List<BlockPos> findNearestFiveByFive(ServerWorld world, BlockPos bellPos, int needed) {
-        List<BlockPos> spawnPositions = new ArrayList<>();
-
-        List<BlockPos> candidateCenters = getCandidateCenters(world, bellPos);
-        for (BlockPos center : candidateCenters) {
-            List<BlockPos> areaPositions = collectAreaPositions(world, center, needed - spawnPositions.size());
-            spawnPositions.addAll(areaPositions);
-            if (spawnPositions.size() >= needed) {
-                break;
-            }
-        }
-
-        return spawnPositions;
-    }
-
-    private static List<BlockPos> getCandidateCenters(ServerWorld world, BlockPos bellPos) {
+    private static List<BlockPos> getPadCenters(ServerWorld world, BlockPos bellPos) {
         List<BlockPos> centers = new ArrayList<>();
-        int searchRadius = ARMOR_STAND_SPAWN_RADIUS;
-        double targetDistance = 5.0D;
-
-        for (BlockPos pos : BlockPos.iterateOutwards(bellPos, searchRadius, 0, searchRadius)) {
+        for (BlockPos pos : BlockPos.iterateOutwards(bellPos, ARMOR_STAND_SPAWN_RADIUS, 0, ARMOR_STAND_SPAWN_RADIUS)) {
             double horizontalDistance = Math.sqrt(pos.getSquaredDistance(bellPos));
-            if (horizontalDistance < targetDistance) {
+            if (horizontalDistance < 5 || horizontalDistance > 10) {
                 continue;
             }
-
             centers.add(pos.toImmutable());
         }
-
-        centers.sort(Comparator
-                .comparingDouble((BlockPos pos) -> Math.abs(Math.sqrt(pos.getSquaredDistance(bellPos)) - targetDistance))
-                .thenComparingDouble(pos -> pos.getSquaredDistance(bellPos)));
+        centers.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(bellPos)));
         return centers;
-    }
-
-    private static List<BlockPos> collectAreaPositions(ServerWorld world, BlockPos center, int needed) {
-        List<BlockPos> openBlocks = new ArrayList<>();
-
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                if (openBlocks.size() >= needed) {
-                    break;
-                }
-
-                BlockPos candidateBase = center.add(dx, 0, dz);
-                findStandPosition(world, candidateBase).ifPresent(openBlocks::add);
-            }
-        }
-
-        return openBlocks;
-    }
-
-    private static Optional<BlockPos> findStandPosition(ServerWorld world, BlockPos base) {
-        BlockPos ground = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, base);
-        BlockPos standPos = ground;
-
-        if (isOpenForArmorStand(world, standPos)) {
-            return Optional.of(standPos.toImmutable());
-        }
-
-        return Optional.empty();
     }
 
     private static List<ArmorStandEntity> spawnArmorStands(ServerWorld world, List<BlockPos> positions) {
@@ -326,51 +253,52 @@ public final class VillageGuardStandManager {
     }
 
     private static Optional<CobblePad> prepareCobblePad(ServerWorld world, BlockPos bellPos) {
-        for (BlockPos center : getCandidateCenters(world, bellPos)) {
+        for (BlockPos center : getPadCenters(world, bellPos)) {
             Optional<CobblePad> pad = tryCreateCobblePad(world, center);
             if (pad.isPresent()) {
                 return pad;
             }
         }
-        return Optional.empty();
+        return tryCreateFallbackPad(world, bellPos);
     }
 
     private static Optional<CobblePad> tryCreateCobblePad(ServerWorld world, BlockPos center) {
         List<BlockPos> groundPositions = new ArrayList<>();
         List<BlockPos> standPositions = new ArrayList<>();
+        int targetY = Integer.MIN_VALUE;
 
-        BlockPos reference = null;
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
                 BlockPos column = center.add(dx, 0, dz);
                 BlockPos ground = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, column);
-                if (reference == null) {
-                    reference = ground;
-                } else if (ground.getY() != reference.getY()) {
-                    return Optional.empty();
-                }
-
-                if (!isDirtLike(world, ground)) {
-                    return Optional.empty();
-                }
-
-                BlockPos standPos = ground.up();
-                if (!world.isAir(standPos) || !world.isAir(standPos.up())) {
-                    return Optional.empty();
-                }
-
+                targetY = Math.max(targetY, ground.getY());
                 groundPositions.add(ground);
-                standPositions.add(standPos);
             }
         }
 
-        groundPositions.forEach(pos -> world.setBlockState(pos, net.minecraft.block.Blocks.COBBLESTONE.getDefaultState()));
+        for (BlockPos ground : groundPositions) {
+            BlockPos base = new BlockPos(ground.getX(), targetY, ground.getZ());
+            if (!world.isAir(base.up()) || !world.isAir(base.up(2))) {
+                return Optional.empty();
+            }
+            standPositions.add(base.up());
+        }
+
+        final int padY = targetY;
+        groundPositions.forEach(pos -> {
+            BlockPos columnTop = new BlockPos(pos.getX(), pos.getY(), pos.getZ());
+            for (int y = columnTop.getY(); y <= padY; y++) {
+                BlockPos fillPos = new BlockPos(columnTop.getX(), y, columnTop.getZ());
+                world.setBlockState(fillPos, net.minecraft.block.Blocks.COBBLESTONE.getDefaultState());
+            }
+        });
+
         return Optional.of(new CobblePad(Collections.unmodifiableList(standPositions)));
     }
 
-    private static boolean isDirtLike(ServerWorld world, BlockPos pos) {
-        return world.getBlockState(pos).isOf(net.minecraft.block.Blocks.DIRT)
-                || world.getBlockState(pos).isOf(net.minecraft.block.Blocks.GRASS_BLOCK);
+    private static Optional<CobblePad> tryCreateFallbackPad(ServerWorld world, BlockPos bellPos) {
+        BlockPos fallbackCenter = bellPos.add(5, 0, 0);
+        return tryCreateCobblePad(world, fallbackCenter);
     }
 
     public record GuardStandAssignment(BlockPos guardPos, BlockPos standPos) {
