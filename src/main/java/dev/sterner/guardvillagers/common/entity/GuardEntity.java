@@ -66,6 +66,7 @@ import net.minecraft.util.*;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.math.intprovider.UniformIntProvider;
 import net.minecraft.util.math.random.Random;
 import net.minecraft.village.VillagerGossips;
@@ -96,6 +97,8 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         slotItems.put(EquipmentSlot.LEGS, GuardEntityLootTables.GUARD_LEGGINGS);
         slotItems.put(EquipmentSlot.FEET, GuardEntityLootTables.GUARD_FEET);
     });
+    private BlockPos hornTargetPos;
+    private long hornTargetEndTime;
     private final VillagerGossips gossips = new VillagerGossips();
     public long lastGossipTime;
     public long lastGossipDecayTime;
@@ -456,6 +459,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         if (this.getHealth() < this.getMaxHealth() && this.age % 200 == 0) {
             this.heal(GuardVillagersConfig.amountOfHealthRegenerated);
         }
+        this.tickHornTarget();
         if (spawnWithArmor && this.getWorld() instanceof ServerWorld serverWorld) {
             for (EquipmentSlot equipmentslottype : EquipmentSlot.values()) {
                 for (ItemStack stack : this.getStacksFromLootTable(equipmentslottype, serverWorld)) {
@@ -596,6 +600,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         this.goalSelector.add(0, new KickGoal(this));
         this.goalSelector.add(0, new GuardEatFoodGoal(this));
         this.goalSelector.add(0, new RaiseShieldGoal(this));
+        this.goalSelector.add(1, new RespondToHornGoal(this, 1.0D));
         this.goalSelector.add(1, new GuardRunToEatGoal(this));
         this.goalSelector.add(2, new RangedCrossbowAttackPassiveGoal<>(this, 1.0D, 8.0F));
         this.goalSelector.add(3, new RangedBowAttackPassiveGoal<GuardEntity>(this, 0.5D, 20, 15.0F) {
@@ -1024,6 +1029,76 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         @Override
         public boolean canStart() {
             return guard.isFollowing() && guard.getOwner() != null;
+        }
+
+        @Override
+        public void stop() {
+            this.guard.getNavigation().stop();
+        }
+    }
+
+    public void setHornTarget(BlockPos pos, long additionalDurationTicks) {
+        this.hornTargetPos = pos;
+        long addedDuration = Math.max(additionalDurationTicks, 0L);
+        long currentTime = this.getWorld().getTime();
+        long baseTime = Math.max(this.hornTargetEndTime, currentTime);
+        this.hornTargetEndTime = baseTime + addedDuration;
+    }
+
+    public boolean hasHornTarget() {
+        return this.hornTargetPos != null && this.hornTargetEndTime > this.getWorld().getTime();
+    }
+
+    private void tickHornTarget() {
+        if (this.hornTargetPos != null && this.hornTargetEndTime <= this.getWorld().getTime()) {
+            this.hornTargetPos = null;
+        }
+    }
+
+    @Nullable
+    public BlockPos getHornTargetPos() {
+        return this.hornTargetPos;
+    }
+
+    public void clearHornTarget() {
+        this.hornTargetPos = null;
+        this.hornTargetEndTime = 0L;
+    }
+
+    public static class RespondToHornGoal extends Goal {
+        private final GuardEntity guard;
+        private final double speed;
+
+        public RespondToHornGoal(GuardEntity guard, double speed) {
+            this.guard = guard;
+            this.speed = speed;
+            this.setControls(EnumSet.of(Goal.Control.MOVE, Goal.Control.LOOK));
+        }
+
+        @Override
+        public boolean canStart() {
+            return this.guard.hasHornTarget();
+        }
+
+        @Override
+        public boolean shouldContinue() {
+            return this.guard.hasHornTarget();
+        }
+
+        @Override
+        public void tick() {
+            BlockPos target = this.guard.getHornTargetPos();
+            if (target == null) {
+                return;
+            }
+            double distance = this.guard.squaredDistanceTo(Vec3d.ofCenter(target));
+            if (distance > 4.0D) {
+                this.guard.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D, this.speed);
+            } else {
+                this.guard.getNavigation().stop();
+                this.guard.getMoveControl().strafeTo(0.0F, 0.0F);
+                this.guard.getLookControl().lookAt(target.getX() + 0.5D, target.getY(), target.getZ() + 0.5D);
+            }
         }
 
         @Override

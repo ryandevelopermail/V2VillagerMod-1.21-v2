@@ -15,6 +15,7 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
@@ -43,8 +44,11 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.TypedActionResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.TypeFilter;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 import net.minecraft.world.spawner.SpecialSpawner;
@@ -102,6 +106,7 @@ public class GuardVillagers implements ModInitializer {
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
         UseEntityCallback.EVENT.register(this::villagerConvert);
         JobBlockPlacementHandler.register();
+        UseItemCallback.EVENT.register(this::onUseItem);
         UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
             if (!world.isClient()) {
                 BlockPos blockPos = hitResult.getBlockPos();
@@ -176,6 +181,21 @@ public class GuardVillagers implements ModInitializer {
 
     private ActionResult villagerConvert(PlayerEntity player, World world, Hand hand, Entity entity, @Nullable EntityHitResult entityHitResult) {
         return ActionResult.PASS;
+    }
+
+    private TypedActionResult<ItemStack> onUseItem(PlayerEntity player, World world, Hand hand) {
+        ItemStack stackInHand = player.getStackInHand(hand);
+        if (!world.isClient() && stackInHand.isOf(Items.GOAT_HORN)) {
+            ServerWorld serverWorld = (ServerWorld) world;
+            BlockPos targetPos = player.getBlockPos();
+            long hornDuration = stackInHand.getMaxUseTime(player) + 20L * 15L;
+            Box searchBox = new Box(targetPos).expand(GuardVillagersConfig.followRangeModifier);
+            for (GuardEntity guard : serverWorld.getEntitiesByType(TypeFilter.instanceOf(GuardEntity.class), searchBox, Entity::isAlive)) {
+                guard.setHornTarget(targetPos, hornDuration);
+            }
+            return TypedActionResult.success(stackInHand, false);
+        }
+        return TypedActionResult.pass(stackInHand);
     }
 
     private void convertVillager(VillagerEntity villagerEntity, PlayerEntity player, World world) {
