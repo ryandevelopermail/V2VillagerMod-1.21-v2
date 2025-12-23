@@ -96,6 +96,7 @@ public final class VillagerBellTracker {
 
         GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
         logPairings(pairingReport);
+        resetGuardsToWander(world, bellPos);
     }
 
     public static void directVillagersToJobsOrBell(ServerWorld world, BlockPos bellPos) {
@@ -110,6 +111,16 @@ public final class VillagerBellTracker {
                     .orElse(bellPos);
 
             villager.getNavigation().startMovingTo(targetPos.getX(), targetPos.getY(), targetPos.getZ(), 0.7D);
+        }
+        resetGuardsToWander(world, bellPos);
+    }
+
+    public static void resetGuardsToWander(ServerWorld world, BlockPos bellPos) {
+        Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
+        var guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+        for (GuardEntity guard : guards) {
+            guard.clearHornTarget();
+            guard.getNavigation().stop();
         }
     }
 

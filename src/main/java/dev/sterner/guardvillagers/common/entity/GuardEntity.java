@@ -1060,6 +1060,11 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         return this.hornTargetPos;
     }
 
+    public void clearHornTarget() {
+        this.hornTargetPos = null;
+        this.hornTargetEndTime = 0L;
+    }
+
     public static class RespondToHornGoal extends Goal {
         private final GuardEntity guard;
         private final double speed;
