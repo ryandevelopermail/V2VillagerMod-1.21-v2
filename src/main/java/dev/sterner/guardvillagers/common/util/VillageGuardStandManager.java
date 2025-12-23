@@ -13,6 +13,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.minecraft.world.Heightmap;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -24,6 +25,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
     private static final int BELL_SEARCH_RANGE = 32;
@@ -130,35 +132,79 @@ public final class VillageGuardStandManager {
             return;
         }
 
-        List<BlockPos> openPositions = findNearestOpenBlocks(world, bellPos);
-        for (BlockPos position : openPositions) {
-            if (standsToSpawn <= 0) {
-                break;
-            }
-
-            ArmorStandEntity armorStand = new ArmorStandEntity(world, position.getX() + 0.5D, position.getY(), position.getZ() + 0.5D);
-            armorStand.addCommandTag(GUARD_STAND_TAG);
-            if (world.spawnEntity(armorStand)) {
-                standsToSpawn--;
-            }
-        }
+        List<BlockPos> openPositions = findNearestFiveByFive(world, bellPos, standsToSpawn);
+        spawnArmorStands(world, openPositions);
     }
 
-    private static List<BlockPos> findNearestOpenBlocks(ServerWorld world, BlockPos bellPos) {
-        List<BlockPos> openBlocks = new ArrayList<>();
+    private static List<BlockPos> findNearestFiveByFive(ServerWorld world, BlockPos bellPos, int needed) {
+        List<BlockPos> spawnPositions = new ArrayList<>();
 
-        for (BlockPos pos : BlockPos.iterateOutwards(bellPos, ARMOR_STAND_SEARCH_RANGE, ARMOR_STAND_SEARCH_RANGE, ARMOR_STAND_SEARCH_RANGE)) {
-            if (!bellPos.isWithinDistance(pos, ARMOR_STAND_SEARCH_RANGE)) {
+        List<BlockPos> candidateCenters = getCandidateCenters(world, bellPos);
+        for (BlockPos center : candidateCenters) {
+            List<BlockPos> areaPositions = collectAreaPositions(world, center, needed - spawnPositions.size());
+            spawnPositions.addAll(areaPositions);
+            if (spawnPositions.size() >= needed) {
+                break;
+            }
+        }
+
+        return spawnPositions;
+    }
+
+    private static List<BlockPos> getCandidateCenters(ServerWorld world, BlockPos bellPos) {
+        List<BlockPos> centers = new ArrayList<>();
+        int searchRadius = 10;
+        double targetDistance = 5.0D;
+
+        for (BlockPos pos : BlockPos.iterateOutwards(bellPos, searchRadius, 0, searchRadius)) {
+            double horizontalDistance = Math.sqrt(pos.getSquaredDistance(bellPos));
+            if (horizontalDistance < targetDistance) {
                 continue;
             }
 
-            if (isOpenForArmorStand(world, pos)) {
-                openBlocks.add(pos.toImmutable());
+            centers.add(pos.toImmutable());
+        }
+
+        centers.sort(Comparator
+                .comparingDouble((BlockPos pos) -> Math.abs(Math.sqrt(pos.getSquaredDistance(bellPos)) - targetDistance))
+                .thenComparingDouble(pos -> pos.getSquaredDistance(bellPos)));
+        return centers;
+    }
+
+    private static List<BlockPos> collectAreaPositions(ServerWorld world, BlockPos center, int needed) {
+        List<BlockPos> openBlocks = new ArrayList<>();
+
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (openBlocks.size() >= needed) {
+                    break;
+                }
+
+                BlockPos candidateBase = center.add(dx, 0, dz);
+                findStandPosition(world, candidateBase).ifPresent(openBlocks::add);
             }
         }
 
-        openBlocks.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(Vec3d.ofCenter(bellPos))));
         return openBlocks;
+    }
+
+    private static Optional<BlockPos> findStandPosition(ServerWorld world, BlockPos base) {
+        BlockPos ground = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, base);
+        BlockPos standPos = ground;
+
+        if (isOpenForArmorStand(world, standPos)) {
+            return Optional.of(standPos.toImmutable());
+        }
+
+        return Optional.empty();
+    }
+
+    private static void spawnArmorStands(ServerWorld world, List<BlockPos> positions) {
+        for (BlockPos position : positions) {
+            ArmorStandEntity armorStand = new ArmorStandEntity(world, position.getX() + 0.5D, position.getY(), position.getZ() + 0.5D);
+            armorStand.addCommandTag(GUARD_STAND_TAG);
+            world.spawnEntity(armorStand);
+        }
     }
 
     private static boolean isOpenForArmorStand(ServerWorld world, BlockPos pos) {
