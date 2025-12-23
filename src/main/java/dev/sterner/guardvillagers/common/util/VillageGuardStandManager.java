@@ -7,6 +7,7 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -29,14 +30,15 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
-    private static final int BELL_SEARCH_RANGE = 32;
-    private static final int VILLAGE_ENTITY_RANGE = 100;
+    private static final int BELL_SEARCH_RANGE = 300;
+    private static final int VILLAGE_ENTITY_RANGE = 300;
     private static final int ARMOR_STAND_SEARCH_RANGE = 6;
     private static final int PLAYER_APPROACH_RANGE = 100;
     private static final int PLAYER_CHECK_INTERVAL_TICKS = 40;
     public static final String GUARD_STAND_TAG = "guardvillagers:auto_armor_stand";
 
     private static final Map<GlobalPos, Integer> GUARD_COUNTS = new HashMap<>();
+    private static final Map<RegistryKey<World>, BlockPos> PRIMARY_BELLS = new HashMap<>();
     private static final Set<GlobalPos> INITIALIZED_BELLS = new HashSet<>();
 
     private VillageGuardStandManager() {
@@ -100,8 +102,7 @@ public final class VillageGuardStandManager {
     }
 
     private static Optional<BlockPos> findNearestBell(ServerWorld world, BlockPos center) {
-        BlockPos closest = null;
-        double distance = Double.MAX_VALUE;
+        List<BlockPos> bellsInRange = new ArrayList<>();
 
         for (BlockPos pos : BlockPos.iterateOutwards(center, BELL_SEARCH_RANGE, BELL_SEARCH_RANGE, BELL_SEARCH_RANGE)) {
             if (!center.isWithinDistance(pos, BELL_SEARCH_RANGE)) {
@@ -109,12 +110,30 @@ public final class VillageGuardStandManager {
             }
 
             if (world.getBlockState(pos).getBlock() instanceof BellBlock) {
-                double currentDistance = pos.getSquaredDistance(Vec3d.ofCenter(center));
-                if (currentDistance < distance) {
-                    distance = currentDistance;
-                    closest = pos.toImmutable();
-                }
+                bellsInRange.add(pos.toImmutable());
             }
+        }
+
+        if (bellsInRange.isEmpty()) {
+            return Optional.empty();
+        }
+
+        RegistryKey<World> worldKey = world.getRegistryKey();
+        BlockPos storedPrimary = PRIMARY_BELLS.get(worldKey);
+        if (storedPrimary != null && bellsInRange.contains(storedPrimary)) {
+            return Optional.of(storedPrimary);
+        }
+
+        BlockPos closest = bellsInRange.stream()
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> pos.getSquaredDistance(Vec3d.ofCenter(center)))
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getY)
+                        .thenComparingInt(BlockPos::getZ))
+                .orElse(null);
+
+        if (closest != null) {
+            PRIMARY_BELLS.put(worldKey, closest);
         }
 
         return Optional.ofNullable(closest);
