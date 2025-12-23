@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.handler;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
@@ -132,6 +133,7 @@ public final class JobBlockPlacementHandler {
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
 
         world.spawnEntityAndPassengers(guard);
+        VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
 
         villager.releaseTicketFor(MemoryModuleType.HOME);

@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
@@ -132,6 +133,9 @@ public class GuardVillagers implements ModInitializer {
                     guardEntity.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
 
                     world.spawnEntityAndPassengers(guardEntity);
+                    if (world instanceof ServerWorld serverWorld) {
+                        VillageGuardStandManager.handleGuardSpawn(serverWorld, guardEntity, villagerEntity);
+                    }
                 }
             }
         });
@@ -199,6 +203,9 @@ public class GuardVillagers implements ModInitializer {
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
         world.spawnEntity(guard);
+        if (world instanceof ServerWorld serverWorld) {
+            VillageGuardStandManager.handleGuardSpawn(serverWorld, guard, villagerEntity);
+        }
         villagerEntity.releaseTicketFor(MemoryModuleType.HOME);
         villagerEntity.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villagerEntity.releaseTicketFor(MemoryModuleType.MEETING_POINT);
