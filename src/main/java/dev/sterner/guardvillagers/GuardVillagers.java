@@ -44,6 +44,7 @@ import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.TypedActionResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.TypeFilter;
@@ -181,16 +182,18 @@ public class GuardVillagers implements ModInitializer {
         return ActionResult.PASS;
     }
 
-    private ActionResult onUseItem(PlayerEntity player, World world, Hand hand) {
-        if (!world.isClient() && player.getStackInHand(hand).isOf(Items.GOAT_HORN)) {
+    private TypedActionResult<ItemStack> onUseItem(PlayerEntity player, World world, Hand hand) {
+        ItemStack stackInHand = player.getStackInHand(hand);
+        if (!world.isClient() && stackInHand.isOf(Items.GOAT_HORN)) {
             ServerWorld serverWorld = (ServerWorld) world;
             BlockPos targetPos = player.getBlockPos();
             long hornDuration = 20L * 60L;
             for (GuardEntity guard : serverWorld.iterateEntitiesByType(TypeFilter.instanceOf(GuardEntity.class), Entity::isAlive)) {
                 guard.setHornTarget(targetPos, hornDuration);
             }
+            return TypedActionResult.success(stackInHand, false);
         }
-        return ActionResult.PASS;
+        return TypedActionResult.pass(stackInHand);
     }
 
     private void convertVillager(VillagerEntity villagerEntity, PlayerEntity player, World world) {
