@@ -193,7 +193,7 @@ public final class VillageGuardStandManager {
                 stand.addCommandTag(GUARD_STAND_TAG);
                 guard.setArmorStandUuid(stand.getUuid());
             } else {
-                guard.removeGuardStatusDueToMissingStand();
+                guard.clearArmorStandUuid();
             }
         }
     }
@@ -288,5 +288,23 @@ public final class VillageGuardStandManager {
     public static Optional<Integer> getGuardCount(World world, BlockPos bellPos) {
         GlobalPos globalPos = GlobalPos.create(world.getRegistryKey(), bellPos);
         return Optional.ofNullable(GUARD_COUNTS.get(globalPos));
+    }
+
+    public static void directGuardsToArmorStandOrBell(ServerWorld world, BlockPos bellPos) {
+        Box searchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
+        List<GuardEntity> guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+
+        for (GuardEntity guard : guards) {
+            BlockPos targetPos = bellPos;
+            Optional<UUID> standId = guard.getArmorStandUuid();
+            if (standId.isPresent()) {
+                Entity entity = world.getEntity(standId.get());
+                if (entity instanceof ArmorStandEntity armorStand && armorStand.isAlive()) {
+                    targetPos = armorStand.getBlockPos();
+                }
+            }
+
+            guard.getNavigation().startMovingTo(targetPos.getX() + 0.5D, targetPos.getY(), targetPos.getZ() + 0.5D, 1.2D);
+        }
     }
 }

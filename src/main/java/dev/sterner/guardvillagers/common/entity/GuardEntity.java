@@ -510,6 +510,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
             if (entity instanceof ArmorStandEntity armorStand && armorStand.isAlive()) {
                 return;
             }
+            this.clearArmorStandUuid();
         } else {
             ArmorStandEntity nearestStand = this.findNearestTaggedArmorStand(serverWorld);
             if (nearestStand != null) {
@@ -517,8 +518,6 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 return;
             }
         }
-
-        this.removeGuardStatusDueToMissingStand();
     }
 
     private @Nullable ArmorStandEntity findNearestTaggedArmorStand(ServerWorld serverWorld) {

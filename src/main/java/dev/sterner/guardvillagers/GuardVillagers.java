@@ -108,6 +108,7 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getBlockState(blockPos).getBlock() instanceof BellBlock && world instanceof ServerWorld serverWorld) {
                     VillagerBellTracker.logBellVillagerStats(serverWorld, blockPos);
                     VillagerBellTracker.directVillagersToJobsOrBell(serverWorld, blockPos);
+                    VillageGuardStandManager.directGuardsToArmorStandOrBell(serverWorld, blockPos);
                 }
             }
             return ActionResult.PASS;
