@@ -34,6 +34,7 @@ public final class VillagerBellTracker {
     }
 
     public static void logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
+        VillageGuardStandManager.refreshBellInventory(world, bellPos);
         Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
