@@ -80,7 +80,7 @@ public final class JobBlockPairingHelper {
         if (villager instanceof VillagerEntity villagerEntity) {
             VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
             Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
-            LOGGER.info("{} paired with chest {} - {} ID: {}",
+            LOGGER.info("{} paired with chest [{}] - {} ID: {}",
                     professionId,
                     blockPos.toShortString(),
                     professionId,
