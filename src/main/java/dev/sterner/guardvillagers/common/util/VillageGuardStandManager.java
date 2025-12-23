@@ -254,6 +254,11 @@ public final class VillageGuardStandManager {
 
     private static Optional<CobblePad> prepareCobblePad(ServerWorld world, BlockPos bellPos) {
         int[] padHeights = new int[]{bellPos.getY() - 1, bellPos.getY()};
+        Optional<CobblePad> existing = findExistingPad(world, bellPos, padHeights);
+        if (existing.isPresent()) {
+            return existing;
+        }
+
         for (int padY : padHeights) {
             for (BlockPos center : getPadCenters(world, bellPos)) {
                 Optional<CobblePad> pad = tryCreateCobblePad(world, center, padY);
@@ -265,6 +270,18 @@ public final class VillageGuardStandManager {
         return tryCreateFallbackPad(world, bellPos, padHeights);
     }
 
+    private static Optional<CobblePad> findExistingPad(ServerWorld world, BlockPos bellPos, int[] padHeights) {
+        for (int padY : padHeights) {
+            for (BlockPos center : getPadCenters(world, bellPos)) {
+                Optional<CobblePad> pad = detectPad(world, center, padY);
+                if (pad.isPresent()) {
+                    return pad;
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     private static Optional<CobblePad> tryCreateCobblePad(ServerWorld world, BlockPos center, int padY) {
         List<BlockPos> groundPositions = new ArrayList<>();
         List<BlockPos> standPositions = new ArrayList<>();
@@ -273,7 +290,7 @@ public final class VillageGuardStandManager {
             for (int dz = -2; dz <= 2; dz++) {
                 BlockPos column = center.add(dx, 0, dz);
                 BlockPos ground = world.getTopPosition(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, column);
-                if (ground.getY() > padY) {
+                if (ground.getY() > padY || ground.getY() < padY - 1) {
                     return Optional.empty();
                 }
 
@@ -307,6 +324,23 @@ public final class VillageGuardStandManager {
             }
         }
         return Optional.empty();
+    }
+
+    private static Optional<CobblePad> detectPad(ServerWorld world, BlockPos center, int padY) {
+        List<BlockPos> standPositions = new ArrayList<>();
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                BlockPos padPos = new BlockPos(center.getX() + dx, padY, center.getZ() + dz);
+                if (!world.getBlockState(padPos).isOf(net.minecraft.block.Blocks.COBBLESTONE)) {
+                    return Optional.empty();
+                }
+                if (!world.isAir(padPos.up()) || !world.isAir(padPos.up(2))) {
+                    return Optional.empty();
+                }
+                standPositions.add(padPos.up());
+            }
+        }
+        return Optional.of(new CobblePad(Collections.unmodifiableList(standPositions)));
     }
 
     public record GuardStandAssignment(BlockPos guardPos, BlockPos standPos) {
