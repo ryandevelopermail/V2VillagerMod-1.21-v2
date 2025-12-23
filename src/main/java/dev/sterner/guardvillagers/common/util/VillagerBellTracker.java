@@ -6,8 +6,11 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import net.minecraft.entity.ai.brain.BlockPosLookTarget;
+import net.minecraft.entity.ai.brain.WalkTarget;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
@@ -29,6 +32,9 @@ import java.util.function.Predicate;
 public final class VillagerBellTracker {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerBellTracker.class);
     private static final int BELL_TRACKING_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
+    private static final long JOB_REPORT_DURATION_TICKS = 20L * 30L;
+    private static final float JOB_REPORT_SPEED = 0.7F;
+    private static final int JOB_REPORT_COMPLETION_RANGE = 1;
 
     private VillagerBellTracker() {
     }
@@ -100,20 +106,26 @@ public final class VillagerBellTracker {
         resetGuardsToWander(world, bellPos);
     }
 
-    public static void directVillagersToJobsOrBell(ServerWorld world, BlockPos bellPos) {
+    public static void directEmployedVillagersAndGuardsToStations(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
         for (VillagerEntity villager : villagers) {
             Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            BlockPos targetPos = jobSite
-                    .filter(globalPos -> Objects.equals(globalPos.dimension(), world.getRegistryKey()))
-                    .map(GlobalPos::pos)
-                    .orElse(bellPos);
+            if (jobSite.isEmpty() || !Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
+                continue;
+            }
 
-            villager.getNavigation().startMovingTo(targetPos.getX(), targetPos.getY(), targetPos.getZ(), 0.7D);
+            BlockPos jobPos = jobSite.get().pos();
+            forceVillagerToReport(villager, jobPos);
         }
-        resetGuardsToWander(world, bellPos);
+
+        var guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+        for (GuardEntity guard : guards) {
+            BlockPos targetPos = getGuardReportPosition(world, guard).orElse(bellPos);
+            guard.setTarget(null);
+            guard.setHornTarget(targetPos, JOB_REPORT_DURATION_TICKS);
+        }
     }
 
     public static void resetGuardsToWander(ServerWorld world, BlockPos bellPos) {
@@ -123,6 +135,33 @@ public final class VillagerBellTracker {
             guard.clearHornTarget();
             guard.getNavigation().stop();
         }
+    }
+
+    private static void forceVillagerToReport(VillagerEntity villager, BlockPos jobPos) {
+        var brain = villager.getBrain();
+        brain.forget(MemoryModuleType.HURT_BY);
+        brain.forget(MemoryModuleType.HURT_BY_ENTITY);
+        brain.forget(MemoryModuleType.NEAREST_HOSTILE);
+        brain.forget(MemoryModuleType.AVOID_TARGET);
+        brain.forget(MemoryModuleType.ATTACK_TARGET);
+        brain.remember(MemoryModuleType.LOOK_TARGET, new BlockPosLookTarget(jobPos), JOB_REPORT_DURATION_TICKS);
+        brain.remember(MemoryModuleType.WALK_TARGET, new WalkTarget(jobPos, JOB_REPORT_SPEED, JOB_REPORT_COMPLETION_RANGE), JOB_REPORT_DURATION_TICKS);
+        villager.getNavigation().startMovingTo(jobPos.getX() + 0.5D, jobPos.getY(), jobPos.getZ() + 0.5D, JOB_REPORT_SPEED);
+    }
+
+    private static Optional<BlockPos> getGuardReportPosition(ServerWorld world, GuardEntity guard) {
+        if (guard.getPairedStandUuid() == null) {
+            return Optional.empty();
+        }
+
+        Entity standEntity = world.getEntity(guard.getPairedStandUuid());
+        if (standEntity instanceof ArmorStandEntity armorStand
+                && armorStand.isAlive()
+                && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
+            return Optional.of(armorStand.getBlockPos());
+        }
+
+        return Optional.empty();
     }
 
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {
