@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
@@ -57,7 +58,7 @@ public final class VillageGuardStandManager {
         int guardCount = countVillageGuards(world, bellPos.get());
         GUARD_COUNTS.put(globalBellPos, guardCount);
 
-        ensureArmorStands(world, bellPos.get(), guardCount);
+        pairGuardsWithStands(world, bellPos.get());
     }
 
     public static void handlePlayerNearby(ServerWorld world, PlayerEntity player) {
@@ -77,7 +78,7 @@ public final class VillageGuardStandManager {
             if (INITIALIZED_BELLS.add(globalBellPos)) {
                 int guardCount = countVillageGuards(world, bellPos.get());
                 GUARD_COUNTS.put(globalBellPos, guardCount);
-                ensureArmorStands(world, bellPos.get(), guardCount);
+                pairGuardsWithStands(world, bellPos.get());
             }
         }
     }
@@ -224,7 +225,10 @@ public final class VillageGuardStandManager {
         int pairCount = Math.min(guards.size(), armorStands.size());
         List<GuardStandAssignment> assignments = new ArrayList<>();
         for (int i = 0; i < pairCount; i++) {
-            assignments.add(new GuardStandAssignment(guards.get(i).getBlockPos(), armorStands.get(i).getBlockPos()));
+            GuardEntity guard = guards.get(i);
+            ArmorStandEntity stand = armorStands.get(i);
+            assignGuardToStand(world, guard, stand);
+            assignments.add(new GuardStandAssignment(guard.getBlockPos(), stand.getBlockPos()));
         }
 
         List<GuardEntity> toDemote = guards.subList(pairCount, guards.size());
@@ -233,23 +237,51 @@ public final class VillageGuardStandManager {
         return new GuardStandPairingReport(assignments, demotedPositions);
     }
 
+    public static void validateGuardStandPairing(ServerWorld world, GuardEntity guard) {
+        if (!guard.isAlive()) {
+            return;
+        }
+
+        UUID standId = guard.getPairedStandUuid();
+        if (standId == null) {
+            return;
+        }
+
+        Entity standEntity = world.getEntity(standId);
+        if (!(standEntity instanceof ArmorStandEntity armorStand) || !armorStand.isAlive() || !armorStand.getCommandTags().contains(GUARD_STAND_TAG)) {
+            demoteGuard(world, guard);
+        }
+    }
+
+    private static void assignGuardToStand(ServerWorld world, GuardEntity guard, ArmorStandEntity stand) {
+        guard.setPairedStandUuid(stand.getUuid());
+        JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
+    }
+
     private static List<BlockPos> demoteGuards(ServerWorld world, List<GuardEntity> guards) {
         List<BlockPos> demoted = new ArrayList<>();
         for (GuardEntity guard : guards) {
-            VillagerEntity villager = EntityType.VILLAGER.create(world);
-            if (villager == null) {
-                continue;
-            }
-            villager.refreshPositionAndAngles(guard.getX(), guard.getY(), guard.getZ(), guard.getYaw(), guard.getPitch());
-            villager.initialize((ServerWorldAccess) world, world.getLocalDifficulty(villager.getBlockPos()), SpawnReason.CONVERSION, null);
-            villager.setCustomName(guard.getCustomName());
-            villager.setCustomNameVisible(guard.isCustomNameVisible());
-            if (world.spawnEntity(villager)) {
+            if (demoteGuard(world, guard)) {
                 demoted.add(guard.getBlockPos());
-                guard.discard();
             }
         }
         return demoted;
+    }
+
+    private static boolean demoteGuard(ServerWorld world, GuardEntity guard) {
+        VillagerEntity villager = EntityType.VILLAGER.create(world);
+        if (villager == null) {
+            return false;
+        }
+        villager.refreshPositionAndAngles(guard.getX(), guard.getY(), guard.getZ(), guard.getYaw(), guard.getPitch());
+        villager.initialize((ServerWorldAccess) world, world.getLocalDifficulty(villager.getBlockPos()), SpawnReason.CONVERSION, null);
+        villager.setCustomName(guard.getCustomName());
+        villager.setCustomNameVisible(guard.isCustomNameVisible());
+        if (world.spawnEntity(villager)) {
+            guard.discard();
+            return true;
+        }
+        return false;
     }
 
     private static Optional<CobblePad> prepareCobblePad(ServerWorld world, BlockPos bellPos) {
