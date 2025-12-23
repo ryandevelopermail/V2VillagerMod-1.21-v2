@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
@@ -33,7 +34,7 @@ public final class VillageGuardStandManager {
     private static final int ARMOR_STAND_SEARCH_RANGE = 6;
     private static final int PLAYER_APPROACH_RANGE = 100;
     private static final int PLAYER_CHECK_INTERVAL_TICKS = 40;
-    private static final String GUARD_STAND_TAG = "guardvillagers:auto_armor_stand";
+    public static final String GUARD_STAND_TAG = "guardvillagers:auto_armor_stand";
 
     private static final Map<GlobalPos, Integer> GUARD_COUNTS = new HashMap<>();
     private static final Set<GlobalPos> INITIALIZED_BELLS = new HashSet<>();
@@ -52,6 +53,7 @@ public final class VillageGuardStandManager {
         GUARD_COUNTS.put(globalBellPos, guardCount);
 
         ensureArmorStands(world, bellPos.get(), guardCount);
+        pairGuardsWithArmorStands(world, bellPos.get());
     }
 
     public static void handlePlayerNearby(ServerWorld world, PlayerEntity player) {
@@ -72,6 +74,7 @@ public final class VillageGuardStandManager {
                 int guardCount = countVillageGuards(world, bellPos.get());
                 GUARD_COUNTS.put(globalBellPos, guardCount);
                 ensureArmorStands(world, bellPos.get(), guardCount);
+                pairGuardsWithArmorStands(world, bellPos.get());
             }
         }
     }
@@ -134,6 +137,46 @@ public final class VillageGuardStandManager {
 
         List<BlockPos> openPositions = findNearestFiveByFive(world, bellPos, standsToSpawn);
         spawnArmorStands(world, openPositions);
+    }
+
+    private static void pairGuardsWithArmorStands(ServerWorld world, BlockPos bellPos) {
+        Box guardSearchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
+        List<GuardEntity> guards = world.getEntitiesByClass(GuardEntity.class, guardSearchBox, Entity::isAlive);
+
+        Box standSearchBox = new Box(bellPos).expand(ARMOR_STAND_SEARCH_RANGE);
+        List<ArmorStandEntity> armorStands = world.getEntitiesByClass(ArmorStandEntity.class, standSearchBox,
+                stand -> stand.isAlive() && stand.getCommandTags().contains(GUARD_STAND_TAG));
+
+        Map<UUID, ArmorStandEntity> armorStandById = armorStands.stream()
+                .collect(Collectors.toMap(ArmorStandEntity::getUuid, stand -> stand));
+        Set<UUID> claimedStands = new HashSet<>();
+
+        for (GuardEntity guard : guards) {
+            Optional<UUID> currentStandId = guard.getArmorStandUuid();
+            if (currentStandId.isPresent()) {
+                Entity potentialStand = world.getEntity(currentStandId.get());
+                ArmorStandEntity currentStand = potentialStand instanceof ArmorStandEntity armorStand
+                        ? armorStand
+                        : armorStandById.get(currentStandId.get());
+                if (currentStand != null && currentStand.isAlive()) {
+                    claimedStands.add(currentStand.getUuid());
+                    continue;
+                }
+            }
+
+            Optional<ArmorStandEntity> closestStand = armorStands.stream()
+                    .filter(stand -> !claimedStands.contains(stand.getUuid()))
+                    .min(Comparator.comparingDouble(stand -> stand.squaredDistanceTo(guard)));
+
+            if (closestStand.isPresent()) {
+                ArmorStandEntity stand = closestStand.get();
+                claimedStands.add(stand.getUuid());
+                stand.addCommandTag(GUARD_STAND_TAG);
+                guard.setArmorStandUuid(stand.getUuid());
+            } else {
+                guard.removeGuardStatusDueToMissingStand();
+            }
+        }
     }
 
     private static List<BlockPos> findNearestFiveByFive(ServerWorld world, BlockPos bellPos, int needed) {

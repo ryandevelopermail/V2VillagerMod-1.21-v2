@@ -95,7 +95,7 @@ public final class JobBlockPlacementHandler {
 
         VillagerEntity villager = nearestVillager.get();
         JobBlockPairingHelper.playPairingAnimation(world, placementPos, villager, placementPos);
-        convertVillagerToGuard(world, villager);
+        convertVillagerToGuard(world, villager, placementPos);
     }
 
     private static Optional<VillagerEntity> findNearestUnemployedVillager(ServerWorld world, BlockPos placementPos) {
@@ -109,7 +109,7 @@ public final class JobBlockPlacementHandler {
         return profession == VillagerProfession.NONE && !villager.isBaby();
     }
 
-    private static void convertVillagerToGuard(ServerWorld world, VillagerEntity villager) {
+    private static void convertVillagerToGuard(ServerWorld world, VillagerEntity villager, BlockPos armorStandPos) {
         GuardEntity guard = GuardVillagers.GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
@@ -131,6 +131,14 @@ public final class JobBlockPlacementHandler {
         guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+
+        world.getEntitiesByClass(ArmorStandEntity.class, new Box(armorStandPos).expand(0.75D), Entity::isAlive)
+                .stream()
+                .findFirst()
+                .ifPresent(armorStand -> {
+                    armorStand.addCommandTag(VillageGuardStandManager.GUARD_STAND_TAG);
+                    guard.setArmorStandUuid(armorStand.getUuid());
+                });
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);

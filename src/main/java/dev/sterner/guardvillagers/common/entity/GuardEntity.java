@@ -5,9 +5,10 @@ import com.google.common.collect.Maps;
 import com.mojang.serialization.Dynamic;
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.entity.goal.*;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
-import dev.sterner.guardvillagers.common.entity.goal.*;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.item.v1.EnchantmentEvents;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerFactory;
 import net.minecraft.component.DataComponentTypes;
@@ -21,6 +22,7 @@ import net.minecraft.entity.*;
 import net.minecraft.entity.ai.RangedAttackMob;
 import net.minecraft.entity.ai.goal.*;
 import net.minecraft.entity.ai.pathing.MobNavigation;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.attribute.DefaultAttributeContainer;
 import net.minecraft.entity.attribute.EntityAttributeInstance;
 import net.minecraft.entity.attribute.EntityAttributeModifier;
@@ -69,6 +71,7 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.intprovider.UniformIntProvider;
 import net.minecraft.util.math.random.Random;
 import net.minecraft.village.VillagerGossips;
+import net.minecraft.village.VillagerProfession;
 import net.minecraft.village.VillagerType;
 import net.minecraft.world.*;
 import org.jetbrains.annotations.Nullable;
@@ -78,6 +81,7 @@ import java.util.function.Predicate;
 
 public class GuardEntity extends PathAwareEntity implements CrossbowUser, RangedAttackMob, Angerable, InventoryChangedListener, InteractionObserver {
     protected static final TrackedData<Optional<UUID>> OWNER_UNIQUE_ID = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.OPTIONAL_UUID);
+    private static final TrackedData<Optional<UUID>> ARMOR_STAND_UUID = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.OPTIONAL_UUID);
     private static final EntityAttributeModifier USE_ITEM_SPEED_PENALTY = new EntityAttributeModifier(GuardVillagers.id("speed_penalty"), -0.25D, EntityAttributeModifier.Operation.ADD_VALUE);
     private static final TrackedData<Optional<BlockPos>> GUARD_POS = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.OPTIONAL_BLOCK_POS);
     private static final TrackedData<Boolean> PATROLLING = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
@@ -86,6 +90,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     private static final TrackedData<Boolean> DATA_CHARGING_STATE = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
     private static final TrackedData<Boolean> KICKING = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
     private static final TrackedData<Boolean> FOLLOWING = DataTracker.registerData(GuardEntity.class, TrackedDataHandlerRegistry.BOOLEAN);
+    private static final int ARMOR_STAND_VALIDATION_INTERVAL = 20;
     private static final Map<EntityPose, EntityDimensions> SIZE_BY_POSE = ImmutableMap.<EntityPose, EntityDimensions>builder().put(EntityPose.STANDING, EntityDimensions.changing(0.6F, 1.95F)).put(EntityPose.SLEEPING, SLEEPING_DIMENSIONS).put(EntityPose.FALL_FLYING, EntityDimensions.changing(0.6F, 0.6F)).put(EntityPose.SWIMMING, EntityDimensions.changing(0.6F, 0.6F)).put(EntityPose.SPIN_ATTACK, EntityDimensions.changing(0.6F, 0.6F)).put(EntityPose.CROUCHING, EntityDimensions.changing(0.6F, 1.75F)).put(EntityPose.DYING, EntityDimensions.fixed(0.2F, 0.2F)).build();
     private static final UniformIntProvider angerTime = TimeHelper.betweenSeconds(20, 39);
     public static final Map<EquipmentSlot, RegistryKey<LootTable>> EQUIPMENT_SLOT_ITEMS = Util.make(Maps.newHashMap(), (slotItems) -> {
@@ -221,6 +226,9 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 this.setOwnerId(null);
             }
         }
+        if (nbt.containsUuid("ArmorStandId")) {
+            this.setArmorStandUuid(nbt.getUuid("ArmorStandId"));
+        }
         this.setGuardEntityVariant(nbt.getInt("Type"));
         this.kickTicks = nbt.getInt("KickTicks");
         this.setFollowing(nbt.getBoolean("Following"));
@@ -309,6 +317,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         if (this.getOwnerId() != null) {
             nbt.putUuid("Owner", this.getOwnerId());
         }
+        this.getArmorStandUuid().ifPresent(uuid -> nbt.putUuid("ArmorStandId", uuid));
 
         NbtList listnbt = new NbtList();
         for (int i = 0; i < this.guardInventory.size(); ++i) {
@@ -380,6 +389,18 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
 
     public boolean isOwner(LivingEntity entityIn) {
         return entityIn == this.getOwner();
+    }
+
+    public Optional<UUID> getArmorStandUuid() {
+        return this.dataTracker.get(ARMOR_STAND_UUID);
+    }
+
+    public void setArmorStandUuid(@Nullable UUID uuid) {
+        this.dataTracker.set(ARMOR_STAND_UUID, Optional.ofNullable(uuid));
+    }
+
+    public void clearArmorStandUuid() {
+        this.setArmorStandUuid(null);
     }
 
     @Nullable
@@ -472,7 +493,78 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     @Override
     public void tick() {
         this.maybeDecayGossip();
+        if (!this.getWorld().isClient && this.age % ARMOR_STAND_VALIDATION_INTERVAL == 0) {
+            this.validateArmorStandLink();
+        }
         super.tick();
+    }
+
+    private void validateArmorStandLink() {
+        if (!(this.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        Optional<UUID> armorStandId = this.getArmorStandUuid();
+        if (armorStandId.isPresent()) {
+            Entity entity = serverWorld.getEntity(armorStandId.get());
+            if (entity instanceof ArmorStandEntity armorStand && armorStand.isAlive()) {
+                return;
+            }
+        } else {
+            ArmorStandEntity nearestStand = this.findNearestTaggedArmorStand(serverWorld);
+            if (nearestStand != null) {
+                this.setArmorStandUuid(nearestStand.getUuid());
+                return;
+            }
+        }
+
+        this.removeGuardStatusDueToMissingStand();
+    }
+
+    private @Nullable ArmorStandEntity findNearestTaggedArmorStand(ServerWorld serverWorld) {
+        Box searchBox = this.getBoundingBox().expand(8.0D);
+        return serverWorld.getEntitiesByClass(ArmorStandEntity.class, searchBox,
+                        stand -> stand.isAlive() && stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG))
+                .stream()
+                .min(Comparator.comparingDouble(stand -> stand.squaredDistanceTo(this)))
+                .orElse(null);
+    }
+
+    public void removeGuardStatusDueToMissingStand() {
+        if (!(this.getWorld() instanceof ServerWorld serverWorld) || this.isRemoved()) {
+            return;
+        }
+
+        this.dropGuardInventory(serverWorld);
+        VillagerEntity villager = EntityType.VILLAGER.create(serverWorld);
+        if (villager != null) {
+            villager.refreshPositionAndAngles(this.getX(), this.getY(), this.getZ(), this.getYaw(), this.getPitch());
+            villager.setVillagerData(villager.getVillagerData().withProfession(VillagerProfession.NONE));
+            villager.setPersistent();
+            villager.setCustomName(this.getCustomName());
+            villager.setCustomNameVisible(this.isCustomNameVisible());
+            serverWorld.spawnEntityAndPassengers(villager);
+        }
+
+        this.discard();
+    }
+
+    private void dropGuardInventory(ServerWorld serverWorld) {
+        for (int i = 0; i < this.guardInventory.size(); i++) {
+            ItemStack stack = this.guardInventory.getStack(i);
+            if (!stack.isEmpty()) {
+                this.dropStack(stack);
+                this.guardInventory.setStack(i, ItemStack.EMPTY);
+            }
+        }
+
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            ItemStack equipped = this.getEquippedStack(slot);
+            if (!equipped.isEmpty()) {
+                this.dropStack(equipped);
+                this.equipStack(slot, ItemStack.EMPTY);
+            }
+        }
     }
 
     @Override
@@ -542,6 +634,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         builder.add(DATA_CHARGING_STATE, false);
         builder.add(KICKING, false);
         builder.add(OWNER_UNIQUE_ID, Optional.empty());
+        builder.add(ARMOR_STAND_UUID, Optional.empty());
         builder.add(FOLLOWING, false);
         builder.add(GUARD_POS, Optional.empty());
         builder.add(PATROLLING, false);
