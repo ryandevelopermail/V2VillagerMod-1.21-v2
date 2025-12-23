@@ -5,9 +5,10 @@ import com.google.common.collect.Maps;
 import com.mojang.serialization.Dynamic;
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.entity.goal.*;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
-import dev.sterner.guardvillagers.common.entity.goal.*;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.item.v1.EnchantmentEvents;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerFactory;
 import net.minecraft.component.DataComponentTypes;
@@ -108,6 +109,8 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     public int kickCoolDown;
     public boolean interacting;
     public boolean spawnWithArmor;
+    @Nullable
+    private UUID pairedStandUuid;
     private int remainingPersistentAngerTime;
     private UUID persistentAngerTarget;
 
@@ -224,6 +227,11 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 this.setOwnerId(null);
             }
         }
+        if (nbt.containsUuid("PairedStand")) {
+            this.pairedStandUuid = nbt.getUuid("PairedStand");
+        } else {
+            this.pairedStandUuid = null;
+        }
         this.setGuardEntityVariant(nbt.getInt("Type"));
         this.kickTicks = nbt.getInt("KickTicks");
         this.setFollowing(nbt.getBoolean("Following"));
@@ -311,6 +319,9 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         nbt.putLong("LastGossipDecay", this.lastGossipDecayTime);
         if (this.getOwnerId() != null) {
             nbt.putUuid("Owner", this.getOwnerId());
+        }
+        if (this.pairedStandUuid != null) {
+            nbt.putUuid("PairedStand", this.pairedStandUuid);
         }
 
         NbtList listnbt = new NbtList();
@@ -476,7 +487,19 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     @Override
     public void tick() {
         this.maybeDecayGossip();
+        if (!this.getWorld().isClient && this.age % 40 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+            VillageGuardStandManager.validateGuardStandPairing(serverWorld, this);
+        }
         super.tick();
+    }
+
+    @Nullable
+    public UUID getPairedStandUuid() {
+        return this.pairedStandUuid;
+    }
+
+    public void setPairedStandUuid(@Nullable UUID pairedStandUuid) {
+        this.pairedStandUuid = pairedStandUuid;
     }
 
     @Override
