@@ -88,6 +88,21 @@ public final class VillagerBellTracker {
         logByProfession("Profession with paired crafting tables", professionWithCraftingTables);
     }
 
+    public static void directVillagersToJobsOrBell(ServerWorld world, BlockPos bellPos) {
+        Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
+        var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
+
+        for (VillagerEntity villager : villagers) {
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            BlockPos targetPos = jobSite
+                    .filter(globalPos -> Objects.equals(globalPos.dimension(), world.getRegistryKey()))
+                    .map(GlobalPos::pos)
+                    .orElse(bellPos);
+
+            villager.getNavigation().startMovingTo(targetPos.getX(), targetPos.getY(), targetPos.getZ(), 0.7D);
+        }
+    }
+
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {
         int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
         for (BlockPos checkPos : BlockPos.iterate(jobPos.add(-range, -range, -range), jobPos.add(range, range, range))) {
