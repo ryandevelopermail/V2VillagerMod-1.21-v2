@@ -48,23 +48,31 @@ public final class JobBlockPlacementHandler {
         ItemStack stack = player.getStackInHand(hand);
         boolean isArmorStand = stack.getItem() instanceof ArmorStandItem;
         boolean isPairingBlockItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isPairingBlock(blockItem.getBlock());
+        boolean isCraftingTableItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isCraftingTable(blockItem.getBlock());
 
-        if (!isArmorStand && !isPairingBlockItem) {
+        if (!isArmorStand && !isPairingBlockItem && !isCraftingTableItem) {
             return ActionResult.PASS;
         }
 
         ItemPlacementContext placementContext = new ItemPlacementContext(player, hand, stack, hitResult);
         BlockPos placementPos = serverWorld.getBlockState(placementContext.getBlockPos()).canReplace(placementContext) ? placementContext.getBlockPos() : placementContext.getBlockPos().offset(placementContext.getSide());
 
-        serverWorld.getServer().execute(() -> handlePlacement(serverWorld, placementPos, isPairingBlockItem, isArmorStand));
+        serverWorld.getServer().execute(() -> handlePlacement(serverWorld, placementPos, isPairingBlockItem, isCraftingTableItem, isArmorStand));
         return ActionResult.PASS;
     }
 
-    private static void handlePlacement(ServerWorld serverWorld, BlockPos placementPos, boolean checkPairingBlocks, boolean checkArmorStand) {
+    private static void handlePlacement(ServerWorld serverWorld, BlockPos placementPos, boolean checkPairingBlocks, boolean checkCraftingTable, boolean checkArmorStand) {
         if (checkPairingBlocks) {
             BlockState placedState = serverWorld.getBlockState(placementPos);
             if (JobBlockPairingHelper.isPairingBlock(placedState)) {
                 JobBlockPairingHelper.handlePairingBlockPlacement(serverWorld, placementPos, placedState);
+            }
+        }
+
+        if (checkCraftingTable) {
+            BlockState placedState = serverWorld.getBlockState(placementPos);
+            if (JobBlockPairingHelper.isCraftingTable(placedState)) {
+                JobBlockPairingHelper.handleCraftingTablePlacement(serverWorld, placementPos);
             }
         }
 
