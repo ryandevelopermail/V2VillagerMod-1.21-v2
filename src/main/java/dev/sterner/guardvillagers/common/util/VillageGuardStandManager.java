@@ -146,15 +146,33 @@ public final class VillageGuardStandManager {
         }
 
         Box searchBox = new Box(bellPos).expand(ARMOR_STAND_SEARCH_RANGE);
-        List<ArmorStandEntity> existingStands = world.getEntitiesByClass(ArmorStandEntity.class, searchBox,
-                stand -> stand.isAlive() && stand.getCommandTags().contains(GUARD_STAND_TAG));
-        existingStands.forEach(Entity::discard);
+        List<ArmorStandEntity> existingStands = world.getEntitiesByClass(ArmorStandEntity.class, searchBox, stand ->
+                stand.isAlive() && stand.getCommandTags().contains(GUARD_STAND_TAG));
 
         List<BlockPos> padPositions = cobblePad.get().standPositions();
-        int spawnCount = Math.min(guardCount, padPositions.size());
-        List<ArmorStandEntity> newStands = spawnArmorStands(world, padPositions.subList(0, spawnCount));
+        Set<BlockPos> occupiedPositions = existingStands.stream()
+                .map(Entity::getBlockPos)
+                .collect(Collectors.toSet());
 
-        return newStands;
+        int targetCount = Math.max(guardCount, existingStands.size());
+        int availablePositions = Math.max(padPositions.size() - occupiedPositions.size(), 0);
+        int spawnCount = Math.min(Math.max(targetCount - existingStands.size(), 0), availablePositions);
+
+        if (spawnCount <= 0) {
+            return existingStands;
+        }
+
+        List<BlockPos> spawnPositions = padPositions.stream()
+                .filter(pos -> !occupiedPositions.contains(pos))
+                .limit(spawnCount)
+                .collect(Collectors.toList());
+
+        List<ArmorStandEntity> newStands = spawnArmorStands(world, spawnPositions);
+        List<ArmorStandEntity> allStands = new ArrayList<>(existingStands.size() + newStands.size());
+        allStands.addAll(existingStands);
+        allStands.addAll(newStands);
+
+        return allStands;
     }
 
     private static List<BlockPos> getPadCenters(ServerWorld world, BlockPos bellPos) {
