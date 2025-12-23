@@ -98,7 +98,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         slotItems.put(EquipmentSlot.FEET, GuardEntityLootTables.GUARD_FEET);
     });
     private BlockPos hornTargetPos;
-    private int hornTicksRemaining;
+    private long hornTargetEndTime;
     private final VillagerGossips gossips = new VillagerGossips();
     public long lastGossipTime;
     public long lastGossipDecayTime;
@@ -1040,20 +1040,18 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     public void setHornTarget(BlockPos pos, long additionalDurationTicks) {
         this.hornTargetPos = pos;
         long addedDuration = Math.max(additionalDurationTicks, 0L);
-        long updatedDuration = (long) this.hornTicksRemaining + addedDuration;
-        this.hornTicksRemaining = (int) Math.min(Integer.MAX_VALUE, updatedDuration);
+        long currentTime = this.getWorld().getTime();
+        long baseTime = Math.max(this.hornTargetEndTime, currentTime);
+        this.hornTargetEndTime = baseTime + addedDuration;
     }
 
     public boolean hasHornTarget() {
-        return this.hornTicksRemaining > 0 && this.hornTargetPos != null;
+        return this.hornTargetPos != null && this.hornTargetEndTime > this.getWorld().getTime();
     }
 
     private void tickHornTarget() {
-        if (this.hornTicksRemaining > 0) {
-            --this.hornTicksRemaining;
-            if (this.hornTicksRemaining <= 0) {
-                this.hornTargetPos = null;
-            }
+        if (this.hornTargetPos != null && this.hornTargetEndTime <= this.getWorld().getTime()) {
+            this.hornTargetPos = null;
         }
     }
 
