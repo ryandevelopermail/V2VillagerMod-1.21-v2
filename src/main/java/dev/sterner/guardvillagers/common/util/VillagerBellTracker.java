@@ -20,6 +20,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import org.slf4j.Logger;
@@ -27,9 +28,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 public final class VillagerBellTracker {
@@ -39,6 +42,8 @@ public final class VillagerBellTracker {
     private static final float JOB_REPORT_SPEED = 0.7F;
     private static final int JOB_REPORT_COMPLETION_RANGE = 1;
     private static final int JOB_HIGHLIGHT_PARTICLE_COUNT = 12;
+    private static final double JOB_REPORT_HOLD_DISTANCE_SQUARED = 2.25D;
+    private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
 
     private VillagerBellTracker() {
     }
@@ -125,7 +130,7 @@ public final class VillagerBellTracker {
             if (jobSite.isPresent() && Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
                 BlockPos jobPos = jobSite.get().pos();
                 highlightJobSite(world, jobPos);
-                forceVillagerToReport(villager, jobPos);
+                startVillagerReport(world, villager, jobPos);
             }
         }
 
@@ -148,16 +153,59 @@ public final class VillagerBellTracker {
         }
     }
 
-    private static void forceVillagerToReport(VillagerEntity villager, BlockPos jobPos) {
+    public static void tickVillagerReports(ServerWorld world) {
+        if (REPORTING_VILLAGERS.isEmpty()) {
+            return;
+        }
+
+        Iterator<Map.Entry<UUID, ReportAssignment>> iterator = REPORTING_VILLAGERS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, ReportAssignment> entry = iterator.next();
+            ReportAssignment assignment = entry.getValue();
+            if (!assignment.jobSite.dimension().equals(world.getRegistryKey())) {
+                continue;
+            }
+            if (assignment.endTime <= world.getTime()) {
+                iterator.remove();
+                continue;
+            }
+
+            Entity entity = world.getEntity(entry.getKey());
+            if (!(entity instanceof VillagerEntity villager) || !villager.isAlive()) {
+                iterator.remove();
+                continue;
+            }
+
+            BlockPos jobPos = assignment.jobSite.pos();
+            forceVillagerToReport(villager, jobPos, assignment.endTime - world.getTime());
+        }
+    }
+
+    private static void startVillagerReport(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        long endTime = world.getTime() + JOB_REPORT_DURATION_TICKS;
+        REPORTING_VILLAGERS.put(villager.getUuid(), new ReportAssignment(GlobalPos.create(world.getRegistryKey(), jobPos), endTime));
+        forceVillagerToReport(villager, jobPos, JOB_REPORT_DURATION_TICKS);
+    }
+
+    private static void forceVillagerToReport(VillagerEntity villager, BlockPos jobPos, long remainingTicks) {
         var brain = villager.getBrain();
         brain.forget(MemoryModuleType.HURT_BY);
         brain.forget(MemoryModuleType.HURT_BY_ENTITY);
         brain.forget(MemoryModuleType.NEAREST_HOSTILE);
         brain.forget(MemoryModuleType.AVOID_TARGET);
         brain.forget(MemoryModuleType.ATTACK_TARGET);
-        brain.remember(MemoryModuleType.LOOK_TARGET, new BlockPosLookTarget(jobPos), JOB_REPORT_DURATION_TICKS);
-        brain.remember(MemoryModuleType.WALK_TARGET, new WalkTarget(jobPos, JOB_REPORT_SPEED, JOB_REPORT_COMPLETION_RANGE), JOB_REPORT_DURATION_TICKS);
-        villager.getNavigation().startMovingTo(jobPos.getX() + 0.5D, jobPos.getY(), jobPos.getZ() + 0.5D, JOB_REPORT_SPEED);
+        brain.remember(MemoryModuleType.LOOK_TARGET, new BlockPosLookTarget(jobPos), remainingTicks);
+        brain.remember(MemoryModuleType.WALK_TARGET, new WalkTarget(jobPos, JOB_REPORT_SPEED, JOB_REPORT_COMPLETION_RANGE), remainingTicks);
+
+        Vec3d jobCenter = Vec3d.ofCenter(jobPos);
+        double distance = villager.squaredDistanceTo(jobCenter);
+        if (distance <= JOB_REPORT_HOLD_DISTANCE_SQUARED) {
+            villager.getNavigation().stop();
+            villager.getMoveControl().strafeTo(0.0F, 0.0F);
+            villager.getLookControl().lookAt(jobCenter.getX(), jobCenter.getY(), jobCenter.getZ());
+        } else {
+            villager.getNavigation().startMovingTo(jobCenter.getX(), jobCenter.getY(), jobCenter.getZ(), JOB_REPORT_SPEED);
+        }
     }
 
     private static Optional<BlockPos> getGuardReportPosition(ServerWorld world, GuardEntity guard) {
@@ -196,6 +244,9 @@ public final class VillagerBellTracker {
     private static boolean isEmployedVillager(VillagerEntity villager) {
         VillagerProfession profession = villager.getVillagerData().getProfession();
         return profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT && !villager.isBaby();
+    }
+
+    private record ReportAssignment(GlobalPos jobSite, long endTime) {
     }
 
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {

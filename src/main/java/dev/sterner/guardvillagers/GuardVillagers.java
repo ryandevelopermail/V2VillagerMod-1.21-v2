@@ -152,6 +152,7 @@ public class GuardVillagers implements ModInitializer {
                 for (PlayerEntity player : world.getPlayers()) {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
+                VillagerBellTracker.tickVillagerReports(world);
             }
         });
     }
