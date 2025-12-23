@@ -81,8 +81,7 @@ public final class VillagerBellTracker {
         LOGGER.info("Bell at [{}] triggered villager summary ({} block radius)", bellPos.toShortString(), BELL_TRACKING_RANGE);
         LOGGER.info("Villagers with beds: {}, without beds: {}", villagersWithBeds, villagersWithoutBeds);
         LOGGER.info("Villagers with job blocks: {}, without job blocks: {}", villagersWithJobs, villagersWithoutJobs);
-        LOGGER.info("Iron golems: {}", ironGolems);
-        LOGGER.info("Guard villagers: {}", guardVillagers);
+        LOGGER.info("Iron golems: {}, Guard villagers: {}", ironGolems, guardVillagers);
 
         logByProfession("Profession counts", professionCounts);
         logByProfession("Profession with paired chests", professionWithChests);
