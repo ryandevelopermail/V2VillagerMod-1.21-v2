@@ -83,6 +83,13 @@ public final class VillageGuardStandManager {
         }
     }
 
+    public static void refreshBellInventory(ServerWorld world, BlockPos bellPos) {
+        GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos);
+        int guardCount = countVillageGuards(world, bellPos);
+        GUARD_COUNTS.put(globalBellPos, guardCount);
+        INITIALIZED_BELLS.add(globalBellPos);
+    }
+
     private static Optional<BlockPos> findBell(ServerWorld world, GuardEntity guard, @Nullable VillagerEntity sourceVillager) {
         Optional<BlockPos> meetingPoint = getMeetingPoint(sourceVillager);
         if (meetingPoint.isPresent()) {
@@ -146,16 +153,39 @@ public final class VillageGuardStandManager {
             return List.of();
         }
 
-        Box searchBox = new Box(bellPos).expand(ARMOR_STAND_SEARCH_RANGE);
-        List<ArmorStandEntity> existingStands = world.getEntitiesByClass(ArmorStandEntity.class, searchBox,
-                stand -> stand.isAlive() && stand.getCommandTags().contains(GUARD_STAND_TAG));
-        existingStands.forEach(Entity::discard);
-
         List<BlockPos> padPositions = cobblePad.get().standPositions();
-        int spawnCount = Math.min(guardCount, padPositions.size());
-        List<ArmorStandEntity> newStands = spawnArmorStands(world, padPositions.subList(0, spawnCount));
+        Set<BlockPos> padPositionSet = new HashSet<>(padPositions);
+        Box searchBox = new Box(bellPos).expand(ARMOR_STAND_SEARCH_RANGE);
+        List<ArmorStandEntity> existingStands = world.getEntitiesByClass(ArmorStandEntity.class, searchBox, Entity::isAlive);
+        Map<BlockPos, ArmorStandEntity> standsByPosition = new HashMap<>();
+        for (ArmorStandEntity stand : existingStands) {
+            BlockPos standPos = stand.getBlockPos();
+            boolean isOnPad = padPositionSet.contains(standPos);
+            boolean hasTag = stand.getCommandTags().contains(GUARD_STAND_TAG);
+            if (isOnPad) {
+                if (!hasTag) {
+                    stand.addCommandTag(GUARD_STAND_TAG);
+                }
+                standsByPosition.putIfAbsent(standPos, stand);
+            } else if (hasTag) {
+                stand.removeCommandTag(GUARD_STAND_TAG);
+            }
+        }
 
-        return newStands;
+        int desiredCount = Math.min(guardCount, padPositions.size());
+        List<ArmorStandEntity> ensuredStands = new ArrayList<>();
+        for (BlockPos padPos : padPositions) {
+            if (ensuredStands.size() >= desiredCount) {
+                break;
+            }
+            ArmorStandEntity stand = standsByPosition.get(padPos);
+            if (stand == null) {
+                stand = spawnArmorStands(world, List.of(padPos)).get(0);
+            }
+            ensuredStands.add(stand);
+        }
+
+        return ensuredStands;
     }
 
     private static List<BlockPos> getPadCenters(ServerWorld world, BlockPos bellPos) {
