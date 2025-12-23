@@ -21,6 +21,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRegistry;
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -136,6 +137,14 @@ public class GuardVillagers implements ModInitializer {
                     if (world instanceof ServerWorld serverWorld) {
                         VillageGuardStandManager.handleGuardSpawn(serverWorld, guardEntity, villagerEntity);
                     }
+                }
+            }
+        });
+
+        ServerTickEvents.END_SERVER_TICK.register(server -> {
+            for (ServerWorld world : server.getWorlds()) {
+                for (PlayerEntity player : world.getPlayers()) {
+                    VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
             }
         });

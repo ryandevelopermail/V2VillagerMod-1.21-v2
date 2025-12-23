@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.server.world.ServerWorld;
@@ -17,18 +18,23 @@ import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 public final class VillageGuardStandManager {
     private static final int BELL_SEARCH_RANGE = 32;
     private static final int VILLAGE_ENTITY_RANGE = 32;
     private static final int ARMOR_STAND_SEARCH_RANGE = 6;
+    private static final int PLAYER_APPROACH_RANGE = 100;
+    private static final int PLAYER_CHECK_INTERVAL_TICKS = 40;
     private static final String GUARD_STAND_TAG = "guardvillagers:auto_armor_stand";
 
     private static final Map<GlobalPos, Integer> GUARD_COUNTS = new HashMap<>();
+    private static final Set<GlobalPos> INITIALIZED_BELLS = new HashSet<>();
 
     private VillageGuardStandManager() {
     }
@@ -44,6 +50,28 @@ public final class VillageGuardStandManager {
         GUARD_COUNTS.put(globalBellPos, guardCount);
 
         ensureArmorStands(world, bellPos.get(), guardCount);
+    }
+
+    public static void handlePlayerNearby(ServerWorld world, PlayerEntity player) {
+        if (world.getTime() % PLAYER_CHECK_INTERVAL_TICKS != 0) {
+            return;
+        }
+
+        Box searchBox = player.getBoundingBox().expand(PLAYER_APPROACH_RANGE);
+        List<GuardEntity> guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+        for (GuardEntity guard : guards) {
+            Optional<BlockPos> bellPos = findBell(world, guard, null);
+            if (bellPos.isEmpty()) {
+                continue;
+            }
+
+            GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos.get());
+            if (INITIALIZED_BELLS.add(globalBellPos)) {
+                int guardCount = countVillageGuards(world, bellPos.get());
+                GUARD_COUNTS.put(globalBellPos, guardCount);
+                ensureArmorStands(world, bellPos.get(), guardCount);
+            }
+        }
     }
 
     private static Optional<BlockPos> findBell(ServerWorld world, GuardEntity guard, @Nullable VillagerEntity sourceVillager) {
