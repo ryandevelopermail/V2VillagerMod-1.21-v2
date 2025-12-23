@@ -8,9 +8,12 @@ import net.minecraft.entity.Entity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import net.minecraft.entity.ai.brain.BlockPosLookTarget;
 import net.minecraft.entity.ai.brain.WalkTarget;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
+import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
@@ -35,6 +38,7 @@ public final class VillagerBellTracker {
     private static final long JOB_REPORT_DURATION_TICKS = 20L * 30L;
     private static final float JOB_REPORT_SPEED = 0.7F;
     private static final int JOB_REPORT_COMPLETION_RANGE = 1;
+    private static final int JOB_HIGHLIGHT_PARTICLE_COUNT = 12;
 
     private VillagerBellTracker() {
     }
@@ -54,18 +58,18 @@ public final class VillagerBellTracker {
 
         for (VillagerEntity villager : villagers) {
             boolean hasBed = villager.getBrain().getOptionalMemory(MemoryModuleType.HOME).isPresent();
-            boolean hasJob = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).isPresent();
+            boolean isEmployed = isEmployedVillager(villager);
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
 
             if (hasBed) {
                 villagersWithBeds++;
             }
 
-            if (hasJob) {
+            if (isEmployed) {
                 villagersWithJobs++;
                 VillagerProfession profession = villager.getVillagerData().getProfession();
                 incrementCount(professionCounts, profession);
 
-                Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
                 if (jobSite.isPresent() && Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
                     BlockPos jobPos = jobSite.get().pos();
                     if (hasPairedBlock(world, jobPos, JobBlockPairingHelper::isPairingBlock)) {
@@ -111,13 +115,17 @@ public final class VillagerBellTracker {
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
         for (VillagerEntity villager : villagers) {
-            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSite.isEmpty() || !Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
+            if (!isEmployedVillager(villager)) {
                 continue;
             }
 
-            BlockPos jobPos = jobSite.get().pos();
-            forceVillagerToReport(villager, jobPos);
+            highlightEmployedVillager(world, villager);
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isPresent() && Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
+                BlockPos jobPos = jobSite.get().pos();
+                highlightJobSite(world, jobPos);
+                forceVillagerToReport(villager, jobPos);
+            }
         }
 
         var guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
@@ -162,6 +170,20 @@ public final class VillagerBellTracker {
         }
 
         return Optional.empty();
+    }
+
+    private static void highlightEmployedVillager(ServerWorld world, VillagerEntity villager) {
+        villager.addStatusEffect(new StatusEffectInstance(StatusEffects.GLOWING, (int) JOB_REPORT_DURATION_TICKS, 0, false, false, true));
+        world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, villager.getX(), villager.getBodyY(0.5D), villager.getZ(), JOB_HIGHLIGHT_PARTICLE_COUNT, 0.35D, 0.5D, 0.35D, 0.0D);
+    }
+
+    private static void highlightJobSite(ServerWorld world, BlockPos jobPos) {
+        world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, jobPos.getX() + 0.5D, jobPos.getY() + 1.0D, jobPos.getZ() + 0.5D, JOB_HIGHLIGHT_PARTICLE_COUNT, 0.35D, 0.35D, 0.35D, 0.0D);
+    }
+
+    private static boolean isEmployedVillager(VillagerEntity villager) {
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        return profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT && !villager.isBaby();
     }
 
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {
