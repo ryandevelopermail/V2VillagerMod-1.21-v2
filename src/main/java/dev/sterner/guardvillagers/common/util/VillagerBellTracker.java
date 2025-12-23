@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.util;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
+import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.registry.Registries;
@@ -75,11 +76,13 @@ public final class VillagerBellTracker {
         }
 
         int ironGolems = world.getEntitiesByClass(IronGolemEntity.class, searchBox, Entity::isAlive).size();
+        int guardVillagers = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive).size();
 
         LOGGER.info("Bell at [{}] triggered villager summary ({} block radius)", bellPos.toShortString(), BELL_TRACKING_RANGE);
         LOGGER.info("Villagers with beds: {}, without beds: {}", villagersWithBeds, villagersWithoutBeds);
         LOGGER.info("Villagers with job blocks: {}, without job blocks: {}", villagersWithJobs, villagersWithoutJobs);
         LOGGER.info("Iron golems: {}", ironGolems);
+        LOGGER.info("Guard villagers: {}", guardVillagers);
 
         logByProfession("Profession counts", professionCounts);
         logByProfession("Profession with paired chests", professionWithChests);
