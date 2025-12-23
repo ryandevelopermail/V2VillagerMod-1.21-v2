@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStandAssignment;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStandPairingReport;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
@@ -26,7 +28,7 @@ import java.util.function.Predicate;
 
 public final class VillagerBellTracker {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerBellTracker.class);
-    private static final int BELL_TRACKING_RANGE = 100;
+    private static final int BELL_TRACKING_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
     private VillagerBellTracker() {
     }
@@ -36,7 +38,6 @@ public final class VillagerBellTracker {
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
         int villagersWithBeds = 0;
-        int villagersWithoutBeds = 0;
         int villagersWithJobs = 0;
         int villagersWithoutJobs = 0;
 
@@ -50,42 +51,51 @@ public final class VillagerBellTracker {
 
             if (hasBed) {
                 villagersWithBeds++;
-            } else {
-                villagersWithoutBeds++;
             }
 
             if (hasJob) {
                 villagersWithJobs++;
+                VillagerProfession profession = villager.getVillagerData().getProfession();
+                incrementCount(professionCounts, profession);
+
+                Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+                if (jobSite.isPresent() && Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
+                    BlockPos jobPos = jobSite.get().pos();
+                    if (hasPairedBlock(world, jobPos, JobBlockPairingHelper::isPairingBlock)) {
+                        incrementCount(professionWithChests, profession);
+                    }
+                    if (hasPairedBlock(world, jobPos, state -> state.isOf(Blocks.CRAFTING_TABLE))) {
+                        incrementCount(professionWithCraftingTables, profession);
+                    }
+                }
             } else {
                 villagersWithoutJobs++;
-            }
-
-            VillagerProfession profession = villager.getVillagerData().getProfession();
-            incrementCount(professionCounts, profession);
-
-            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSite.isPresent() && Objects.equals(jobSite.get().dimension(), world.getRegistryKey())) {
-                BlockPos jobPos = jobSite.get().pos();
-                if (hasPairedBlock(world, jobPos, JobBlockPairingHelper::isPairingBlock)) {
-                    incrementCount(professionWithChests, profession);
-                }
-                if (hasPairedBlock(world, jobPos, state -> state.isOf(Blocks.CRAFTING_TABLE))) {
-                    incrementCount(professionWithCraftingTables, profession);
-                }
             }
         }
 
         int ironGolems = world.getEntitiesByClass(IronGolemEntity.class, searchBox, Entity::isAlive).size();
         int guardVillagers = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive).size();
+        int totalVillagers = villagers.size() + guardVillagers;
+        int armorStands = VillageGuardStandManager.getGuardArmorStands(world, bellPos).size();
+
+        int totalPairedChests = professionWithChests.values().stream().mapToInt(Integer::intValue).sum();
+        int totalPairedCraftingTables = professionWithCraftingTables.values().stream().mapToInt(Integer::intValue).sum();
 
         LOGGER.info("Bell at [{}] triggered villager summary ({} block radius)", bellPos.toShortString(), BELL_TRACKING_RANGE);
-        LOGGER.info("Villagers with beds: {}, without beds: {}", villagersWithBeds, villagersWithoutBeds);
-        LOGGER.info("Villagers with job blocks: {}, without job blocks: {}", villagersWithJobs, villagersWithoutJobs);
-        LOGGER.info("Iron golems: {}, Guard villagers: {}", ironGolems, guardVillagers);
+        LOGGER.info("Golems: {}", ironGolems);
+        LOGGER.info("Total villagers: {}", totalVillagers);
+        LOGGER.info("     Guards: {}", guardVillagers);
+        LOGGER.info("     Armor Stands: {}", armorStands);
+        LOGGER.info("     Employed: {}", villagersWithJobs);
+        LOGGER.info("     Unemployed: {}", villagersWithoutJobs);
+        LOGGER.info("Beds: {}", villagersWithBeds);
+        LOGGER.info("Workstations: {}", villagersWithJobs);
+        logByProfession(professionCounts);
+        LOGGER.info("Paired Chests: {}", totalPairedChests);
+        LOGGER.info("Paired Crafting Tables: {}", totalPairedCraftingTables);
 
-        logByProfession("Profession counts", professionCounts);
-        logByProfession("Profession with paired chests", professionWithChests);
-        logByProfession("Profession with paired crafting tables", professionWithCraftingTables);
+        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
+        logPairings(pairingReport);
     }
 
     public static void directVillagersToJobsOrBell(ServerWorld world, BlockPos bellPos) {
@@ -113,17 +123,33 @@ public final class VillagerBellTracker {
         return false;
     }
 
-    private static void logByProfession(String header, Map<VillagerProfession, Integer> counts) {
-        LOGGER.info("{}:", header);
+    private static void logByProfession(Map<VillagerProfession, Integer> counts) {
+        LOGGER.info("     Workstations by profession:");
         counts.entrySet().stream()
                 .sorted(Comparator.comparing(entry -> Registries.VILLAGER_PROFESSION.getId(entry.getKey()).toString()))
-                .forEach(entry -> {
-                    Identifier professionId = Registries.VILLAGER_PROFESSION.getId(entry.getKey());
-                    LOGGER.info("- {}: {}", professionId, entry.getValue());
-                });
+                .forEach(entry -> LOGGER.info("     {} - {}", Registries.VILLAGER_PROFESSION.getId(entry.getKey()), entry.getValue()));
     }
 
     private static void incrementCount(Map<VillagerProfession, Integer> map, VillagerProfession profession) {
         map.merge(profession, 1, Integer::sum);
+    }
+
+    private static void logPairings(GuardStandPairingReport pairingReport) {
+        if (pairingReport.assignments().isEmpty()) {
+            LOGGER.info("No guard to armor stand pairings were created.");
+            return;
+        }
+
+        LOGGER.info("Guard and armor stand pairings:");
+        for (GuardStandAssignment assignment : pairingReport.assignments()) {
+            LOGGER.info("Guard: {}", assignment.guardPos().toShortString());
+            LOGGER.info("Stand: {}", assignment.standPos().toShortString());
+        }
+
+        if (!pairingReport.demotedGuards().isEmpty()) {
+            LOGGER.info("Demoted excess guards: {}", pairingReport.demotedGuards().size());
+            pairingReport.demotedGuards()
+                    .forEach(pos -> LOGGER.info("- {}", pos.toShortString()));
+        }
     }
 }
