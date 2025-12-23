@@ -188,7 +188,7 @@ public class GuardVillagers implements ModInitializer {
         if (!world.isClient() && stackInHand.isOf(Items.GOAT_HORN)) {
             ServerWorld serverWorld = (ServerWorld) world;
             BlockPos targetPos = player.getBlockPos();
-            long hornDuration = 20L * 60L;
+            long hornDuration = 20L * 15L;
             Box searchBox = new Box(targetPos).expand(GuardVillagersConfig.followRangeModifier);
             for (GuardEntity guard : serverWorld.getEntitiesByType(TypeFilter.instanceOf(GuardEntity.class), searchBox, Entity::isAlive)) {
                 guard.setHornTarget(targetPos, hornDuration);
