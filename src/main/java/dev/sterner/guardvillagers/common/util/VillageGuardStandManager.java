@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
     private static final int BELL_SEARCH_RANGE = 32;
-    private static final int VILLAGE_ENTITY_RANGE = 32;
+    private static final int VILLAGE_ENTITY_RANGE = 100;
     private static final int ARMOR_STAND_SEARCH_RANGE = 6;
     private static final int PLAYER_APPROACH_RANGE = 100;
     private static final int PLAYER_CHECK_INTERVAL_TICKS = 40;
