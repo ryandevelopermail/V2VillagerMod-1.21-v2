@@ -9,13 +9,17 @@ import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.registry.Registries;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.util.Identifier;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.event.GameEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.Optional;
@@ -25,6 +29,7 @@ public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
     private static final double NEARBY_VILLAGER_SCAN_RANGE = 8.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
+    private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
     static {
         registerPairingBlock(Blocks.CHEST);
@@ -72,6 +77,16 @@ public final class JobBlockPairingHelper {
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
+        if (villager instanceof VillagerEntity villagerEntity) {
+            VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
+            Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
+            LOGGER.info("{} paired with chest {} - {} ID: {}",
+                    professionId,
+                    blockPos.toShortString(),
+                    professionId,
+                    villager.getId());
+        }
+
         spawnHappyParticles(world, blockPos);
         spawnHappyParticles(world, jobPos);
         spawnHappyParticles(world, villager);
