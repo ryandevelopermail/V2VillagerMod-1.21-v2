@@ -46,6 +46,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.TypedActionResult;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.TypeFilter;
 import net.minecraft.village.VillagerProfession;
@@ -188,7 +189,8 @@ public class GuardVillagers implements ModInitializer {
             ServerWorld serverWorld = (ServerWorld) world;
             BlockPos targetPos = player.getBlockPos();
             long hornDuration = 20L * 60L;
-            for (GuardEntity guard : serverWorld.iterateEntitiesByType(TypeFilter.instanceOf(GuardEntity.class), Entity::isAlive)) {
+            Box searchBox = new Box(targetPos).expand(GuardVillagersConfig.followRangeModifier);
+            for (GuardEntity guard : serverWorld.getEntitiesByType(TypeFilter.instanceOf(GuardEntity.class), searchBox, Entity::isAlive)) {
                 guard.setHornTarget(targetPos, hornDuration);
             }
             return TypedActionResult.success(stackInHand, false);
