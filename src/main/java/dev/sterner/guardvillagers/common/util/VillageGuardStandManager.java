@@ -134,7 +134,13 @@ public final class VillageGuardStandManager {
     }
 
     private static boolean isOpenForArmorStand(ServerWorld world, BlockPos pos) {
-        boolean spaceIsClear = world.isAir(pos) && world.isAir(pos.up()) && world.isSpaceEmpty(new Box(pos, pos.add(1, 2, 1)));
+        boolean spaceIsClear = world.isAir(pos) && world.isAir(pos.up()) && world.isSpaceEmpty(new Box(
+                pos.getX(),
+                pos.getY(),
+                pos.getZ(),
+                pos.getX() + 1,
+                pos.getY() + 2,
+                pos.getZ() + 1));
         if (!spaceIsClear) {
             return false;
         }
