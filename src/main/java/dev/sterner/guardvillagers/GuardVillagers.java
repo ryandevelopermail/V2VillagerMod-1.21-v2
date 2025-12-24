@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviors;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
@@ -85,6 +86,7 @@ public class GuardVillagers implements ModInitializer {
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
+        VillagerProfessionBehaviors.register();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
         Registry.register(Registries.SCREEN_HANDLER, id("guard_screen"), GUARD_SCREEN_HANDLER);

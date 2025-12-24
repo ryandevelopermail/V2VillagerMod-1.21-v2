@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.util;
 
 import com.google.common.collect.Sets;
+import dev.sterner.guardvillagers.common.villager.SpecialModifier;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -51,6 +53,10 @@ public final class JobBlockPairingHelper {
         return PAIRING_BLOCKS.contains(block);
     }
 
+    public static boolean isSpecialModifierBlock(Block block) {
+        return VillagerProfessionBehaviorRegistry.isSpecialModifierBlock(block);
+    }
+
     public static void handlePairingBlockPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
         if (!isPairingBlock(placedState)) {
             return;
@@ -63,6 +69,16 @@ public final class JobBlockPairingHelper {
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
         world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
+    }
+
+    public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
+        Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(placedState.getBlock());
+        if (modifier.isEmpty()) {
+            return;
+        }
+
+        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+                .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, modifier.get()));
     }
 
     private static void tryPlayPairingAnimation(ServerWorld world, VillagerEntity villager, BlockPos placedPos) {
@@ -78,6 +94,7 @@ public final class JobBlockPairingHelper {
 
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
+            VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
         }
     }
 
@@ -107,6 +124,36 @@ public final class JobBlockPairingHelper {
         }
 
         playPairingAnimation(world, placedPos, villager, jobPos);
+        VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), placedPos);
+    }
+
+    private static void tryPlayPairingAnimationWithSpecialModifier(ServerWorld world, VillagerEntity villager, BlockPos placedPos, SpecialModifier modifier) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            return;
+        }
+
+        BlockPos jobPos = globalPos.pos();
+        if (!jobPos.isWithinDistance(placedPos, modifier.range())) {
+            return;
+        }
+
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        if (nearbyChest.isEmpty()) {
+            return;
+        }
+
+        if (!nearbyChest.get().isWithinDistance(placedPos, modifier.range())) {
+            return;
+        }
+
+        playPairingAnimation(world, placedPos, villager, jobPos);
+        VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, placedPos);
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
