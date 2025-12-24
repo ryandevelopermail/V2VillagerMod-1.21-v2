@@ -33,6 +33,7 @@ public class FarmerCraftingGoal extends Goal {
     private long lastCraftDay = -1L;
     private int dailyCraftLimit;
     private int craftedToday;
+    private int lastCheckCount;
 
     public FarmerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -73,9 +74,9 @@ public class FarmerCraftingGoal extends Goal {
             return false;
         }
 
-        int craftableCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Farmer", formatCheckResult(craftableCount));
-        return craftableCount > 0;
+        lastCheckCount = countCraftableRecipes(world);
+        CraftingCheckLogger.report(world, "Farmer", formatCheckResult(lastCheckCount));
+        return lastCheckCount > 0;
     }
 
     @Override
@@ -153,6 +154,7 @@ public class FarmerCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            CraftingCheckLogger.report(world, "Farmer", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
@@ -304,5 +306,13 @@ public class FarmerCraftingGoal extends Goal {
             return "1 item available to craft";
         }
         return craftableCount + " items available to craft";
+    }
+
+    private String formatCraftedResult(int craftableCount, ItemStack crafted) {
+        String craftedName = crafted.getName().getString();
+        if (craftableCount == 1) {
+            return "1 item available to craft - 1 " + craftedName + " crafted";
+        }
+        return craftableCount + " items available to craft - 1 " + craftedName + " crafted";
     }
 }
