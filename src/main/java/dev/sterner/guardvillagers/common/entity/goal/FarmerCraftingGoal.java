@@ -280,10 +280,6 @@ public class FarmerCraftingGoal extends Goal {
 
     private enum Recipe {
         WOODEN_HOE(new ItemStack(Items.WOODEN_HOE), new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        STONE_HOE(new ItemStack(Items.STONE_HOE), new IngredientRequirement(stack -> stack.isOf(Items.COBBLESTONE), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        IRON_HOE(new ItemStack(Items.IRON_HOE), new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        GOLDEN_HOE(new ItemStack(Items.GOLDEN_HOE), new IngredientRequirement(stack -> stack.isOf(Items.GOLD_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        DIAMOND_HOE(new ItemStack(Items.DIAMOND_HOE), new IngredientRequirement(stack -> stack.isOf(Items.DIAMOND), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
         BREAD(new ItemStack(Items.BREAD), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 3)),
         HAY_BALE(new ItemStack(Items.HAY_BLOCK), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 9));
 
