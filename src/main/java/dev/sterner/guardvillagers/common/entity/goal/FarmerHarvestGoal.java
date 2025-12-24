@@ -7,9 +7,13 @@ import net.minecraft.block.CropBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemConvertible;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -19,6 +23,7 @@ public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
     private final Deque<BlockPos> harvestTargets = new ArrayDeque<>();
@@ -54,7 +59,7 @@ public class FarmerHarvestGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_JOB;
+        setStage(Stage.GO_TO_JOB);
         populateHarvestTargets();
         moveTo(jobPos);
     }
@@ -63,13 +68,13 @@ public class FarmerHarvestGoal extends Goal {
     public void stop() {
         villager.getNavigation().stop();
         harvestTargets.clear();
-        stage = Stage.DONE;
+        setStage(Stage.DONE);
     }
 
     @Override
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
-            stage = Stage.DONE;
+            setStage(Stage.DONE);
             pendingWork = false;
             return;
         }
@@ -77,14 +82,14 @@ public class FarmerHarvestGoal extends Goal {
         switch (stage) {
             case GO_TO_JOB -> {
                 if (isNear(jobPos)) {
-                    stage = Stage.HARVEST;
+                    setStage(Stage.HARVEST);
                 } else {
                     moveTo(jobPos);
                 }
             }
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
-                    stage = Stage.RETURN_TO_CHEST;
+                    setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
                     return;
                 }
@@ -100,25 +105,27 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
 
+                BlockState harvestedState = serverWorld.getBlockState(target);
                 serverWorld.breakBlock(target, true, villager);
+                attemptReplant(serverWorld, target, harvestedState);
                 harvestTargets.removeFirst();
             }
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
-                    stage = Stage.DEPOSIT;
+                    setStage(Stage.DEPOSIT);
                 } else {
                     moveTo(chestPos);
                 }
             }
             case DEPOSIT -> {
                 if (!isNear(chestPos)) {
-                    stage = Stage.RETURN_TO_CHEST;
+                    setStage(Stage.RETURN_TO_CHEST);
                     return;
                 }
 
                 depositInventory(serverWorld);
                 pendingWork = false;
-                stage = Stage.DONE;
+                setStage(Stage.DONE);
             }
             case IDLE, DONE -> {
             }
@@ -162,6 +169,48 @@ public class FarmerHarvestGoal extends Goal {
 
     private void moveTo(BlockPos target) {
         villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+    }
+
+    private void attemptReplant(ServerWorld world, BlockPos pos, BlockState harvestedState) {
+        if (!(harvestedState.getBlock() instanceof CropBlock crop)) {
+            return;
+        }
+
+        if (!world.getBlockState(pos).isAir()) {
+            return;
+        }
+
+        ItemConvertible seedConvertible = crop.getSeedsItem();
+        Item seedItem = seedConvertible.asItem();
+
+        Inventory inventory = villager.getInventory();
+        if (!consumeSeed(inventory, seedItem)) {
+            return;
+        }
+
+        BlockState replantedState = crop.getDefaultState();
+        if (!replantedState.canPlaceAt(world, pos)) {
+            return;
+        }
+
+        world.setBlockState(pos, replantedState);
+    }
+
+    private boolean consumeSeed(Inventory inventory, Item seedItem) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || stack.getItem() != seedItem) {
+                continue;
+            }
+
+            stack.decrement(1);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            inventory.markDirty();
+            return true;
+        }
+        return false;
     }
 
     private void depositInventory(ServerWorld world) {
@@ -230,6 +279,14 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         return remaining;
+    }
+
+    private void setStage(Stage newStage) {
+        if (stage == newStage) {
+            return;
+        }
+        stage = newStage;
+        LOGGER.info("Farmer {} entering harvest stage {}", villager.getUuidAsString(), newStage);
     }
 
     private enum Stage {
