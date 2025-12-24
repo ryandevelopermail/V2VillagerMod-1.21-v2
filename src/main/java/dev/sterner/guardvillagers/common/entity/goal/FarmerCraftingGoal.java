@@ -1,8 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -72,7 +73,9 @@ public class FarmerCraftingGoal extends Goal {
             return false;
         }
 
-        return hasCraftableRecipe(world);
+        int craftableCount = countCraftableRecipes(world);
+        CraftingCheckLogger.report(world, "Farmer", formatCheckResult(craftableCount));
+        return craftableCount > 0;
     }
 
     @Override
@@ -126,12 +129,12 @@ public class FarmerCraftingGoal extends Goal {
         }
     }
 
-    private boolean hasCraftableRecipe(ServerWorld world) {
+    private int countCraftableRecipes(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return false;
+            return 0;
         }
-        return !getCraftableRecipes(inventory).isEmpty();
+        return getCraftableRecipes(inventory).size();
     }
 
     private void craftOnce(ServerWorld world) {
@@ -280,6 +283,10 @@ public class FarmerCraftingGoal extends Goal {
 
     private enum Recipe {
         WOODEN_HOE(new ItemStack(Items.WOODEN_HOE), new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        STONE_HOE(new ItemStack(Items.STONE_HOE), new IngredientRequirement(stack -> stack.isOf(Items.COBBLESTONE), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        IRON_HOE(new ItemStack(Items.IRON_HOE), new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        GOLDEN_HOE(new ItemStack(Items.GOLDEN_HOE), new IngredientRequirement(stack -> stack.isOf(Items.GOLD_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        DIAMOND_HOE(new ItemStack(Items.DIAMOND_HOE), new IngredientRequirement(stack -> stack.isOf(Items.DIAMOND), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
         BREAD(new ItemStack(Items.BREAD), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 3)),
         HAY_BALE(new ItemStack(Items.HAY_BLOCK), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 9));
 
@@ -290,5 +297,12 @@ public class FarmerCraftingGoal extends Goal {
             this.output = output;
             this.requirements = requirements;
         }
+    }
+
+    private String formatCheckResult(int craftableCount) {
+        if (craftableCount == 1) {
+            return "1 item available to craft";
+        }
+        return craftableCount + " items available to craft";
     }
 }
