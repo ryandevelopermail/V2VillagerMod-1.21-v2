@@ -4,12 +4,13 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.CropBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
-import net.minecraft.item.ItemConvertible;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import org.slf4j.Logger;
@@ -180,8 +181,10 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
 
-        ItemConvertible seedConvertible = crop.getSeedsItem();
-        Item seedItem = seedConvertible.asItem();
+        Item seedItem = getSeedItem(crop);
+        if (seedItem == null) {
+            return;
+        }
 
         Inventory inventory = villager.getInventory();
         if (!consumeSeed(inventory, seedItem)) {
@@ -194,6 +197,23 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         world.setBlockState(pos, replantedState);
+    }
+
+    private Item getSeedItem(CropBlock crop) {
+        Block block = crop;
+        if (block == Blocks.WHEAT) {
+            return Items.WHEAT_SEEDS;
+        }
+        if (block == Blocks.CARROTS) {
+            return Items.CARROT;
+        }
+        if (block == Blocks.POTATOES) {
+            return Items.POTATO;
+        }
+        if (block == Blocks.BEETROOTS) {
+            return Items.BEETROOT_SEEDS;
+        }
+        return null;
     }
 
     private boolean consumeSeed(Inventory inventory, Item seedItem) {
