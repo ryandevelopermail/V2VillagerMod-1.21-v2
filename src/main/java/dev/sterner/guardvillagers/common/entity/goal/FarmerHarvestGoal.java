@@ -1,0 +1,243 @@
+package dev.sterner.guardvillagers.common.entity.goal;
+
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.block.CropBlock;
+import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.EnumSet;
+
+public class FarmerHarvestGoal extends Goal {
+    private static final int HARVEST_RADIUS = 50;
+    private static final double TARGET_REACH_SQUARED = 4.0D;
+    private static final double MOVE_SPEED = 0.6D;
+
+    private final VillagerEntity villager;
+    private final Deque<BlockPos> harvestTargets = new ArrayDeque<>();
+
+    private BlockPos jobPos;
+    private BlockPos chestPos;
+    private boolean pendingWork;
+    private Stage stage = Stage.IDLE;
+
+    public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        this.villager = villager;
+        setTargets(jobPos, chestPos);
+        setControls(EnumSet.of(Control.MOVE));
+    }
+
+    public void setTargets(BlockPos jobPos, BlockPos chestPos) {
+        this.jobPos = jobPos.toImmutable();
+        this.chestPos = chestPos.toImmutable();
+        this.pendingWork = true;
+        this.stage = Stage.IDLE;
+        this.harvestTargets.clear();
+    }
+
+    @Override
+    public boolean canStart() {
+        return pendingWork && villager.isAlive() && jobPos != null && chestPos != null;
+    }
+
+    @Override
+    public boolean shouldContinue() {
+        return pendingWork && villager.isAlive() && stage != Stage.DONE;
+    }
+
+    @Override
+    public void start() {
+        stage = Stage.GO_TO_JOB;
+        populateHarvestTargets();
+        moveTo(jobPos);
+    }
+
+    @Override
+    public void stop() {
+        villager.getNavigation().stop();
+        harvestTargets.clear();
+        stage = Stage.DONE;
+    }
+
+    @Override
+    public void tick() {
+        if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
+            stage = Stage.DONE;
+            pendingWork = false;
+            return;
+        }
+
+        switch (stage) {
+            case GO_TO_JOB -> {
+                if (isNear(jobPos)) {
+                    stage = Stage.HARVEST;
+                } else {
+                    moveTo(jobPos);
+                }
+            }
+            case HARVEST -> {
+                if (harvestTargets.isEmpty()) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                    return;
+                }
+
+                BlockPos target = harvestTargets.peekFirst();
+                if (!isMatureCrop(serverWorld.getBlockState(target))) {
+                    harvestTargets.removeFirst();
+                    return;
+                }
+
+                if (!isNear(target)) {
+                    moveTo(target);
+                    return;
+                }
+
+                serverWorld.breakBlock(target, true, villager);
+                harvestTargets.removeFirst();
+            }
+            case RETURN_TO_CHEST -> {
+                if (isNear(chestPos)) {
+                    stage = Stage.DEPOSIT;
+                } else {
+                    moveTo(chestPos);
+                }
+            }
+            case DEPOSIT -> {
+                if (!isNear(chestPos)) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    return;
+                }
+
+                depositInventory(serverWorld);
+                pendingWork = false;
+                stage = Stage.DONE;
+            }
+            case IDLE, DONE -> {
+            }
+        }
+    }
+
+    private void populateHarvestTargets() {
+        if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        harvestTargets.clear();
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+
+            BlockState state = serverWorld.getBlockState(pos);
+            if (isMatureCrop(state)) {
+                harvestTargets.add(pos.toImmutable());
+            }
+        }
+    }
+
+    private boolean isMatureCrop(BlockState state) {
+        Block block = state.getBlock();
+        if (block instanceof CropBlock crop) {
+            return crop.isMature(state);
+        }
+        return false;
+    }
+
+    private boolean isNear(BlockPos target) {
+        return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    private void moveTo(BlockPos target) {
+        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+    }
+
+    private void depositInventory(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return;
+        }
+
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return;
+        }
+
+        Inventory villagerInventory = villager.getInventory();
+        for (int i = 0; i < villagerInventory.size(); i++) {
+            ItemStack stack = villagerInventory.getStack(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            ItemStack remaining = insertStack(chestInventory, stack);
+            villagerInventory.setStack(i, remaining);
+        }
+
+        villagerInventory.markDirty();
+        chestInventory.markDirty();
+    }
+
+    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.canCombine(existing, remaining)) {
+                continue;
+            }
+
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+
+        return remaining;
+    }
+
+    private enum Stage {
+        IDLE,
+        GO_TO_JOB,
+        HARVEST,
+        RETURN_TO_CHEST,
+        DEPOSIT,
+        DONE
+    }
+}
