@@ -211,7 +211,7 @@ public class FarmerHarvestGoal extends Goal {
                 continue;
             }
 
-            if (!ItemStack.canCombine(existing, remaining)) {
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
                 continue;
             }
 
