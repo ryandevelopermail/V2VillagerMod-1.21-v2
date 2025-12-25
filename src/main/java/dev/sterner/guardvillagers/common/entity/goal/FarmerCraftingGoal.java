@@ -20,7 +20,7 @@ import java.util.Optional;
 import java.util.function.Predicate;
 
 public class FarmerCraftingGoal extends Goal {
-    private static final int CHECK_INTERVAL_TICKS = 200;
+    private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
 
@@ -76,6 +76,7 @@ public class FarmerCraftingGoal extends Goal {
 
         lastCheckCount = countCraftableRecipes(world);
         CraftingCheckLogger.report(world, "Farmer", formatCheckResult(lastCheckCount));
+        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         return lastCheckCount > 0;
     }
 
@@ -114,7 +115,6 @@ public class FarmerCraftingGoal extends Goal {
             case CRAFT -> {
                 craftOnce(world);
                 stage = Stage.DONE;
-                nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             }
             case IDLE, DONE -> {
             }

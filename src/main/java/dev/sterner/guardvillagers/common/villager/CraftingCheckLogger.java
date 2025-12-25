@@ -9,6 +9,7 @@ import java.util.Map;
 
 public final class CraftingCheckLogger {
     private static final Logger LOGGER = LoggerFactory.getLogger(CraftingCheckLogger.class);
+    public static final int MATERIAL_CHECK_INTERVAL_TICKS = 40;
     private static long lastTick = -1L;
     private static final Map<String, String> ENTRIES = new LinkedHashMap<>();
 
