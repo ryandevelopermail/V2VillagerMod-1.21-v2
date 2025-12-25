@@ -4,7 +4,6 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.CropBlock;
-import net.minecraft.block.Blocks;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -118,7 +117,8 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
-                    setStage(Stage.PLANT_MISSED);
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
                     return;
                 }
 
@@ -137,11 +137,6 @@ public class FarmerHarvestGoal extends Goal {
                 serverWorld.breakBlock(target, true, villager);
                 attemptReplant(serverWorld, target, harvestedState);
                 harvestTargets.removeFirst();
-            }
-            case PLANT_MISSED -> {
-                plantMissingCrops(serverWorld);
-                setStage(Stage.RETURN_TO_CHEST);
-                moveTo(chestPos);
             }
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
@@ -384,100 +379,8 @@ public class FarmerHarvestGoal extends Goal {
         IDLE,
         GO_TO_JOB,
         HARVEST,
-        PLANT_MISSED,
         RETURN_TO_CHEST,
         DEPOSIT,
         DONE
-    }
-
-    private void plantMissingCrops(ServerWorld world) {
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
-        Inventory villagerInventory = villager.getInventory();
-        Inventory chestInventory = getChestInventory(world);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
-                continue;
-            }
-            BlockState state = world.getBlockState(pos);
-            if (!state.isOf(Blocks.FARMLAND)) {
-                continue;
-            }
-            BlockPos above = pos.up();
-            if (!world.getBlockState(above).isAir()) {
-                continue;
-            }
-
-            Item seedItem = findPlantableItem(villagerInventory);
-            Inventory source = villagerInventory;
-            if (seedItem == null && chestInventory != null) {
-                seedItem = findPlantableItem(chestInventory);
-                source = chestInventory;
-            }
-            if (seedItem == null) {
-                return;
-            }
-
-            Block cropBlock = getCropBlockForItem(seedItem);
-            if (cropBlock == null) {
-                continue;
-            }
-            BlockState plantedState = cropBlock.getDefaultState();
-            if (!plantedState.canPlaceAt(world, above)) {
-                continue;
-            }
-
-            if (!consumeSeed(source, seedItem)) {
-                continue;
-            }
-            world.setBlockState(above, plantedState);
-        }
-    }
-
-    private Inventory getChestInventory(ServerWorld world) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
-        }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-    }
-
-    private Item findPlantableItem(Inventory inventory) {
-        if (inventory == null) {
-            return null;
-        }
-        Item[] candidates = new Item[] {
-                Items.WHEAT_SEEDS,
-                Items.CARROT,
-                Items.POTATO,
-                Items.BEETROOT_SEEDS
-        };
-        for (Item candidate : candidates) {
-            for (int slot = 0; slot < inventory.size(); slot++) {
-                ItemStack stack = inventory.getStack(slot);
-                if (!stack.isEmpty() && stack.getItem() == candidate) {
-                    return candidate;
-                }
-            }
-        }
-        return null;
-    }
-
-    private Block getCropBlockForItem(Item item) {
-        if (item == Items.WHEAT_SEEDS) {
-            return Blocks.WHEAT;
-        }
-        if (item == Items.CARROT) {
-            return Blocks.CARROTS;
-        }
-        if (item == Items.POTATO) {
-            return Blocks.POTATOES;
-        }
-        if (item == Items.BEETROOT_SEEDS) {
-            return Blocks.BEETROOTS;
-        }
-        return null;
     }
 }
