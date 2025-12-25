@@ -32,6 +32,7 @@ public class FarmerBehavior implements VillagerProfessionBehavior {
         FarmerCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
+            goal.setCraftingGoal(craftingGoal);
         }
     }
 
@@ -45,6 +46,11 @@ public class FarmerBehavior implements VillagerProfessionBehavior {
             selector.add(CRAFTING_GOAL_PRIORITY, goal);
         } else {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+
+        FarmerHarvestGoal harvestGoal = GOALS.get(villager);
+        if (harvestGoal != null) {
+            harvestGoal.setCraftingGoal(goal);
         }
     }
 

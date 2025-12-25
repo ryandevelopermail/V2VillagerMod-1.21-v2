@@ -24,6 +24,7 @@ public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int CHECK_INTERVAL_TICKS = 20;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
@@ -31,8 +32,12 @@ public class FarmerHarvestGoal extends Goal {
 
     private BlockPos jobPos;
     private BlockPos chestPos;
-    private boolean pendingWork;
+    private boolean enabled;
     private Stage stage = Stage.IDLE;
+    private long nextCheckTime;
+    private long lastHarvestDay = -1L;
+    private boolean dailyHarvestRun;
+    private FarmerCraftingGoal craftingGoal;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -43,19 +48,43 @@ public class FarmerHarvestGoal extends Goal {
     public void setTargets(BlockPos jobPos, BlockPos chestPos) {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
-        this.pendingWork = true;
+        this.enabled = true;
         this.stage = Stage.IDLE;
         this.harvestTargets.clear();
     }
 
+    public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
+        this.craftingGoal = craftingGoal;
+    }
+
     @Override
     public boolean canStart() {
-        return pendingWork && villager.isAlive() && jobPos != null && chestPos != null;
+        if (!enabled || !villager.isAlive() || jobPos == null || chestPos == null) {
+            return false;
+        }
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            return false;
+        }
+        if (world.getTime() < nextCheckTime) {
+            return false;
+        }
+
+        long day = world.getTimeOfDay() / 24000L;
+        if (day != lastHarvestDay) {
+            lastHarvestDay = day;
+            dailyHarvestRun = true;
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            return true;
+        }
+
+        int matureCount = countMatureCrops(world);
+        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        return matureCount >= 1;
     }
 
     @Override
     public boolean shouldContinue() {
-        return pendingWork && villager.isAlive() && stage != Stage.DONE;
+        return enabled && villager.isAlive() && stage != Stage.DONE;
     }
 
     @Override
@@ -76,7 +105,6 @@ public class FarmerHarvestGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             setStage(Stage.DONE);
-            pendingWork = false;
             return;
         }
 
@@ -125,7 +153,10 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 depositInventory(serverWorld);
-                pendingWork = false;
+                if (dailyHarvestRun) {
+                    notifyDailyHarvestComplete(serverWorld);
+                    dailyHarvestRun = false;
+                }
                 setStage(Stage.DONE);
             }
             case IDLE, DONE -> {
@@ -143,17 +174,35 @@ public class FarmerHarvestGoal extends Goal {
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
         BlockPos end = jobPos.add(radius, radius, radius);
-
         for (BlockPos pos : BlockPos.iterate(start, end)) {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
-
             BlockState state = serverWorld.getBlockState(pos);
             if (isMatureCrop(state)) {
                 harvestTargets.add(pos.toImmutable());
             }
         }
+    }
+
+    private int countMatureCrops(ServerWorld world) {
+        int count = 0;
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (isMatureCrop(world.getBlockState(pos))) {
+                count++;
+                if (count > 1) {
+                    return count;
+                }
+            }
+        }
+        return count;
     }
 
     private boolean isMatureCrop(BlockState state) {
@@ -170,6 +219,12 @@ public class FarmerHarvestGoal extends Goal {
 
     private void moveTo(BlockPos target) {
         villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+    }
+
+    private void notifyDailyHarvestComplete(ServerWorld world) {
+        if (craftingGoal != null) {
+            craftingGoal.notifyDailyHarvestComplete(world.getTimeOfDay() / 24000L);
+        }
     }
 
     private void attemptReplant(ServerWorld world, BlockPos pos, BlockState harvestedState) {

@@ -34,6 +34,8 @@ public class FarmerCraftingGoal extends Goal {
     private int dailyCraftLimit;
     private int craftedToday;
     private int lastCheckCount;
+    private boolean guaranteedCraftPending;
+    private long guaranteedCraftDay = -1L;
 
     public FarmerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -66,11 +68,13 @@ public class FarmerCraftingGoal extends Goal {
         if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
             return false;
         }
-        if (world.getTime() < nextCheckTime) {
-            return false;
-        }
         refreshDailyLimit(world);
         if (craftedToday >= dailyCraftLimit) {
+            return false;
+        }
+
+        boolean skipThrottle = guaranteedCraftPending && guaranteedCraftDay == world.getTimeOfDay() / 24000L;
+        if (!skipThrottle && world.getTime() < nextCheckTime) {
             return false;
         }
 
@@ -125,9 +129,23 @@ public class FarmerCraftingGoal extends Goal {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
             lastCraftDay = day;
-            dailyCraftLimit = 1 + villager.getRandom().nextInt(3);
+            dailyCraftLimit = 2 + villager.getRandom().nextInt(3);
             craftedToday = 0;
+            guaranteedCraftPending = false;
+            guaranteedCraftDay = day;
         }
+    }
+
+    public void notifyDailyHarvestComplete(long day) {
+        if (day != lastCraftDay) {
+            return;
+        }
+        if (craftedToday > 0) {
+            return;
+        }
+        guaranteedCraftPending = true;
+        guaranteedCraftDay = day;
+        nextCheckTime = 0L;
     }
 
     private int countCraftableRecipes(ServerWorld world) {
@@ -154,6 +172,7 @@ public class FarmerCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            guaranteedCraftPending = false;
             CraftingCheckLogger.report(world, "Farmer", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
