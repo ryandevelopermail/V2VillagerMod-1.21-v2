@@ -242,7 +242,7 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         Inventory inventory = villager.getInventory();
-        if (!consumeSeed(inventory, seedItem)) {
+        if (!consumeSeed(inventory, seedItem) && !consumeSeedFromChest(world, seedItem)) {
             return;
         }
 
@@ -286,6 +286,18 @@ public class FarmerHarvestGoal extends Goal {
             return true;
         }
         return false;
+    }
+
+    private boolean consumeSeedFromChest(ServerWorld world, Item seedItem) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return false;
+        }
+        return consumeSeed(chestInventory, seedItem);
     }
 
     private void depositInventory(ServerWorld world) {
