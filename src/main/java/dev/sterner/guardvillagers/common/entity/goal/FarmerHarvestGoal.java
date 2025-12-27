@@ -17,6 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
 
@@ -25,6 +27,7 @@ public class FarmerHarvestGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
+    private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
@@ -38,6 +41,8 @@ public class FarmerHarvestGoal extends Goal {
     private long lastHarvestDay = -1L;
     private boolean dailyHarvestRun;
     private FarmerCraftingGoal craftingGoal;
+    private BlockPos currentTarget;
+    private long currentTargetStartTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -98,6 +103,7 @@ public class FarmerHarvestGoal extends Goal {
     public void stop() {
         villager.getNavigation().stop();
         harvestTargets.clear();
+        currentTarget = null;
         setStage(Stage.DONE);
     }
 
@@ -124,8 +130,19 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 BlockPos target = harvestTargets.peekFirst();
+                if (currentTarget == null || !currentTarget.equals(target)) {
+                    currentTarget = target;
+                    currentTargetStartTick = serverWorld.getTime();
+                }
+
+                if (serverWorld.getTime() - currentTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    harvestTargets.removeFirst();
+                    currentTarget = null;
+                    return;
+                }
                 if (!isMatureCrop(serverWorld.getBlockState(target))) {
                     harvestTargets.removeFirst();
+                    currentTarget = null;
                     return;
                 }
 
@@ -138,6 +155,7 @@ public class FarmerHarvestGoal extends Goal {
                 serverWorld.breakBlock(target, true, villager);
                 attemptReplant(serverWorld, target, harvestedState);
                 harvestTargets.removeFirst();
+                currentTarget = null;
             }
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
@@ -174,15 +192,19 @@ public class FarmerHarvestGoal extends Goal {
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
         BlockPos end = jobPos.add(radius, radius, radius);
+        ArrayList<BlockPos> targets = new ArrayList<>();
         for (BlockPos pos : BlockPos.iterate(start, end)) {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
             BlockState state = serverWorld.getBlockState(pos);
             if (isMatureCrop(state)) {
-                harvestTargets.add(pos.toImmutable());
+                targets.add(pos.toImmutable());
             }
         }
+
+        targets.sort(Comparator.comparingDouble(pos -> villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D)));
+        harvestTargets.addAll(targets);
     }
 
     private int countMatureCrops(ServerWorld world) {
