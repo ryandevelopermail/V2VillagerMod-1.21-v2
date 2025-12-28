@@ -61,6 +61,8 @@ public class FarmerHarvestGoal extends Goal {
     private int feedTargetCount;
     private Direction penInsideDirection;
     private int exitDelayTicks;
+    private final Deque<BlockPos> hoeTargets = new ArrayDeque<>();
+    private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -284,15 +286,84 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 depositInventory(serverWorld);
-                if (pickUpHoeFromChest(serverWorld)) {
-                    hoeNearbyDirt(serverWorld);
+                pickUpHoeFromChest(serverWorld);
+                pickUpPlantablesFromChest(serverWorld);
+                populateHoeTargets(serverWorld);
+                populatePlantTargets(serverWorld);
+                if (!hoeTargets.isEmpty()) {
+                    setStage(Stage.HOE_GROUND);
+                    break;
                 }
-                plantEmptyFarmland(serverWorld);
+                if (!plantTargets.isEmpty()) {
+                    setStage(Stage.PLANT_FARMLAND);
+                    break;
+                }
                 if (dailyHarvestRun) {
                     notifyDailyHarvestComplete(serverWorld);
                     dailyHarvestRun = false;
                 }
                 setStage(Stage.DONE);
+            }
+            case HOE_GROUND -> {
+                if (hoeTargets.isEmpty()) {
+                    if (!plantTargets.isEmpty()) {
+                        setStage(Stage.PLANT_FARMLAND);
+                    } else {
+                        if (dailyHarvestRun) {
+                            notifyDailyHarvestComplete(serverWorld);
+                            dailyHarvestRun = false;
+                        }
+                        setStage(Stage.DONE);
+                    }
+                    return;
+                }
+                BlockPos target = hoeTargets.peekFirst();
+                if (!isNear(target)) {
+                    moveTo(target, PEN_MOVE_SPEED);
+                    return;
+                }
+                if (isHoeTarget(serverWorld, target) && isWaterInRange(serverWorld, target)) {
+                    serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
+                }
+                hoeTargets.removeFirst();
+            }
+            case PLANT_FARMLAND -> {
+                if (plantTargets.isEmpty()) {
+                    if (dailyHarvestRun) {
+                        notifyDailyHarvestComplete(serverWorld);
+                        dailyHarvestRun = false;
+                    }
+                    setStage(Stage.DONE);
+                    return;
+                }
+                BlockPos target = plantTargets.peekFirst();
+                BlockPos above = target.up();
+                if (!isNear(above)) {
+                    moveTo(above, PEN_MOVE_SPEED);
+                    return;
+                }
+                if (serverWorld.getBlockState(above).isAir()) {
+                    Item seedItem = findFirstPlantableInInventory();
+                    if (seedItem == null) {
+                        plantTargets.clear();
+                        if (dailyHarvestRun) {
+                            notifyDailyHarvestComplete(serverWorld);
+                            dailyHarvestRun = false;
+                        }
+                        setStage(Stage.DONE);
+                        return;
+                    }
+                    Block cropBlock = getCropBlockForItem(seedItem);
+                    if (cropBlock != null) {
+                        BlockState plantedState = cropBlock.getDefaultState();
+                        if (plantedState.canPlaceAt(serverWorld, above)) {
+                            if (consumeSeed(villager.getInventory(), seedItem)) {
+                                serverWorld.setBlockState(above, plantedState);
+                            }
+                        }
+                    }
+                }
+                plantTargets.removeFirst();
             }
             case IDLE, DONE -> {
             }
@@ -549,6 +620,8 @@ public class FarmerHarvestGoal extends Goal {
         CLOSE_GATE_EXIT,
         RETURN_TO_CHEST,
         DEPOSIT,
+        HOE_GROUND,
+        PLANT_FARMLAND,
         DONE
     }
 
@@ -692,7 +765,8 @@ public class FarmerHarvestGoal extends Goal {
         animal.setLoveTicks(600);
     }
 
-    private void plantEmptyFarmland(ServerWorld world) {
+    private void populateHoeTargets(ServerWorld world) {
+        hoeTargets.clear();
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
@@ -701,57 +775,30 @@ public class FarmerHarvestGoal extends Goal {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
-            BlockState state = world.getBlockState(pos);
-            if (!state.isOf(Blocks.FARMLAND)) {
-                continue;
+            if (isHoeTarget(world, pos) && isWaterInRange(world, pos)) {
+                hoeTargets.add(pos.toImmutable());
             }
-            BlockPos above = pos.up();
-            if (!world.getBlockState(above).isAir()) {
-                continue;
-            }
-            Item seedItem = findFirstPlantableFromChest(world);
-            if (seedItem == null) {
-                return;
-            }
-            Block cropBlock = getCropBlockForItem(seedItem);
-            if (cropBlock == null) {
-                continue;
-            }
-            BlockState plantedState = cropBlock.getDefaultState();
-            if (!plantedState.canPlaceAt(world, above)) {
-                continue;
-            }
-            if (!consumeSeedFromChest(world, seedItem)) {
-                return;
-            }
-            world.setBlockState(above, plantedState);
         }
     }
 
-    private Item findFirstPlantableFromChest(ServerWorld world) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
-        }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-        if (chestInventory == null) {
-            return null;
-        }
-        Item[] candidates = new Item[] {
-                Items.WHEAT_SEEDS,
-                Items.CARROT,
-                Items.POTATO,
-                Items.BEETROOT_SEEDS
-        };
-        for (Item candidate : candidates) {
-            for (int slot = 0; slot < chestInventory.size(); slot++) {
-                ItemStack stack = chestInventory.getStack(slot);
-                if (!stack.isEmpty() && stack.getItem() == candidate) {
-                    return candidate;
-                }
+    private void populatePlantTargets(ServerWorld world) {
+        plantTargets.clear();
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
             }
+            if (!world.getBlockState(pos).isOf(Blocks.FARMLAND)) {
+                continue;
+            }
+            if (!world.getBlockState(pos.up()).isAir()) {
+                continue;
+            }
+            plantTargets.add(pos.toImmutable());
         }
-        return null;
     }
 
     private Block getCropBlockForItem(Item item) {
@@ -813,6 +860,55 @@ public class FarmerHarvestGoal extends Goal {
         return false;
     }
 
+    private void pickUpPlantablesFromChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return;
+        }
+        Item[] candidates = new Item[] {
+                Items.WHEAT_SEEDS,
+                Items.CARROT,
+                Items.POTATO,
+                Items.BEETROOT_SEEDS
+        };
+        for (Item candidate : candidates) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                ItemStack stack = chestInventory.getStack(slot);
+                if (stack.isEmpty() || stack.getItem() != candidate) {
+                    continue;
+                }
+                ItemStack remaining = insertStack(villager.getInventory(), stack);
+                chestInventory.setStack(slot, remaining);
+                if (remaining.isEmpty()) {
+                    break;
+                }
+            }
+        }
+        chestInventory.markDirty();
+        villager.getInventory().markDirty();
+    }
+
+    private Item findFirstPlantableInInventory() {
+        Item[] candidates = new Item[] {
+                Items.WHEAT_SEEDS,
+                Items.CARROT,
+                Items.POTATO,
+                Items.BEETROOT_SEEDS
+        };
+        for (Item candidate : candidates) {
+            for (int slot = 0; slot < villager.getInventory().size(); slot++) {
+                ItemStack stack = villager.getInventory().getStack(slot);
+                if (!stack.isEmpty() && stack.getItem() == candidate) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
     private boolean isHoeTarget(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (!(state.isOf(Blocks.DIRT) || state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT_PATH))) {
