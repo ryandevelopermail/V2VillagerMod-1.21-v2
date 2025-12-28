@@ -625,10 +625,7 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private void applyBreedingState(AnimalEntity animal, VillagerEntity villagerEntity) {
-        animal.lovePlayer(villagerEntity);
-        if (!animal.isInLove()) {
-            animal.setLoveTicks(600);
-        }
+        animal.setLoveTicks(600);
     }
 
     private BlockPos findGateInterior(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
