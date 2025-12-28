@@ -632,6 +632,5 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
         world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
-        gateBlock.playOpenCloseSound(world, pos, open);
     }
 }
