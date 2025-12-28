@@ -6,6 +6,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.entity.ai.brain.BlockPosLookTarget;
 import net.minecraft.entity.ai.brain.WalkTarget;
 import net.minecraft.entity.effect.StatusEffectInstance;
@@ -110,6 +111,8 @@ public final class VillagerBellTracker {
         logByProfession(professionCounts);
         LOGGER.info("Paired Chests: {}", totalPairedChests);
         LOGGER.info("Paired Crafting Tables: {}", totalPairedCraftingTables);
+
+        JobBlockPairingHelper.pairFarmersWithBanners(world, bellPos, BELL_TRACKING_RANGE);
 
         GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
         logPairings(pairingReport);
