@@ -208,29 +208,10 @@ public final class JobBlockPairingHelper {
     }
 
     private static boolean isBannerOnFence(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
-        return getBannerFenceBase(world, bannerPos, bannerState) != null;
-    }
-
-    public static BlockPos ensureBannerOnFencePostIfInsidePen(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
-        if (bannerState.getBlock() instanceof WallBannerBlock) {
-            return bannerPos;
+        if (getBannerFenceBase(world, bannerPos, bannerState) != null) {
+            return true;
         }
-        BlockState belowState = world.getBlockState(bannerPos.down());
-        if (belowState.getBlock() instanceof FenceBlock || belowState.getBlock() instanceof FenceGateBlock) {
-            return bannerPos;
-        }
-        if (!world.getBlockState(bannerPos.up()).isAir()) {
-            return bannerPos;
-        }
-        if (!isInsideFencePen(world, bannerPos)) {
-            return bannerPos;
-        }
-
-        world.removeBlock(bannerPos, false);
-        world.setBlockState(bannerPos, Blocks.OAK_FENCE.getDefaultState(), 3);
-        BlockPos raisedBannerPos = bannerPos.up();
-        world.setBlockState(raisedBannerPos, bannerState, 3);
-        return raisedBannerPos;
+        return isInsideFencePen(world, bannerPos);
     }
 
     private static BlockPos getBannerFenceBase(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {

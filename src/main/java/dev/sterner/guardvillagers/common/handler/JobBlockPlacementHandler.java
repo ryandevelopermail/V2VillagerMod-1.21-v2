@@ -90,9 +90,7 @@ public final class JobBlockPlacementHandler {
         if (checkBanner) {
             BlockState placedState = serverWorld.getBlockState(placementPos);
             if (placedState.isIn(BlockTags.BANNERS)) {
-                BlockPos bannerPos = JobBlockPairingHelper.ensureBannerOnFencePostIfInsidePen(serverWorld, placementPos, placedState);
-                BlockState bannerState = serverWorld.getBlockState(bannerPos);
-                JobBlockPairingHelper.handleBannerPlacement(serverWorld, bannerPos, bannerState);
+                JobBlockPairingHelper.handleBannerPlacement(serverWorld, placementPos, placedState);
             }
         }
 
