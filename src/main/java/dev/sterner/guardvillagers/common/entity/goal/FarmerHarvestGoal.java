@@ -57,6 +57,8 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos penTargetPos;
     private int feedsRemaining;
     private AnimalEntity targetAnimal;
+    private int feedCooldownTicks;
+    private boolean feedingInside;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -218,11 +220,17 @@ public class FarmerHarvestGoal extends Goal {
                 if (gatePos != null) {
                     openGate(serverWorld, gatePos, false);
                 }
+                feedingInside = true;
                 setStage(Stage.FEED_ANIMALS);
             }
             case FEED_ANIMALS -> {
+                if (feedCooldownTicks > 0) {
+                    feedCooldownTicks--;
+                    return;
+                }
                 if (!feedAnimals(serverWorld)) {
                     villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+                    feedingInside = false;
                     setStage(Stage.OPEN_GATE_EXIT);
                 }
             }
@@ -531,6 +539,8 @@ public class FarmerHarvestGoal extends Goal {
         penTargetPos = gateInteriorPos != null ? gateInteriorPos : bannerPos;
         feedsRemaining = 1 + villager.getRandom().nextInt(5);
         targetAnimal = null;
+        feedCooldownTicks = 0;
+        feedingInside = false;
         return !getAnimalsNearBanner(world).isEmpty();
     }
 
@@ -539,6 +549,10 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         if (bannerPos == null) {
+            return false;
+        }
+
+        if (!feedingInside) {
             return false;
         }
 
@@ -565,13 +579,14 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
 
-        applyBreedingState(targetAnimal, villager);
+        applyBreedingState(targetAnimal);
         LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), feedStack.getName().getString(), targetAnimal.getBlockPos().toShortString());
         if (targetAnimal.isInLove()) {
             LOGGER.info("Animal {} entered breeding state at {}", targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
         }
         feedsRemaining--;
         targetAnimal = null;
+        feedCooldownTicks = 20;
         return feedsRemaining > 0;
     }
 
@@ -624,7 +639,7 @@ public class FarmerHarvestGoal extends Goal {
         return false;
     }
 
-    private void applyBreedingState(AnimalEntity animal, VillagerEntity villagerEntity) {
+    private void applyBreedingState(AnimalEntity animal) {
         animal.setLoveTicks(600);
     }
 
