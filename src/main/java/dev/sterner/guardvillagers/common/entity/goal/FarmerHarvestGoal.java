@@ -6,6 +6,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
@@ -13,6 +14,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -94,6 +96,7 @@ public class FarmerHarvestGoal extends Goal {
 
     @Override
     public void start() {
+        villager.setCanPickUpLoot(true);
         setStage(Stage.GO_TO_JOB);
         populateHarvestTargets();
         moveTo(jobPos);
@@ -154,6 +157,7 @@ public class FarmerHarvestGoal extends Goal {
                 BlockState harvestedState = serverWorld.getBlockState(target);
                 serverWorld.breakBlock(target, true, villager);
                 attemptReplant(serverWorld, target, harvestedState);
+                collectNearbyDrops(serverWorld, target);
                 harvestTargets.removeFirst();
                 currentTarget = null;
             }
@@ -274,6 +278,13 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         world.setBlockState(pos, replantedState);
+    }
+
+    private void collectNearbyDrops(ServerWorld world, BlockPos pos) {
+        Box box = new Box(pos).expand(2.0D);
+        for (ItemEntity itemEntity : world.getEntitiesByClass(ItemEntity.class, box, entity -> entity.isAlive() && !entity.getStack().isEmpty())) {
+            villager.tryPickup(itemEntity);
+        }
     }
 
     private Item getSeedItem(CropBlock crop) {
