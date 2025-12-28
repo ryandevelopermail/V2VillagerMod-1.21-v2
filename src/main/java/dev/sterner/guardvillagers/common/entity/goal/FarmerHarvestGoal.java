@@ -5,6 +5,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
+import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.AnimalEntity;
@@ -50,6 +51,8 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos currentTarget;
     private long currentTargetStartTick;
     private BlockPos bannerPos;
+    private BlockPos gatePos;
+    private BlockPos gateInteriorPos;
     private int feedsRemaining;
     private AnimalEntity targetAnimal;
 
@@ -186,17 +189,47 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (isNear(bannerPos)) {
+                if (gatePos == null) {
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
+                    return;
+                }
+                if (isNear(gatePos)) {
+                    openGate(serverWorld, gatePos, true);
+                    setStage(Stage.ENTER_PEN);
+                } else {
+                    moveTo(gatePos);
+                }
+            }
+            case ENTER_PEN -> {
+                if (gateInteriorPos == null) {
+                    setStage(Stage.FEED_ANIMALS);
+                    return;
+                }
+                if (isNear(gateInteriorPos)) {
                     setStage(Stage.FEED_ANIMALS);
                 } else {
-                    moveTo(bannerPos);
+                    moveTo(gateInteriorPos);
                 }
             }
             case FEED_ANIMALS -> {
                 if (!feedAnimals(serverWorld)) {
                     villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+                    setStage(Stage.EXIT_PEN);
+                }
+            }
+            case EXIT_PEN -> {
+                if (gatePos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
+                    return;
+                }
+                if (isNear(gatePos)) {
+                    openGate(serverWorld, gatePos, false);
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
+                } else {
+                    moveTo(gatePos);
                 }
             }
             case DEPOSIT -> {
@@ -454,7 +487,9 @@ public class FarmerHarvestGoal extends Goal {
         GO_TO_JOB,
         HARVEST,
         GO_TO_PEN,
+        ENTER_PEN,
         FEED_ANIMALS,
+        EXIT_PEN,
         RETURN_TO_CHEST,
         DEPOSIT,
         DONE
@@ -468,6 +503,11 @@ public class FarmerHarvestGoal extends Goal {
         if (villager.getInventory().isEmpty()) {
             return false;
         }
+        gatePos = findNearestGate(world, bannerPos);
+        if (gatePos == null) {
+            return false;
+        }
+        gateInteriorPos = bannerPos;
         feedsRemaining = 1 + villager.getRandom().nextInt(5);
         targetAnimal = null;
         return !getAnimalsNearBanner(world).isEmpty();
@@ -561,5 +601,37 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private BlockPos findNearestGate(ServerWorld world, BlockPos center) {
+        int gateRange = 6;
+        BlockPos start = center.add(-gateRange, -gateRange, -gateRange);
+        BlockPos end = center.add(gateRange, gateRange, gateRange);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            BlockState state = world.getBlockState(pos);
+            if (!(state.getBlock() instanceof FenceGateBlock)) {
+                continue;
+            }
+            double distance = villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = pos.toImmutable();
+            }
+        }
+        return nearest;
+    }
+
+    private void openGate(ServerWorld world, BlockPos pos, boolean open) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof FenceGateBlock gateBlock)) {
+            return;
+        }
+        if (state.get(FenceGateBlock.OPEN) == open) {
+            return;
+        }
+        world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
+        gateBlock.playOpenCloseSound(world, pos, open);
     }
 }
