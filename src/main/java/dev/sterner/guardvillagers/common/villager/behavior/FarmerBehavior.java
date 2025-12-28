@@ -1,7 +1,9 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.common.entity.goal.FarmerAnimalFeedingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FarmerCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FarmerHarvestGoal;
+import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -14,8 +16,10 @@ import java.util.WeakHashMap;
 public class FarmerBehavior implements VillagerProfessionBehavior {
     private static final int HARVEST_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int FEEDING_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, FarmerHarvestGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FarmerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, FarmerAnimalFeedingGoal> FEEDING_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -51,6 +55,19 @@ public class FarmerBehavior implements VillagerProfessionBehavior {
         FarmerHarvestGoal harvestGoal = GOALS.get(villager);
         if (harvestGoal != null) {
             harvestGoal.setCraftingGoal(goal);
+        }
+    }
+
+    @Override
+    public void onSpecialModifierPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, SpecialModifier modifier, BlockPos modifierPos) {
+        FarmerAnimalFeedingGoal goal = FEEDING_GOALS.get(villager);
+        if (goal == null) {
+            goal = new FarmerAnimalFeedingGoal(villager, modifierPos);
+            FEEDING_GOALS.put(villager, goal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(FEEDING_GOAL_PRIORITY, goal);
+        } else {
+            goal.setBannerPos(modifierPos);
         }
     }
 

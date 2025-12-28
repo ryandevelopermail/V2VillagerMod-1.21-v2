@@ -6,6 +6,8 @@ import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegi
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.FenceBlock;
+import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -19,6 +21,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.Identifier;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.world.event.GameEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,6 +77,11 @@ public final class JobBlockPairingHelper {
     public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
         Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(placedState.getBlock());
         if (modifier.isEmpty()) {
+            return;
+        }
+
+        if (placedState.isIn(BlockTags.BANNERS) && isBannerOnEnclosedFenceWithGate(world, placedPos)) {
+            pairFarmersWithBanner(world, placedPos, modifier.get());
             return;
         }
 
@@ -156,6 +164,83 @@ public final class JobBlockPairingHelper {
         VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, placedPos);
     }
 
+    public static void pairFarmersWithBanners(ServerWorld world, BlockPos center, double range) {
+        int radius = (int) Math.ceil(range);
+        BlockPos start = center.add(-radius, -radius, -radius);
+        BlockPos end = center.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (!center.isWithinDistance(pos, range)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(pos);
+            if (!state.isIn(BlockTags.BANNERS)) {
+                continue;
+            }
+            if (!isBannerOnEnclosedFenceWithGate(world, pos)) {
+                continue;
+            }
+            VillagerProfessionBehaviorRegistry.getSpecialModifier(state.getBlock())
+                    .ifPresent(modifier -> pairFarmersWithBanner(world, pos.toImmutable(), modifier));
+        }
+    }
+
+    private static void pairFarmersWithBanner(ServerWorld world, BlockPos bannerPos, SpecialModifier modifier) {
+        double range = modifier.range();
+        world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(range), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)
+                .forEach(villager -> pairFarmerWithModifier(world, villager, bannerPos, modifier));
+    }
+
+    private static void pairFarmerWithModifier(ServerWorld world, VillagerEntity villager, BlockPos bannerPos, SpecialModifier modifier) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            return;
+        }
+
+        BlockPos jobPos = globalPos.pos();
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        if (nearbyChest.isEmpty()) {
+            return;
+        }
+
+        playPairingAnimation(world, bannerPos, villager, jobPos);
+        VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, bannerPos);
+    }
+
+    private static boolean isBannerOnEnclosedFenceWithGate(ServerWorld world, BlockPos bannerPos) {
+        BlockState below = world.getBlockState(bannerPos.down());
+        if (!(below.getBlock() instanceof FenceBlock)) {
+            return false;
+        }
+
+        boolean hasFenceNeighbor = false;
+        for (BlockPos offset : new BlockPos[] {bannerPos.down().north(), bannerPos.down().south(), bannerPos.down().east(), bannerPos.down().west()}) {
+            BlockState neighbor = world.getBlockState(offset);
+            if (neighbor.getBlock() instanceof FenceBlock || neighbor.getBlock() instanceof FenceGateBlock) {
+                hasFenceNeighbor = true;
+                break;
+            }
+        }
+        if (!hasFenceNeighbor) {
+            return false;
+        }
+
+        int gateRange = 6;
+        BlockPos start = bannerPos.down().add(-gateRange, 0, -gateRange);
+        BlockPos end = bannerPos.down().add(gateRange, 0, gateRange);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() instanceof FenceGateBlock) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
         if (villager instanceof VillagerEntity villagerEntity) {
             VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
@@ -199,7 +284,7 @@ public final class JobBlockPairingHelper {
         return block == Blocks.CRAFTING_TABLE;
     }
 
-    private static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center) {
+    public static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center) {
         int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
         for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
             if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isPairingBlock(world.getBlockState(checkPos))) {
