@@ -14,6 +14,8 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.item.HoeItem;
+import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -141,6 +143,7 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
+                    hoeNearbyDirt(serverWorld);
                     if (prepareFeeding(serverWorld)) {
                         setStage(Stage.GO_TO_PEN);
                         moveTo(bannerPos, PEN_MOVE_SPEED);
@@ -683,6 +686,70 @@ public class FarmerHarvestGoal extends Goal {
 
     private void applyBreedingState(AnimalEntity animal) {
         animal.setLoveTicks(600);
+    }
+
+    private void hoeNearbyDirt(ServerWorld world) {
+        if (!hasHoeInChest(world)) {
+            return;
+        }
+
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (!isHoeTarget(world, pos)) {
+                continue;
+            }
+            if (!isWaterInRange(world, pos)) {
+                continue;
+            }
+            world.setBlockState(pos, Blocks.FARMLAND.getDefaultState());
+        }
+    }
+
+    private boolean hasHoeInChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return false;
+        }
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isHoeTarget(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.isOf(Blocks.DIRT) || state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT_PATH))) {
+            return false;
+        }
+        return world.getBlockState(pos.up()).isAir();
+    }
+
+    private boolean isWaterInRange(ServerWorld world, BlockPos pos) {
+        int range = 4;
+        BlockPos start = pos.add(-range, 0, -range);
+        BlockPos end = pos.add(range, 0, range);
+        for (BlockPos checkPos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(checkPos) > range * range) {
+                continue;
+            }
+            if (world.getFluidState(checkPos).isIn(FluidTags.WATER)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private BlockPos findGateWalkTarget(BlockPos gatePos, Direction direction, int distance) {
