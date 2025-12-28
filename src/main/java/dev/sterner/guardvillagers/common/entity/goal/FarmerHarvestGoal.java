@@ -58,6 +58,7 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos exitWalkTarget;
     private int feedTargetCount;
     private Direction penInsideDirection;
+    private int exitDelayTicks;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -235,12 +236,17 @@ public class FarmerHarvestGoal extends Goal {
             case FEED_ANIMALS -> {
                 feedAnimals(serverWorld);
                 villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+                exitDelayTicks = 40;
                 setStage(Stage.OPEN_GATE_EXIT);
             }
             case OPEN_GATE_EXIT -> {
                 if (gatePos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
+                    return;
+                }
+                if (exitDelayTicks > 0) {
+                    exitDelayTicks--;
                     return;
                 }
                 openGate(serverWorld, gatePos, true);
@@ -555,6 +561,7 @@ public class FarmerHarvestGoal extends Goal {
         gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
         exitWalkTarget = null;
         feedTargetCount = determineFeedTargetCount();
+        exitDelayTicks = 0;
         return !getAnimalsNearBanner(world).isEmpty();
     }
 
