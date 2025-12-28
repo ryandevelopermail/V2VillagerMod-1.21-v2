@@ -7,14 +7,17 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.CropBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.List;
 
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
@@ -45,6 +49,9 @@ public class FarmerHarvestGoal extends Goal {
     private FarmerCraftingGoal craftingGoal;
     private BlockPos currentTarget;
     private long currentTargetStartTick;
+    private BlockPos bannerPos;
+    private int feedsRemaining;
+    private AnimalEntity targetAnimal;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -127,8 +134,13 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
-                    setStage(Stage.RETURN_TO_CHEST);
-                    moveTo(chestPos);
+                    if (prepareFeeding(serverWorld)) {
+                        setStage(Stage.GO_TO_PEN);
+                        moveTo(bannerPos);
+                    } else {
+                        setStage(Stage.RETURN_TO_CHEST);
+                        moveTo(chestPos);
+                    }
                     return;
                 }
 
@@ -165,6 +177,25 @@ public class FarmerHarvestGoal extends Goal {
                 if (isNear(chestPos)) {
                     setStage(Stage.DEPOSIT);
                 } else {
+                    moveTo(chestPos);
+                }
+            }
+            case GO_TO_PEN -> {
+                if (bannerPos == null) {
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
+                    return;
+                }
+                if (isNear(bannerPos)) {
+                    setStage(Stage.FEED_ANIMALS);
+                } else {
+                    moveTo(bannerPos);
+                }
+            }
+            case FEED_ANIMALS -> {
+                if (!feedAnimals(serverWorld)) {
+                    villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+                    setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
                 }
             }
@@ -422,8 +453,109 @@ public class FarmerHarvestGoal extends Goal {
         IDLE,
         GO_TO_JOB,
         HARVEST,
+        GO_TO_PEN,
+        FEED_ANIMALS,
         RETURN_TO_CHEST,
         DEPOSIT,
         DONE
+    }
+
+    private boolean prepareFeeding(ServerWorld world) {
+        bannerPos = FarmerBannerTracker.getBanner(villager).orElse(null);
+        if (bannerPos == null) {
+            return false;
+        }
+        if (villager.getInventory().isEmpty()) {
+            return false;
+        }
+        feedsRemaining = 1 + villager.getRandom().nextInt(5);
+        targetAnimal = null;
+        return !getAnimalsNearBanner(world).isEmpty();
+    }
+
+    private boolean feedAnimals(ServerWorld world) {
+        if (feedsRemaining <= 0) {
+            return false;
+        }
+        if (bannerPos == null) {
+            return false;
+        }
+
+        if (targetAnimal == null || !targetAnimal.isAlive()) {
+            targetAnimal = findNearestAnimal(world);
+            if (targetAnimal == null) {
+                return false;
+            }
+        }
+
+        ItemStack feedStack = findBreedingStack(villager.getInventory(), targetAnimal);
+        if (feedStack == null) {
+            return false;
+        }
+
+        villager.setStackInHand(Hand.MAIN_HAND, new ItemStack(feedStack.getItem()));
+
+        if (!isNear(targetAnimal.getBlockPos())) {
+            moveTo(targetAnimal.getBlockPos());
+            return true;
+        }
+
+        if (!consumeFeedItems(villager.getInventory(), feedStack.getItem())) {
+            return false;
+        }
+
+        targetAnimal.lovePlayer(null);
+        feedsRemaining--;
+        targetAnimal = null;
+        return feedsRemaining > 0;
+    }
+
+    private List<AnimalEntity> getAnimalsNearBanner(ServerWorld world) {
+        Box box = new Box(bannerPos).expand(6.0D);
+        return world.getEntitiesByClass(AnimalEntity.class, box, animal -> animal.isAlive() && !animal.isBaby());
+    }
+
+    private AnimalEntity findNearestAnimal(ServerWorld world) {
+        List<AnimalEntity> animals = getAnimalsNearBanner(world);
+        return animals.stream()
+                .min(Comparator.comparingDouble(animal -> animal.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D)))
+                .orElse(null);
+    }
+
+    private ItemStack findBreedingStack(Inventory inventory, AnimalEntity animal) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            if (stack.getCount() < 2) {
+                continue;
+            }
+            if (animal.isBreedingItem(stack)) {
+                return stack;
+            }
+        }
+        return null;
+    }
+
+    private boolean consumeFeedItems(Inventory inventory, Item item) {
+        int remaining = 2;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || stack.getItem() != item) {
+                continue;
+            }
+            int removed = Math.min(remaining, stack.getCount());
+            stack.decrement(removed);
+            remaining -= removed;
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            if (remaining <= 0) {
+                inventory.markDirty();
+                return true;
+            }
+        }
+        return false;
     }
 }

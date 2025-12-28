@@ -23,6 +23,7 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
+import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import net.minecraft.world.event.GameEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -167,35 +168,43 @@ public final class JobBlockPairingHelper {
         }
 
         double range = FARMER_BANNER_PAIR_RANGE;
-        world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(range), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)
-                .forEach(villager -> pairFarmerWithBanner(world, villager, bannerPos));
+        int pairedCount = 0;
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(range), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)) {
+            if (pairFarmerWithBanner(world, villager, bannerPos)) {
+                pairedCount++;
+            }
+        }
+
+        LOGGER.info("Banner {} paired with {} Farmer(s)", bannerPos.toShortString(), pairedCount);
     }
 
-    private static void pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
+    private static boolean pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
         Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSite.isEmpty()) {
-            return;
+            return false;
         }
 
         GlobalPos globalPos = jobSite.get();
         if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
-            return;
+            return false;
         }
 
         BlockPos jobPos = globalPos.pos();
         if (villager.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > FARMER_BANNER_PAIR_RANGE * FARMER_BANNER_PAIR_RANGE) {
-            return;
+            return false;
         }
 
         if (!world.getBlockState(jobPos).isOf(Blocks.COMPOSTER)) {
-            return;
+            return false;
         }
 
         if (findNearbyChest(world, jobPos).isEmpty()) {
-            return;
+            return false;
         }
 
         playPairingAnimation(world, bannerPos, villager, jobPos);
+        FarmerBannerTracker.setBanner(villager, bannerPos);
+        return true;
     }
 
     private static boolean isBannerOnFence(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
