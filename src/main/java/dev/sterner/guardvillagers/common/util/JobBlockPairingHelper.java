@@ -211,6 +211,23 @@ public final class JobBlockPairingHelper {
         return getBannerFenceBase(world, bannerPos, bannerState) != null;
     }
 
+    public static BlockPos ensureBannerOnFencePostIfInsidePen(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        if (bannerState.getBlock() instanceof WallBannerBlock) {
+            return bannerPos;
+        }
+        if (!world.getBlockState(bannerPos.up()).isAir()) {
+            return bannerPos;
+        }
+        if (!isInsideFencePen(world, bannerPos)) {
+            return bannerPos;
+        }
+
+        world.setBlockState(bannerPos, Blocks.OAK_FENCE.getDefaultState(), 3);
+        BlockPos raisedBannerPos = bannerPos.up();
+        world.setBlockState(raisedBannerPos, bannerState, 3);
+        return raisedBannerPos;
+    }
+
     private static BlockPos getBannerFenceBase(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
         if (bannerState.getBlock() instanceof WallBannerBlock && bannerState.contains(WallBannerBlock.FACING)) {
             Direction facing = bannerState.get(WallBannerBlock.FACING);
@@ -227,6 +244,27 @@ public final class JobBlockPairingHelper {
         }
 
         return null;
+    }
+
+    private static boolean isInsideFencePen(ServerWorld world, BlockPos bannerPos) {
+        int maxDistance = 6;
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+            if (!hasFenceInDirection(world, bannerPos, direction, maxDistance)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
+        for (int i = 1; i <= maxDistance; i++) {
+            BlockPos pos = start.offset(direction, i);
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
