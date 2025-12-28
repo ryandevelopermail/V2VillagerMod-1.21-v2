@@ -33,6 +33,7 @@ import java.util.Set;
 public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
     private static final double NEARBY_VILLAGER_SCAN_RANGE = 8.0D;
+    private static final double FARMER_BANNER_PAIR_RANGE = 200.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
@@ -185,7 +186,7 @@ public final class JobBlockPairingHelper {
     }
 
     private static void pairFarmersWithBanner(ServerWorld world, BlockPos bannerPos, SpecialModifier modifier) {
-        double range = modifier.range();
+        double range = Math.max(modifier.range(), FARMER_BANNER_PAIR_RANGE);
         world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(range), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)
                 .forEach(villager -> pairFarmerWithModifier(world, villager, bannerPos, modifier));
     }
@@ -202,6 +203,9 @@ public final class JobBlockPairingHelper {
         }
 
         BlockPos jobPos = globalPos.pos();
+        if (!jobPos.isWithinDistance(bannerPos, FARMER_BANNER_PAIR_RANGE)) {
+            return;
+        }
         Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
         if (nearbyChest.isEmpty()) {
             return;
