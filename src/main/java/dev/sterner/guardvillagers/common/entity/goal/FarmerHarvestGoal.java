@@ -55,6 +55,8 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos gatePos;
     private BlockPos gateWalkTarget;
     private BlockPos exitWalkTarget;
+    private BlockPos gateReturnPos;
+    private int feedTargetCount;
     private long gateOpenUntilTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -206,12 +208,12 @@ public class FarmerHarvestGoal extends Goal {
                     openGate(serverWorld, gatePos, true);
                     gateOpenUntilTick = serverWorld.getTime() + 60;
                     gateWalkTarget = findGateWalkTarget(serverWorld, gatePos, 3);
-                    setStage(Stage.OPEN_GATE_ENTER);
+                    setStage(Stage.WALK_THROUGH_GATE);
                 } else {
                     moveTo(gatePos);
                 }
             }
-            case OPEN_GATE_ENTER -> {
+            case WALK_THROUGH_GATE -> {
                 if (gatePos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
@@ -222,21 +224,40 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 moveTo(gateWalkTarget);
                 if (isNear(gateWalkTarget)) {
-                    if (serverWorld.getTime() >= gateOpenUntilTick) {
-                        setStage(Stage.CLOSE_GATE_INSIDE);
-                    }
+                    setStage(Stage.TURN_AROUND_INSIDE);
                 }
+            }
+            case TURN_AROUND_INSIDE -> {
+                if (gatePos != null) {
+                    villager.getLookControl().lookAt(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+                }
+                setStage(Stage.CLOSE_GATE_INSIDE);
             }
             case CLOSE_GATE_INSIDE -> {
                 if (gatePos != null) {
                     openGate(serverWorld, gatePos, false);
                 }
+                gateReturnPos = villager.getBlockPos().toImmutable();
                 setStage(Stage.FEED_ANIMALS);
             }
             case FEED_ANIMALS -> {
                 feedAnimals(serverWorld);
                 villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
-                setStage(Stage.OPEN_GATE_EXIT);
+                setStage(Stage.RETURN_TO_EXIT_POINT);
+            }
+            case RETURN_TO_EXIT_POINT -> {
+                if (gateReturnPos == null) {
+                    setStage(Stage.OPEN_GATE_EXIT);
+                    return;
+                }
+                if (isNear(gateReturnPos)) {
+                    if (gatePos != null) {
+                        villager.getLookControl().lookAt(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+                    }
+                    setStage(Stage.OPEN_GATE_EXIT);
+                } else {
+                    moveTo(gateReturnPos);
+                }
             }
             case OPEN_GATE_EXIT -> {
                 if (gatePos == null) {
@@ -246,10 +267,10 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 openGate(serverWorld, gatePos, true);
                 gateOpenUntilTick = serverWorld.getTime() + 60;
-                setStage(Stage.EXIT_PEN);
                 exitWalkTarget = findGateWalkTarget(serverWorld, gatePos, 4);
+                setStage(Stage.WALK_OUT_GATE);
             }
-            case EXIT_PEN -> {
+            case WALK_OUT_GATE -> {
                 if (gatePos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
@@ -259,11 +280,22 @@ public class FarmerHarvestGoal extends Goal {
                     exitWalkTarget = gatePos;
                 }
                 moveTo(exitWalkTarget);
-                if (isNear(exitWalkTarget) && serverWorld.getTime() >= gateOpenUntilTick) {
-                    openGate(serverWorld, gatePos, false);
-                    setStage(Stage.RETURN_TO_CHEST);
-                    moveTo(chestPos);
+                if (isNear(exitWalkTarget)) {
+                    setStage(Stage.TURN_AROUND_EXIT);
                 }
+            }
+            case TURN_AROUND_EXIT -> {
+                if (gatePos != null) {
+                    villager.getLookControl().lookAt(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+                }
+                setStage(Stage.CLOSE_GATE_EXIT);
+            }
+            case CLOSE_GATE_EXIT -> {
+                if (gatePos != null) {
+                    openGate(serverWorld, gatePos, false);
+                }
+                setStage(Stage.RETURN_TO_CHEST);
+                moveTo(chestPos);
             }
             case DEPOSIT -> {
                 if (!isNear(chestPos)) {
@@ -521,11 +553,15 @@ public class FarmerHarvestGoal extends Goal {
         HARVEST,
         GO_TO_PEN,
         GO_TO_GATE,
-        OPEN_GATE_ENTER,
+        WALK_THROUGH_GATE,
+        TURN_AROUND_INSIDE,
         CLOSE_GATE_INSIDE,
         FEED_ANIMALS,
+        RETURN_TO_EXIT_POINT,
         OPEN_GATE_EXIT,
-        EXIT_PEN,
+        WALK_OUT_GATE,
+        TURN_AROUND_EXIT,
+        CLOSE_GATE_EXIT,
         RETURN_TO_CHEST,
         DEPOSIT,
         DONE
@@ -545,6 +581,8 @@ public class FarmerHarvestGoal extends Goal {
         }
         gateWalkTarget = findGateWalkTarget(world, gatePos, 3);
         exitWalkTarget = null;
+        gateReturnPos = null;
+        feedTargetCount = determineFeedTargetCount();
         return !getAnimalsNearBanner(world).isEmpty();
     }
 
@@ -556,7 +594,7 @@ public class FarmerHarvestGoal extends Goal {
         List<AnimalEntity> animals = getAnimalsNearBanner(world);
         int fedCount = 0;
         for (AnimalEntity animal : animals) {
-            if (fedCount >= 2) {
+            if (fedCount >= feedTargetCount) {
                 break;
             }
             if (!canFeedAnimal(animal)) {
@@ -612,6 +650,35 @@ public class FarmerHarvestGoal extends Goal {
 
     private boolean canFeedAnimal(AnimalEntity animal) {
         return !animal.isInLove() && animal.getBreedingAge() == 0;
+    }
+
+    private int determineFeedTargetCount() {
+        int availablePairs = countAvailableBreedingPairs();
+        if (availablePairs >= 6) {
+            return 6;
+        }
+        if (availablePairs >= 4) {
+            return 4;
+        }
+        if (availablePairs >= 2) {
+            return 2;
+        }
+        return 0;
+    }
+
+    private int countAvailableBreedingPairs() {
+        int total = 0;
+        for (int slot = 0; slot < villager.getInventory().size(); slot++) {
+            ItemStack stack = villager.getInventory().getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            Item item = stack.getItem();
+            if (item == Items.WHEAT || item == Items.CARROT || item == Items.POTATO || item == Items.BEETROOT) {
+                total += stack.getCount();
+            }
+        }
+        return total / 2;
     }
 
     private boolean consumeFeedItems(Inventory inventory, Item item) {
