@@ -206,14 +206,14 @@ public class FarmerHarvestGoal extends Goal {
                 }
             }
             case ENTER_PEN -> {
-                if (penTargetPos == null) {
+                if (gateInteriorPos == null) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                     return;
                 }
-                if (isNear(penTargetPos)) {
+                if (isNear(gateInteriorPos)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                 } else {
-                    moveTo(penTargetPos);
+                    moveTo(gateInteriorPos);
                 }
             }
             case CLOSE_GATE_INSIDE -> {
@@ -221,7 +221,18 @@ public class FarmerHarvestGoal extends Goal {
                     openGate(serverWorld, gatePos, false);
                 }
                 feedingInside = true;
-                setStage(Stage.FEED_ANIMALS);
+                setStage(Stage.MOVE_TO_PEN_CENTER);
+            }
+            case MOVE_TO_PEN_CENTER -> {
+                if (penTargetPos == null) {
+                    setStage(Stage.FEED_ANIMALS);
+                    return;
+                }
+                if (isNear(penTargetPos)) {
+                    setStage(Stage.FEED_ANIMALS);
+                } else {
+                    moveTo(penTargetPos);
+                }
             }
             case FEED_ANIMALS -> {
                 if (feedCooldownTicks > 0) {
@@ -515,6 +526,7 @@ public class FarmerHarvestGoal extends Goal {
         GO_TO_PEN,
         ENTER_PEN,
         CLOSE_GATE_INSIDE,
+        MOVE_TO_PEN_CENTER,
         FEED_ANIMALS,
         OPEN_GATE_EXIT,
         EXIT_PEN,
@@ -536,7 +548,7 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         gateInteriorPos = findGateInterior(world, gatePos, bannerPos);
-        penTargetPos = gateInteriorPos != null ? gateInteriorPos : bannerPos;
+        penTargetPos = bannerPos;
         feedsRemaining = 1 + villager.getRandom().nextInt(5);
         targetAnimal = null;
         feedCooldownTicks = 0;
