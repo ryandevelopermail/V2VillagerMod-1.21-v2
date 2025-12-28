@@ -8,6 +8,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
+import net.minecraft.block.WallBannerBlock;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -20,6 +21,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.world.event.GameEvent;
@@ -218,13 +220,13 @@ public final class JobBlockPairingHelper {
     }
 
     private static boolean isBannerOnEnclosedFenceWithGate(ServerWorld world, BlockPos bannerPos) {
-        BlockState below = world.getBlockState(bannerPos.down());
-        if (!(below.getBlock() instanceof FenceBlock)) {
+        BlockPos fenceBasePos = getBannerFenceBase(world, bannerPos);
+        if (fenceBasePos == null) {
             return false;
         }
 
         boolean hasFenceNeighbor = false;
-        for (BlockPos offset : new BlockPos[] {bannerPos.down().north(), bannerPos.down().south(), bannerPos.down().east(), bannerPos.down().west()}) {
+        for (BlockPos offset : new BlockPos[] {fenceBasePos.north(), fenceBasePos.south(), fenceBasePos.east(), fenceBasePos.west()}) {
             BlockState neighbor = world.getBlockState(offset);
             if (neighbor.getBlock() instanceof FenceBlock || neighbor.getBlock() instanceof FenceGateBlock) {
                 hasFenceNeighbor = true;
@@ -236,8 +238,8 @@ public final class JobBlockPairingHelper {
         }
 
         int gateRange = 6;
-        BlockPos start = bannerPos.down().add(-gateRange, 0, -gateRange);
-        BlockPos end = bannerPos.down().add(gateRange, 0, gateRange);
+        BlockPos start = fenceBasePos.add(-gateRange, 0, -gateRange);
+        BlockPos end = fenceBasePos.add(gateRange, 0, gateRange);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
             BlockState state = world.getBlockState(pos);
             if (state.getBlock() instanceof FenceGateBlock) {
@@ -245,6 +247,25 @@ public final class JobBlockPairingHelper {
             }
         }
         return false;
+    }
+
+    private static BlockPos getBannerFenceBase(ServerWorld world, BlockPos bannerPos) {
+        BlockState state = world.getBlockState(bannerPos);
+        if (state.getBlock() instanceof WallBannerBlock && state.contains(WallBannerBlock.FACING)) {
+            Direction facing = state.get(WallBannerBlock.FACING);
+            BlockPos attachedPos = bannerPos.offset(facing.getOpposite());
+            BlockState attachedState = world.getBlockState(attachedPos);
+            if (attachedState.getBlock() instanceof FenceBlock || attachedState.getBlock() instanceof FenceGateBlock) {
+                return attachedPos;
+            }
+        }
+
+        BlockState below = world.getBlockState(bannerPos.down());
+        if (below.getBlock() instanceof FenceBlock || below.getBlock() instanceof FenceGateBlock) {
+            return bannerPos.down();
+        }
+
+        return null;
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
