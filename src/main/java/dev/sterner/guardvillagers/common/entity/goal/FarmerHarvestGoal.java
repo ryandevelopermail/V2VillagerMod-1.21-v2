@@ -505,6 +505,10 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         targetAnimal.lovePlayer(null);
+        LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), feedStack.getName().getString(), targetAnimal.getBlockPos().toShortString());
+        if (targetAnimal.isInLove()) {
+            LOGGER.info("Animal {} entered breeding state at {}", targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
+        }
         feedsRemaining--;
         targetAnimal = null;
         return feedsRemaining > 0;

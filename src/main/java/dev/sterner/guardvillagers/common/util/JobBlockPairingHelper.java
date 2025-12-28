@@ -35,7 +35,7 @@ import java.util.Set;
 public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
     private static final double NEARBY_VILLAGER_SCAN_RANGE = 8.0D;
-    private static final double FARMER_BANNER_PAIR_RANGE = 300.0D;
+    private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
