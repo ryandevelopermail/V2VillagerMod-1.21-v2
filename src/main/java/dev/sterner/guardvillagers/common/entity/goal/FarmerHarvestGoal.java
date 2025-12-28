@@ -35,7 +35,7 @@ import java.util.List;
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final double MOVE_SPEED = 0.6D;
+    private static final double MOVE_SPEED = 1.0D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -208,12 +208,13 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                BlockPos approachPos = findGateApproachTarget(gatePos, oppositeDirection(penInsideDirection));
-                if (!isNear(approachPos)) {
-                    moveTo(approachPos, MOVE_SPEED);
+                if (gateWalkTarget == null) {
+                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                }
+                if (!isNear(gateWalkTarget)) {
+                    moveTo(gateWalkTarget, MOVE_SPEED);
                     return;
                 }
-                gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
                 setStage(Stage.ENTER_PEN);
             }
             case ENTER_PEN -> {
@@ -223,7 +224,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (gateWalkTarget == null) {
-                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
+                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
                 }
                 moveTo(gateWalkTarget, MOVE_SPEED);
                 if (isNear(gateWalkTarget)) {
@@ -249,7 +250,7 @@ public class FarmerHarvestGoal extends Goal {
                     exitDelayTicks--;
                     return;
                 }
-                exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 1);
+                exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 3);
                 setStage(Stage.EXIT_PEN);
             }
             case EXIT_PEN -> {
@@ -259,7 +260,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (exitWalkTarget == null) {
-                    exitWalkTarget = gatePos;
+                    exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 3);
                 }
                 moveTo(exitWalkTarget, MOVE_SPEED);
                 if (isNear(exitWalkTarget)) {
@@ -931,13 +932,6 @@ public class FarmerHarvestGoal extends Goal {
             return gatePos;
         }
         return gatePos.offset(direction, distance);
-    }
-
-    private BlockPos findGateApproachTarget(BlockPos gatePos, Direction direction) {
-        if (direction == null) {
-            return gatePos;
-        }
-        return gatePos.offset(direction, 1);
     }
 
     private Direction findInsideDirection(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
