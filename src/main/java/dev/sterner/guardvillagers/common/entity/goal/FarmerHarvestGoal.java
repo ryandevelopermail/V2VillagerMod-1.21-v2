@@ -54,6 +54,7 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos bannerPos;
     private BlockPos gatePos;
     private BlockPos gateWalkTarget;
+    private BlockPos exitWalkTarget;
     private long gateOpenUntilTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -204,6 +205,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (isNear(gatePos)) {
                     openGate(serverWorld, gatePos, true);
                     gateOpenUntilTick = serverWorld.getTime() + 60;
+                    gateWalkTarget = findGateWalkTarget(serverWorld, gatePos, 3);
                     setStage(Stage.OPEN_GATE_ENTER);
                 } else {
                     moveTo(gatePos);
@@ -246,6 +248,7 @@ public class FarmerHarvestGoal extends Goal {
                 openGate(serverWorld, gatePos, true);
                 gateOpenUntilTick = serverWorld.getTime() + 60;
                 setStage(Stage.EXIT_PEN);
+                exitWalkTarget = findGateWalkTarget(serverWorld, gatePos, 4);
             }
             case EXIT_PEN -> {
                 if (gatePos == null) {
@@ -253,8 +256,11 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                moveTo(gatePos);
-                if (isNear(gatePos) && serverWorld.getTime() >= gateOpenUntilTick) {
+                if (exitWalkTarget == null) {
+                    exitWalkTarget = gatePos;
+                }
+                moveTo(exitWalkTarget);
+                if (isNear(exitWalkTarget) && serverWorld.getTime() >= gateOpenUntilTick) {
                     openGate(serverWorld, gatePos, false);
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
@@ -538,7 +544,8 @@ public class FarmerHarvestGoal extends Goal {
         if (gatePos == null) {
             return false;
         }
-        gateWalkTarget = findGateWalkTarget(world, gatePos);
+        gateWalkTarget = findGateWalkTarget(world, gatePos, 3);
+        exitWalkTarget = null;
         return !getAnimalsNearBanner(world).isEmpty();
     }
 
@@ -633,11 +640,11 @@ public class FarmerHarvestGoal extends Goal {
         animal.setLoveTicks(600);
     }
 
-    private BlockPos findGateWalkTarget(ServerWorld world, BlockPos gatePos) {
+    private BlockPos findGateWalkTarget(ServerWorld world, BlockPos gatePos, int distance) {
         BlockState state = world.getBlockState(gatePos);
         if (state.contains(FenceGateBlock.FACING)) {
             Direction facing = state.get(FenceGateBlock.FACING);
-            return gatePos.offset(facing, 4);
+            return gatePos.offset(facing, distance);
         }
         return gatePos;
     }
