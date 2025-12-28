@@ -286,9 +286,12 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 depositInventory(serverWorld);
-                pickUpHoeFromChest(serverWorld);
+                if (pickUpHoeFromChest(serverWorld)) {
+                    populateHoeTargets(serverWorld);
+                } else {
+                    hoeTargets.clear();
+                }
                 pickUpPlantablesFromChest(serverWorld);
-                populateHoeTargets(serverWorld);
                 populatePlantTargets(serverWorld);
                 if (!hoeTargets.isEmpty()) {
                     setStage(Stage.HOE_GROUND);
