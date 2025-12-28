@@ -219,12 +219,15 @@ public class FarmerHarvestGoal extends Goal {
                     gateWalkTarget = gatePos;
                 }
                 moveTo(gateWalkTarget);
-                if (isNear(gateWalkTarget) && serverWorld.getTime() >= gateOpenUntilTick) {
+                if (isNear(gateWalkTarget)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                 }
             }
             case CLOSE_GATE_INSIDE -> {
                 if (gatePos != null) {
+                    if (serverWorld.getTime() < gateOpenUntilTick) {
+                        return;
+                    }
                     openGate(serverWorld, gatePos, false);
                 }
                 setStage(Stage.FEED_ANIMALS);
@@ -557,7 +560,7 @@ public class FarmerHarvestGoal extends Goal {
 
             ItemStack feedStack = findBreedingStack(villager.getInventory(), animal);
             if (feedStack == null) {
-                LOGGER.info("Farmer {} attempted to feed {} at {}, but had no valid food", villager.getUuidAsString(), animal.getType().getName().getString(), animal.getBlockPos().toShortString());
+                LOGGER.info("Farmer {} attempted to feed {} at {}, but had no valid food in inventory", villager.getUuidAsString(), animal.getType().getName().getString(), animal.getBlockPos().toShortString());
                 continue;
             }
 
