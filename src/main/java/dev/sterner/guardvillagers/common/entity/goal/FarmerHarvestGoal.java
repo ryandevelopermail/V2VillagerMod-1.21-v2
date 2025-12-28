@@ -197,11 +197,11 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (isNear(bannerPos)) {
-                    setStage(Stage.GO_TO_GATE);
-                } else {
+                if (!isNear(bannerPos)) {
                     moveTo(bannerPos, PEN_MOVE_SPEED);
+                    return;
                 }
+                setStage(Stage.GO_TO_GATE);
             }
             case GO_TO_GATE -> {
                 if (gatePos == null) {
@@ -209,13 +209,13 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (isNear(gatePos)) {
-                    openGate(serverWorld, gatePos, true);
-                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
-                    setStage(Stage.ENTER_PEN);
-                } else {
+                if (!isNear(gatePos)) {
                     moveTo(gatePos, PEN_MOVE_SPEED);
+                    return;
                 }
+                openGate(serverWorld, gatePos, true);
+                gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                setStage(Stage.ENTER_PEN);
             }
             case ENTER_PEN -> {
                 if (gatePos == null) {
