@@ -222,14 +222,13 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 moveTo(gateWalkTarget);
                 if (isNear(gateWalkTarget)) {
-                    setStage(Stage.CLOSE_GATE_INSIDE);
+                    if (serverWorld.getTime() >= gateOpenUntilTick) {
+                        setStage(Stage.CLOSE_GATE_INSIDE);
+                    }
                 }
             }
             case CLOSE_GATE_INSIDE -> {
                 if (gatePos != null) {
-                    if (serverWorld.getTime() < gateOpenUntilTick) {
-                        return;
-                    }
                     openGate(serverWorld, gatePos, false);
                 }
                 setStage(Stage.FEED_ANIMALS);
