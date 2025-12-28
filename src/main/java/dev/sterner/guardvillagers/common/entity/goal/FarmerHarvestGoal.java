@@ -287,6 +287,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (pickUpHoeFromChest(serverWorld)) {
                     hoeNearbyDirt(serverWorld);
                 }
+                plantEmptyFarmland(serverWorld);
                 if (dailyHarvestRun) {
                     notifyDailyHarvestComplete(serverWorld);
                     dailyHarvestRun = false;
@@ -689,6 +690,84 @@ public class FarmerHarvestGoal extends Goal {
 
     private void applyBreedingState(AnimalEntity animal) {
         animal.setLoveTicks(600);
+    }
+
+    private void plantEmptyFarmland(ServerWorld world) {
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            BlockState state = world.getBlockState(pos);
+            if (!state.isOf(Blocks.FARMLAND)) {
+                continue;
+            }
+            BlockPos above = pos.up();
+            if (!world.getBlockState(above).isAir()) {
+                continue;
+            }
+            Item seedItem = findFirstPlantableFromChest(world);
+            if (seedItem == null) {
+                return;
+            }
+            Block cropBlock = getCropBlockForItem(seedItem);
+            if (cropBlock == null) {
+                continue;
+            }
+            BlockState plantedState = cropBlock.getDefaultState();
+            if (!plantedState.canPlaceAt(world, above)) {
+                continue;
+            }
+            if (!consumeSeedFromChest(world, seedItem)) {
+                return;
+            }
+            world.setBlockState(above, plantedState);
+        }
+    }
+
+    private Item findFirstPlantableFromChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return null;
+        }
+        Item[] candidates = new Item[] {
+                Items.WHEAT_SEEDS,
+                Items.CARROT,
+                Items.POTATO,
+                Items.BEETROOT_SEEDS
+        };
+        for (Item candidate : candidates) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                ItemStack stack = chestInventory.getStack(slot);
+                if (!stack.isEmpty() && stack.getItem() == candidate) {
+                    return candidate;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Block getCropBlockForItem(Item item) {
+        if (item == Items.WHEAT_SEEDS) {
+            return Blocks.WHEAT;
+        }
+        if (item == Items.CARROT) {
+            return Blocks.CARROTS;
+        }
+        if (item == Items.POTATO) {
+            return Blocks.POTATOES;
+        }
+        if (item == Items.BEETROOT_SEEDS) {
+            return Blocks.BEETROOTS;
+        }
+        return null;
     }
 
     private void hoeNearbyDirt(ServerWorld world) {
