@@ -215,6 +215,10 @@ public final class JobBlockPairingHelper {
         if (bannerState.getBlock() instanceof WallBannerBlock) {
             return bannerPos;
         }
+        BlockState belowState = world.getBlockState(bannerPos.down());
+        if (belowState.getBlock() instanceof FenceBlock || belowState.getBlock() instanceof FenceGateBlock) {
+            return bannerPos;
+        }
         if (!world.getBlockState(bannerPos.up()).isAir()) {
             return bannerPos;
         }
