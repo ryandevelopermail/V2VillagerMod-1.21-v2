@@ -36,7 +36,6 @@ public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
-    private static final double PEN_MOVE_SPEED = 0.35D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -147,7 +146,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (harvestTargets.isEmpty()) {
                     if (prepareFeeding(serverWorld)) {
                         setStage(Stage.GO_TO_PEN);
-                        moveTo(bannerPos, PEN_MOVE_SPEED);
+                        moveTo(bannerPos, MOVE_SPEED);
                     } else {
                         setStage(Stage.RETURN_TO_CHEST);
                         moveTo(chestPos);
@@ -198,7 +197,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (!isNear(bannerPos)) {
-                    moveTo(bannerPos, PEN_MOVE_SPEED);
+                    moveTo(bannerPos, MOVE_SPEED);
                     return;
                 }
                 setStage(Stage.GO_TO_GATE);
@@ -211,10 +210,9 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 BlockPos approachPos = findGateApproachTarget(gatePos, oppositeDirection(penInsideDirection));
                 if (!isNear(approachPos)) {
-                    moveTo(approachPos, PEN_MOVE_SPEED);
+                    moveTo(approachPos, MOVE_SPEED);
                     return;
                 }
-                openGate(serverWorld, gatePos, true);
                 gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
                 setStage(Stage.ENTER_PEN);
             }
@@ -227,15 +225,12 @@ public class FarmerHarvestGoal extends Goal {
                 if (gateWalkTarget == null) {
                     gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
                 }
-                moveTo(gateWalkTarget, PEN_MOVE_SPEED);
+                moveTo(gateWalkTarget, MOVE_SPEED);
                 if (isNear(gateWalkTarget)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                 }
             }
             case CLOSE_GATE_INSIDE -> {
-                if (gatePos != null) {
-                    openGate(serverWorld, gatePos, false);
-                }
                 setStage(Stage.FEED_ANIMALS);
             }
             case FEED_ANIMALS -> {
@@ -254,7 +249,6 @@ public class FarmerHarvestGoal extends Goal {
                     exitDelayTicks--;
                     return;
                 }
-                openGate(serverWorld, gatePos, true);
                 exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 1);
                 setStage(Stage.EXIT_PEN);
             }
@@ -267,15 +261,12 @@ public class FarmerHarvestGoal extends Goal {
                 if (exitWalkTarget == null) {
                     exitWalkTarget = gatePos;
                 }
-                moveTo(exitWalkTarget, PEN_MOVE_SPEED);
+                moveTo(exitWalkTarget, MOVE_SPEED);
                 if (isNear(exitWalkTarget)) {
                     setStage(Stage.CLOSE_GATE_EXIT);
                 }
             }
             case CLOSE_GATE_EXIT -> {
-                if (gatePos != null) {
-                    openGate(serverWorld, gatePos, false);
-                }
                 setStage(Stage.RETURN_TO_CHEST);
                 moveTo(chestPos);
             }
@@ -322,7 +313,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 BlockPos target = hoeTargets.peekFirst();
                 if (!isNear(target)) {
-                    moveTo(target, PEN_MOVE_SPEED);
+                    moveTo(target, MOVE_SPEED);
                     return;
                 }
                 if (isHoeTarget(serverWorld, target) && isWaterInRange(serverWorld, target)) {
@@ -342,7 +333,7 @@ public class FarmerHarvestGoal extends Goal {
                 BlockPos target = plantTargets.peekFirst();
                 BlockPos above = target.up();
                 if (!isNear(above)) {
-                    moveTo(above, PEN_MOVE_SPEED);
+                    moveTo(above, MOVE_SPEED);
                     return;
                 }
                 if (serverWorld.getBlockState(above).isAir()) {
@@ -993,14 +984,4 @@ public class FarmerHarvestGoal extends Goal {
         return nearest;
     }
 
-    private void openGate(ServerWorld world, BlockPos pos, boolean open) {
-        BlockState state = world.getBlockState(pos);
-        if (!(state.getBlock() instanceof FenceGateBlock gateBlock)) {
-            return;
-        }
-        if (state.get(FenceGateBlock.OPEN) == open) {
-            return;
-        }
-        world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
-    }
 }
