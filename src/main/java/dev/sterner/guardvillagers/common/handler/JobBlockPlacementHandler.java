@@ -51,21 +51,21 @@ public final class JobBlockPlacementHandler {
         boolean isArmorStand = stack.getItem() instanceof ArmorStandItem;
         boolean isPairingBlockItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isPairingBlock(blockItem.getBlock());
         boolean isCraftingTableItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isCraftingTable(blockItem.getBlock());
-        boolean isSpecialModifierItem = stack.getItem() instanceof BlockItem blockItem
-                && (JobBlockPairingHelper.isSpecialModifierBlock(blockItem.getBlock()) || blockItem.getBlock().getDefaultState().isIn(BlockTags.BANNERS));
+        boolean isBannerItem = stack.getItem() instanceof BlockItem blockItem && blockItem.getBlock().getDefaultState().isIn(BlockTags.BANNERS);
+        boolean isSpecialModifierItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isSpecialModifierBlock(blockItem.getBlock());
 
-        if (!isArmorStand && !isPairingBlockItem && !isCraftingTableItem && !isSpecialModifierItem) {
+        if (!isArmorStand && !isPairingBlockItem && !isCraftingTableItem && !isSpecialModifierItem && !isBannerItem) {
             return ActionResult.PASS;
         }
 
         ItemPlacementContext placementContext = new ItemPlacementContext(player, hand, stack, hitResult);
         BlockPos placementPos = serverWorld.getBlockState(placementContext.getBlockPos()).canReplace(placementContext) ? placementContext.getBlockPos() : placementContext.getBlockPos().offset(placementContext.getSide());
 
-        serverWorld.getServer().execute(() -> handlePlacement(serverWorld, placementPos, isPairingBlockItem, isCraftingTableItem, isSpecialModifierItem, isArmorStand));
+        serverWorld.getServer().execute(() -> handlePlacement(serverWorld, placementPos, isPairingBlockItem, isCraftingTableItem, isSpecialModifierItem, isBannerItem, isArmorStand));
         return ActionResult.PASS;
     }
 
-    private static void handlePlacement(ServerWorld serverWorld, BlockPos placementPos, boolean checkPairingBlocks, boolean checkCraftingTable, boolean checkSpecialModifier, boolean checkArmorStand) {
+    private static void handlePlacement(ServerWorld serverWorld, BlockPos placementPos, boolean checkPairingBlocks, boolean checkCraftingTable, boolean checkSpecialModifier, boolean checkBanner, boolean checkArmorStand) {
         if (checkPairingBlocks) {
             BlockState placedState = serverWorld.getBlockState(placementPos);
             if (JobBlockPairingHelper.isPairingBlock(placedState)) {
@@ -82,8 +82,15 @@ public final class JobBlockPlacementHandler {
 
         if (checkSpecialModifier) {
             BlockState placedState = serverWorld.getBlockState(placementPos);
-            if (JobBlockPairingHelper.isSpecialModifierBlock(placedState.getBlock()) || placedState.isIn(BlockTags.BANNERS)) {
+            if (JobBlockPairingHelper.isSpecialModifierBlock(placedState.getBlock())) {
                 JobBlockPairingHelper.handleSpecialModifierPlacement(serverWorld, placementPos, placedState);
+            }
+        }
+
+        if (checkBanner) {
+            BlockState placedState = serverWorld.getBlockState(placementPos);
+            if (placedState.isIn(BlockTags.BANNERS)) {
+                JobBlockPairingHelper.handleBannerPlacement(serverWorld, placementPos, placedState);
             }
         }
 

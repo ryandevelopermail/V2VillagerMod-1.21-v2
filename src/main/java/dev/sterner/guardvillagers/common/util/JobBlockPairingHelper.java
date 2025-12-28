@@ -23,7 +23,6 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
-import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.world.event.GameEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -80,11 +79,6 @@ public final class JobBlockPairingHelper {
     public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
         Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(placedState.getBlock());
         if (modifier.isEmpty()) {
-            return;
-        }
-
-        if (placedState.isIn(BlockTags.BANNERS) && isBannerOnEnclosedFenceWithGate(world, placedPos)) {
-            pairFarmersWithBanner(world, placedPos, modifier.get());
             return;
         }
 
@@ -167,33 +161,17 @@ public final class JobBlockPairingHelper {
         VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, placedPos);
     }
 
-    public static void pairFarmersWithBanners(ServerWorld world, BlockPos center, double range) {
-        int radius = (int) Math.ceil(range);
-        BlockPos start = center.add(-radius, -radius, -radius);
-        BlockPos end = center.add(radius, radius, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (!center.isWithinDistance(pos, range)) {
-                continue;
-            }
-            BlockState state = world.getBlockState(pos);
-            if (!state.isIn(BlockTags.BANNERS)) {
-                continue;
-            }
-            if (!isBannerOnEnclosedFenceWithGate(world, pos)) {
-                continue;
-            }
-            VillagerProfessionBehaviorRegistry.getSpecialModifier(state.getBlock())
-                    .ifPresent(modifier -> pairFarmersWithBanner(world, pos.toImmutable(), modifier));
+    public static void handleBannerPlacement(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        if (!isBannerOnFence(world, bannerPos, bannerState)) {
+            return;
         }
-    }
 
-    private static void pairFarmersWithBanner(ServerWorld world, BlockPos bannerPos, SpecialModifier modifier) {
-        double range = Math.max(modifier.range(), FARMER_BANNER_PAIR_RANGE);
+        double range = FARMER_BANNER_PAIR_RANGE;
         world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(range), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)
-                .forEach(villager -> pairFarmerWithModifier(world, villager, bannerPos, modifier));
+                .forEach(villager -> pairFarmerWithBanner(world, villager, bannerPos));
     }
 
-    private static void pairFarmerWithModifier(ServerWorld world, VillagerEntity villager, BlockPos bannerPos, SpecialModifier modifier) {
+    private static void pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
         Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSite.isEmpty()) {
             return;
@@ -205,54 +183,28 @@ public final class JobBlockPairingHelper {
         }
 
         BlockPos jobPos = globalPos.pos();
-
         if (villager.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > FARMER_BANNER_PAIR_RANGE * FARMER_BANNER_PAIR_RANGE) {
             return;
         }
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
-        if (nearbyChest.isEmpty()) {
-            playPairingAnimation(world, bannerPos, villager, jobPos);
+
+        if (!world.getBlockState(jobPos).isOf(Blocks.COMPOSTER)) {
+            return;
+        }
+
+        if (findNearbyChest(world, jobPos).isEmpty()) {
             return;
         }
 
         playPairingAnimation(world, bannerPos, villager, jobPos);
-        VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, bannerPos);
     }
 
-    private static boolean isBannerOnEnclosedFenceWithGate(ServerWorld world, BlockPos bannerPos) {
-        BlockPos fenceBasePos = getBannerFenceBase(world, bannerPos);
-        if (fenceBasePos == null) {
-            return false;
-        }
-
-        boolean hasFenceNeighbor = false;
-        for (BlockPos offset : new BlockPos[] {fenceBasePos.north(), fenceBasePos.south(), fenceBasePos.east(), fenceBasePos.west()}) {
-            BlockState neighbor = world.getBlockState(offset);
-            if (neighbor.getBlock() instanceof FenceBlock || neighbor.getBlock() instanceof FenceGateBlock) {
-                hasFenceNeighbor = true;
-                break;
-            }
-        }
-        if (!hasFenceNeighbor) {
-            return false;
-        }
-
-        int gateRange = 6;
-        BlockPos start = fenceBasePos.add(-gateRange, 0, -gateRange);
-        BlockPos end = fenceBasePos.add(gateRange, 0, gateRange);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            BlockState state = world.getBlockState(pos);
-            if (state.getBlock() instanceof FenceGateBlock) {
-                return true;
-            }
-        }
-        return false;
+    private static boolean isBannerOnFence(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        return getBannerFenceBase(world, bannerPos, bannerState) != null;
     }
 
-    private static BlockPos getBannerFenceBase(ServerWorld world, BlockPos bannerPos) {
-        BlockState state = world.getBlockState(bannerPos);
-        if (state.getBlock() instanceof WallBannerBlock && state.contains(WallBannerBlock.FACING)) {
-            Direction facing = state.get(WallBannerBlock.FACING);
+    private static BlockPos getBannerFenceBase(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        if (bannerState.getBlock() instanceof WallBannerBlock && bannerState.contains(WallBannerBlock.FACING)) {
+            Direction facing = bannerState.get(WallBannerBlock.FACING);
             BlockPos attachedPos = bannerPos.offset(facing.getOpposite());
             BlockState attachedState = world.getBlockState(attachedPos);
             if (attachedState.getBlock() instanceof FenceBlock || attachedState.getBlock() instanceof FenceGateBlock) {
