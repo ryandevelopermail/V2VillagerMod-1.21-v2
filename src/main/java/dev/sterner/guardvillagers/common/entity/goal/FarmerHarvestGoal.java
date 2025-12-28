@@ -209,12 +209,13 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (!isNear(gatePos)) {
-                    moveTo(gatePos, PEN_MOVE_SPEED);
+                BlockPos approachPos = findGateApproachTarget(gatePos, oppositeDirection(penInsideDirection));
+                if (!isNear(approachPos)) {
+                    moveTo(approachPos, PEN_MOVE_SPEED);
                     return;
                 }
                 openGate(serverWorld, gatePos, true);
-                gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
                 setStage(Stage.ENTER_PEN);
             }
             case ENTER_PEN -> {
@@ -224,7 +225,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (gateWalkTarget == null) {
-                    gateWalkTarget = gatePos;
+                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 1);
                 }
                 moveTo(gateWalkTarget, PEN_MOVE_SPEED);
                 if (isNear(gateWalkTarget)) {
@@ -254,7 +255,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 openGate(serverWorld, gatePos, true);
-                exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 4);
+                exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 1);
                 setStage(Stage.EXIT_PEN);
             }
             case EXIT_PEN -> {
@@ -939,6 +940,13 @@ public class FarmerHarvestGoal extends Goal {
             return gatePos;
         }
         return gatePos.offset(direction, distance);
+    }
+
+    private BlockPos findGateApproachTarget(BlockPos gatePos, Direction direction) {
+        if (direction == null) {
+            return gatePos;
+        }
+        return gatePos.offset(direction, 1);
     }
 
     private Direction findInsideDirection(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
