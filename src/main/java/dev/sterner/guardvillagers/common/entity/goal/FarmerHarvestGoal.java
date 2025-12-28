@@ -283,7 +283,16 @@ public class FarmerHarvestGoal extends Goal {
     private void collectNearbyDrops(ServerWorld world, BlockPos pos) {
         Box box = new Box(pos).expand(2.0D);
         for (ItemEntity itemEntity : world.getEntitiesByClass(ItemEntity.class, box, entity -> entity.isAlive() && !entity.getStack().isEmpty())) {
-            villager.tryPickup(itemEntity);
+            pickupItemEntity(itemEntity);
+        }
+    }
+
+    private void pickupItemEntity(ItemEntity itemEntity) {
+        ItemStack remaining = insertStack(villager.getInventory(), itemEntity.getStack());
+        if (remaining.isEmpty()) {
+            itemEntity.discard();
+        } else {
+            itemEntity.setStack(remaining);
         }
     }
 
