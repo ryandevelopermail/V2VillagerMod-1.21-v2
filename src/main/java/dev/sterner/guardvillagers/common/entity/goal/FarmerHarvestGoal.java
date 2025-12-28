@@ -284,6 +284,9 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 depositInventory(serverWorld);
+                if (pickUpHoeFromChest(serverWorld)) {
+                    hoeNearbyDirt(serverWorld);
+                }
                 if (dailyHarvestRun) {
                     notifyDailyHarvestComplete(serverWorld);
                     dailyHarvestRun = false;
@@ -689,10 +692,6 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private void hoeNearbyDirt(ServerWorld world) {
-        if (!hasHoeInChest(world)) {
-            return;
-        }
-
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
@@ -711,7 +710,7 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
-    private boolean hasHoeInChest(ServerWorld world) {
+    private boolean pickUpHoeFromChest(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return false;
@@ -720,11 +719,17 @@ public class FarmerHarvestGoal extends Goal {
         if (chestInventory == null) {
             return false;
         }
+
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
-            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
-                return true;
+            if (stack.isEmpty() || !(stack.getItem() instanceof HoeItem)) {
+                continue;
             }
+            ItemStack remaining = insertStack(villager.getInventory(), stack);
+            chestInventory.setStack(slot, remaining);
+            chestInventory.markDirty();
+            villager.getInventory().markDirty();
+            return true;
         }
         return false;
     }
@@ -738,7 +743,7 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean isWaterInRange(ServerWorld world, BlockPos pos) {
-        int range = 4;
+        int range = 5;
         BlockPos start = pos.add(-range, 0, -range);
         BlockPos end = pos.add(range, 0, range);
         for (BlockPos checkPos : BlockPos.iterate(start, end)) {
