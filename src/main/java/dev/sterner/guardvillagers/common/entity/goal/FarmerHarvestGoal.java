@@ -58,7 +58,6 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos gateReturnPos;
     private int feedTargetCount;
     private Direction penInsideDirection;
-    private long gateOpenUntilTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -207,7 +206,6 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 if (isNear(gatePos)) {
                     openGate(serverWorld, gatePos, true);
-                    gateOpenUntilTick = serverWorld.getTime() + 60;
                     gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
                     setStage(Stage.WALK_THROUGH_GATE);
                 } else {
@@ -225,14 +223,8 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 moveTo(gateWalkTarget);
                 if (isNear(gateWalkTarget)) {
-                    setStage(Stage.TURN_AROUND_INSIDE);
+                    setStage(Stage.CLOSE_GATE_INSIDE);
                 }
-            }
-            case TURN_AROUND_INSIDE -> {
-                if (gatePos != null) {
-                    villager.getLookControl().lookAt(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
-                }
-                setStage(Stage.CLOSE_GATE_INSIDE);
             }
             case CLOSE_GATE_INSIDE -> {
                 if (gatePos != null) {
@@ -267,7 +259,6 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 openGate(serverWorld, gatePos, true);
-                gateOpenUntilTick = serverWorld.getTime() + 60;
                 exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 4);
                 setStage(Stage.WALK_OUT_GATE);
             }
@@ -555,7 +546,6 @@ public class FarmerHarvestGoal extends Goal {
         GO_TO_PEN,
         GO_TO_GATE,
         WALK_THROUGH_GATE,
-        TURN_AROUND_INSIDE,
         CLOSE_GATE_INSIDE,
         FEED_ANIMALS,
         RETURN_TO_EXIT_POINT,
