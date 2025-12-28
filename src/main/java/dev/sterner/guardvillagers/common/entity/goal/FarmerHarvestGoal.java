@@ -548,7 +548,7 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         gateInteriorPos = findGateInterior(world, gatePos, bannerPos);
-        penTargetPos = bannerPos;
+        penTargetPos = gateInteriorPos;
         feedsRemaining = 1 + villager.getRandom().nextInt(5);
         targetAnimal = null;
         feedCooldownTicks = 0;
@@ -567,16 +567,28 @@ public class FarmerHarvestGoal extends Goal {
         if (!feedingInside) {
             return false;
         }
+        if (penTargetPos != null && !isNear(penTargetPos)) {
+            moveTo(penTargetPos);
+            return true;
+        }
 
         if (targetAnimal == null || !targetAnimal.isAlive()) {
             targetAnimal = findNearestAnimal(world);
             if (targetAnimal == null) {
+                LOGGER.info("Farmer {} tried to feed, but no animals were available at {}", villager.getUuidAsString(), bannerPos.toShortString());
                 return false;
             }
         }
 
+        if (!canFeedAnimal(targetAnimal)) {
+            LOGGER.info("Farmer {} attempted to feed {} at {}, but it was not ready to breed", villager.getUuidAsString(), targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
+            targetAnimal = null;
+            return false;
+        }
+
         ItemStack feedStack = findBreedingStack(villager.getInventory(), targetAnimal);
         if (feedStack == null) {
+            LOGGER.info("Farmer {} attempted to feed {} at {}, but had no valid food", villager.getUuidAsString(), targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
             return false;
         }
 
@@ -628,6 +640,10 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private boolean canFeedAnimal(AnimalEntity animal) {
+        return !animal.isInLove() && animal.getBreedingAge() == 0;
     }
 
     private boolean consumeFeedItems(Inventory inventory, Item item) {
