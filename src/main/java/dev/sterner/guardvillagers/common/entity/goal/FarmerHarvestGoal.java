@@ -18,6 +18,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,7 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos bannerPos;
     private BlockPos gatePos;
     private BlockPos gateInteriorPos;
+    private BlockPos penTargetPos;
     private int feedsRemaining;
     private AnimalEntity targetAnimal;
 
@@ -202,14 +204,14 @@ public class FarmerHarvestGoal extends Goal {
                 }
             }
             case ENTER_PEN -> {
-                if (gateInteriorPos == null) {
+                if (penTargetPos == null) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                     return;
                 }
-                if (isNear(gateInteriorPos)) {
+                if (isNear(penTargetPos)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
                 } else {
-                    moveTo(gateInteriorPos);
+                    moveTo(penTargetPos);
                 }
             }
             case CLOSE_GATE_INSIDE -> {
@@ -525,7 +527,8 @@ public class FarmerHarvestGoal extends Goal {
         if (gatePos == null) {
             return false;
         }
-        gateInteriorPos = bannerPos;
+        gateInteriorPos = findGateInterior(world, gatePos, bannerPos);
+        penTargetPos = gateInteriorPos != null ? gateInteriorPos : bannerPos;
         feedsRemaining = 1 + villager.getRandom().nextInt(5);
         targetAnimal = null;
         return !getAnimalsNearBanner(world).isEmpty();
@@ -562,7 +565,7 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
 
-        applyBreedingState(targetAnimal);
+        applyBreedingState(targetAnimal, villager);
         LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), feedStack.getName().getString(), targetAnimal.getBlockPos().toShortString());
         if (targetAnimal.isInLove()) {
             LOGGER.info("Animal {} entered breeding state at {}", targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
@@ -621,8 +624,31 @@ public class FarmerHarvestGoal extends Goal {
         return false;
     }
 
-    private void applyBreedingState(AnimalEntity animal) {
-        animal.setLoveTicks(600);
+    private void applyBreedingState(AnimalEntity animal, VillagerEntity villagerEntity) {
+        animal.lovePlayer(villagerEntity);
+        if (!animal.isInLove()) {
+            animal.setLoveTicks(600);
+        }
+    }
+
+    private BlockPos findGateInterior(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
+        BlockState state = world.getBlockState(gatePos);
+        if (state.contains(FenceGateBlock.FACING)) {
+            Direction facing = state.get(FenceGateBlock.FACING);
+            BlockPos frontPos = gatePos.offset(facing);
+            BlockPos backPos = gatePos.offset(facing.getOpposite());
+            double frontDistance = squaredDistance(frontPos, bannerPos);
+            double backDistance = squaredDistance(backPos, bannerPos);
+            return frontDistance <= backDistance ? frontPos : backPos;
+        }
+        return bannerPos;
+    }
+
+    private double squaredDistance(BlockPos a, BlockPos b) {
+        double dx = a.getX() + 0.5D - (b.getX() + 0.5D);
+        double dy = a.getY() + 0.5D - (b.getY() + 0.5D);
+        double dz = a.getZ() + 0.5D - (b.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private BlockPos findNearestGate(ServerWorld world, BlockPos center) {
