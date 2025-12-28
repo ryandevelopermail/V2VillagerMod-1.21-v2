@@ -17,6 +17,7 @@ import net.minecraft.item.ArmorStandItem;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemPlacementContext;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.ActionResult;
@@ -50,7 +51,8 @@ public final class JobBlockPlacementHandler {
         boolean isArmorStand = stack.getItem() instanceof ArmorStandItem;
         boolean isPairingBlockItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isPairingBlock(blockItem.getBlock());
         boolean isCraftingTableItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isCraftingTable(blockItem.getBlock());
-        boolean isSpecialModifierItem = stack.getItem() instanceof BlockItem blockItem && JobBlockPairingHelper.isSpecialModifierBlock(blockItem.getBlock());
+        boolean isSpecialModifierItem = stack.getItem() instanceof BlockItem blockItem
+                && (JobBlockPairingHelper.isSpecialModifierBlock(blockItem.getBlock()) || blockItem.getBlock().getDefaultState().isIn(BlockTags.BANNERS));
 
         if (!isArmorStand && !isPairingBlockItem && !isCraftingTableItem && !isSpecialModifierItem) {
             return ActionResult.PASS;
@@ -80,7 +82,7 @@ public final class JobBlockPlacementHandler {
 
         if (checkSpecialModifier) {
             BlockState placedState = serverWorld.getBlockState(placementPos);
-            if (JobBlockPairingHelper.isSpecialModifierBlock(placedState.getBlock())) {
+            if (JobBlockPairingHelper.isSpecialModifierBlock(placedState.getBlock()) || placedState.isIn(BlockTags.BANNERS)) {
                 JobBlockPairingHelper.handleSpecialModifierPlacement(serverWorld, placementPos, placedState);
             }
         }
