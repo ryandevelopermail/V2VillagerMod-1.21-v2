@@ -226,6 +226,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (gateWalkTarget == null) {
                     gateWalkTarget = gatePos;
                 }
+                openGate(serverWorld, gatePos, true);
                 moveTo(gateWalkTarget, PEN_MOVE_SPEED);
                 if (isNear(gateWalkTarget)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
