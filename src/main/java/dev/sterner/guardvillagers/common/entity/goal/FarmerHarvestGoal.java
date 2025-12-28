@@ -57,6 +57,7 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos exitWalkTarget;
     private BlockPos gateReturnPos;
     private int feedTargetCount;
+    private Direction penInsideDirection;
     private long gateOpenUntilTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -207,7 +208,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (isNear(gatePos)) {
                     openGate(serverWorld, gatePos, true);
                     gateOpenUntilTick = serverWorld.getTime() + 60;
-                    gateWalkTarget = findGateWalkTarget(serverWorld, gatePos, 3);
+                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
                     setStage(Stage.WALK_THROUGH_GATE);
                 } else {
                     moveTo(gatePos);
@@ -267,7 +268,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 openGate(serverWorld, gatePos, true);
                 gateOpenUntilTick = serverWorld.getTime() + 60;
-                exitWalkTarget = findGateWalkTarget(serverWorld, gatePos, 4);
+                exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 4);
                 setStage(Stage.WALK_OUT_GATE);
             }
             case WALK_OUT_GATE -> {
@@ -579,7 +580,8 @@ public class FarmerHarvestGoal extends Goal {
         if (gatePos == null) {
             return false;
         }
-        gateWalkTarget = findGateWalkTarget(world, gatePos, 3);
+        penInsideDirection = findInsideDirection(world, gatePos, bannerPos);
+        gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
         exitWalkTarget = null;
         gateReturnPos = null;
         feedTargetCount = determineFeedTargetCount();
@@ -706,13 +708,35 @@ public class FarmerHarvestGoal extends Goal {
         animal.setLoveTicks(600);
     }
 
-    private BlockPos findGateWalkTarget(ServerWorld world, BlockPos gatePos, int distance) {
+    private BlockPos findGateWalkTarget(BlockPos gatePos, Direction direction, int distance) {
+        if (direction == null) {
+            return gatePos;
+        }
+        return gatePos.offset(direction, distance);
+    }
+
+    private Direction findInsideDirection(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
         BlockState state = world.getBlockState(gatePos);
         if (state.contains(FenceGateBlock.FACING)) {
             Direction facing = state.get(FenceGateBlock.FACING);
-            return gatePos.offset(facing, distance);
+            BlockPos frontPos = gatePos.offset(facing);
+            BlockPos backPos = gatePos.offset(facing.getOpposite());
+            double frontDistance = squaredDistance(frontPos, bannerPos);
+            double backDistance = squaredDistance(backPos, bannerPos);
+            return frontDistance <= backDistance ? facing : facing.getOpposite();
         }
-        return gatePos;
+        return bannerPos.getX() >= gatePos.getX() ? Direction.EAST : Direction.WEST;
+    }
+
+    private Direction oppositeDirection(Direction direction) {
+        return direction == null ? null : direction.getOpposite();
+    }
+
+    private double squaredDistance(BlockPos a, BlockPos b) {
+        double dx = a.getX() + 0.5D - (b.getX() + 0.5D);
+        double dy = a.getY() + 0.5D - (b.getY() + 0.5D);
+        double dz = a.getZ() + 0.5D - (b.getZ() + 0.5D);
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private BlockPos findNearestGate(ServerWorld world, BlockPos center) {
