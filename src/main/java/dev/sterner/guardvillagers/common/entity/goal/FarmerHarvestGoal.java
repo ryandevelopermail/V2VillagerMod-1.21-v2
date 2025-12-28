@@ -203,20 +203,36 @@ public class FarmerHarvestGoal extends Goal {
             }
             case ENTER_PEN -> {
                 if (gateInteriorPos == null) {
-                    setStage(Stage.FEED_ANIMALS);
+                    setStage(Stage.CLOSE_GATE_INSIDE);
                     return;
                 }
                 if (isNear(gateInteriorPos)) {
-                    setStage(Stage.FEED_ANIMALS);
+                    setStage(Stage.CLOSE_GATE_INSIDE);
                 } else {
                     moveTo(gateInteriorPos);
                 }
             }
+            case CLOSE_GATE_INSIDE -> {
+                if (gatePos != null) {
+                    openGate(serverWorld, gatePos, false);
+                }
+                setStage(Stage.FEED_ANIMALS);
+            }
             case FEED_ANIMALS -> {
                 if (!feedAnimals(serverWorld)) {
                     villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
-                    setStage(Stage.EXIT_PEN);
+                    setStage(Stage.OPEN_GATE_EXIT);
                 }
+            }
+            case OPEN_GATE_EXIT -> {
+                if (gatePos == null) {
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
+                    return;
+                }
+                openGate(serverWorld, gatePos, true);
+                setStage(Stage.EXIT_PEN);
+                moveTo(gatePos);
             }
             case EXIT_PEN -> {
                 if (gatePos == null) {
@@ -488,7 +504,9 @@ public class FarmerHarvestGoal extends Goal {
         HARVEST,
         GO_TO_PEN,
         ENTER_PEN,
+        CLOSE_GATE_INSIDE,
         FEED_ANIMALS,
+        OPEN_GATE_EXIT,
         EXIT_PEN,
         RETURN_TO_CHEST,
         DEPOSIT,
@@ -544,7 +562,7 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
 
-        targetAnimal.lovePlayer(null);
+        applyBreedingState(targetAnimal);
         LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), feedStack.getName().getString(), targetAnimal.getBlockPos().toShortString());
         if (targetAnimal.isInLove()) {
             LOGGER.info("Animal {} entered breeding state at {}", targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
@@ -601,6 +619,10 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private void applyBreedingState(AnimalEntity animal) {
+        animal.setLoveTicks(600);
     }
 
     private BlockPos findNearestGate(ServerWorld world, BlockPos center) {
