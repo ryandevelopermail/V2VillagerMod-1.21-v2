@@ -63,6 +63,7 @@ public class FarmerHarvestGoal extends Goal {
     private int exitDelayTicks;
     private final Deque<BlockPos> hoeTargets = new ArrayDeque<>();
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
+    private BlockPos gateApproachPos;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -209,12 +210,13 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (isNear(gatePos)) {
+                BlockPos approach = gateApproachPos != null ? gateApproachPos : gatePos;
+                if (isNear(approach)) {
                     openGate(serverWorld, gatePos, true);
                     gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
                     setStage(Stage.ENTER_PEN);
                 } else {
-                    moveTo(gatePos, PEN_MOVE_SPEED);
+                    moveTo(approach, PEN_MOVE_SPEED);
                 }
             }
             case ENTER_PEN -> {
@@ -226,7 +228,6 @@ public class FarmerHarvestGoal extends Goal {
                 if (gateWalkTarget == null) {
                     gateWalkTarget = gatePos;
                 }
-                openGate(serverWorld, gatePos, true);
                 moveTo(gateWalkTarget, PEN_MOVE_SPEED);
                 if (isNear(gateWalkTarget)) {
                     setStage(Stage.CLOSE_GATE_INSIDE);
@@ -641,6 +642,7 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         penInsideDirection = findInsideDirection(world, gatePos, bannerPos);
+        gateApproachPos = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 1);
         gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
         exitWalkTarget = null;
         feedTargetCount = determineFeedTargetCount();
