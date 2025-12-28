@@ -549,7 +549,7 @@ public class FarmerHarvestGoal extends Goal {
         }
         gateInteriorPos = findGateInterior(world, gatePos, bannerPos);
         penTargetPos = gateInteriorPos;
-        feedsRemaining = 1 + villager.getRandom().nextInt(5);
+        feedsRemaining = Math.max(2, 1 + villager.getRandom().nextInt(5));
         targetAnimal = null;
         feedCooldownTicks = 0;
         feedingInside = false;
@@ -573,23 +573,18 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         if (targetAnimal == null || !targetAnimal.isAlive()) {
-            targetAnimal = findNearestAnimal(world);
+            targetAnimal = findFeedableAnimal(world);
             if (targetAnimal == null) {
-                LOGGER.info("Farmer {} tried to feed, but no animals were available at {}", villager.getUuidAsString(), bannerPos.toShortString());
+                LOGGER.info("Farmer {} attempted to feed, but no animals were ready or food was unavailable at {}", villager.getUuidAsString(), bannerPos.toShortString());
                 return false;
             }
-        }
-
-        if (!canFeedAnimal(targetAnimal)) {
-            LOGGER.info("Farmer {} attempted to feed {} at {}, but it was not ready to breed", villager.getUuidAsString(), targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
-            targetAnimal = null;
-            return false;
         }
 
         ItemStack feedStack = findBreedingStack(villager.getInventory(), targetAnimal);
         if (feedStack == null) {
             LOGGER.info("Farmer {} attempted to feed {} at {}, but had no valid food", villager.getUuidAsString(), targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
-            return false;
+            targetAnimal = null;
+            return feedsRemaining > 0;
         }
 
         villager.setStackInHand(Hand.MAIN_HAND, new ItemStack(feedStack.getItem()));
@@ -599,12 +594,13 @@ public class FarmerHarvestGoal extends Goal {
             return true;
         }
 
+        ItemStack fedItem = feedStack.copy();
         if (!consumeFeedItems(villager.getInventory(), feedStack.getItem())) {
             return false;
         }
 
         applyBreedingState(targetAnimal);
-        LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), feedStack.getName().getString(), targetAnimal.getBlockPos().toShortString());
+        LOGGER.info("Farmer {} fed {} x2 at {}", villager.getUuidAsString(), fedItem.getName().getString(), targetAnimal.getBlockPos().toShortString());
         if (targetAnimal.isInLove()) {
             LOGGER.info("Animal {} entered breeding state at {}", targetAnimal.getType().getName().getString(), targetAnimal.getBlockPos().toShortString());
         }
@@ -624,6 +620,19 @@ public class FarmerHarvestGoal extends Goal {
         return animals.stream()
                 .min(Comparator.comparingDouble(animal -> animal.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D)))
                 .orElse(null);
+    }
+
+    private AnimalEntity findFeedableAnimal(ServerWorld world) {
+        List<AnimalEntity> animals = getAnimalsNearBanner(world);
+        for (AnimalEntity animal : animals) {
+            if (!canFeedAnimal(animal)) {
+                continue;
+            }
+            if (findBreedingStack(villager.getInventory(), animal) != null) {
+                return animal;
+            }
+        }
+        return null;
     }
 
     private ItemStack findBreedingStack(Inventory inventory, AnimalEntity animal) {
