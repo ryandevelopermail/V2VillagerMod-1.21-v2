@@ -226,6 +226,7 @@ public final class JobBlockPairingHelper {
             return bannerPos;
         }
 
+        world.removeBlock(bannerPos, false);
         world.setBlockState(bannerPos, Blocks.OAK_FENCE.getDefaultState(), 3);
         BlockPos raisedBannerPos = bannerPos.up();
         world.setBlockState(raisedBannerPos, bannerState, 3);
