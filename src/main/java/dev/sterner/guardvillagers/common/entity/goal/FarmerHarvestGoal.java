@@ -35,7 +35,7 @@ import java.util.List;
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final double MOVE_SPEED = 1.0D;
+    private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -208,13 +208,12 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-                if (gateWalkTarget == null) {
-                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
-                }
-                if (!isNear(gateWalkTarget)) {
-                    moveTo(gateWalkTarget, MOVE_SPEED);
+                BlockPos insideTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                if (!isNear(insideTarget)) {
+                    moveTo(insideTarget, MOVE_SPEED);
                     return;
                 }
+                gateWalkTarget = insideTarget;
                 setStage(Stage.ENTER_PEN);
             }
             case ENTER_PEN -> {
@@ -250,6 +249,7 @@ public class FarmerHarvestGoal extends Goal {
                     exitDelayTicks--;
                     return;
                 }
+                openGate(serverWorld, gatePos, true);
                 exitWalkTarget = findGateWalkTarget(gatePos, oppositeDirection(penInsideDirection), 3);
                 setStage(Stage.EXIT_PEN);
             }
@@ -932,6 +932,17 @@ public class FarmerHarvestGoal extends Goal {
             return gatePos;
         }
         return gatePos.offset(direction, distance);
+    }
+
+    private void openGate(ServerWorld world, BlockPos pos, boolean open) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        if (state.get(FenceGateBlock.OPEN) == open) {
+            return;
+        }
+        world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
     }
 
     private Direction findInsideDirection(ServerWorld world, BlockPos gatePos, BlockPos bannerPos) {
