@@ -145,7 +145,6 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
-                    hoeNearbyDirt(serverWorld);
                     if (prepareFeeding(serverWorld)) {
                         setStage(Stage.GO_TO_PEN);
                         moveTo(bannerPos, PEN_MOVE_SPEED);
