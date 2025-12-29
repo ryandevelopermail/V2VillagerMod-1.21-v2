@@ -8,6 +8,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -17,10 +18,12 @@ import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.sound.SoundCategory;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.util.Hand;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
@@ -45,7 +48,7 @@ public class ShepherdSpecialGoal extends Goal {
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private TaskType taskType;
-    private List<BlockPos> sheepTargets = new ArrayList<>();
+    private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
     private BlockPos penTarget;
     private ItemStack carriedItem = ItemStack.EMPTY;
@@ -113,6 +116,7 @@ public class ShepherdSpecialGoal extends Goal {
         if (taskType == TaskType.SHEARS) {
             sheepTargets = findSheepTargets(world);
             sheepTargetIndex = 0;
+            equipShearsFromInventory();
             if (sheepTargets.isEmpty()) {
                 stage = Stage.RETURN_TO_CHEST;
                 moveTo(chestPos);
@@ -153,23 +157,25 @@ public class ShepherdSpecialGoal extends Goal {
 
         switch (stage) {
             case GO_TO_SHEEP -> {
-                if (sheepTargetIndex >= sheepTargets.size()) {
+                SheepEntity targetEntity = getSheepTarget();
+                if (targetEntity == null) {
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
                     return;
                 }
 
-                BlockPos target = sheepTargets.get(sheepTargetIndex);
-                if (isNear(target)) {
+                if (isNear(targetEntity.getBlockPos())) {
+                    shearSheep(world, targetEntity);
                     sheepTargetIndex++;
-                    if (sheepTargetIndex < sheepTargets.size()) {
-                        moveTo(sheepTargets.get(sheepTargetIndex));
+                    SheepEntity nextTarget = getSheepTarget();
+                    if (nextTarget != null) {
+                        moveTo(nextTarget.getBlockPos());
                     } else {
                         stage = Stage.RETURN_TO_CHEST;
                         moveTo(chestPos);
                     }
                 } else {
-                    moveTo(target);
+                    moveTo(targetEntity.getBlockPos());
                 }
             }
             case GO_TO_PEN -> {
@@ -281,18 +287,69 @@ public class ShepherdSpecialGoal extends Goal {
             villagerInventory.setStack(slot, remaining);
         }
 
+        ItemStack mainHand = villager.getMainHandStack();
+        if (mainHand.isOf(Items.SHEARS) || mainHand.isIn(ItemTags.BANNERS)) {
+            ItemStack remaining = insertStack(chestInventory, mainHand);
+            villager.setStackInHand(Hand.MAIN_HAND, remaining);
+        }
+
         villagerInventory.markDirty();
         chestInventory.markDirty();
     }
 
-    private List<BlockPos> findSheepTargets(ServerWorld world) {
+    private List<SheepEntity> findSheepTargets(ServerWorld world) {
         List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
         sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
-        List<BlockPos> positions = new ArrayList<>();
-        for (SheepEntity entity : sheep) {
-            positions.add(entity.getBlockPos().toImmutable());
+        return new ArrayList<>(sheep);
+    }
+
+    private SheepEntity getSheepTarget() {
+        while (sheepTargetIndex < sheepTargets.size()) {
+            SheepEntity target = sheepTargets.get(sheepTargetIndex);
+            if (target != null && target.isAlive()) {
+                return target;
+            }
+            sheepTargetIndex++;
         }
-        return positions;
+        return null;
+    }
+
+    private void equipShearsFromInventory() {
+        if (villager.getMainHandStack().isOf(Items.SHEARS)) {
+            return;
+        }
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.SHEARS)) {
+                continue;
+            }
+            villager.setStackInHand(Hand.MAIN_HAND, stack);
+            inventory.setStack(slot, ItemStack.EMPTY);
+            inventory.markDirty();
+            return;
+        }
+    }
+
+    private void shearSheep(ServerWorld world, SheepEntity sheep) {
+        if (!sheep.isAlive() || !sheep.isShearable()) {
+            return;
+        }
+
+        if (!villager.getMainHandStack().isOf(Items.SHEARS)) {
+            equipShearsFromInventory();
+        }
+
+        ItemStack shears = villager.getMainHandStack();
+        if (!shears.isOf(Items.SHEARS)) {
+            return;
+        }
+
+        sheep.shear(SoundCategory.NEUTRAL);
+        shears.damage(1, villager, EquipmentSlot.MAINHAND);
+        if (shears.isEmpty()) {
+            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+        }
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
