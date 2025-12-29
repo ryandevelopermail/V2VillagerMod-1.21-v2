@@ -57,6 +57,8 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos gatePos;
     private BlockPos gateWalkTarget;
     private BlockPos exitWalkTarget;
+    private double gateCloseDistanceSquared;
+    private boolean gateClosedAfterEntry;
     private int feedTargetCount;
     private Direction penInsideDirection;
     private int exitDelayTicks;
@@ -145,8 +147,8 @@ public class FarmerHarvestGoal extends Goal {
             case HARVEST -> {
                 if (harvestTargets.isEmpty()) {
                     if (prepareFeeding(serverWorld)) {
-                        setStage(Stage.GO_TO_PEN);
-                        moveTo(bannerPos, MOVE_SPEED);
+                        setStage(Stage.GO_TO_GATE);
+                        moveTo(gatePos, MOVE_SPEED);
                     } else {
                         setStage(Stage.RETURN_TO_CHEST);
                         moveTo(chestPos);
@@ -190,47 +192,39 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(chestPos);
                 }
             }
-            case GO_TO_PEN -> {
-                if (bannerPos == null) {
-                    setStage(Stage.RETURN_TO_CHEST);
-                    moveTo(chestPos);
-                    return;
-                }
-                if (!isNear(bannerPos)) {
-                    moveTo(bannerPos, MOVE_SPEED);
-                    return;
-                }
-                setStage(Stage.GO_TO_GATE);
-            }
             case GO_TO_GATE -> {
                 if (gatePos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
                     return;
                 }
-                BlockPos insideTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
-                if (!isNear(insideTarget)) {
-                    moveTo(insideTarget, MOVE_SPEED);
+                if (!isNear(gatePos)) {
+                    moveTo(gatePos, MOVE_SPEED);
                     return;
                 }
-                gateWalkTarget = insideTarget;
-                setStage(Stage.ENTER_PEN);
+                openGate(serverWorld, gatePos, true);
+                gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                gateClosedAfterEntry = false;
+                gateCloseDistanceSquared = calculateGateCloseDistanceSquared(gatePos, bannerPos);
+                setStage(Stage.WALK_TO_BANNER);
             }
-            case ENTER_PEN -> {
-                if (gatePos == null) {
+            case WALK_TO_BANNER -> {
+                if (bannerPos == null) {
                     setStage(Stage.RETURN_TO_CHEST);
                     moveTo(chestPos);
                     return;
                 }
-                if (gateWalkTarget == null) {
-                    gateWalkTarget = findGateWalkTarget(gatePos, penInsideDirection, 3);
+                if (!gateClosedAfterEntry && gatePos != null) {
+                    double distanceFromGateSquared = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+                    if (distanceFromGateSquared >= gateCloseDistanceSquared || isNear(bannerPos)) {
+                        openGate(serverWorld, gatePos, false);
+                        gateClosedAfterEntry = true;
+                    }
                 }
-                moveTo(gateWalkTarget, MOVE_SPEED);
-                if (isNear(gateWalkTarget)) {
-                    setStage(Stage.CLOSE_GATE_INSIDE);
+                if (!isNear(bannerPos)) {
+                    moveTo(bannerPos, MOVE_SPEED);
+                    return;
                 }
-            }
-            case CLOSE_GATE_INSIDE -> {
                 setStage(Stage.FEED_ANIMALS);
             }
             case FEED_ANIMALS -> {
@@ -605,10 +599,8 @@ public class FarmerHarvestGoal extends Goal {
         IDLE,
         GO_TO_JOB,
         HARVEST,
-        GO_TO_PEN,
         GO_TO_GATE,
-        ENTER_PEN,
-        CLOSE_GATE_INSIDE,
+        WALK_TO_BANNER,
         FEED_ANIMALS,
         OPEN_GATE_EXIT,
         EXIT_PEN,
@@ -637,6 +629,8 @@ public class FarmerHarvestGoal extends Goal {
         exitWalkTarget = null;
         feedTargetCount = determineFeedTargetCount();
         exitDelayTicks = 0;
+        gateClosedAfterEntry = false;
+        gateCloseDistanceSquared = 0.0D;
         return !getAnimalsNearBanner(world).isEmpty();
     }
 
@@ -967,6 +961,15 @@ public class FarmerHarvestGoal extends Goal {
         double dy = a.getY() + 0.5D - (b.getY() + 0.5D);
         double dz = a.getZ() + 0.5D - (b.getZ() + 0.5D);
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    private double calculateGateCloseDistanceSquared(BlockPos gatePos, BlockPos bannerPos) {
+        if (gatePos == null || bannerPos == null) {
+            return 0.0D;
+        }
+        double gateToBannerDistance = Math.sqrt(squaredDistance(gatePos, bannerPos));
+        double closeDistance = Math.min(2.0D, gateToBannerDistance);
+        return closeDistance * closeDistance;
     }
 
     private BlockPos findNearestGate(ServerWorld world, BlockPos center) {
