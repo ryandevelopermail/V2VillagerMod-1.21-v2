@@ -138,11 +138,24 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        carriedItem = takeItemFromChest(world, taskType);
-        if (carriedItem.isEmpty()) {
-            nextCheckTime = world.getTime() + nextRandomCheckInterval();
-            stage = Stage.DONE;
-            return;
+        if (taskType == TaskType.SHEARS) {
+            if (hasShearsInInventoryOrHand()) {
+                carriedItem = ItemStack.EMPTY;
+            } else {
+                carriedItem = takeItemFromChest(world, taskType);
+                if (carriedItem.isEmpty()) {
+                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                    stage = Stage.DONE;
+                    return;
+                }
+            }
+        } else {
+            carriedItem = takeItemFromChest(world, taskType);
+            if (carriedItem.isEmpty()) {
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+                return;
+            }
         }
 
         if (taskType == TaskType.SHEARS) {
@@ -267,9 +280,11 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean hasShearsInChestOrInventory(Inventory chestInventory) {
-        if (hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))) {
-            return true;
-        }
+        return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))
+                || hasShearsInInventoryOrHand();
+    }
+
+    private boolean hasShearsInInventoryOrHand() {
         Inventory villagerInventory = villager.getInventory();
         return hasMatchingItem(villagerInventory, stack -> stack.isOf(Items.SHEARS))
                 || villager.getMainHandStack().isOf(Items.SHEARS);
@@ -336,7 +351,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (stack.isEmpty()) {
                 continue;
             }
-            if (!(stack.isOf(Items.SHEARS) || stack.isIn(ItemTags.BANNERS) || stack.isIn(ItemTags.WOOL))) {
+            if (!(stack.isIn(ItemTags.BANNERS) || stack.isIn(ItemTags.WOOL))) {
                 continue;
             }
 
@@ -345,7 +360,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         ItemStack mainHand = villager.getMainHandStack();
-        if (mainHand.isOf(Items.SHEARS) || mainHand.isIn(ItemTags.BANNERS) || mainHand.isIn(ItemTags.WOOL)) {
+        if (mainHand.isIn(ItemTags.BANNERS) || mainHand.isIn(ItemTags.WOOL)) {
             ItemStack remaining = insertStack(chestInventory, mainHand);
             villager.setStackInHand(Hand.MAIN_HAND, remaining);
         }
