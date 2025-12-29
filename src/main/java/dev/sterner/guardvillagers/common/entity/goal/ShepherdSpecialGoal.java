@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
 public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
     private static final int CHECK_INTERVAL_MIN_TICKS = 2400;
-    private static final int CHECK_INTERVAL_VARIANCE_TICKS = 2400;
+    private static final int CHECK_INTERVAL_VARIANCE_TICKS = 3600;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 100;
@@ -91,7 +91,8 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
         long day = world.getTimeOfDay() / 24000L;
-        if (day != lastShearDay) {
+        boolean dayChanged = day != lastShearDay;
+        if (dayChanged) {
             lastShearDay = day;
             hadShearsInChest = false;
             hadBannerInChest = false;
@@ -103,6 +104,10 @@ public class ShepherdSpecialGoal extends Goal {
             hadBannerInChest = false;
             nextCheckTime = world.getTime() + nextRandomCheckInterval();
             return false;
+        }
+
+        if (dayChanged && nextTask == TaskType.SHEARS) {
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
