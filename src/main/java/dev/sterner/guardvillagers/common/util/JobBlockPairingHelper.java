@@ -27,6 +27,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import net.minecraft.world.event.GameEvent;
+import net.minecraft.world.border.WorldBorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -215,7 +216,15 @@ public final class JobBlockPairingHelper {
     }
 
     public static void refreshWorldPairings(ServerWorld world) {
-        Box worldBounds = world.getWorldBorder().getArea();
+        WorldBorder border = world.getWorldBorder();
+        double halfSize = border.getSize() / 2.0D;
+        double minX = border.getCenterX() - halfSize;
+        double maxX = border.getCenterX() + halfSize;
+        double minZ = border.getCenterZ() - halfSize;
+        double maxZ = border.getCenterZ() + halfSize;
+        int minY = world.getBottomY();
+        int maxY = world.getTopY();
+        Box worldBounds = new Box(minX, minY, minZ, maxX, maxY, maxZ);
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
             refreshVillagerPairings(world, villager);
         }
