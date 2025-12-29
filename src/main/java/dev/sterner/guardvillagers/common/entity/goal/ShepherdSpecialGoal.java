@@ -40,8 +40,8 @@ import org.slf4j.LoggerFactory;
 
 public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
-    private static final int SHEAR_CHECK_INTERVAL_TICKS = 2400;
-    private static final int SHEAR_CHECK_INTERVAL_VARIANCE_TICKS = 1200;
+    private static final int SHEAR_CHECK_INTERVAL_TICKS = 1200;
+    private static final int SHEAR_CHECK_INTERVAL_VARIANCE_TICKS = 200;
     private static final int SHEEP_SENSOR_INTERVAL_TICKS = 80;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
