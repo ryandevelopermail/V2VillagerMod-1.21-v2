@@ -45,7 +45,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int CHECK_INTERVAL_VARIANCE_TICKS = 3600;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final int SHEEP_SCAN_RANGE = 100;
+    private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
@@ -129,9 +129,9 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (nextTask == TaskType.SHEARS) {
-            int shearableCount = countShearableSheepNearJob(world);
+            int sheepCount = countSheepNearJob(world);
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-            if (shearableCount < 1) {
+            if (sheepCount < 1) {
                 return false;
             }
         }
@@ -356,10 +356,9 @@ public class ShepherdSpecialGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
-    private int countShearableSheepNearJob(ServerWorld world) {
+    private int countSheepNearJob(ServerWorld world) {
         Box box = new Box(jobPos).expand(SHEEP_SCAN_RANGE);
-        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box,
-                entity -> entity.isAlive() && entity.isShearable());
+        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box, SheepEntity::isAlive);
         return sheep.size();
     }
 
@@ -394,7 +393,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private List<SheepEntity> findSheepTargets(ServerWorld world) {
-        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
+        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(jobPos).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
         sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
         return new ArrayList<>(sheep);
     }
