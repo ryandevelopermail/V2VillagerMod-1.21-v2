@@ -10,9 +10,11 @@ import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
@@ -23,6 +25,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
 import net.minecraft.village.VillagerProfession;
 
@@ -345,11 +348,51 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        sheep.sheared(SoundCategory.NEUTRAL);
+        sheep.setSheared(true);
+        sheep.playSound(sheep.getShearSound(), 1.0F, 1.0F);
+        int dropCount = 1 + sheep.getRandom().nextInt(3);
+        ItemStack woolStack = new ItemStack(woolFromColor(sheep.getColor()), dropCount);
+        sheep.dropStack(woolStack);
         shears.damage(1, villager, EquipmentSlot.MAINHAND);
         if (shears.isEmpty()) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
         }
+        collectNearbyWool(world, sheep.getBlockPos());
+    }
+
+    private void collectNearbyWool(ServerWorld world, BlockPos center) {
+        Box box = new Box(center).expand(3.0D);
+        List<ItemEntity> items = world.getEntitiesByClass(ItemEntity.class, box, entity -> entity.isAlive() && entity.getStack().isIn(ItemTags.WOOL));
+        for (ItemEntity itemEntity : items) {
+            ItemStack remaining = insertStack(villager.getInventory(), itemEntity.getStack());
+            if (remaining.isEmpty()) {
+                itemEntity.discard();
+            } else {
+                itemEntity.setStack(remaining);
+            }
+        }
+        villager.getInventory().markDirty();
+    }
+
+    private Item woolFromColor(DyeColor color) {
+        return switch (color) {
+            case ORANGE -> Items.ORANGE_WOOL;
+            case MAGENTA -> Items.MAGENTA_WOOL;
+            case LIGHT_BLUE -> Items.LIGHT_BLUE_WOOL;
+            case YELLOW -> Items.YELLOW_WOOL;
+            case LIME -> Items.LIME_WOOL;
+            case PINK -> Items.PINK_WOOL;
+            case GRAY -> Items.GRAY_WOOL;
+            case LIGHT_GRAY -> Items.LIGHT_GRAY_WOOL;
+            case CYAN -> Items.CYAN_WOOL;
+            case PURPLE -> Items.PURPLE_WOOL;
+            case BLUE -> Items.BLUE_WOOL;
+            case BROWN -> Items.BROWN_WOOL;
+            case GREEN -> Items.GREEN_WOOL;
+            case RED -> Items.RED_WOOL;
+            case BLACK -> Items.BLACK_WOOL;
+            default -> Items.WHITE_WOOL;
+        };
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
