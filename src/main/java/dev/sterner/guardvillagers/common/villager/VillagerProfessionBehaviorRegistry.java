@@ -6,13 +6,13 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
-import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Optional;
 
 public final class VillagerProfessionBehaviorRegistry {
-    private static final Map<VillagerProfession, VillagerProfessionBehavior> BEHAVIORS = new EnumMap<>(VillagerProfession.class);
+    private static final Map<VillagerProfession, VillagerProfessionBehavior> BEHAVIORS = new HashMap<>();
     private static final Map<Block, SpecialModifier> SPECIAL_MODIFIERS = new IdentityHashMap<>();
 
     private VillagerProfessionBehaviorRegistry() {
