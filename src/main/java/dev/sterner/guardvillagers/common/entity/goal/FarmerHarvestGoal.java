@@ -262,6 +262,9 @@ public class FarmerHarvestGoal extends Goal {
                 }
             }
             case CLOSE_GATE_EXIT -> {
+                if (gatePos != null) {
+                    openGate(serverWorld, gatePos, false);
+                }
                 setStage(Stage.RETURN_TO_CHEST);
                 moveTo(chestPos);
             }
