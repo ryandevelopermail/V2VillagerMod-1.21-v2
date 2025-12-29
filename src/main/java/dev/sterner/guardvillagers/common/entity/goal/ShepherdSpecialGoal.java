@@ -56,6 +56,7 @@ public class ShepherdSpecialGoal extends Goal {
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long nextSheepSensorCheckTime;
+    private long nextChestShearTriggerTime;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
     private boolean hadBannerInChest;
@@ -95,6 +96,7 @@ public class ShepherdSpecialGoal extends Goal {
             lastShearDay = day;
             hadShearsInChest = false;
             hadBannerInChest = false;
+            nextChestShearTriggerTime = 0L;
         }
 
         TaskType nextTask = findTaskType(world);
@@ -111,6 +113,13 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (dayChanged && nextTask == TaskType.SHEARS && nextCheckTime == 0L) {
             nextCheckTime = world.getTime();
+        }
+
+        if (nextTask == TaskType.SHEARS && hasShearsInChest(world)) {
+            if (world.getTime() >= nextChestShearTriggerTime) {
+                hadShearsInChest = false;
+                nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
+            }
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
