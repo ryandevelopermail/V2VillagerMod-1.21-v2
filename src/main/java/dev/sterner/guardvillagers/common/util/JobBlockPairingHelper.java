@@ -24,13 +24,18 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import net.minecraft.world.event.GameEvent;
 import net.minecraft.world.border.WorldBorder;
+import net.minecraft.world.chunk.ChunkStatus;
+import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -206,12 +211,13 @@ public final class JobBlockPairingHelper {
         }
 
         if (villager.getVillagerData().getProfession() == VillagerProfession.FARMER) {
-            Optional<BlockPos> bannerPos = findNearbyBanner(world, jobPos, 16);
-            bannerPos.ifPresent(pos -> {
-                if (pairFarmerWithBanner(world, villager, pos)) {
-                    LOGGER.info("Banner {} paired with Farmer {} on refresh", pos.toShortString(), villager.getUuidAsString());
+            Collection<BlockPos> bannerPositions = findBannersWithinRange(world, jobPos, 300);
+            for (BlockPos bannerPos : bannerPositions) {
+                BlockState bannerState = world.getBlockState(bannerPos);
+                if (isBannerOnFence(world, bannerPos, bannerState)) {
+                    handleBannerPlacement(world, bannerPos, bannerState);
                 }
-            });
+            }
         }
     }
 
@@ -315,17 +321,29 @@ public final class JobBlockPairingHelper {
         return Optional.empty();
     }
 
-    private static Optional<BlockPos> findNearbyBanner(ServerWorld world, BlockPos center, int range) {
-        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
-            BlockState state = world.getBlockState(checkPos);
-            if (!state.isIn(BlockTags.BANNERS)) {
-                continue;
-            }
-            if (isBannerOnFence(world, checkPos, state)) {
-                return Optional.of(checkPos.toImmutable());
+    private static Collection<BlockPos> findBannersWithinRange(ServerWorld world, BlockPos center, int range) {
+        int chunkRadius = MathHelper.ceil(range / 16.0D);
+        int centerChunkX = center.getX() >> 4;
+        int centerChunkZ = center.getZ() >> 4;
+        Collection<BlockPos> banners = new ArrayList<>();
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                WorldChunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+                for (BlockPos pos : chunk.getBlockEntities().keySet()) {
+                    if (!center.isWithinDistance(pos, range)) {
+                        continue;
+                    }
+                    BlockState state = world.getBlockState(pos);
+                    if (state.isIn(BlockTags.BANNERS)) {
+                        banners.add(pos.toImmutable());
+                    }
+                }
             }
         }
-        return Optional.empty();
+        return banners;
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
