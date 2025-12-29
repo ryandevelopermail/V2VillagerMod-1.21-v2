@@ -123,7 +123,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
             stage = Stage.GO_TO_SHEEP;
-            moveTo(sheepTargets.get(sheepTargetIndex));
+            moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
             return;
         }
 
