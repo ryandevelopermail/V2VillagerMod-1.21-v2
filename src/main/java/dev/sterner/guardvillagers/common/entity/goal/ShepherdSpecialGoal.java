@@ -241,7 +241,11 @@ public class ShepherdSpecialGoal extends Goal {
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
-                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                    if (taskType == TaskType.SHEARS) {
+                        scheduleNextShearCheck(world, "after shearing run");
+                    } else {
+                        nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                    }
                     stage = Stage.DONE;
                 } else {
                     moveTo(chestPos);
@@ -448,6 +452,16 @@ public class ShepherdSpecialGoal extends Goal {
 
     private long nextRandomCheckInterval() {
         return CHECK_INTERVAL_MIN_TICKS + villager.getRandom().nextInt(CHECK_INTERVAL_VARIANCE_TICKS + 1);
+    }
+
+    private void scheduleNextShearCheck(ServerWorld world, String reason) {
+        long interval = nextRandomCheckInterval();
+        nextCheckTime = world.getTime() + interval;
+        LOGGER.info("Shepherd {} scheduled next shearing session in {} ticks ({} min) {}",
+                villager.getUuidAsString(),
+                interval,
+                String.format("%.2f", interval / 1200.0D),
+                reason);
     }
 
     private Item woolFromColor(DyeColor color) {
