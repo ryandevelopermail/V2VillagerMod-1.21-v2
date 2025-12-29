@@ -280,7 +280,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private TaskType findTaskType(ServerWorld world) {
-        boolean sheepNearby = countSheepNearJob(world) > 0;
+        boolean sheepNearby = countSheepNearby(world) > 0;
         Inventory inventory = getChestInventory(world).orElse(null);
         if (sheepNearby) {
             if (inventory == null) {
