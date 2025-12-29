@@ -36,8 +36,11 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ShepherdSpecialGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
     private static final int CHECK_INTERVAL_TICKS = 200;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
@@ -336,6 +339,13 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void shearSheep(ServerWorld world, SheepEntity sheep) {
+        LOGGER.info("Shepherd {} attempting to shear sheep {} at {} (alive={}, shearable={}, sheared={})",
+                villager.getUuidAsString(),
+                sheep.getUuidAsString(),
+                sheep.getBlockPos().toShortString(),
+                sheep.isAlive(),
+                sheep.isShearable(),
+                sheep.isSheared());
         if (!sheep.isAlive() || !sheep.isShearable()) {
             return;
         }
@@ -346,6 +356,9 @@ public class ShepherdSpecialGoal extends Goal {
 
         ItemStack shears = villager.getMainHandStack();
         if (!shears.isOf(Items.SHEARS)) {
+            LOGGER.info("Shepherd {} has no shears in hand to shear sheep {}",
+                    villager.getUuidAsString(),
+                    sheep.getUuidAsString());
             return;
         }
 
@@ -354,6 +367,11 @@ public class ShepherdSpecialGoal extends Goal {
         int dropCount = 1 + sheep.getRandom().nextInt(3);
         ItemStack woolStack = new ItemStack(woolFromColor(sheep.getColor()), dropCount);
         sheep.dropStack(woolStack);
+        LOGGER.info("Shepherd {} sheared sheep {} at {} (now sheared={})",
+                villager.getUuidAsString(),
+                sheep.getUuidAsString(),
+                sheep.getBlockPos().toShortString(),
+                sheep.isSheared());
         shears.damage(1, villager, EquipmentSlot.MAINHAND);
         if (shears.isEmpty()) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
