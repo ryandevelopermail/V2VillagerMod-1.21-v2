@@ -87,9 +87,6 @@ public class ShepherdSpecialGoal extends Goal {
         if (jobPos == null || chestPos == null) {
             return false;
         }
-        if (!world.isDay()) {
-            return false;
-        }
         long day = world.getTimeOfDay() / 24000L;
         boolean dayChanged = day != lastShearDay;
         if (dayChanged) {
@@ -106,8 +103,12 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (dayChanged && nextTask == TaskType.SHEARS) {
-            nextCheckTime = world.getTime() + nextRandomCheckInterval();
+        if (nextTask != TaskType.SHEARS && !world.isDay()) {
+            return false;
+        }
+
+        if (dayChanged && nextTask == TaskType.SHEARS && nextCheckTime == 0L) {
+            nextCheckTime = world.getTime();
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
@@ -116,6 +117,10 @@ public class ShepherdSpecialGoal extends Goal {
         } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
             hadBannerInChest = true;
             nextCheckTime = 0L;
+        }
+
+        if (nextTask == TaskType.SHEARS && nextCheckTime == 0L && hasShearsInInventoryOrHand()) {
+            nextCheckTime = world.getTime();
         }
 
         if (world.getTime() < nextCheckTime) {
@@ -216,6 +221,7 @@ public class ShepherdSpecialGoal extends Goal {
                     if (nextTarget != null) {
                         moveTo(nextTarget.getBlockPos());
                     } else {
+                        scheduleNextShearCheck(world, "after shearing run");
                         stage = Stage.RETURN_TO_CHEST;
                         moveTo(chestPos);
                     }
@@ -241,9 +247,7 @@ public class ShepherdSpecialGoal extends Goal {
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
-                    if (taskType == TaskType.SHEARS) {
-                        scheduleNextShearCheck(world, "after shearing run");
-                    } else {
+                    if (taskType != TaskType.SHEARS) {
                         nextCheckTime = world.getTime() + nextRandomCheckInterval();
                     }
                     stage = Stage.DONE;
