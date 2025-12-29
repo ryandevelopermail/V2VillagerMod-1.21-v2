@@ -129,7 +129,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (nextTask == TaskType.SHEARS) {
-            int sheepCount = countSheepNearJob(world);
+            int sheepCount = countSheepNearby(world);
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             if (sheepCount < 1) {
                 return false;
@@ -356,8 +356,8 @@ public class ShepherdSpecialGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
-    private int countSheepNearJob(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SHEEP_SCAN_RANGE);
+    private int countSheepNearby(ServerWorld world) {
+        Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
         List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box, SheepEntity::isAlive);
         return sheep.size();
     }
@@ -393,7 +393,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private List<SheepEntity> findSheepTargets(ServerWorld world) {
-        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(jobPos).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
+        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
         sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
         return new ArrayList<>(sheep);
     }
