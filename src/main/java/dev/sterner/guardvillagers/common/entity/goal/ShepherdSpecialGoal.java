@@ -40,7 +40,8 @@ import org.slf4j.LoggerFactory;
 
 public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
-    private static final int CHECK_INTERVAL_TICKS = 200;
+    private static final int CHECK_INTERVAL_MIN_TICKS = 1200;
+    private static final int CHECK_INTERVAL_VARIANCE_TICKS = 1200;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 100;
@@ -53,6 +54,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos chestPos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
+    private long lastShearDay = -1L;
     private TaskType taskType;
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
@@ -86,13 +88,19 @@ public class ShepherdSpecialGoal extends Goal {
         if (!world.isDay()) {
             return false;
         }
+        long day = world.getTimeOfDay() / 24000L;
+        if (day != lastShearDay) {
+            lastShearDay = day;
+            nextCheckTime = 0L;
+        }
+
         if (world.getTime() < nextCheckTime) {
             return false;
         }
 
         TaskType nextTask = findTaskType(world);
         if (nextTask == null) {
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
             return false;
         }
 
@@ -114,7 +122,7 @@ public class ShepherdSpecialGoal extends Goal {
 
         carriedItem = takeItemFromChest(world, taskType);
         if (carriedItem.isEmpty()) {
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
             stage = Stage.DONE;
             return;
         }
@@ -202,7 +210,7 @@ public class ShepherdSpecialGoal extends Goal {
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
-                    nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
                     stage = Stage.DONE;
                 } else {
                     moveTo(chestPos);
@@ -361,7 +369,11 @@ public class ShepherdSpecialGoal extends Goal {
         sheep.playSound(SoundEvents.ENTITY_SHEEP_SHEAR, 1.0F, 1.0F);
         int dropCount = 1 + sheep.getRandom().nextInt(3);
         ItemStack woolStack = new ItemStack(woolFromColor(sheep.getColor()), dropCount);
-        sheep.dropStack(woolStack);
+        ItemStack remaining = insertStack(villager.getInventory(), woolStack);
+        if (!remaining.isEmpty()) {
+            sheep.dropStack(remaining);
+        }
+        villager.getInventory().markDirty();
         LOGGER.info("Shepherd {} sheared sheep {} at {} (now sheared={})",
                 villager.getUuidAsString(),
                 sheep.getUuidAsString(),
@@ -382,6 +394,10 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         villager.getInventory().markDirty();
+    }
+
+    private long nextRandomCheckInterval() {
+        return CHECK_INTERVAL_MIN_TICKS + villager.getRandom().nextInt(CHECK_INTERVAL_VARIANCE_TICKS + 1);
     }
 
     private Item woolFromColor(DyeColor color) {
