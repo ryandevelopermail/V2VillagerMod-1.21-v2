@@ -127,6 +127,11 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
+        if (nextTask == TaskType.SHEARS && !hasShearsInChest(world)) {
+            addShearsToChest(world);
+            hadShearsInChest = true;
+        }
+
         taskType = nextTask;
         return true;
     }
@@ -345,6 +350,19 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         return ItemStack.EMPTY;
+    }
+
+    private void addShearsToChest(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+
+        ItemStack shears = new ItemStack(Items.SHEARS, 1);
+        ItemStack remaining = insertStack(inventory, shears);
+        if (remaining.isEmpty()) {
+            inventory.markDirty();
+        }
     }
 
     private void depositSpecialItems(ServerWorld world) {
