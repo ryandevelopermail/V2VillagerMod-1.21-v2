@@ -105,7 +105,7 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask == TaskType.SHEARS && !hadShearsInChest) {
+        if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
             hadShearsInChest = true;
             nextCheckTime = 0L;
         } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
@@ -240,7 +240,7 @@ public class ShepherdSpecialGoal extends Goal {
             return null;
         }
 
-        if (hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS))) {
+        if (hasShearsInChestOrInventory(inventory)) {
             return TaskType.SHEARS;
         }
 
@@ -259,6 +259,23 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private boolean hasShearsInChestOrInventory(Inventory chestInventory) {
+        if (hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))) {
+            return true;
+        }
+        Inventory villagerInventory = villager.getInventory();
+        return hasMatchingItem(villagerInventory, stack -> stack.isOf(Items.SHEARS))
+                || villager.getMainHandStack().isOf(Items.SHEARS);
+    }
+
+    private boolean hasShearsInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return false;
+        }
+        return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS));
     }
 
     private ItemStack takeItemFromChest(ServerWorld world, TaskType taskType) {
