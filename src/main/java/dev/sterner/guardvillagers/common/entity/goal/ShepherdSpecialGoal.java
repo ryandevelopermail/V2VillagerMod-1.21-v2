@@ -259,7 +259,7 @@ public class ShepherdSpecialGoal extends Goal {
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return null;
+            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
