@@ -127,9 +127,8 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask == TaskType.SHEARS && !hasShearsInChest(world)) {
-            addShearsToChest(world);
-            hadShearsInChest = true;
+        if (nextTask == TaskType.SHEARS && countShearableSheepNearJob(world) >= 3) {
+            nextCheckTime = world.getTime();
         }
 
         taskType = nextTask;
@@ -352,17 +351,11 @@ public class ShepherdSpecialGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
-    private void addShearsToChest(ServerWorld world) {
-        Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) {
-            return;
-        }
-
-        ItemStack shears = new ItemStack(Items.SHEARS, 1);
-        ItemStack remaining = insertStack(inventory, shears);
-        if (remaining.isEmpty()) {
-            inventory.markDirty();
-        }
+    private int countShearableSheepNearJob(ServerWorld world) {
+        Box box = new Box(jobPos).expand(SHEEP_SCAN_RANGE);
+        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box,
+                entity -> entity.isAlive() && entity.isShearable());
+        return sheep.size();
     }
 
     private void depositSpecialItems(ServerWorld world) {
