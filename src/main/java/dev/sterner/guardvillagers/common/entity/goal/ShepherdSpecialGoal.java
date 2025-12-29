@@ -1,0 +1,483 @@
+package dev.sterner.guardvillagers.common.entity.goal;
+
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.block.FenceBlock;
+import net.minecraft.block.FenceGateBlock;
+import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.passive.SheepEntity;
+import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.GlobalPos;
+import net.minecraft.village.VillagerProfession;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Predicate;
+
+public class ShepherdSpecialGoal extends Goal {
+    private static final int CHECK_INTERVAL_TICKS = 200;
+    private static final double MOVE_SPEED = 0.6D;
+    private static final double TARGET_REACH_SQUARED = 4.0D;
+    private static final int SHEEP_SCAN_RANGE = 100;
+    private static final int PEN_SCAN_RANGE = 100;
+    private static final int PEN_FENCE_RANGE = 16;
+    private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+
+    private final VillagerEntity villager;
+    private BlockPos jobPos;
+    private BlockPos chestPos;
+    private Stage stage = Stage.IDLE;
+    private long nextCheckTime;
+    private TaskType taskType;
+    private List<BlockPos> sheepTargets = new ArrayList<>();
+    private int sheepTargetIndex;
+    private BlockPos penTarget;
+    private ItemStack carriedItem = ItemStack.EMPTY;
+
+    public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        this.villager = villager;
+        setTargets(jobPos, chestPos);
+        setControls(EnumSet.of(Control.MOVE));
+    }
+
+    public void setTargets(BlockPos jobPos, BlockPos chestPos) {
+        this.jobPos = jobPos.toImmutable();
+        this.chestPos = chestPos.toImmutable();
+        this.stage = Stage.IDLE;
+    }
+
+    public void requestImmediateCheck() {
+        nextCheckTime = 0L;
+    }
+
+    @Override
+    public boolean canStart() {
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            return false;
+        }
+        if (jobPos == null || chestPos == null) {
+            return false;
+        }
+        if (!world.isDay()) {
+            return false;
+        }
+        if (world.getTime() < nextCheckTime) {
+            return false;
+        }
+
+        TaskType nextTask = findTaskType(world);
+        if (nextTask == null) {
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            return false;
+        }
+
+        taskType = nextTask;
+        return true;
+    }
+
+    @Override
+    public boolean shouldContinue() {
+        return stage != Stage.DONE && villager.isAlive();
+    }
+
+    @Override
+    public void start() {
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            stage = Stage.DONE;
+            return;
+        }
+
+        carriedItem = takeItemFromChest(world, taskType);
+        if (carriedItem.isEmpty()) {
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            stage = Stage.DONE;
+            return;
+        }
+
+        if (taskType == TaskType.SHEARS) {
+            sheepTargets = findSheepTargets(world);
+            sheepTargetIndex = 0;
+            if (sheepTargets.isEmpty()) {
+                stage = Stage.RETURN_TO_CHEST;
+                moveTo(chestPos);
+                return;
+            }
+            stage = Stage.GO_TO_SHEEP;
+            moveTo(sheepTargets.get(sheepTargetIndex));
+            return;
+        }
+
+        penTarget = findNearestPenTarget(world);
+        if (penTarget == null) {
+            stage = Stage.RETURN_TO_CHEST;
+            moveTo(chestPos);
+            return;
+        }
+        stage = Stage.GO_TO_PEN;
+        moveTo(penTarget);
+    }
+
+    @Override
+    public void stop() {
+        villager.getNavigation().stop();
+        stage = Stage.DONE;
+        taskType = null;
+        sheepTargets = new ArrayList<>();
+        sheepTargetIndex = 0;
+        penTarget = null;
+        carriedItem = ItemStack.EMPTY;
+    }
+
+    @Override
+    public void tick() {
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            stage = Stage.DONE;
+            return;
+        }
+
+        switch (stage) {
+            case GO_TO_SHEEP -> {
+                if (sheepTargetIndex >= sheepTargets.size()) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                    return;
+                }
+
+                BlockPos target = sheepTargets.get(sheepTargetIndex);
+                if (isNear(target)) {
+                    sheepTargetIndex++;
+                    if (sheepTargetIndex < sheepTargets.size()) {
+                        moveTo(sheepTargets.get(sheepTargetIndex));
+                    } else {
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                    }
+                } else {
+                    moveTo(target);
+                }
+            }
+            case GO_TO_PEN -> {
+                if (penTarget == null) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                    return;
+                }
+
+                if (isNear(penTarget)) {
+                    triggerBannerPairing(world, penTarget);
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                } else {
+                    moveTo(penTarget);
+                }
+            }
+            case RETURN_TO_CHEST -> {
+                if (isNear(chestPos)) {
+                    depositSpecialItems(world);
+                    nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                    stage = Stage.DONE;
+                } else {
+                    moveTo(chestPos);
+                }
+            }
+            case IDLE, DONE -> {
+            }
+        }
+    }
+
+    private TaskType findTaskType(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return null;
+        }
+
+        if (hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS))) {
+            return TaskType.SHEARS;
+        }
+
+        if (hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
+            return TaskType.BANNER;
+        }
+
+        return null;
+    }
+
+    private boolean hasMatchingItem(Inventory inventory, Predicate<ItemStack> matcher) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && matcher.test(stack)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private ItemStack takeItemFromChest(ServerWorld world, TaskType taskType) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return ItemStack.EMPTY;
+        }
+
+        Predicate<ItemStack> matcher = taskType == TaskType.SHEARS
+                ? stack -> stack.isOf(Items.SHEARS)
+                : stack -> stack.isIn(ItemTags.BANNERS);
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !matcher.test(stack)) {
+                continue;
+            }
+
+            ItemStack extracted = stack.split(1);
+            ItemStack remaining = insertStack(villager.getInventory(), extracted);
+            if (!remaining.isEmpty()) {
+                stack.increment(remaining.getCount());
+                inventory.setStack(slot, stack);
+                return ItemStack.EMPTY;
+            }
+
+            inventory.setStack(slot, stack);
+            inventory.markDirty();
+            villager.getInventory().markDirty();
+            return extracted;
+        }
+
+        return ItemStack.EMPTY;
+    }
+
+    private void depositSpecialItems(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return;
+        }
+
+        Inventory villagerInventory = villager.getInventory();
+        for (int slot = 0; slot < villagerInventory.size(); slot++) {
+            ItemStack stack = villagerInventory.getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            if (!(stack.isOf(Items.SHEARS) || stack.isIn(ItemTags.BANNERS))) {
+                continue;
+            }
+
+            ItemStack remaining = insertStack(chestInventory, stack);
+            villagerInventory.setStack(slot, remaining);
+        }
+
+        villagerInventory.markDirty();
+        chestInventory.markDirty();
+    }
+
+    private List<BlockPos> findSheepTargets(ServerWorld world) {
+        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
+        sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
+        List<BlockPos> positions = new ArrayList<>();
+        for (SheepEntity entity : sheep) {
+            positions.add(entity.getBlockPos().toImmutable());
+        }
+        return positions;
+    }
+
+    private BlockPos findNearestPenTarget(ServerWorld world) {
+        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
+        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            BlockState state = world.getBlockState(pos);
+            if (!(state.getBlock() instanceof FenceGateBlock)) {
+                continue;
+            }
+
+            BlockPos insidePos = getPenInterior(world, pos, state);
+            if (insidePos == null) {
+                continue;
+            }
+
+            if (!isInsideFencePen(world, insidePos)) {
+                continue;
+            }
+
+            if (hasBannerInPen(world, insidePos)) {
+                continue;
+            }
+
+            double distance = villager.squaredDistanceTo(insidePos.getX() + 0.5D, insidePos.getY() + 0.5D, insidePos.getZ() + 0.5D);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = insidePos.toImmutable();
+            }
+        }
+
+        return nearest;
+    }
+
+    private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
+        if (state.contains(FenceGateBlock.FACING)) {
+            Direction facing = state.get(FenceGateBlock.FACING);
+            BlockPos front = gatePos.offset(facing);
+            BlockPos back = gatePos.offset(facing.getOpposite());
+            if (isInsideFencePen(world, front)) {
+                return front;
+            }
+            if (isInsideFencePen(world, back)) {
+                return back;
+            }
+        }
+        return null;
+    }
+
+    private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
+        BlockPos start = penPos.add(-PEN_FENCE_RANGE, -PEN_FENCE_RANGE, -PEN_FENCE_RANGE);
+        BlockPos end = penPos.add(PEN_FENCE_RANGE, PEN_FENCE_RANGE, PEN_FENCE_RANGE);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (!penPos.isWithinDistance(pos, PEN_FENCE_RANGE)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(pos);
+            if (!state.isIn(BlockTags.BANNERS)) {
+                continue;
+            }
+            if (isInsideFencePen(world, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isInsideFencePen(ServerWorld world, BlockPos pos) {
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+            if (!hasFenceInDirection(world, pos, direction, PEN_FENCE_RANGE)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
+        for (int i = 1; i <= maxDistance; i++) {
+            BlockPos pos = start.offset(direction, i);
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(FARMER_BANNER_PAIR_RANGE), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)) {
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isEmpty()) {
+                continue;
+            }
+
+            GlobalPos globalPos = jobSite.get();
+            if (!globalPos.dimension().equals(world.getRegistryKey())) {
+                continue;
+            }
+
+            BlockPos farmerJobPos = globalPos.pos();
+            if (!world.getBlockState(farmerJobPos).isOf(Blocks.COMPOSTER)) {
+                continue;
+            }
+
+            if (JobBlockPairingHelper.findNearbyChest(world, farmerJobPos).isEmpty()) {
+                continue;
+            }
+
+            JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
+            FarmerBannerTracker.setBanner(villager, bannerPos);
+        }
+    }
+
+    private Optional<Inventory> getChestInventory(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return Optional.empty();
+        }
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return Optional.ofNullable(inventory);
+    }
+
+    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+
+        return remaining;
+    }
+
+    private void moveTo(BlockPos target) {
+        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+    }
+
+    private boolean isNear(BlockPos target) {
+        return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    private enum Stage {
+        IDLE,
+        GO_TO_SHEEP,
+        GO_TO_PEN,
+        RETURN_TO_CHEST,
+        DONE
+    }
+
+    private enum TaskType {
+        SHEARS,
+        BANNER
+    }
+}
