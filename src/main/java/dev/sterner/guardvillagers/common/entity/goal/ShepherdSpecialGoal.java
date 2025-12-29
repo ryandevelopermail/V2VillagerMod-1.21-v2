@@ -57,6 +57,7 @@ public class ShepherdSpecialGoal extends Goal {
     private long nextCheckTime;
     private long nextSheepSensorCheckTime;
     private long nextChestShearTriggerTime;
+    private int lastShearsInChestCount;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
     private boolean hadBannerInChest;
@@ -97,6 +98,7 @@ public class ShepherdSpecialGoal extends Goal {
             hadShearsInChest = false;
             hadBannerInChest = false;
             nextChestShearTriggerTime = 0L;
+            lastShearsInChestCount = 0;
         }
 
         TaskType nextTask = findTaskType(world);
@@ -115,15 +117,25 @@ public class ShepherdSpecialGoal extends Goal {
             nextCheckTime = world.getTime();
         }
 
-        if (nextTask == TaskType.SHEARS && hasShearsInChest(world)) {
+        int shearsInChestCount = countShearsInChest(world);
+        boolean hasShearsInChest = shearsInChestCount > 0;
+        boolean shearsAddedToChest = shearsInChestCount > lastShearsInChestCount;
+
+        if (nextTask == TaskType.SHEARS && hasShearsInChest) {
+            if (shearsAddedToChest) {
+                triggerShearsPlacedInChest(world);
+                hadShearsInChest = false;
+            }
             if (world.getTime() >= nextChestShearTriggerTime) {
                 hadShearsInChest = false;
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
             }
+            lastShearsInChestCount = countShearsInChest(world);
+        } else if (!hasShearsInChest) {
+            lastShearsInChestCount = 0;
         }
 
-        if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
-            triggerShearsPlacedInChest(world);
+        if (nextTask == TaskType.SHEARS && hasShearsInChest && !hadShearsInChest) {
             hadShearsInChest = true;
             if (nextChestShearTriggerTime == 0L) {
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
@@ -140,11 +152,11 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (world.getTime() >= nextSheepSensorCheckTime && (stage == Stage.IDLE || stage == Stage.DONE)) {
             nextSheepSensorCheckTime = world.getTime() + SHEEP_SENSOR_INTERVAL_TICKS;
-            if (nextCheckTime > world.getTime()
-                    && hasShearableSheepNearby(world)
-                    && (hasShearsInInventoryOrHand() || hasShearsInChest(world))) {
-                nextCheckTime = 0L;
-            }
+        if (nextCheckTime > world.getTime()
+                && hasShearableSheepNearby(world)
+                && (hasShearsInInventoryOrHand() || hasShearsInChest)) {
+            nextCheckTime = 0L;
+        }
         }
 
         if (world.getTime() < nextCheckTime) {
@@ -153,7 +165,7 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (nextTask == TaskType.SHEARS) {
             int sheepCount = countSheepNearby(world);
-            boolean needsShearsFromChest = !hasShearsInInventoryOrHand() && hasShearsInChest(world);
+            boolean needsShearsFromChest = !hasShearsInInventoryOrHand() && hasShearsInChest;
             if (sheepCount < 1 && !needsShearsFromChest) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 return false;
@@ -337,6 +349,21 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
         return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS));
+    }
+
+    private int countShearsInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(Items.SHEARS)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private ItemStack takeItemFromChest(ServerWorld world, TaskType taskType) {
