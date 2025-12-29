@@ -247,7 +247,8 @@ public class ShepherdSpecialGoal extends Goal {
             return ItemStack.EMPTY;
         }
 
-        Predicate<ItemStack> matcher = taskType == TaskType.SHEARS
+        boolean wantsShears = taskType == TaskType.SHEARS;
+        Predicate<ItemStack> matcher = wantsShears
                 ? stack -> stack.isOf(Items.SHEARS)
                 : stack -> stack.isIn(ItemTags.BANNERS);
 
@@ -258,6 +259,13 @@ public class ShepherdSpecialGoal extends Goal {
             }
 
             ItemStack extracted = stack.split(1);
+            if (wantsShears && villager.getMainHandStack().isEmpty()) {
+                villager.setStackInHand(Hand.MAIN_HAND, extracted);
+                inventory.setStack(slot, stack);
+                inventory.markDirty();
+                return extracted;
+            }
+
             ItemStack remaining = insertStack(villager.getInventory(), extracted);
             if (!remaining.isEmpty()) {
                 stack.increment(remaining.getCount());
