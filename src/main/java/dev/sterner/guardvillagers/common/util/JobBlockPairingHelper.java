@@ -9,6 +9,8 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.block.WallBannerBlock;
+import net.minecraft.block.entity.BannerBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -332,12 +334,12 @@ public final class JobBlockPairingHelper {
                 if (chunk == null) {
                     continue;
                 }
-                for (BlockPos pos : chunk.getBlockEntities().keySet()) {
+                for (BlockPos pos : chunk.getBlockEntityPositions()) {
                     if (!center.isWithinDistance(pos, range)) {
                         continue;
                     }
-                    BlockState state = world.getBlockState(pos);
-                    if (state.isIn(BlockTags.BANNERS)) {
+                    BlockEntity blockEntity = chunk.getBlockEntity(pos);
+                    if (blockEntity instanceof BannerBlockEntity) {
                         banners.add(pos.toImmutable());
                     }
                 }
