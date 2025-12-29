@@ -21,6 +21,7 @@ import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
+import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -349,7 +350,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         sheep.setSheared(true);
-        sheep.playSound(sheep.getShearSound(), 1.0F, 1.0F);
+        sheep.playSound(SoundEvents.ENTITY_SHEEP_SHEAR, 1.0F, 1.0F);
         int dropCount = 1 + sheep.getRandom().nextInt(3);
         ItemStack woolStack = new ItemStack(woolFromColor(sheep.getColor()), dropCount);
         sheep.dropStack(woolStack);
