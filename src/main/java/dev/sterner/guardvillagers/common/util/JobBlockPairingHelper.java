@@ -17,6 +17,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.Registries;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -178,6 +179,36 @@ public final class JobBlockPairingHelper {
         LOGGER.info("Banner {} paired with {} Farmer(s)", bannerPos.toShortString(), pairedCount);
     }
 
+    public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
+        if (!isEmployedVillager(villager)) {
+            return;
+        }
+
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            return;
+        }
+
+        BlockPos jobPos = globalPos.pos();
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
+
+        if (nearbyChest.isPresent()) {
+            Optional<BlockPos> craftingTablePos = findNearbyCraftingTable(world, jobPos);
+            craftingTablePos.ifPresent(pos -> VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
+        }
+
+        if (villager.getVillagerData().getProfession() == VillagerProfession.FARMER) {
+            Optional<BlockPos> bannerPos = findNearbyBanner(world, jobPos, 16);
+            bannerPos.ifPresent(pos -> pairFarmerWithBanner(world, villager, pos));
+        }
+    }
+
     private static boolean pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
         Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSite.isEmpty()) {
@@ -251,6 +282,29 @@ public final class JobBlockPairingHelper {
             }
         }
         return false;
+    }
+
+    private static Optional<BlockPos> findNearbyCraftingTable(ServerWorld world, BlockPos center) {
+        int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
+        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isCraftingTable(world.getBlockState(checkPos))) {
+                return Optional.of(checkPos.toImmutable());
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static Optional<BlockPos> findNearbyBanner(ServerWorld world, BlockPos center, int range) {
+        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            BlockState state = world.getBlockState(checkPos);
+            if (!state.isIn(BlockTags.BANNERS)) {
+                continue;
+            }
+            if (isBannerOnFence(world, checkPos, state)) {
+                return Optional.of(checkPos.toImmutable());
+            }
+        }
+        return Optional.empty();
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {

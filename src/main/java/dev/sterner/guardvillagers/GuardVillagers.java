@@ -7,6 +7,7 @@ import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviors;
@@ -121,29 +122,34 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
-            if (entity instanceof VillagerEntity villagerEntity && villagerEntity.isNatural()) {
-                var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
-                if (world.random.nextFloat() < spawnChance) {
-                    GuardEntity guardEntity = GUARD_VILLAGER.create(world);
-                    guardEntity.spawnWithArmor= true;
-                    guardEntity.initialize(world, world.getLocalDifficulty(villagerEntity.getBlockPos()), SpawnReason.NATURAL, null);
-                    guardEntity.refreshPositionAndAngles(villagerEntity.getBlockPos(), 0.0f, 0.0f);
+            if (entity instanceof VillagerEntity villagerEntity) {
+                if (world instanceof ServerWorld serverWorld) {
+                    JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);
+                }
+                if (villagerEntity.isNatural()) {
+                    var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
+                    if (world.random.nextFloat() < spawnChance) {
+                        GuardEntity guardEntity = GUARD_VILLAGER.create(world);
+                        guardEntity.spawnWithArmor = true;
+                        guardEntity.initialize(world, world.getLocalDifficulty(villagerEntity.getBlockPos()), SpawnReason.NATURAL, null);
+                        guardEntity.refreshPositionAndAngles(villagerEntity.getBlockPos(), 0.0f, 0.0f);
 
-                    int i = GuardEntity.getRandomTypeForBiome(guardEntity.getWorld(), guardEntity.getBlockPos());
-                    guardEntity.setGuardVariant(i);
-                    guardEntity.setPersistent();
-                    guardEntity.setCustomName(villagerEntity.getCustomName());
-                    guardEntity.setCustomNameVisible(villagerEntity.isCustomNameVisible());
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
-                    guardEntity.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+                        int i = GuardEntity.getRandomTypeForBiome(guardEntity.getWorld(), guardEntity.getBlockPos());
+                        guardEntity.setGuardVariant(i);
+                        guardEntity.setPersistent();
+                        guardEntity.setCustomName(villagerEntity.getCustomName());
+                        guardEntity.setCustomNameVisible(villagerEntity.isCustomNameVisible());
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
+                        guardEntity.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
 
-                    world.spawnEntityAndPassengers(guardEntity);
-                    if (world instanceof ServerWorld serverWorld) {
-                        VillageGuardStandManager.handleGuardSpawn(serverWorld, guardEntity, villagerEntity);
+                        world.spawnEntityAndPassengers(guardEntity);
+                        if (world instanceof ServerWorld serverWorld) {
+                            VillageGuardStandManager.handleGuardSpawn(serverWorld, guardEntity, villagerEntity);
+                        }
                     }
                 }
             }
