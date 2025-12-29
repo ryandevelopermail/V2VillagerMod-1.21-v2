@@ -205,7 +205,11 @@ public final class JobBlockPairingHelper {
 
         if (villager.getVillagerData().getProfession() == VillagerProfession.FARMER) {
             Optional<BlockPos> bannerPos = findNearbyBanner(world, jobPos, 16);
-            bannerPos.ifPresent(pos -> pairFarmerWithBanner(world, villager, pos));
+            bannerPos.ifPresent(pos -> {
+                if (pairFarmerWithBanner(world, villager, pos)) {
+                    LOGGER.info("Banner {} paired with Farmer {} on refresh", pos.toShortString(), villager.getUuidAsString());
+                }
+            });
         }
     }
 
