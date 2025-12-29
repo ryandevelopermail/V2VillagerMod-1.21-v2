@@ -42,6 +42,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
     private static final int SHEAR_CHECK_INTERVAL_TICKS = 2400;
     private static final int SHEAR_CHECK_INTERVAL_VARIANCE_TICKS = 1200;
+    private static final int SHEEP_SENSOR_INTERVAL_TICKS = 80;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
@@ -54,6 +55,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos chestPos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
+    private long nextSheepSensorCheckTime;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
     private boolean hadBannerInChest;
@@ -121,6 +123,15 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (nextTask == TaskType.SHEARS && nextCheckTime == 0L && hasShearsInInventoryOrHand()) {
             nextCheckTime = world.getTime();
+        }
+
+        if (world.getTime() >= nextSheepSensorCheckTime && (stage == Stage.IDLE || stage == Stage.DONE)) {
+            nextSheepSensorCheckTime = world.getTime() + SHEEP_SENSOR_INTERVAL_TICKS;
+            if (nextCheckTime > world.getTime()
+                    && hasShearableSheepNearby(world)
+                    && (hasShearsInInventoryOrHand() || hasShearsInChest(world))) {
+                nextCheckTime = 0L;
+            }
         }
 
         if (world.getTime() < nextCheckTime) {
@@ -368,6 +379,11 @@ public class ShepherdSpecialGoal extends Goal {
         Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
         List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box, SheepEntity::isAlive);
         return sheep.size();
+    }
+
+    private boolean hasShearableSheepNearby(ServerWorld world) {
+        Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
+        return !world.getEntitiesByClass(SheepEntity.class, box, entity -> entity.isAlive() && entity.isShearable()).isEmpty();
     }
 
     private void depositSpecialItems(ServerWorld world) {
