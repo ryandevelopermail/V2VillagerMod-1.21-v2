@@ -123,7 +123,11 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest(world) && !hadShearsInChest) {
+            triggerShearsPlacedInChest(world);
             hadShearsInChest = true;
+            if (nextChestShearTriggerTime == 0L) {
+                nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
+            }
             nextCheckTime = 0L;
         } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
             hadBannerInChest = true;
@@ -492,6 +496,19 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         villager.getInventory().markDirty();
+    }
+
+    private void triggerShearsPlacedInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return;
+        }
+
+        ItemStack shears = new ItemStack(Items.SHEARS);
+        ItemStack remaining = insertStack(chestInventory, shears);
+        if (remaining.isEmpty()) {
+            chestInventory.markDirty();
+        }
     }
 
     private long nextRandomCheckInterval() {
