@@ -233,7 +233,7 @@ public final class JobBlockPairingHelper {
     }
 
     private static boolean isInsideFencePen(ServerWorld world, BlockPos bannerPos) {
-        int maxDistance = 6;
+        int maxDistance = 16;
         for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
             if (!hasFenceInDirection(world, bannerPos, direction, maxDistance)) {
                 return false;
