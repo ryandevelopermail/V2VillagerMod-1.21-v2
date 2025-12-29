@@ -34,8 +34,7 @@ public class ShepherdCraftingGoal extends Goal {
     private int dailyCraftLimit;
     private int craftedToday;
     private int lastCheckCount;
-    private boolean guaranteedCraftPending;
-    private long guaranteedCraftDay = -1L;
+    private boolean immediateCheckPending;
 
     public ShepherdCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -73,14 +72,14 @@ public class ShepherdCraftingGoal extends Goal {
             return false;
         }
 
-        boolean skipThrottle = guaranteedCraftPending && guaranteedCraftDay == world.getTimeOfDay() / 24000L;
-        if (!skipThrottle && world.getTime() < nextCheckTime) {
+        if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
 
         lastCheckCount = countCraftableRecipes(world);
         CraftingCheckLogger.report(world, "Shepherd", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        immediateCheckPending = false;
         return lastCheckCount > 0;
     }
 
@@ -131,15 +130,13 @@ public class ShepherdCraftingGoal extends Goal {
             lastCraftDay = day;
             dailyCraftLimit = 2 + villager.getRandom().nextInt(3);
             craftedToday = 0;
-            guaranteedCraftPending = false;
-            guaranteedCraftDay = day;
+            immediateCheckPending = false;
         }
     }
 
     public void requestImmediateCraft(ServerWorld world) {
         refreshDailyLimit(world);
-        guaranteedCraftPending = true;
-        guaranteedCraftDay = world.getTimeOfDay() / 24000L;
+        immediateCheckPending = true;
         nextCheckTime = 0L;
     }
 
@@ -167,7 +164,6 @@ public class ShepherdCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            guaranteedCraftPending = false;
             CraftingCheckLogger.report(world, "Shepherd", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
