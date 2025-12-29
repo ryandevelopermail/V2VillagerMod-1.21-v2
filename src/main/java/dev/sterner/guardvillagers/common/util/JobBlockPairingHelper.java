@@ -29,8 +29,8 @@ import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import net.minecraft.world.event.GameEvent;
 import net.minecraft.world.border.WorldBorder;
+import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkStatus;
-import net.minecraft.world.chunk.WorldChunk;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -328,7 +328,7 @@ public final class JobBlockPairingHelper {
         Collection<BlockPos> banners = new ArrayList<>();
         for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
             for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
-                WorldChunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
+                Chunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
                 if (chunk == null) {
                     continue;
                 }
