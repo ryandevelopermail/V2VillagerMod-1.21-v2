@@ -33,5 +33,6 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         } else {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
+        goal.requestImmediateCraft(world);
     }
 }

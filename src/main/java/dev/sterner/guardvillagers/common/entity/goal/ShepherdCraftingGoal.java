@@ -136,6 +136,13 @@ public class ShepherdCraftingGoal extends Goal {
         }
     }
 
+    public void requestImmediateCraft(ServerWorld world) {
+        refreshDailyLimit(world);
+        guaranteedCraftPending = true;
+        guaranteedCraftDay = world.getTimeOfDay() / 24000L;
+        nextCheckTime = 0L;
+    }
+
     private int countCraftableRecipes(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
@@ -291,11 +298,7 @@ public class ShepherdCraftingGoal extends Goal {
     }
 
     private enum Recipe {
-        WHITE_WOOL(new ItemStack(Items.WHITE_WOOL), new IngredientRequirement(stack -> stack.isOf(Items.STRING), 4)),
-        WHITE_CARPET(new ItemStack(Items.WHITE_CARPET, 3), new IngredientRequirement(stack -> stack.isIn(ItemTags.WOOL), 2)),
-        WHITE_BED(new ItemStack(Items.WHITE_BED), new IngredientRequirement(stack -> stack.isIn(ItemTags.WOOL), 3), new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 3)),
-        WHITE_BANNER(new ItemStack(Items.WHITE_BANNER), new IngredientRequirement(stack -> stack.isIn(ItemTags.WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        PAINTING(new ItemStack(Items.PAINTING), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 8), new IngredientRequirement(stack -> stack.isIn(ItemTags.WOOL), 1));
+        WHITE_BANNER(new ItemStack(Items.WHITE_BANNER), new IngredientRequirement(stack -> stack.isIn(ItemTags.WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1));
 
         private final ItemStack output;
         private final IngredientRequirement[] requirements;
