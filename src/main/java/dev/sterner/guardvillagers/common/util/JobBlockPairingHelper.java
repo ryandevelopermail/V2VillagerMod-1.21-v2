@@ -9,6 +9,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.block.WallBannerBlock;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -210,6 +211,13 @@ public final class JobBlockPairingHelper {
                     LOGGER.info("Banner {} paired with Farmer {} on refresh", pos.toShortString(), villager.getUuidAsString());
                 }
             });
+        }
+    }
+
+    public static void refreshWorldPairings(ServerWorld world) {
+        Box worldBounds = world.getWorldBorder().getArea();
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
+            refreshVillagerPairings(world, villager);
         }
     }
 
