@@ -94,6 +94,8 @@ public class ShepherdSpecialGoal extends Goal {
         if (day != lastShearDay) {
             lastShearDay = day;
             nextCheckTime = 0L;
+            hadShearsInChest = false;
+            hadBannerInChest = false;
         }
 
         TaskType nextTask = findTaskType(world);
