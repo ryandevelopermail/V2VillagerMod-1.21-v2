@@ -55,6 +55,8 @@ public class ShepherdSpecialGoal extends Goal {
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long lastShearDay = -1L;
+    private boolean hadShearsInChest;
+    private boolean hadBannerInChest;
     private TaskType taskType;
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
@@ -94,13 +96,23 @@ public class ShepherdSpecialGoal extends Goal {
             nextCheckTime = 0L;
         }
 
-        if (world.getTime() < nextCheckTime) {
+        TaskType nextTask = findTaskType(world);
+        if (nextTask == null) {
+            hadShearsInChest = false;
+            hadBannerInChest = false;
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
             return false;
         }
 
-        TaskType nextTask = findTaskType(world);
-        if (nextTask == null) {
-            nextCheckTime = world.getTime() + nextRandomCheckInterval();
+        if (nextTask == TaskType.SHEARS && !hadShearsInChest) {
+            hadShearsInChest = true;
+            nextCheckTime = 0L;
+        } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
+            hadBannerInChest = true;
+            nextCheckTime = 0L;
+        }
+
+        if (world.getTime() < nextCheckTime) {
             return false;
         }
 
@@ -301,7 +313,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (stack.isEmpty()) {
                 continue;
             }
-            if (!(stack.isOf(Items.SHEARS) || stack.isIn(ItemTags.BANNERS))) {
+            if (!(stack.isOf(Items.SHEARS) || stack.isIn(ItemTags.BANNERS) || stack.isIn(ItemTags.WOOL))) {
                 continue;
             }
 
@@ -310,7 +322,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         ItemStack mainHand = villager.getMainHandStack();
-        if (mainHand.isOf(Items.SHEARS) || mainHand.isIn(ItemTags.BANNERS)) {
+        if (mainHand.isOf(Items.SHEARS) || mainHand.isIn(ItemTags.BANNERS) || mainHand.isIn(ItemTags.WOOL)) {
             ItemStack remaining = insertStack(chestInventory, mainHand);
             villager.setStackInHand(Hand.MAIN_HAND, remaining);
         }
