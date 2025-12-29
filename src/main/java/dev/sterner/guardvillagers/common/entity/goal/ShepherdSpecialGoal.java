@@ -8,7 +8,6 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.SheepEntity;
@@ -358,18 +357,6 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        if (!villager.getMainHandStack().isOf(Items.SHEARS)) {
-            equipShearsFromInventory();
-        }
-
-        ItemStack shears = villager.getMainHandStack();
-        if (!shears.isOf(Items.SHEARS)) {
-            LOGGER.info("Shepherd {} has no shears in hand to shear sheep {}",
-                    villager.getUuidAsString(),
-                    sheep.getUuidAsString());
-            return;
-        }
-
         sheep.setSheared(true);
         sheep.playSound(SoundEvents.ENTITY_SHEEP_SHEAR, 1.0F, 1.0F);
         int dropCount = 1 + sheep.getRandom().nextInt(3);
@@ -380,10 +367,6 @@ public class ShepherdSpecialGoal extends Goal {
                 sheep.getUuidAsString(),
                 sheep.getBlockPos().toShortString(),
                 sheep.isSheared());
-        shears.damage(1, villager, EquipmentSlot.MAINHAND);
-        if (shears.isEmpty()) {
-            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
-        }
         collectNearbyWool(world, sheep.getBlockPos());
     }
 
