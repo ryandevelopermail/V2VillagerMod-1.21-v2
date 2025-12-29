@@ -40,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
+    private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int CHECK_INTERVAL_MIN_TICKS = 2400;
     private static final int CHECK_INTERVAL_VARIANCE_TICKS = 3600;
     private static final double MOVE_SPEED = 0.6D;
@@ -127,8 +128,12 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask == TaskType.SHEARS && countShearableSheepNearJob(world) >= 3) {
-            nextCheckTime = world.getTime();
+        if (nextTask == TaskType.SHEARS) {
+            int shearableCount = countShearableSheepNearJob(world);
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            if (shearableCount < 1) {
+                return false;
+            }
         }
 
         taskType = nextTask;
@@ -470,7 +475,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void scheduleNextShearCheck(ServerWorld world, String reason) {
-        long interval = nextRandomCheckInterval();
+        long interval = CHECK_INTERVAL_TICKS;
         nextCheckTime = world.getTime() + interval;
         LOGGER.info("Shepherd {} scheduled next shearing session in {} ticks ({} min) {}",
                 villager.getUuidAsString(),
