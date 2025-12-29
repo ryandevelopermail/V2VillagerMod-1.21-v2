@@ -345,7 +345,7 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        sheep.shear(SoundCategory.NEUTRAL);
+        sheep.sheared(SoundCategory.NEUTRAL);
         shears.damage(1, villager, EquipmentSlot.MAINHAND);
         if (shears.isEmpty()) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
