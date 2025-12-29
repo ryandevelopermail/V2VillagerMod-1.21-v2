@@ -140,7 +140,8 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (nextTask == TaskType.SHEARS) {
             int sheepCount = countSheepNearby(world);
-            if (sheepCount < 1) {
+            boolean needsShearsFromChest = !hasShearsInInventoryOrHand() && hasShearsInChest(world);
+            if (sheepCount < 1 && !needsShearsFromChest) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 return false;
             }
@@ -280,22 +281,13 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private TaskType findTaskType(ServerWorld world) {
-        boolean sheepNearby = countSheepNearby(world) > 0;
         Inventory inventory = getChestInventory(world).orElse(null);
-        if (sheepNearby) {
-            if (inventory == null) {
-                return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
-            }
-
-            if (hasShearsInChestOrInventory(inventory)) {
-                return TaskType.SHEARS;
-            }
-
-            return null;
+        if (inventory == null) {
+            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
         }
 
-        if (inventory == null) {
-            return null;
+        if (hasShearsInChestOrInventory(inventory)) {
+            return TaskType.SHEARS;
         }
 
         if (hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
