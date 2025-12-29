@@ -270,13 +270,22 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private TaskType findTaskType(ServerWorld world) {
+        boolean sheepNearby = countSheepNearJob(world) > 0;
         Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) {
-            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
+        if (sheepNearby) {
+            if (inventory == null) {
+                return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
+            }
+
+            if (hasShearsInChestOrInventory(inventory)) {
+                return TaskType.SHEARS;
+            }
+
+            return null;
         }
 
-        if (hasShearsInChestOrInventory(inventory)) {
-            return TaskType.SHEARS;
+        if (inventory == null) {
+            return null;
         }
 
         if (hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
