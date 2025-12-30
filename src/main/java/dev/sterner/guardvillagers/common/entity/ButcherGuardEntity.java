@@ -50,12 +50,11 @@ import org.slf4j.LoggerFactory;
 
 public class ButcherGuardEntity extends GuardEntity {
     private static final Logger LOGGER = LoggerFactory.getLogger(ButcherGuardEntity.class);
-    private static final int DAY_LENGTH = 24000;
     private static final int HUNT_SESSION_MAX_TICKS = 20 * 60;
-    private static final int RANDOM_HUNT_CHANCES_MIN = 1;
-    private static final int RANDOM_HUNT_CHANCES_MAX = 2;
     private static final int HUNT_TARGET_MIN = 1;
     private static final int HUNT_TARGET_MAX = 5;
+    private static final int HUNT_INTERVAL_MIN_TICKS = 20 * 60 * 3;
+    private static final int HUNT_INTERVAL_MAX_TICKS = 20 * 60 * 10;
     private static final int LOOT_SCAN_INTERVAL = 20;
     private static final double LOOT_SCAN_RANGE = 6.0D;
 
@@ -63,8 +62,11 @@ public class ButcherGuardEntity extends GuardEntity {
     private boolean huntSessionActive;
     private int huntTargetsRemaining;
     private long huntSessionEndTick;
-    private int lastRecordedDay = -1;
-    private final List<Long> randomHuntTimes = new ArrayList<>();
+    private long nextHuntTriggerTime;
+    private long huntCountdownTotalTicks;
+    private long huntCountdownStartTime;
+    private int lastHuntCountdownLogStep;
+    private boolean huntCountdownActive;
     private final List<ItemStack> collectedLoot = new ArrayList<>();
     private BlockPos pairedChestPos;
 
@@ -159,12 +161,12 @@ public class ButcherGuardEntity extends GuardEntity {
             return;
         }
 
-        updateDailySchedule();
         if (this.huntOnSpawn) {
             this.huntOnSpawn = false;
             startHuntSession();
         }
 
+        updateHuntCountdown();
         if (this.huntSessionActive && this.getWorld().getTime() > this.huntSessionEndTick) {
             endHuntSession();
         }
@@ -193,32 +195,22 @@ public class ButcherGuardEntity extends GuardEntity {
         return result;
     }
 
-    private void updateDailySchedule() {
-        long timeOfDay = this.getWorld().getTimeOfDay();
-        long day = timeOfDay / DAY_LENGTH;
-        if ((int) day != this.lastRecordedDay) {
-            int previousDay = this.lastRecordedDay;
-            this.lastRecordedDay = (int) day;
-            this.randomHuntTimes.clear();
-            int randomSessions = MathHelper.nextInt(this.random, RANDOM_HUNT_CHANCES_MIN, RANDOM_HUNT_CHANCES_MAX);
-            long minOffset = previousDay == -1 ? timeOfDay % DAY_LENGTH : 0;
-            for (int i = 0; i < randomSessions; i++) {
-                long randomOffset = MathHelper.nextInt(this.random, (int) minOffset, DAY_LENGTH - 1);
-                this.randomHuntTimes.add(day * DAY_LENGTH + randomOffset);
-            }
-            this.randomHuntTimes.sort(Comparator.naturalOrder());
-            if (previousDay != -1) {
-                startHuntSession();
-            }
+    private void updateHuntCountdown() {
+        if (this.huntSessionActive) {
+            return;
         }
 
-        if (!this.huntSessionActive && !this.randomHuntTimes.isEmpty()) {
-            long currentTime = this.getWorld().getTimeOfDay();
-            long nextTime = this.randomHuntTimes.get(0);
-            if (currentTime >= nextTime) {
-                this.randomHuntTimes.remove(0);
-                startHuntSession();
-            }
+        if (!this.huntCountdownActive) {
+            startHuntCountdown("initial schedule");
+        }
+
+        if (this.huntCountdownActive && this.nextHuntTriggerTime > 0L) {
+            logHuntCountdownProgress();
+        }
+
+        if (this.huntCountdownActive && this.nextHuntTriggerTime > 0L && this.getWorld().getTime() >= this.nextHuntTriggerTime) {
+            clearHuntCountdown();
+            startHuntSession();
         }
     }
 
@@ -226,6 +218,7 @@ public class ButcherGuardEntity extends GuardEntity {
         if (this.huntSessionActive) {
             return;
         }
+        clearHuntCountdown();
         this.huntSessionActive = true;
         this.huntTargetsRemaining = MathHelper.nextInt(this.random, HUNT_TARGET_MIN, HUNT_TARGET_MAX);
         this.huntSessionEndTick = this.getWorld().getTime() + HUNT_SESSION_MAX_TICKS;
@@ -239,6 +232,7 @@ public class ButcherGuardEntity extends GuardEntity {
         this.huntTargetsRemaining = 0;
         this.setTarget(null);
         depositLootToChest();
+        startHuntCountdown("hunt session ended");
     }
 
     @Override
@@ -358,5 +352,47 @@ public class ButcherGuardEntity extends GuardEntity {
             }
         }
         this.collectedLoot.clear();
+    }
+
+    private void startHuntCountdown(String reason) {
+        this.huntCountdownTotalTicks = nextRandomHuntInterval();
+        this.huntCountdownStartTime = this.getWorld().getTime();
+        this.nextHuntTriggerTime = this.huntCountdownStartTime + this.huntCountdownTotalTicks;
+        this.lastHuntCountdownLogStep = 0;
+        this.huntCountdownActive = true;
+        LOGGER.info("Butcher Guard {} hunt countdown started ({} ticks) {}",
+                this.getUuidAsString(),
+                this.huntCountdownTotalTicks,
+                reason);
+    }
+
+    private void logHuntCountdownProgress() {
+        if (this.huntCountdownTotalTicks <= 0L) {
+            return;
+        }
+        long remainingTicks = this.nextHuntTriggerTime - this.getWorld().getTime();
+        long elapsedTicks = this.getWorld().getTime() - this.huntCountdownStartTime;
+        int step = Math.min(4, (int) ((elapsedTicks * 4L) / this.huntCountdownTotalTicks));
+        if (step <= this.lastHuntCountdownLogStep || step == 0) {
+            return;
+        }
+        this.lastHuntCountdownLogStep = step;
+        int percent = step * 25;
+        LOGGER.info("Butcher Guard {} hunt countdown {}% ({} ticks remaining)",
+                this.getUuidAsString(),
+                percent,
+                Math.max(remainingTicks, 0L));
+    }
+
+    private long nextRandomHuntInterval() {
+        return MathHelper.nextInt(this.random, HUNT_INTERVAL_MIN_TICKS, HUNT_INTERVAL_MAX_TICKS);
+    }
+
+    private void clearHuntCountdown() {
+        this.nextHuntTriggerTime = 0L;
+        this.huntCountdownTotalTicks = 0L;
+        this.huntCountdownStartTime = 0L;
+        this.lastHuntCountdownLogStep = 0;
+        this.huntCountdownActive = false;
     }
 }
