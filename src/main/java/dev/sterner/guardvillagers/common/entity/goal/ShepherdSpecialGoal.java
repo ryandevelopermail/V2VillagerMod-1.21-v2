@@ -61,6 +61,7 @@ public class ShepherdSpecialGoal extends Goal {
     private long shearCountdownStartTime;
     private int lastShearsInChestCount;
     private int lastShearCountdownLogStep;
+    private boolean shearCountdownActive;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
     private boolean hadBannerInChest;
@@ -106,6 +107,7 @@ public class ShepherdSpecialGoal extends Goal {
             shearCountdownStartTime = 0L;
             lastShearsInChestCount = 0;
             lastShearCountdownLogStep = 0;
+            shearCountdownActive = false;
         }
 
         TaskType nextTask = findTaskType(world);
@@ -547,32 +549,43 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void updateShearsCountdown(ServerWorld world) {
+        if (chestPos == null) {
+            return;
+        }
         int shearsInChestCount = countShearsInChest(world);
         boolean hasShearsInChest = shearsInChestCount > 0;
         boolean shearsAddedToChest = shearsInChestCount > lastShearsInChestCount;
+        boolean shouldContinueCountdown = hasShearsInChest || hasShearsInInventoryOrHand();
 
-        if (hasShearsInChest) {
-            if (shearsAddedToChest) {
-                startShearCountdown(world, "shears added to chest");
-                hadShearsInChest = false;
-            } else if (nextChestShearTriggerTime == 0L) {
-                startShearCountdown(world, "shears detected in chest");
-            }
+        if (shearsAddedToChest) {
+            startShearCountdown(world, "shears added to chest");
+            hadShearsInChest = false;
+            shearCountdownActive = true;
+        } else if (!shearCountdownActive && hasShearsInChest) {
+            startShearCountdown(world, "shears detected in chest");
+            shearCountdownActive = true;
+        }
 
-            if (nextChestShearTriggerTime > 0L) {
-                logShearCountdownProgress(world, nextChestShearTriggerTime);
-            }
+        if (shearCountdownActive && nextChestShearTriggerTime > 0L) {
+            logShearCountdownProgress(world, nextChestShearTriggerTime);
+        }
 
-            if (nextChestShearTriggerTime > 0L && world.getTime() >= nextChestShearTriggerTime) {
-                triggerShearsPlacedInChest(world);
-                hadShearsInChest = false;
+        if (shearCountdownActive && nextChestShearTriggerTime > 0L && world.getTime() >= nextChestShearTriggerTime) {
+            triggerShearsPlacedInChest(world);
+            hadShearsInChest = false;
+            if (shouldContinueCountdown) {
                 startShearCountdown(world, "shears insertion complete");
+            } else {
+                shearCountdownActive = false;
             }
-        } else {
+        }
+
+        if (!shouldContinueCountdown) {
             nextChestShearTriggerTime = 0L;
             shearCountdownTotalTicks = 0L;
             shearCountdownStartTime = 0L;
             lastShearCountdownLogStep = 0;
+            shearCountdownActive = false;
         }
 
         lastShearsInChestCount = shearsInChestCount;
@@ -583,6 +596,7 @@ public class ShepherdSpecialGoal extends Goal {
         shearCountdownStartTime = world.getTime();
         nextChestShearTriggerTime = shearCountdownStartTime + shearCountdownTotalTicks;
         lastShearCountdownLogStep = 0;
+        shearCountdownActive = true;
         LOGGER.info("Shepherd {} shears countdown started ({} ticks) {}",
                 villager.getUuidAsString(),
                 shearCountdownTotalTicks,
