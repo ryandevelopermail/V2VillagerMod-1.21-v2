@@ -74,6 +74,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos penGatePos;
     private ItemStack carriedItem = ItemStack.EMPTY;
     private boolean openedPenGate;
+    private boolean wasInsidePen;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -252,6 +253,7 @@ public class ShepherdSpecialGoal extends Goal {
         penGatePos = null;
         carriedItem = ItemStack.EMPTY;
         openedPenGate = false;
+        wasInsidePen = false;
     }
 
     @Override
@@ -953,16 +955,18 @@ public class ShepherdSpecialGoal extends Goal {
         if (isNearGate && (!isOpen || !openedPenGate)) {
             openGate(world, gatePos, true);
             openedPenGate = true;
+            wasInsidePen = isInsidePen;
             return;
         }
 
-        if (openedPenGate && isOpen && !isInsidePen) {
+        if (openedPenGate && isOpen && wasInsidePen && !isInsidePen) {
             double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
             if (distance > GATE_INTERACT_RANGE_SQUARED) {
                 openGate(world, gatePos, false);
                 openedPenGate = false;
             }
         }
+        wasInsidePen = isInsidePen;
     }
 
     private void openGate(ServerWorld world, BlockPos pos, boolean open) {
