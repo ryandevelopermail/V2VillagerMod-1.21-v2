@@ -12,11 +12,11 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SmokerBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
-import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.recipe.RecipeType;
+import net.minecraft.recipe.input.SingleStackRecipeInput;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 
@@ -235,9 +235,8 @@ public class ButcherSmokerGoal extends Goal {
         if (stack.isEmpty()) {
             return false;
         }
-        SimpleInventory inventory = new SimpleInventory(1);
-        inventory.setStack(0, stack.copy());
-        return world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, inventory, world).isPresent();
+        SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
+        return world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent();
     }
 
     private boolean isFuel(ItemStack stack) {
