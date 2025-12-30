@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SmokerBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
@@ -246,7 +247,7 @@ public class ButcherSmokerGoal extends Goal {
     }
 
     private boolean isFuel(ItemStack stack) {
-        return stack.isIn(ItemTags.FUEL);
+        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
 
     private ItemStack insertIntoSmoker(SmokerBlockEntity smoker, ItemStack stack, int slot) {
