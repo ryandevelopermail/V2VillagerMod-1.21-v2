@@ -353,7 +353,8 @@ public class ButcherGuardEntity extends GuardEntity {
     private void dropRemainingLoot(ServerWorld world, BlockPos pos) {
         for (ItemStack stack : this.collectedLoot) {
             if (!stack.isEmpty()) {
-                this.dropStack(world, stack, pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+                ItemEntity itemEntity = new ItemEntity(world, pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, stack);
+                world.spawnEntity(itemEntity);
             }
         }
         this.collectedLoot.clear();
