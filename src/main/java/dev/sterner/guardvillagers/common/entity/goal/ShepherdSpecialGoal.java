@@ -50,6 +50,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+    private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -65,7 +66,7 @@ public class ShepherdSpecialGoal extends Goal {
     private boolean shearCountdownActive;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
-    private boolean hadBannerInChest;
+    private int lastBannersInChestCount;
     private TaskType taskType;
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
@@ -104,11 +105,11 @@ public class ShepherdSpecialGoal extends Goal {
         if (dayChanged) {
             lastShearDay = day;
             hadShearsInChest = false;
-            hadBannerInChest = false;
             nextChestShearTriggerTime = 0L;
             shearCountdownTotalTicks = 0L;
             shearCountdownStartTime = 0L;
             lastShearsInChestCount = 0;
+            lastBannersInChestCount = 0;
             lastShearCountdownLogStep = 0;
             shearCountdownActive = false;
         }
@@ -116,7 +117,6 @@ public class ShepherdSpecialGoal extends Goal {
         TaskType nextTask = findTaskType(world);
         if (nextTask == null) {
             hadShearsInChest = false;
-            hadBannerInChest = false;
             nextCheckTime = world.getTime() + nextRandomCheckInterval();
             return false;
         }
@@ -145,9 +145,13 @@ public class ShepherdSpecialGoal extends Goal {
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
             }
             nextCheckTime = 0L;
-        } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
-            hadBannerInChest = true;
-            nextCheckTime = 0L;
+        } else if (nextTask == TaskType.BANNER) {
+            int bannersInChestCount = countBannersInChest(world);
+            boolean bannersAddedToChest = bannersInChestCount > lastBannersInChestCount;
+            if (bannersAddedToChest) {
+                nextCheckTime = 0L;
+            }
+            lastBannersInChestCount = bannersInChestCount;
         }
 
         if (nextTask == TaskType.SHEARS && nextCheckTime == 0L && hasShearsInInventoryOrHand()) {
@@ -201,8 +205,12 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else {
-            carriedItem = takeItemFromChest(world, taskType);
-            if (carriedItem.isEmpty()) {
+            if (hasBannerInInventoryOrHand()) {
+                carriedItem = getBannerInInventoryOrHand();
+            } else {
+                carriedItem = takeItemFromChest(world, taskType);
+            }
+            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -225,8 +233,8 @@ public class ShepherdSpecialGoal extends Goal {
 
         penTarget = findNearestPenTarget(world);
         if (penTarget == null) {
-            stage = Stage.RETURN_TO_CHEST;
-            moveTo(chestPos);
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
+            stage = Stage.DONE;
             return;
         }
         stage = Stage.GO_TO_PEN;
@@ -319,14 +327,17 @@ public class ShepherdSpecialGoal extends Goal {
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
+            if (hasShearsInInventoryOrHand()) {
+                return TaskType.SHEARS;
+            }
+            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
             return TaskType.SHEARS;
         }
 
-        if (hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
+        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
             return TaskType.BANNER;
         }
 
@@ -354,12 +365,48 @@ public class ShepherdSpecialGoal extends Goal {
                 || villager.getMainHandStack().isOf(Items.SHEARS);
     }
 
+    private boolean hasBannerInInventoryOrHand() {
+        Inventory villagerInventory = villager.getInventory();
+        return hasMatchingItem(villagerInventory, stack -> stack.isIn(ItemTags.BANNERS))
+                || villager.getMainHandStack().isIn(ItemTags.BANNERS);
+    }
+
+    private ItemStack getBannerInInventoryOrHand() {
+        ItemStack mainHand = villager.getMainHandStack();
+        if (mainHand.isIn(ItemTags.BANNERS)) {
+            return mainHand.copy();
+        }
+        Inventory villagerInventory = villager.getInventory();
+        for (int slot = 0; slot < villagerInventory.size(); slot++) {
+            ItemStack stack = villagerInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(ItemTags.BANNERS)) {
+                return stack.copy();
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
     private boolean hasShearsInChest(ServerWorld world) {
         Inventory chestInventory = getChestInventory(world).orElse(null);
         if (chestInventory == null) {
             return false;
         }
         return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS));
+    }
+
+    private int countBannersInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(ItemTags.BANNERS)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private int countShearsInChest(ServerWorld world) {
@@ -900,7 +947,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         boolean isOpen = state.get(FenceGateBlock.OPEN);
-        boolean isNearGate = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+        boolean isNearGate = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D) <= GATE_INTERACT_RANGE_SQUARED;
         boolean isInsidePen = penTarget != null && isInsideFencePen(world, villager.getBlockPos());
 
         if (isNearGate && (!isOpen || !openedPenGate)) {
@@ -911,7 +958,7 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (openedPenGate && isOpen && !isInsidePen) {
             double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
-            if (distance > TARGET_REACH_SQUARED) {
+            if (distance > GATE_INTERACT_RANGE_SQUARED) {
                 openGate(world, gatePos, false);
                 openedPenGate = false;
             }
