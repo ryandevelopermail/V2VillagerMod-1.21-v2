@@ -224,6 +224,13 @@ public final class JobBlockPairingHelper {
     }
 
     public static void refreshWorldPairings(ServerWorld world) {
+        Box worldBounds = getWorldBounds(world);
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
+            refreshVillagerPairings(world, villager);
+        }
+    }
+
+    public static Box getWorldBounds(ServerWorld world) {
         WorldBorder border = world.getWorldBorder();
         double halfSize = border.getSize() / 2.0D;
         double minX = border.getCenterX() - halfSize;
@@ -232,10 +239,7 @@ public final class JobBlockPairingHelper {
         double maxZ = border.getCenterZ() + halfSize;
         int minY = world.getBottomY();
         int maxY = world.getTopY();
-        Box worldBounds = new Box(minX, minY, minZ, maxX, maxY, maxZ);
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
-            refreshVillagerPairings(world, villager);
-        }
+        return new Box(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     private static boolean pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
