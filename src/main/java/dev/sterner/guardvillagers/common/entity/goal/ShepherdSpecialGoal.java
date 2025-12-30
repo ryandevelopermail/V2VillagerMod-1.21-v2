@@ -13,6 +13,7 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -49,6 +50,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+    private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -64,12 +66,15 @@ public class ShepherdSpecialGoal extends Goal {
     private boolean shearCountdownActive;
     private long lastShearDay = -1L;
     private boolean hadShearsInChest;
-    private boolean hadBannerInChest;
+    private int lastBannersInChestCount;
     private TaskType taskType;
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
     private BlockPos penTarget;
+    private BlockPos penGatePos;
     private ItemStack carriedItem = ItemStack.EMPTY;
+    private boolean openedPenGate;
+    private boolean wasInsidePen;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -101,11 +106,11 @@ public class ShepherdSpecialGoal extends Goal {
         if (dayChanged) {
             lastShearDay = day;
             hadShearsInChest = false;
-            hadBannerInChest = false;
             nextChestShearTriggerTime = 0L;
             shearCountdownTotalTicks = 0L;
             shearCountdownStartTime = 0L;
             lastShearsInChestCount = 0;
+            lastBannersInChestCount = 0;
             lastShearCountdownLogStep = 0;
             shearCountdownActive = false;
         }
@@ -113,7 +118,6 @@ public class ShepherdSpecialGoal extends Goal {
         TaskType nextTask = findTaskType(world);
         if (nextTask == null) {
             hadShearsInChest = false;
-            hadBannerInChest = false;
             nextCheckTime = world.getTime() + nextRandomCheckInterval();
             return false;
         }
@@ -142,9 +146,13 @@ public class ShepherdSpecialGoal extends Goal {
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
             }
             nextCheckTime = 0L;
-        } else if (nextTask == TaskType.BANNER && !hadBannerInChest) {
-            hadBannerInChest = true;
-            nextCheckTime = 0L;
+        } else if (nextTask == TaskType.BANNER) {
+            int bannersInChestCount = countBannersInChest(world);
+            boolean bannersAddedToChest = bannersInChestCount > lastBannersInChestCount;
+            if (bannersAddedToChest) {
+                nextCheckTime = 0L;
+            }
+            lastBannersInChestCount = bannersInChestCount;
         }
 
         if (nextTask == TaskType.SHEARS && nextCheckTime == 0L && hasShearsInInventoryOrHand()) {
@@ -198,8 +206,12 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else {
-            carriedItem = takeItemFromChest(world, taskType);
-            if (carriedItem.isEmpty()) {
+            if (hasBannerInInventoryOrHand()) {
+                carriedItem = getBannerInInventoryOrHand();
+            } else {
+                carriedItem = takeItemFromChest(world, taskType);
+            }
+            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -222,8 +234,8 @@ public class ShepherdSpecialGoal extends Goal {
 
         penTarget = findNearestPenTarget(world);
         if (penTarget == null) {
-            stage = Stage.RETURN_TO_CHEST;
-            moveTo(chestPos);
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
+            stage = Stage.DONE;
             return;
         }
         stage = Stage.GO_TO_PEN;
@@ -238,7 +250,10 @@ public class ShepherdSpecialGoal extends Goal {
         sheepTargets = new ArrayList<>();
         sheepTargetIndex = 0;
         penTarget = null;
+        penGatePos = null;
         carriedItem = ItemStack.EMPTY;
+        openedPenGate = false;
+        wasInsidePen = false;
     }
 
     @Override
@@ -281,8 +296,13 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                updatePenGateAccess(world, penGatePos);
+
                 if (isNear(penTarget)) {
-                    triggerBannerPairing(world, penTarget);
+                    BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
+                    if (placedBannerPos != null) {
+                        triggerBannerPairing(world, placedBannerPos);
+                    }
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
                 } else {
@@ -290,6 +310,7 @@ public class ShepherdSpecialGoal extends Goal {
                 }
             }
             case RETURN_TO_CHEST -> {
+                updatePenGateAccess(world, penGatePos);
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
@@ -308,14 +329,17 @@ public class ShepherdSpecialGoal extends Goal {
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
+            if (hasShearsInInventoryOrHand()) {
+                return TaskType.SHEARS;
+            }
+            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
             return TaskType.SHEARS;
         }
 
-        if (hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
+        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
             return TaskType.BANNER;
         }
 
@@ -343,12 +367,48 @@ public class ShepherdSpecialGoal extends Goal {
                 || villager.getMainHandStack().isOf(Items.SHEARS);
     }
 
+    private boolean hasBannerInInventoryOrHand() {
+        Inventory villagerInventory = villager.getInventory();
+        return hasMatchingItem(villagerInventory, stack -> stack.isIn(ItemTags.BANNERS))
+                || villager.getMainHandStack().isIn(ItemTags.BANNERS);
+    }
+
+    private ItemStack getBannerInInventoryOrHand() {
+        ItemStack mainHand = villager.getMainHandStack();
+        if (mainHand.isIn(ItemTags.BANNERS)) {
+            return mainHand.copy();
+        }
+        Inventory villagerInventory = villager.getInventory();
+        for (int slot = 0; slot < villagerInventory.size(); slot++) {
+            ItemStack stack = villagerInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(ItemTags.BANNERS)) {
+                return stack.copy();
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
     private boolean hasShearsInChest(ServerWorld world) {
         Inventory chestInventory = getChestInventory(world).orElse(null);
         if (chestInventory == null) {
             return false;
         }
         return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS));
+    }
+
+    private int countBannersInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(ItemTags.BANNERS)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private int countShearsInChest(ServerWorld world) {
@@ -657,6 +717,7 @@ public class ShepherdSpecialGoal extends Goal {
         BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
         BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
         BlockPos nearest = null;
+        BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos pos : BlockPos.iterate(start, end)) {
@@ -674,17 +735,24 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
 
-            if (hasBannerInPen(world, insidePos)) {
+            BlockPos penCenter = getPenCenter(world, insidePos);
+            if (penCenter == null) {
                 continue;
             }
 
-            double distance = villager.squaredDistanceTo(insidePos.getX() + 0.5D, insidePos.getY() + 0.5D, insidePos.getZ() + 0.5D);
+            if (hasBannerInPen(world, penCenter)) {
+                continue;
+            }
+
+            double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                nearest = insidePos.toImmutable();
+                nearest = penCenter.toImmutable();
+                nearestGate = pos.toImmutable();
             }
         }
 
+        penGatePos = nearestGate;
         return nearest;
     }
 
@@ -704,12 +772,14 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
-        BlockPos start = penPos.add(-PEN_FENCE_RANGE, -PEN_FENCE_RANGE, -PEN_FENCE_RANGE);
-        BlockPos end = penPos.add(PEN_FENCE_RANGE, PEN_FENCE_RANGE, PEN_FENCE_RANGE);
+        BlockPos center = getPenCenter(world, penPos);
+        if (center == null) {
+            return false;
+        }
+        int scanRange = 2;
+        BlockPos start = center.add(-scanRange, -1, -scanRange);
+        BlockPos end = center.add(scanRange, 1, scanRange);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (!penPos.isWithinDistance(pos, PEN_FENCE_RANGE)) {
-                continue;
-            }
             BlockState state = world.getBlockState(pos);
             if (!state.isIn(BlockTags.BANNERS)) {
                 continue;
@@ -719,6 +789,39 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private BlockPos getPenCenter(ServerWorld world, BlockPos insidePos) {
+        BlockPos westFence = findFenceInDirection(world, insidePos, Direction.WEST, PEN_FENCE_RANGE);
+        BlockPos eastFence = findFenceInDirection(world, insidePos, Direction.EAST, PEN_FENCE_RANGE);
+        BlockPos northFence = findFenceInDirection(world, insidePos, Direction.NORTH, PEN_FENCE_RANGE);
+        BlockPos southFence = findFenceInDirection(world, insidePos, Direction.SOUTH, PEN_FENCE_RANGE);
+        if (westFence == null || eastFence == null || northFence == null || southFence == null) {
+            return null;
+        }
+
+        int minX = westFence.getX() + 1;
+        int maxX = eastFence.getX() - 1;
+        int minZ = northFence.getZ() + 1;
+        int maxZ = southFence.getZ() - 1;
+        if (minX > maxX || minZ > maxZ) {
+            return null;
+        }
+
+        int centerX = (minX + maxX) / 2;
+        int centerZ = (minZ + maxZ) / 2;
+        return new BlockPos(centerX, insidePos.getY(), centerZ);
+    }
+
+    private BlockPos findFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
+        for (int i = 1; i <= maxDistance; i++) {
+            BlockPos pos = start.offset(direction, i);
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+                return pos;
+            }
+        }
+        return null;
     }
 
     private boolean isInsideFencePen(ServerWorld world, BlockPos pos) {
@@ -737,6 +840,75 @@ public class ShepherdSpecialGoal extends Goal {
             if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private BlockPos placeBannerInPen(ServerWorld world, BlockPos centerPos) {
+        if (!carriedItem.isIn(ItemTags.BANNERS)) {
+            return null;
+        }
+        if (!(carriedItem.getItem() instanceof BlockItem blockItem)) {
+            return null;
+        }
+
+        BlockPos placed = tryPlaceBanner(world, centerPos, blockItem);
+        if (placed == null) {
+            placed = tryPlaceBanner(world, centerPos.up(), blockItem);
+        }
+        if (placed != null && consumeBannerFromInventory(carriedItem)) {
+            carriedItem.decrement(1);
+            if (carriedItem.isEmpty()) {
+                carriedItem = ItemStack.EMPTY;
+            }
+        }
+        return placed;
+    }
+
+    private BlockPos tryPlaceBanner(ServerWorld world, BlockPos pos, BlockItem blockItem) {
+        if (!world.getBlockState(pos).isAir()) {
+            return null;
+        }
+        BlockState bannerState = blockItem.getBlock().getDefaultState();
+        if (!bannerState.canPlaceAt(world, pos)) {
+            return null;
+        }
+        if (world.setBlockState(pos, bannerState)) {
+            world.playSound(null, pos, SoundEvents.BLOCK_WOOD_PLACE, SoundCategory.BLOCKS, 1.0F, 1.0F);
+            return pos;
+        }
+        return null;
+    }
+
+    private boolean consumeBannerFromInventory(ItemStack bannerStack) {
+        if (bannerStack.isEmpty()) {
+            return false;
+        }
+        ItemStack mainHand = villager.getMainHandStack();
+        if (!mainHand.isEmpty()
+                && mainHand.isIn(ItemTags.BANNERS)
+                && ItemStack.areItemsAndComponentsEqual(mainHand, bannerStack)) {
+            mainHand.decrement(1);
+            if (mainHand.isEmpty()) {
+                villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+            }
+            return true;
+        }
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isIn(ItemTags.BANNERS)) {
+                continue;
+            }
+            if (!ItemStack.areItemsAndComponentsEqual(stack, bannerStack)) {
+                continue;
+            }
+            stack.decrement(1);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            inventory.markDirty();
+            return true;
         }
         return false;
     }
@@ -765,6 +937,47 @@ public class ShepherdSpecialGoal extends Goal {
             JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
             FarmerBannerTracker.setBanner(villager, bannerPos);
         }
+    }
+
+    private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
+        if (gatePos == null) {
+            return;
+        }
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+
+        boolean isOpen = state.get(FenceGateBlock.OPEN);
+        boolean isNearGate = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D) <= GATE_INTERACT_RANGE_SQUARED;
+        boolean isInsidePen = penTarget != null && isInsideFencePen(world, villager.getBlockPos());
+
+        if (isNearGate && (!isOpen || !openedPenGate)) {
+            openGate(world, gatePos, true);
+            openedPenGate = true;
+            wasInsidePen = isInsidePen;
+            return;
+        }
+
+        if (openedPenGate && isOpen && !isInsidePen && stage == Stage.RETURN_TO_CHEST) {
+            openGate(world, gatePos, false);
+            openedPenGate = false;
+        } else if (openedPenGate && isOpen && wasInsidePen && !isInsidePen && isNearGate) {
+            openGate(world, gatePos, false);
+            openedPenGate = false;
+        }
+        wasInsidePen = isInsidePen;
+    }
+
+    private void openGate(ServerWorld world, BlockPos pos, boolean open) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        if (state.get(FenceGateBlock.OPEN) == open) {
+            return;
+        }
+        world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
