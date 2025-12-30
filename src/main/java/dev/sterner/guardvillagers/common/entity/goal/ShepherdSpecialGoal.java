@@ -959,7 +959,10 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        if (openedPenGate && isOpen && wasInsidePen && !isInsidePen && isNearGate) {
+        if (openedPenGate && isOpen && !isInsidePen && stage == Stage.RETURN_TO_CHEST) {
+            openGate(world, gatePos, false);
+            openedPenGate = false;
+        } else if (openedPenGate && isOpen && wasInsidePen && !isInsidePen && isNearGate) {
             openGate(world, gatePos, false);
             openedPenGate = false;
         }
