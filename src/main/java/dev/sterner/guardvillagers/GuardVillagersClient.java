@@ -31,6 +31,7 @@ public class GuardVillagersClient implements ClientModInitializer {
         EntityModelLayerRegistry.registerModelLayer(GUARD_ARMOR_INNER, GuardArmorModel::createInnerArmorLayer);
         EntityRendererRegistry.register(GUARD_VILLAGER, GuardRenderer::new);
         EntityRendererRegistry.register(AXE_GUARD_VILLAGER, GuardRenderer::new);
+        EntityRendererRegistry.register(BUTCHER_GUARD_VILLAGER, GuardRenderer::new);
 
 
     }

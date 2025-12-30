@@ -3,6 +3,8 @@
   "item.guardvillagers.guard_spawn_egg": "Guard Spawn Egg",
   "entity.guardvillagers.axe_guard": "Axe Guard",
   "item.guardvillagers.axe_guard_spawn_egg": "Axe Guard Spawn Egg",
+  "entity.guardvillagers.butcher_guard": "Butcher Guard",
+  "item.guardvillagers.butcher_guard_spawn_egg": "Butcher Guard Spawn Egg",
   "guardinventory.health": "Health: %s",
   "guardinventory.armor": "Armor: %s",
   "guardvillagers.midnightconfig.useSteveModel": "Use Steve Model",
