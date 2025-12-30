@@ -15,6 +15,7 @@ public class GuardEntityLootTables {
     });
 
     public static final RegistryKey<LootTable> GUARD_MAIN_HAND = registerLootTable("entities/guard_main_hand");
+    public static final RegistryKey<LootTable> AXE_GUARD_MAIN_HAND = registerLootTable("entities/axe_guard_main_hand");
     public static final RegistryKey<LootTable> GUARD_OFF_HAND = registerLootTable("entities/guard_off_hand");
     public static final RegistryKey<LootTable> GUARD_HELMET = registerLootTable("entities/guard_helmet");
     public static final RegistryKey<LootTable> GUARD_CHEST = registerLootTable("entities/guard_chestplate");
