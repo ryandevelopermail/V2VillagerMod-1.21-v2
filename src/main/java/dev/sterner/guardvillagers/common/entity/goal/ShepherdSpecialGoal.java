@@ -128,27 +128,9 @@ public class ShepherdSpecialGoal extends Goal {
         boolean shearsAddedToChest = shearsInChestCount > lastShearsInChestCount;
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest) {
-            if (shearsAddedToChest) {
-                hadShearsInChest = false;
-                startShearCountdown(world, "shears added to chest");
-            } else if (nextChestShearTriggerTime == 0L) {
-                startShearCountdown(world, "shears detected in chest");
-            }
-            if (nextChestShearTriggerTime > 0L) {
-                logShearCountdownProgress(world, nextChestShearTriggerTime);
-            }
-            if (nextChestShearTriggerTime > 0L && world.getTime() >= nextChestShearTriggerTime) {
-                triggerShearsPlacedInChest(world);
-                hadShearsInChest = false;
-                startShearCountdown(world, "shears insertion complete");
-            }
             lastShearsInChestCount = countShearsInChest(world);
         } else if (!hasShearsInChest) {
             lastShearsInChestCount = 0;
-            nextChestShearTriggerTime = 0L;
-            shearCountdownTotalTicks = 0L;
-            shearCountdownStartTime = 0L;
-            lastShearCountdownLogStep = 0;
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest && !hadShearsInChest) {
@@ -265,6 +247,8 @@ public class ShepherdSpecialGoal extends Goal {
             stage = Stage.DONE;
             return;
         }
+
+        updateShearsCountdown(world);
 
         switch (stage) {
             case GO_TO_SHEEP -> {
@@ -557,8 +541,40 @@ public class ShepherdSpecialGoal extends Goal {
         } else {
             LOGGER.info("Shepherd {} failed to insert shears into chest at {} (no space)",
                     villager.getUuidAsString(),
-                    chestPos.toShortString());
+                chestPos.toShortString());
         }
+    }
+
+    private void updateShearsCountdown(ServerWorld world) {
+        int shearsInChestCount = countShearsInChest(world);
+        boolean hasShearsInChest = shearsInChestCount > 0;
+        boolean shearsAddedToChest = shearsInChestCount > lastShearsInChestCount;
+
+        if (hasShearsInChest) {
+            if (shearsAddedToChest) {
+                startShearCountdown(world, "shears added to chest");
+                hadShearsInChest = false;
+            } else if (nextChestShearTriggerTime == 0L) {
+                startShearCountdown(world, "shears detected in chest");
+            }
+
+            if (nextChestShearTriggerTime > 0L) {
+                logShearCountdownProgress(world, nextChestShearTriggerTime);
+            }
+
+            if (nextChestShearTriggerTime > 0L && world.getTime() >= nextChestShearTriggerTime) {
+                triggerShearsPlacedInChest(world);
+                hadShearsInChest = false;
+                startShearCountdown(world, "shears insertion complete");
+            }
+        } else {
+            nextChestShearTriggerTime = 0L;
+            shearCountdownTotalTicks = 0L;
+            shearCountdownStartTime = 0L;
+            lastShearCountdownLogStep = 0;
+        }
+
+        lastShearsInChestCount = shearsInChestCount;
     }
 
     private void startShearCountdown(ServerWorld world, String reason) {
