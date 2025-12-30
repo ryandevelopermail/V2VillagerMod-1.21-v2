@@ -13,7 +13,7 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.item.RawMeatItem;
+import net.minecraft.item.Item;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -26,6 +26,18 @@ public class ButcherSmokerGoal extends Goal {
     private final ButcherGuardEntity guard;
     private long nextCheckTime;
     private Stage stage = Stage.IDLE;
+    private static final List<Item> RAW_MEATS = List.of(
+            Items.BEEF,
+            Items.PORKCHOP,
+            Items.MUTTON,
+            Items.CHICKEN,
+            Items.RABBIT,
+            Items.COD,
+            Items.SALMON,
+            Items.TROPICAL_FISH,
+            Items.PUFFERFISH,
+            Items.ROTTEN_FLESH
+    );
 
     private enum Stage {
         IDLE,
@@ -230,7 +242,7 @@ public class ButcherSmokerGoal extends Goal {
     }
 
     private boolean isRawMeat(ItemStack stack) {
-        return stack.getItem() instanceof RawMeatItem;
+        return RAW_MEATS.contains(stack.getItem());
     }
 
     private boolean isFuel(ItemStack stack) {
