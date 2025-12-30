@@ -137,6 +137,7 @@ public class ButcherSmokerGoal extends Goal {
             return;
         }
         SmokerBlockEntity smoker = smokerOpt.get();
+        extractSmokerOutput(chestInventory, smoker);
         ItemStack meatStack = extractBestMeat(world, chestInventory);
         if (!meatStack.isEmpty()) {
             ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
@@ -257,6 +258,19 @@ public class ButcherSmokerGoal extends Goal {
         ItemStack remaining = stack.copy();
         remaining.decrement(toMove);
         return remaining;
+    }
+
+    private void extractSmokerOutput(Inventory chestInventory, SmokerBlockEntity smoker) {
+        ItemStack output = smoker.getStack(2);
+        if (output.isEmpty()) {
+            return;
+        }
+        ItemStack remaining = insertIntoInventory(chestInventory, output.copy());
+        if (remaining.isEmpty()) {
+            smoker.setStack(2, ItemStack.EMPTY);
+        } else if (remaining.getCount() != output.getCount()) {
+            smoker.setStack(2, remaining);
+        }
     }
 
     private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
