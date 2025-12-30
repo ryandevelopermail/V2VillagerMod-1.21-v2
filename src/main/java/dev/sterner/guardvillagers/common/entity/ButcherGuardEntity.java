@@ -19,6 +19,7 @@ import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.goal.ActiveTargetGoal;
 import net.minecraft.entity.ai.goal.FleeEntityGoal;
@@ -35,20 +36,28 @@ import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.MerchantEntity;
 import net.minecraft.entity.passive.PolarBearEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.nbt.NbtCompound;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ButcherGuardEntity extends GuardEntity {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ButcherGuardEntity.class);
     private static final int DAY_LENGTH = 24000;
     private static final int HUNT_SESSION_MAX_TICKS = 20 * 60;
     private static final int RANDOM_HUNT_CHANCES_MIN = 1;
     private static final int RANDOM_HUNT_CHANCES_MAX = 2;
     private static final int HUNT_TARGET_MIN = 1;
-    private static final int HUNT_TARGET_MAX = 3;
+    private static final int HUNT_TARGET_MAX = 5;
+    private static final int LOOT_SCAN_INTERVAL = 20;
+    private static final double LOOT_SCAN_RANGE = 6.0D;
 
     private boolean huntOnSpawn;
     private boolean huntSessionActive;
@@ -56,6 +65,8 @@ public class ButcherGuardEntity extends GuardEntity {
     private long huntSessionEndTick;
     private int lastRecordedDay = -1;
     private final List<Long> randomHuntTimes = new ArrayList<>();
+    private final List<ItemStack> collectedLoot = new ArrayList<>();
+    private BlockPos pairedChestPos;
 
     public ButcherGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -63,6 +74,10 @@ public class ButcherGuardEntity extends GuardEntity {
 
     public void setHuntOnSpawn() {
         this.huntOnSpawn = true;
+    }
+
+    public void setPairedChestPos(BlockPos chestPos) {
+        this.pairedChestPos = chestPos == null ? null : chestPos.toImmutable();
     }
 
     @Override
@@ -161,6 +176,9 @@ public class ButcherGuardEntity extends GuardEntity {
         if (this.huntSessionActive && this.getTarget() == null) {
             findNearbyAnimalTarget();
         }
+        if (this.huntSessionActive && this.age % LOOT_SCAN_INTERVAL == 0) {
+            collectNearbyLoot();
+        }
     }
 
     @Override
@@ -211,12 +229,39 @@ public class ButcherGuardEntity extends GuardEntity {
         this.huntSessionActive = true;
         this.huntTargetsRemaining = MathHelper.nextInt(this.random, HUNT_TARGET_MIN, HUNT_TARGET_MAX);
         this.huntSessionEndTick = this.getWorld().getTime() + HUNT_SESSION_MAX_TICKS;
+        LOGGER.info("Butcher Guard {} starting hunt session ({} target(s))",
+                this.getUuidAsString(),
+                this.huntTargetsRemaining);
     }
 
     private void endHuntSession() {
         this.huntSessionActive = false;
         this.huntTargetsRemaining = 0;
         this.setTarget(null);
+        depositLootToChest();
+    }
+
+    @Override
+    public void readCustomDataFromNbt(NbtCompound nbt) {
+        super.readCustomDataFromNbt(nbt);
+        if (nbt.contains("PairedChestX")) {
+            int x = nbt.getInt("PairedChestX");
+            int y = nbt.getInt("PairedChestY");
+            int z = nbt.getInt("PairedChestZ");
+            this.pairedChestPos = new BlockPos(x, y, z);
+        } else {
+            this.pairedChestPos = null;
+        }
+    }
+
+    @Override
+    public void writeCustomDataToNbt(NbtCompound nbt) {
+        super.writeCustomDataToNbt(nbt);
+        if (this.pairedChestPos != null) {
+            nbt.putInt("PairedChestX", this.pairedChestPos.getX());
+            nbt.putInt("PairedChestY", this.pairedChestPos.getY());
+            nbt.putInt("PairedChestZ", this.pairedChestPos.getZ());
+        }
     }
 
     private boolean shouldTargetAnimal(LivingEntity entity) {
@@ -230,5 +275,87 @@ public class ButcherGuardEntity extends GuardEntity {
         if (!animals.isEmpty()) {
             this.setTarget(animals.get(0));
         }
+    }
+
+    private void collectNearbyLoot() {
+        Box searchBox = this.getBoundingBox().expand(LOOT_SCAN_RANGE);
+        List<ItemEntity> items = this.getWorld().getEntitiesByClass(ItemEntity.class, searchBox, entity -> entity.isAlive() && !entity.getStack().isEmpty());
+        for (ItemEntity item : items) {
+            ItemStack stack = item.getStack();
+            if (!stack.isEmpty()) {
+                this.collectedLoot.add(stack.copy());
+                item.discard();
+            }
+        }
+    }
+
+    private void depositLootToChest() {
+        if (this.collectedLoot.isEmpty() || this.pairedChestPos == null) {
+            this.collectedLoot.clear();
+            return;
+        }
+
+        if (!(this.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        Inventory inventory = getChestInventory(serverWorld);
+        if (inventory == null) {
+            dropRemainingLoot(serverWorld, this.pairedChestPos);
+            return;
+        }
+
+        List<ItemStack> remaining = new ArrayList<>();
+        for (ItemStack stack : this.collectedLoot) {
+            ItemStack remainder = insertIntoInventory(inventory, stack);
+            if (!remainder.isEmpty()) {
+                remaining.add(remainder);
+            }
+        }
+        this.collectedLoot.clear();
+        if (!remaining.isEmpty()) {
+            this.collectedLoot.addAll(remaining);
+            dropRemainingLoot(serverWorld, this.pairedChestPos);
+        }
+    }
+
+    private Inventory getChestInventory(ServerWorld world) {
+        if (this.pairedChestPos == null) {
+            return null;
+        }
+        var blockEntity = world.getBlockEntity(this.pairedChestPos);
+        if (blockEntity instanceof Inventory inventory) {
+            return inventory;
+        }
+        return null;
+    }
+
+    private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int i = 0; i < inventory.size() && !remaining.isEmpty(); i++) {
+            ItemStack slotStack = inventory.getStack(i);
+            if (slotStack.isEmpty()) {
+                inventory.setStack(i, remaining);
+                remaining = ItemStack.EMPTY;
+            } else if (ItemStack.areItemsAndComponentsEqual(slotStack, remaining)) {
+                int maxTransfer = Math.min(slotStack.getMaxCount() - slotStack.getCount(), remaining.getCount());
+                if (maxTransfer > 0) {
+                    slotStack.increment(maxTransfer);
+                    remaining.decrement(maxTransfer);
+                    inventory.setStack(i, slotStack);
+                }
+            }
+        }
+        inventory.markDirty();
+        return remaining;
+    }
+
+    private void dropRemainingLoot(ServerWorld world, BlockPos pos) {
+        for (ItemStack stack : this.collectedLoot) {
+            if (!stack.isEmpty()) {
+                this.dropStack(world, stack, pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+            }
+        }
+        this.collectedLoot.clear();
     }
 }
