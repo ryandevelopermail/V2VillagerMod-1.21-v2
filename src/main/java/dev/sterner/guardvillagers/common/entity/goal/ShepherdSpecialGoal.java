@@ -13,6 +13,7 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -282,7 +283,10 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 if (isNear(penTarget)) {
-                    triggerBannerPairing(world, penTarget);
+                    BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
+                    if (placedBannerPos != null) {
+                        triggerBannerPairing(world, placedBannerPos);
+                    }
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
                 } else {
@@ -674,14 +678,19 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
 
-            if (hasBannerInPen(world, insidePos)) {
+            BlockPos penCenter = getPenCenter(world, insidePos);
+            if (penCenter == null) {
                 continue;
             }
 
-            double distance = villager.squaredDistanceTo(insidePos.getX() + 0.5D, insidePos.getY() + 0.5D, insidePos.getZ() + 0.5D);
+            if (hasBannerInPen(world, penCenter)) {
+                continue;
+            }
+
+            double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                nearest = insidePos.toImmutable();
+                nearest = penCenter.toImmutable();
             }
         }
 
@@ -704,12 +713,14 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
-        BlockPos start = penPos.add(-PEN_FENCE_RANGE, -PEN_FENCE_RANGE, -PEN_FENCE_RANGE);
-        BlockPos end = penPos.add(PEN_FENCE_RANGE, PEN_FENCE_RANGE, PEN_FENCE_RANGE);
+        BlockPos center = getPenCenter(world, penPos);
+        if (center == null) {
+            return false;
+        }
+        int scanRange = 2;
+        BlockPos start = center.add(-scanRange, -1, -scanRange);
+        BlockPos end = center.add(scanRange, 1, scanRange);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (!penPos.isWithinDistance(pos, PEN_FENCE_RANGE)) {
-                continue;
-            }
             BlockState state = world.getBlockState(pos);
             if (!state.isIn(BlockTags.BANNERS)) {
                 continue;
@@ -719,6 +730,39 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private BlockPos getPenCenter(ServerWorld world, BlockPos insidePos) {
+        BlockPos westFence = findFenceInDirection(world, insidePos, Direction.WEST, PEN_FENCE_RANGE);
+        BlockPos eastFence = findFenceInDirection(world, insidePos, Direction.EAST, PEN_FENCE_RANGE);
+        BlockPos northFence = findFenceInDirection(world, insidePos, Direction.NORTH, PEN_FENCE_RANGE);
+        BlockPos southFence = findFenceInDirection(world, insidePos, Direction.SOUTH, PEN_FENCE_RANGE);
+        if (westFence == null || eastFence == null || northFence == null || southFence == null) {
+            return null;
+        }
+
+        int minX = westFence.getX() + 1;
+        int maxX = eastFence.getX() - 1;
+        int minZ = northFence.getZ() + 1;
+        int maxZ = southFence.getZ() - 1;
+        if (minX > maxX || minZ > maxZ) {
+            return null;
+        }
+
+        int centerX = (minX + maxX) / 2;
+        int centerZ = (minZ + maxZ) / 2;
+        return new BlockPos(centerX, insidePos.getY(), centerZ);
+    }
+
+    private BlockPos findFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
+        for (int i = 1; i <= maxDistance; i++) {
+            BlockPos pos = start.offset(direction, i);
+            BlockState state = world.getBlockState(pos);
+            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+                return pos;
+            }
+        }
+        return null;
     }
 
     private boolean isInsideFencePen(ServerWorld world, BlockPos pos) {
@@ -737,6 +781,75 @@ public class ShepherdSpecialGoal extends Goal {
             if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    private BlockPos placeBannerInPen(ServerWorld world, BlockPos centerPos) {
+        if (!carriedItem.isIn(ItemTags.BANNERS)) {
+            return null;
+        }
+        if (!(carriedItem.getItem() instanceof BlockItem blockItem)) {
+            return null;
+        }
+
+        BlockPos placed = tryPlaceBanner(world, centerPos, blockItem);
+        if (placed == null) {
+            placed = tryPlaceBanner(world, centerPos.up(), blockItem);
+        }
+        if (placed != null && consumeBannerFromInventory(carriedItem)) {
+            carriedItem.decrement(1);
+            if (carriedItem.isEmpty()) {
+                carriedItem = ItemStack.EMPTY;
+            }
+        }
+        return placed;
+    }
+
+    private BlockPos tryPlaceBanner(ServerWorld world, BlockPos pos, BlockItem blockItem) {
+        if (!world.getBlockState(pos).isAir()) {
+            return null;
+        }
+        BlockState bannerState = blockItem.getBlock().getDefaultState();
+        if (!bannerState.canPlaceAt(world, pos)) {
+            return null;
+        }
+        if (world.setBlockState(pos, bannerState)) {
+            world.playSound(null, pos, SoundEvents.BLOCK_WOOD_PLACE, SoundCategory.BLOCKS, 1.0F, 1.0F);
+            return pos;
+        }
+        return null;
+    }
+
+    private boolean consumeBannerFromInventory(ItemStack bannerStack) {
+        if (bannerStack.isEmpty()) {
+            return false;
+        }
+        ItemStack mainHand = villager.getMainHandStack();
+        if (!mainHand.isEmpty()
+                && mainHand.isIn(ItemTags.BANNERS)
+                && ItemStack.areItemsAndComponentsEqual(mainHand, bannerStack)) {
+            mainHand.decrement(1);
+            if (mainHand.isEmpty()) {
+                villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+            }
+            return true;
+        }
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isIn(ItemTags.BANNERS)) {
+                continue;
+            }
+            if (!ItemStack.areItemsAndComponentsEqual(stack, bannerStack)) {
+                continue;
+            }
+            stack.decrement(1);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            inventory.markDirty();
+            return true;
         }
         return false;
     }
