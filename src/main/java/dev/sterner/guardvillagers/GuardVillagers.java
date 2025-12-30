@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers;
 
+import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
-import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
@@ -72,6 +72,11 @@ public class GuardVillagers implements ModInitializer {
 
     public static final Item GUARD_SPAWN_EGG = new SpawnEggItem(GUARD_VILLAGER, 5651507, 8412749, new Item.Settings());
 
+    public static final EntityType<AxeGuardEntity> AXE_GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("axe_guard"),
+            FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, AxeGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
+
+    public static final Item AXE_GUARD_SPAWN_EGG = new SpawnEggItem(AXE_GUARD_VILLAGER, 5651507, 9477598, new Item.Settings());
+
     public static Hand getHandWith(LivingEntity livingEntity, Predicate<Item> itemPredicate) {
         return itemPredicate.test(livingEntity.getMainHandStack().getItem()) ? Hand.MAIN_HAND : Hand.OFF_HAND;
     }
@@ -88,9 +93,11 @@ public class GuardVillagers implements ModInitializer {
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(AXE_GUARD_VILLAGER, GuardEntity.createAttributes());
         VillagerProfessionBehaviors.register();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
+        Registry.register(Registries.ITEM, id("axe_guard_spawn_egg"), AXE_GUARD_SPAWN_EGG);
         Registry.register(Registries.SCREEN_HANDLER, id("guard_screen"), GUARD_SCREEN_HANDLER);
         Registry.register(Registries.SOUND_EVENT, id("entity.guard.ambient"), GUARD_AMBIENT);
         Registry.register(Registries.SOUND_EVENT, id( "entity.guard.hurt"), GUARD_HURT);
@@ -105,7 +112,10 @@ public class GuardVillagers implements ModInitializer {
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
 
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(GUARD_SPAWN_EGG));
+        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> {
+            entries.add(GUARD_SPAWN_EGG);
+            entries.add(AXE_GUARD_SPAWN_EGG);
+        });
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
         UseEntityCallback.EVENT.register(this::villagerConvert);
