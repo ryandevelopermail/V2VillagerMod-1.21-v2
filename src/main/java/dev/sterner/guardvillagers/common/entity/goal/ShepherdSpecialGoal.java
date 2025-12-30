@@ -127,6 +127,7 @@ public class ShepherdSpecialGoal extends Goal {
                 hadShearsInChest = false;
             }
             if (world.getTime() >= nextChestShearTriggerTime) {
+                triggerShearsPlacedInChest(world);
                 hadShearsInChest = false;
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
             }
