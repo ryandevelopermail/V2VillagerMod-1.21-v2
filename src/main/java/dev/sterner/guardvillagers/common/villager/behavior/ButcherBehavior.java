@@ -96,6 +96,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
         guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
+        guard.setHuntOnSpawn();
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
