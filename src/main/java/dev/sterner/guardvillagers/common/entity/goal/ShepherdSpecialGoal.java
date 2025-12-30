@@ -91,6 +91,7 @@ public class ShepherdSpecialGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             return false;
         }
+        updateShearsCountdown(world);
         if (jobPos == null || chestPos == null) {
             return false;
         }
