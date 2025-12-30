@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SmokerBlockEntity;
@@ -110,7 +111,7 @@ public class ButcherSmokerGoal extends Goal {
 
     private boolean hasTransferableItems(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
-        BlockPos smokerPos = guard.getPairedSmokerPos();
+        BlockPos smokerPos = resolveSmokerPos(world, chestPos);
         if (chestPos == null || smokerPos == null) {
             return false;
         }
@@ -126,7 +127,7 @@ public class ButcherSmokerGoal extends Goal {
 
     private void transferItems(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
-        BlockPos smokerPos = guard.getPairedSmokerPos();
+        BlockPos smokerPos = resolveSmokerPos(world, chestPos);
         if (chestPos == null || smokerPos == null) {
             return;
         }
@@ -296,6 +297,23 @@ public class ButcherSmokerGoal extends Goal {
             return Optional.of(smoker);
         }
         return Optional.empty();
+    }
+
+    private BlockPos resolveSmokerPos(ServerWorld world, BlockPos chestPos) {
+        if (chestPos == null) {
+            return null;
+        }
+        BlockPos smokerPos = guard.getPairedSmokerPos();
+        if (smokerPos != null && world.getBlockState(smokerPos).isOf(Blocks.SMOKER)) {
+            return smokerPos;
+        }
+        for (BlockPos pos : BlockPos.iterate(chestPos.add(-3, -3, -3), chestPos.add(3, 3, 3))) {
+            if (world.getBlockState(pos).isOf(Blocks.SMOKER)) {
+                guard.setPairedSmokerPos(pos.toImmutable());
+                return pos.toImmutable();
+            }
+        }
+        return null;
     }
 
     private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
