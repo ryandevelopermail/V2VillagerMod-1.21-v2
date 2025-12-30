@@ -4,6 +4,18 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.entity.goal.ArmorerRepairGuardArmorGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FollowShieldGuards;
+import dev.sterner.guardvillagers.common.entity.goal.GuardEatFoodGoal;
+import dev.sterner.guardvillagers.common.entity.goal.GuardInteractDoorGoal;
+import dev.sterner.guardvillagers.common.entity.goal.GuardLookAtAndStopMovingWhenBeingTheInteractionTarget;
+import dev.sterner.guardvillagers.common.entity.goal.GuardRunToEatGoal;
+import dev.sterner.guardvillagers.common.entity.goal.KickGoal;
+import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
+import dev.sterner.guardvillagers.common.entity.goal.RangedBowAttackPassiveGoal;
+import dev.sterner.guardvillagers.common.entity.goal.RangedCrossbowAttackPassiveGoal;
+import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
+import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
@@ -17,6 +29,7 @@ import net.minecraft.entity.ai.goal.RevengeGoal;
 import net.minecraft.entity.ai.goal.SwimGoal;
 import net.minecraft.entity.ai.goal.WanderAroundFarGoal;
 import net.minecraft.entity.ai.goal.WanderAroundPointOfInterestGoal;
+import net.minecraft.entity.ai.goal.target.UniversalAngerGoal;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.MerchantEntity;
@@ -66,7 +79,7 @@ public class ButcherGuardEntity extends GuardEntity {
         this.goalSelector.add(0, new KickGoal(this));
         this.goalSelector.add(0, new GuardEatFoodGoal(this));
         this.goalSelector.add(0, new RaiseShieldGoal(this));
-        this.goalSelector.add(1, new RespondToHornGoal(this, 1.0D));
+        this.goalSelector.add(1, new GuardEntity.RespondToHornGoal(this, 1.0D));
         this.goalSelector.add(1, new GuardRunToEatGoal(this));
         this.goalSelector.add(2, new RangedCrossbowAttackPassiveGoal<>(this, 1.0D, 8.0F));
         this.goalSelector.add(3, new RangedBowAttackPassiveGoal<GuardEntity>(this, 0.5D, 20, 15.0F) {
@@ -93,7 +106,7 @@ public class ButcherGuardEntity extends GuardEntity {
                 return (this.canStart() || !ButcherGuardEntity.this.getNavigation().isIdle()) && this.isBowInMainhand();
             }
         });
-        this.goalSelector.add(2, new GuardEntityMeleeGoal(this, 0.8D, true));
+        this.goalSelector.add(2, new GuardEntity.GuardEntityMeleeGoal(this, 0.8D, true));
         this.goalSelector.add(3, new GuardEntity.FollowHeroGoal(this));
         if (GuardVillagersConfig.guardEntitysRunFromPolarBears) {
             this.goalSelector.add(3, new FleeEntityGoal<>(this, PolarBearEntity.class, 12.0F, 1.0D, 1.2D));
@@ -172,7 +185,7 @@ public class ButcherGuardEntity extends GuardEntity {
             int randomSessions = MathHelper.nextInt(this.random, RANDOM_HUNT_CHANCES_MIN, RANDOM_HUNT_CHANCES_MAX);
             long minOffset = previousDay == -1 ? timeOfDay % DAY_LENGTH : 0;
             for (int i = 0; i < randomSessions; i++) {
-                long randomOffset = MathHelper.nextLong(this.random, minOffset, DAY_LENGTH - 1);
+                long randomOffset = MathHelper.nextInt(this.random, (int) minOffset, DAY_LENGTH - 1);
                 this.randomHuntTimes.add(day * DAY_LENGTH + randomOffset);
             }
             this.randomHuntTimes.sort(Comparator.naturalOrder());
