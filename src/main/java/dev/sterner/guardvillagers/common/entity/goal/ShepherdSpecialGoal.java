@@ -70,7 +70,9 @@ public class ShepherdSpecialGoal extends Goal {
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
     private BlockPos penTarget;
+    private BlockPos penGatePos;
     private ItemStack carriedItem = ItemStack.EMPTY;
+    private boolean openedPenGate;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -239,7 +241,9 @@ public class ShepherdSpecialGoal extends Goal {
         sheepTargets = new ArrayList<>();
         sheepTargetIndex = 0;
         penTarget = null;
+        penGatePos = null;
         carriedItem = ItemStack.EMPTY;
+        openedPenGate = false;
     }
 
     @Override
@@ -282,6 +286,8 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                updatePenGateAccess(world, penGatePos);
+
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
                     if (placedBannerPos != null) {
@@ -294,6 +300,7 @@ public class ShepherdSpecialGoal extends Goal {
                 }
             }
             case RETURN_TO_CHEST -> {
+                updatePenGateAccess(world, penGatePos);
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
@@ -661,6 +668,7 @@ public class ShepherdSpecialGoal extends Goal {
         BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
         BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
         BlockPos nearest = null;
+        BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos pos : BlockPos.iterate(start, end)) {
@@ -691,9 +699,11 @@ public class ShepherdSpecialGoal extends Goal {
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = penCenter.toImmutable();
+                nearestGate = pos.toImmutable();
             }
         }
 
+        penGatePos = nearestGate;
         return nearest;
     }
 
@@ -878,6 +888,45 @@ public class ShepherdSpecialGoal extends Goal {
             JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
             FarmerBannerTracker.setBanner(villager, bannerPos);
         }
+    }
+
+    private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
+        if (gatePos == null) {
+            return;
+        }
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+
+        boolean isOpen = state.get(FenceGateBlock.OPEN);
+        boolean isNearGate = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+        boolean isInsidePen = penTarget != null && isInsideFencePen(world, villager.getBlockPos());
+
+        if (isNearGate && (!isOpen || !openedPenGate)) {
+            openGate(world, gatePos, true);
+            openedPenGate = true;
+            return;
+        }
+
+        if (openedPenGate && isOpen && !isInsidePen) {
+            double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+            if (distance > TARGET_REACH_SQUARED) {
+                openGate(world, gatePos, false);
+                openedPenGate = false;
+            }
+        }
+    }
+
+    private void openGate(ServerWorld world, BlockPos pos, boolean open) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        if (state.get(FenceGateBlock.OPEN) == open) {
+            return;
+        }
+        world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
