@@ -959,12 +959,9 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        if (openedPenGate && isOpen && wasInsidePen && !isInsidePen) {
-            double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
-            if (distance > GATE_INTERACT_RANGE_SQUARED) {
-                openGate(world, gatePos, false);
-                openedPenGate = false;
-            }
+        if (openedPenGate && isOpen && wasInsidePen && !isInsidePen && isNearGate) {
+            openGate(world, gatePos, false);
+            openedPenGate = false;
         }
         wasInsidePen = isInsidePen;
     }
