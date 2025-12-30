@@ -190,15 +190,12 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (taskType == TaskType.SHEARS) {
-            if (hasShearsInInventoryOrHand()) {
+            if (hasShearsInInventoryOrHand() || hasShearsInChest(world)) {
                 carriedItem = ItemStack.EMPTY;
             } else {
-                carriedItem = takeItemFromChest(world, taskType);
-                if (carriedItem.isEmpty()) {
-                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                    stage = Stage.DONE;
-                    return;
-                }
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+                return;
             }
         } else {
             carriedItem = takeItemFromChest(world, taskType);
