@@ -5,7 +5,7 @@ import java.util.Comparator;
 import java.util.List;
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerRepairGuardArmorGoal;
-import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ButcherGuardSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FollowShieldGuards;
 import dev.sterner.guardvillagers.common.entity.goal.GuardEatFoodGoal;
 import dev.sterner.guardvillagers.common.entity.goal.GuardInteractDoorGoal;
@@ -112,7 +112,7 @@ public class ButcherGuardEntity extends GuardEntity {
         this.goalSelector.add(0, new RaiseShieldGoal(this));
         this.goalSelector.add(1, new GuardEntity.RespondToHornGoal(this, 1.0D));
         this.goalSelector.add(1, new GuardRunToEatGoal(this));
-        this.goalSelector.add(2, new ButcherSmokerGoal(this));
+        this.goalSelector.add(2, new ButcherGuardSmokerGoal(this));
         this.goalSelector.add(2, new RangedCrossbowAttackPassiveGoal<>(this, 1.0D, 8.0F));
         this.goalSelector.add(3, new RangedBowAttackPassiveGoal<GuardEntity>(this, 0.5D, 20, 15.0F) {
             @Override

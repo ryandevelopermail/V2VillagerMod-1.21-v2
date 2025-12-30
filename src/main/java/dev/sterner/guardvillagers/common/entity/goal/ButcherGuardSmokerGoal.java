@@ -1,15 +1,17 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.SmokerBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -19,16 +21,14 @@ import net.minecraft.recipe.input.SingleStackRecipeInput;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 
-public class ButcherSmokerGoal extends Goal {
+public class ButcherGuardSmokerGoal extends Goal {
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final int CHECK_INTERVAL_TICKS = 10;
+    private static final int CHECK_INTERVAL_TICKS = 20;
 
-    private final VillagerEntity villager;
-    private BlockPos jobPos;
-    private BlockPos chestPos;
-    private Stage stage = Stage.IDLE;
+    private final ButcherGuardEntity guard;
     private long nextCheckTime;
+    private Stage stage = Stage.IDLE;
 
     private enum Stage {
         IDLE,
@@ -37,24 +37,17 @@ public class ButcherSmokerGoal extends Goal {
         DONE
     }
 
-    public ButcherSmokerGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
-        this.villager = villager;
-        setTargets(jobPos, chestPos);
+    public ButcherGuardSmokerGoal(ButcherGuardEntity guard) {
+        this.guard = guard;
         setControls(EnumSet.of(Control.MOVE));
-    }
-
-    public void setTargets(BlockPos jobPos, BlockPos chestPos) {
-        this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
-        this.stage = Stage.IDLE;
     }
 
     @Override
     public boolean canStart() {
-        if (!(villager.getWorld() instanceof ServerWorld world)) {
+        if (!(guard.getWorld() instanceof ServerWorld world)) {
             return false;
         }
-        if (!villager.isAlive() || villager.isSleeping()) {
+        if (guard.getTarget() != null || guard.isEating() || guard.isBlocking()) {
             return false;
         }
         if (world.getTime() < nextCheckTime) {
@@ -66,24 +59,24 @@ public class ButcherSmokerGoal extends Goal {
 
     @Override
     public boolean shouldContinue() {
-        return stage != Stage.DONE && villager.isAlive();
+        return stage != Stage.DONE && guard.isAlive() && guard.getTarget() == null;
     }
 
     @Override
     public void start() {
         stage = Stage.MOVE_TO_CHEST;
-        moveTo(chestPos);
+        moveTo(guard.getPairedChestPos());
     }
 
     @Override
     public void stop() {
         stage = Stage.DONE;
-        villager.getNavigation().stop();
+        guard.getNavigation().stop();
     }
 
     @Override
     public void tick() {
-        if (!(villager.getWorld() instanceof ServerWorld world)) {
+        if (!(guard.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
             return;
         }
@@ -93,11 +86,11 @@ public class ButcherSmokerGoal extends Goal {
                 stage = Stage.DONE;
                 return;
             }
-            if (isNear(chestPos)) {
+            if (isNear(guard.getPairedChestPos())) {
                 stage = Stage.MOVE_TO_SMOKER;
-                moveTo(jobPos);
-            } else if (villager.getNavigation().isIdle()) {
-                moveTo(chestPos);
+                moveTo(guard.getPairedSmokerPos());
+            } else if (guard.getNavigation().isIdle()) {
+                moveTo(guard.getPairedChestPos());
             }
             return;
         }
@@ -107,32 +100,39 @@ public class ButcherSmokerGoal extends Goal {
                 stage = Stage.DONE;
                 return;
             }
-            if (isNear(jobPos)) {
+            if (isNear(guard.getPairedSmokerPos())) {
                 transferItems(world);
                 stage = Stage.DONE;
-            } else if (villager.getNavigation().isIdle()) {
-                moveTo(jobPos);
+            } else if (guard.getNavigation().isIdle()) {
+                moveTo(guard.getPairedSmokerPos());
             }
         }
     }
 
     private boolean hasTransferableItems(ServerWorld world) {
-        if (jobPos == null || chestPos == null) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos smokerPos = resolveSmokerPos(world, chestPos);
+        if (chestPos == null || smokerPos == null) {
             return false;
         }
-        Inventory chestInventory = getChestInventory(world);
+        Inventory chestInventory = getChestInventory(world, chestPos);
         if (chestInventory == null) {
             return false;
         }
-        if (getSmokerInventory(world).isEmpty()) {
+        if (getSmokerInventory(world, smokerPos).isEmpty()) {
             return false;
         }
         return findBestMeat(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
     }
 
     private void transferItems(ServerWorld world) {
-        Inventory chestInventory = getChestInventory(world);
-        Optional<SmokerBlockEntity> smokerOpt = getSmokerInventory(world);
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos smokerPos = resolveSmokerPos(world, chestPos);
+        if (chestPos == null || smokerPos == null) {
+            return;
+        }
+        Inventory chestInventory = getChestInventory(world, chestPos);
+        Optional<SmokerBlockEntity> smokerOpt = getSmokerInventory(world, smokerPos);
         if (chestInventory == null || smokerOpt.isEmpty()) {
             return;
         }
@@ -156,16 +156,14 @@ public class ButcherSmokerGoal extends Goal {
     }
 
     private Optional<ItemStack> findBestMeat(ServerWorld world, Inventory inventory) {
-        return inventoryToStream(inventory)
-                .filter(stack -> isSmokable(world, stack))
-                .sorted(stackComparator(false))
+        return getSortedStacks(inventory, stack -> isSmokable(world, stack), false)
+                .stream()
                 .findFirst();
     }
 
     private Optional<ItemStack> findBestFuel(Inventory inventory) {
-        return inventoryToStream(inventory)
-                .filter(this::isFuel)
-                .sorted(stackComparator(true))
+        return getSortedStacks(inventory, this::isFuel, true)
+                .stream()
                 .findFirst();
     }
 
@@ -177,10 +175,18 @@ public class ButcherSmokerGoal extends Goal {
         return extractBestStack(inventory, this::isFuel, true);
     }
 
-    private java.util.stream.Stream<ItemStack> inventoryToStream(Inventory inventory) {
+    private List<ItemStack> getSortedStacks(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, boolean fuel) {
+        return inventoryToList(inventory).stream()
+                .filter(stack -> !stack.isEmpty() && predicate.test(stack))
+                .sorted(stackComparator(fuel))
+                .toList();
+    }
+
+    private List<ItemStack> inventoryToList(Inventory inventory) {
         return java.util.stream.IntStream.range(0, inventory.size())
                 .mapToObj(inventory::getStack)
-                .filter(stack -> !stack.isEmpty());
+                .filter(stack -> !stack.isEmpty())
+                .toList();
     }
 
     private ItemStack extractBestStack(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, boolean fuel) {
@@ -226,16 +232,16 @@ public class ButcherSmokerGoal extends Goal {
         return 3;
     }
 
-    private boolean isFuel(ItemStack stack) {
-        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
-    }
-
     private boolean isSmokable(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
         SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
         return world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent();
+    }
+
+    private boolean isFuel(ItemStack stack) {
+        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
 
     private ItemStack insertIntoSmoker(SmokerBlockEntity smoker, ItemStack stack, int slot) {
@@ -285,15 +291,32 @@ public class ButcherSmokerGoal extends Goal {
         return remaining;
     }
 
-    private Optional<SmokerBlockEntity> getSmokerInventory(ServerWorld world) {
-        BlockEntity blockEntity = world.getBlockEntity(jobPos);
+    private Optional<SmokerBlockEntity> getSmokerInventory(ServerWorld world, BlockPos smokerPos) {
+        BlockEntity blockEntity = world.getBlockEntity(smokerPos);
         if (blockEntity instanceof SmokerBlockEntity smoker) {
             return Optional.of(smoker);
         }
         return Optional.empty();
     }
 
-    private Inventory getChestInventory(ServerWorld world) {
+    private BlockPos resolveSmokerPos(ServerWorld world, BlockPos chestPos) {
+        if (chestPos == null) {
+            return null;
+        }
+        BlockPos smokerPos = guard.getPairedSmokerPos();
+        if (smokerPos != null && world.getBlockState(smokerPos).isOf(Blocks.SMOKER)) {
+            return smokerPos;
+        }
+        for (BlockPos pos : BlockPos.iterate(chestPos.add(-3, -3, -3), chestPos.add(3, 3, 3))) {
+            if (world.getBlockState(pos).isOf(Blocks.SMOKER)) {
+                guard.setPairedSmokerPos(pos.toImmutable());
+                return pos.toImmutable();
+            }
+        }
+        return null;
+    }
+
+    private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
@@ -305,13 +328,13 @@ public class ButcherSmokerGoal extends Goal {
         if (pos == null) {
             return;
         }
-        villager.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, MOVE_SPEED);
+        guard.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, MOVE_SPEED);
     }
 
     private boolean isNear(BlockPos pos) {
         if (pos == null) {
             return false;
         }
-        return villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+        return guard.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
     }
 }
