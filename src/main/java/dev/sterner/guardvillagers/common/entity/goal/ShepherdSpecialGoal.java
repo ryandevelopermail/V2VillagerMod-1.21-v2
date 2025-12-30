@@ -123,10 +123,10 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest) {
             if (shearsAddedToChest) {
-                triggerShearsPlacedInChest(world);
                 hadShearsInChest = false;
+                nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
             }
-            if (world.getTime() >= nextChestShearTriggerTime) {
+            if (nextChestShearTriggerTime > 0L && world.getTime() >= nextChestShearTriggerTime) {
                 triggerShearsPlacedInChest(world);
                 hadShearsInChest = false;
                 nextChestShearTriggerTime = world.getTime() + nextRandomCheckInterval();
@@ -134,6 +134,7 @@ public class ShepherdSpecialGoal extends Goal {
             lastShearsInChestCount = countShearsInChest(world);
         } else if (!hasShearsInChest) {
             lastShearsInChestCount = 0;
+            nextChestShearTriggerTime = 0L;
         }
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest && !hadShearsInChest) {
