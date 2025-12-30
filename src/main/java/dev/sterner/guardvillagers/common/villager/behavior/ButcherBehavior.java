@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
@@ -30,7 +30,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        AxeGuardEntity guard = GuardVillagers.AXE_GUARD_VILLAGER.create(world);
+        ButcherGuardEntity guard = GuardVillagers.BUTCHER_GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
         }
