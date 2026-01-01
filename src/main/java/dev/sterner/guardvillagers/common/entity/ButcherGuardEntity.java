@@ -71,6 +71,7 @@ public class ButcherGuardEntity extends GuardEntity {
     private final List<ItemStack> collectedLoot = new ArrayList<>();
     private BlockPos pairedChestPos;
     private BlockPos pairedSmokerPos;
+    private BlockPos pairedBannerPos;
 
     public ButcherGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -88,12 +89,20 @@ public class ButcherGuardEntity extends GuardEntity {
         this.pairedSmokerPos = smokerPos == null ? null : smokerPos.toImmutable();
     }
 
+    public void setPairedBannerPos(BlockPos bannerPos) {
+        this.pairedBannerPos = bannerPos == null ? null : bannerPos.toImmutable();
+    }
+
     public BlockPos getPairedChestPos() {
         return pairedChestPos;
     }
 
     public BlockPos getPairedSmokerPos() {
         return pairedSmokerPos;
+    }
+
+    public BlockPos getPairedBannerPos() {
+        return pairedBannerPos;
     }
 
     @Override
@@ -269,6 +278,14 @@ public class ButcherGuardEntity extends GuardEntity {
         } else {
             this.pairedSmokerPos = null;
         }
+        if (nbt.contains("PairedBannerX")) {
+            int x = nbt.getInt("PairedBannerX");
+            int y = nbt.getInt("PairedBannerY");
+            int z = nbt.getInt("PairedBannerZ");
+            this.pairedBannerPos = new BlockPos(x, y, z);
+        } else {
+            this.pairedBannerPos = null;
+        }
     }
 
     @Override
@@ -283,6 +300,11 @@ public class ButcherGuardEntity extends GuardEntity {
             nbt.putInt("PairedSmokerX", this.pairedSmokerPos.getX());
             nbt.putInt("PairedSmokerY", this.pairedSmokerPos.getY());
             nbt.putInt("PairedSmokerZ", this.pairedSmokerPos.getZ());
+        }
+        if (this.pairedBannerPos != null) {
+            nbt.putInt("PairedBannerX", this.pairedBannerPos.getX());
+            nbt.putInt("PairedBannerY", this.pairedBannerPos.getY());
+            nbt.putInt("PairedBannerZ", this.pairedBannerPos.getZ());
         }
     }
 

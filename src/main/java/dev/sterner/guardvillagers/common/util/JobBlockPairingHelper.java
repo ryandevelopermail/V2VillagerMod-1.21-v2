@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.util;
 
 import com.google.common.collect.Sets;
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.villager.ButcherBannerTracker;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import net.minecraft.block.Block;
@@ -46,6 +48,7 @@ public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
     private static final double NEARBY_VILLAGER_SCAN_RANGE = 8.0D;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+    private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
@@ -185,7 +188,14 @@ public final class JobBlockPairingHelper {
             }
         }
 
-        LOGGER.info("Banner {} paired with {} Farmer(s)", bannerPos.toShortString(), pairedCount);
+        int guardPairedCount = 0;
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, new Box(bannerPos).expand(BUTCHER_BANNER_PAIR_RANGE), Entity::isAlive)) {
+            if (pairButcherGuardWithBanner(world, guard, bannerPos)) {
+                guardPairedCount++;
+            }
+        }
+
+        LOGGER.info("Banner {} paired with {} Farmer(s) and {} Butcher Guard(s)", bannerPos.toShortString(), pairedCount, guardPairedCount);
     }
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
@@ -228,6 +238,9 @@ public final class JobBlockPairingHelper {
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
             refreshVillagerPairings(world, villager);
         }
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, worldBounds, Entity::isAlive)) {
+            refreshButcherGuardPairings(world, guard);
+        }
     }
 
     public static Box getWorldBounds(ServerWorld world) {
@@ -269,6 +282,41 @@ public final class JobBlockPairingHelper {
         playPairingAnimation(world, bannerPos, villager, jobPos);
         FarmerBannerTracker.setBanner(villager, bannerPos);
         return true;
+    }
+
+    private static boolean pairButcherGuardWithBanner(ServerWorld world, ButcherGuardEntity guard, BlockPos bannerPos) {
+        if (guard.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > BUTCHER_BANNER_PAIR_RANGE * BUTCHER_BANNER_PAIR_RANGE) {
+            return false;
+        }
+
+        playPairingAnimation(world, bannerPos, guard, guard.getBlockPos());
+        ButcherBannerTracker.setBanner(guard, bannerPos);
+        guard.setPairedBannerPos(bannerPos);
+        return true;
+    }
+
+    public static void refreshButcherGuardPairings(ServerWorld world, ButcherGuardEntity guard) {
+        if (!guard.isAlive()) {
+            return;
+        }
+
+        BlockPos pairedBannerPos = guard.getPairedBannerPos();
+        if (pairedBannerPos != null) {
+            BlockState bannerState = world.getBlockState(pairedBannerPos);
+            if (isBannerOnFence(world, pairedBannerPos, bannerState)) {
+                ButcherBannerTracker.setBanner(guard, pairedBannerPos);
+                return;
+            }
+        }
+
+        Collection<BlockPos> bannerPositions = findBannersWithinRange(world, guard.getBlockPos(), (int) BUTCHER_BANNER_PAIR_RANGE);
+        for (BlockPos bannerPos : bannerPositions) {
+            BlockState bannerState = world.getBlockState(bannerPos);
+            if (isBannerOnFence(world, bannerPos, bannerState)) {
+                pairButcherGuardWithBanner(world, guard, bannerPos);
+                break;
+            }
+        }
     }
 
     private static boolean isBannerOnFence(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
