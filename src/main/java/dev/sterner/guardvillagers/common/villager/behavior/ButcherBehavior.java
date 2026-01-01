@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -11,6 +12,7 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.AxeItem;
@@ -21,10 +23,14 @@ import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.Optional;
+import java.util.WeakHashMap;
 
 public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ButcherBehavior.class);
+    private static final int SMOKER_GOAL_PRIORITY = 3;
+    private static final Map<VillagerEntity, ButcherSmokerGoal> GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -44,6 +50,16 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
+
+        ButcherSmokerGoal goal = GOALS.get(villager);
+        if (goal == null) {
+            goal = new ButcherSmokerGoal(villager, jobPos, chestPos);
+            GOALS.put(villager, goal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(SMOKER_GOAL_PRIORITY, goal);
+        } else {
+            goal.setTargets(jobPos, chestPos);
+        }
 
         tryConvertWithAxe(world, villager, jobPos, chestPos);
     }
@@ -98,6 +114,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
         guard.setHuntOnSpawn();
         guard.setPairedChestPos(chestPos);
+        guard.setPairedSmokerPos(jobPos);
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
