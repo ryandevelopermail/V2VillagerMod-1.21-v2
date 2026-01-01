@@ -17,6 +17,7 @@ import dev.sterner.guardvillagers.common.entity.goal.RangedBowAttackPassiveGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RangedCrossbowAttackPassiveGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
@@ -58,6 +59,9 @@ public class ButcherGuardEntity extends GuardEntity {
     private static final int HUNT_INTERVAL_MAX_TICKS = 20 * 60 * 10;
     private static final int LOOT_SCAN_INTERVAL = 20;
     private static final double LOOT_SCAN_RANGE = 6.0D;
+    private static final double HUNT_NEARBY_RANGE = 25.0D;
+    private static final int HUNT_BANNER_SEARCH_RANGE = 128;
+    private static final int HUNT_BANNER_NAVIGATION_INTERVAL = 40;
 
     private boolean huntOnSpawn;
     private boolean huntSessionActive;
@@ -291,12 +295,28 @@ public class ButcherGuardEntity extends GuardEntity {
     }
 
     private void findNearbyAnimalTarget() {
-        Box searchBox = this.getBoundingBox().expand(16.0D);
+        Box searchBox = this.getBoundingBox().expand(HUNT_NEARBY_RANGE);
         List<AnimalEntity> animals = this.getWorld().getEntitiesByClass(AnimalEntity.class, searchBox, Entity::isAlive);
         animals.sort(Comparator.comparingDouble(this::squaredDistanceTo));
         if (!animals.isEmpty()) {
             this.setTarget(animals.get(0));
+            return;
         }
+        navigateToNearestPenBanner();
+    }
+
+    private void navigateToNearestPenBanner() {
+        if (!this.huntSessionActive || this.getTarget() != null || this.age % HUNT_BANNER_NAVIGATION_INTERVAL != 0) {
+            return;
+        }
+        if (!(this.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+        if (!this.getNavigation().isIdle()) {
+            return;
+        }
+        JobBlockPairingHelper.findNearestPenBanner(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE)
+                .ifPresent(pos -> this.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, 0.6D));
     }
 
     private void collectNearbyLoot() {

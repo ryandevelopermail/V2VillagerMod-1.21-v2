@@ -352,6 +352,23 @@ public final class JobBlockPairingHelper {
         return banners;
     }
 
+    public static Optional<BlockPos> findNearestPenBanner(ServerWorld world, BlockPos center, int range) {
+        BlockPos closest = null;
+        double closestDistance = Double.MAX_VALUE;
+        for (BlockPos bannerPos : findBannersWithinRange(world, center, range)) {
+            BlockState bannerState = world.getBlockState(bannerPos);
+            if (!isBannerOnFence(world, bannerPos, bannerState)) {
+                continue;
+            }
+            double distance = center.getSquaredDistance(bannerPos);
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closest = bannerPos;
+            }
+        }
+        return Optional.ofNullable(closest);
+    }
+
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
         if (villager instanceof VillagerEntity villagerEntity) {
             VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
