@@ -119,10 +119,14 @@ public class ButcherGuardSmokerGoal extends Goal {
         if (chestInventory == null) {
             return false;
         }
-        if (getSmokerInventory(world, smokerPos).isEmpty()) {
+        Optional<SmokerBlockEntity> smokerOpt = getSmokerInventory(world, smokerPos);
+        if (smokerOpt.isEmpty()) {
             return false;
         }
-        return findBestMeat(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
+        SmokerBlockEntity smoker = smokerOpt.get();
+        boolean canInsertMeat = smoker.getStack(0).isEmpty() && findBestMeat(world, chestInventory).isPresent();
+        boolean hasFuel = findBestFuel(chestInventory).isPresent();
+        return canInsertMeat || hasFuel;
     }
 
     private void transferItems(ServerWorld world) {
@@ -138,11 +142,13 @@ public class ButcherGuardSmokerGoal extends Goal {
         }
         SmokerBlockEntity smoker = smokerOpt.get();
         extractSmokerOutput(chestInventory, smoker);
-        ItemStack meatStack = extractBestMeat(world, chestInventory);
-        if (!meatStack.isEmpty()) {
-            ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
-            if (!remaining.isEmpty()) {
-                insertIntoInventory(chestInventory, remaining);
+        if (smoker.getStack(0).isEmpty()) {
+            ItemStack meatStack = extractBestMeat(world, chestInventory);
+            if (!meatStack.isEmpty()) {
+                ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
+                if (!remaining.isEmpty()) {
+                    insertIntoInventory(chestInventory, remaining);
+                }
             }
         }
         ItemStack fuelStack = extractBestFuel(chestInventory);
