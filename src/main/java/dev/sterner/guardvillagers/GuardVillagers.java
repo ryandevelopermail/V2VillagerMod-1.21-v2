@@ -174,6 +174,9 @@ public class GuardVillagers implements ModInitializer {
                     }
                 }
             }
+            if (entity instanceof ButcherGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity);
+            }
         });
 
         ServerWorldEvents.LOAD.register((server, world) -> JobBlockPairingHelper.refreshWorldPairings(world));
