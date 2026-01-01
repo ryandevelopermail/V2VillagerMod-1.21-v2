@@ -119,8 +119,13 @@ public class ButcherGuardSmokerGoal extends Goal {
         if (chestInventory == null) {
             return false;
         }
-        if (getSmokerInventory(world, smokerPos).isEmpty()) {
+        Optional<SmokerBlockEntity> smokerOpt = getSmokerInventory(world, smokerPos);
+        if (smokerOpt.isEmpty()) {
             return false;
+        }
+        SmokerBlockEntity smoker = smokerOpt.get();
+        if (!smoker.getStack(2).isEmpty() && smoker.getStack(0).isEmpty()) {
+            return true;
         }
         return findBestMeat(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
     }
@@ -137,7 +142,9 @@ public class ButcherGuardSmokerGoal extends Goal {
             return;
         }
         SmokerBlockEntity smoker = smokerOpt.get();
-        extractSmokerOutput(chestInventory, smoker);
+        if (smoker.getStack(0).isEmpty()) {
+            extractSmokerOutput(chestInventory, smoker);
+        }
         ItemStack meatStack = extractBestMeat(world, chestInventory);
         if (!meatStack.isEmpty()) {
             ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
