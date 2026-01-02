@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.villager;
 import dev.sterner.guardvillagers.common.villager.behavior.ArmorerBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.ButcherBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.FarmerBehavior;
+import dev.sterner.guardvillagers.common.villager.behavior.FletcherBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.LeatherworkerBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.ToolsmithBehavior;
@@ -17,6 +18,7 @@ public final class VillagerProfessionBehaviors {
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.ARMORER, new ArmorerBehavior());
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.BUTCHER, new ButcherBehavior());
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.FARMER, new FarmerBehavior());
+        VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.FLETCHER, new FletcherBehavior());
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.LEATHERWORKER, new LeatherworkerBehavior());
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.SHEPHERD, new ShepherdBehavior());
         VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.TOOLSMITH, new ToolsmithBehavior());
