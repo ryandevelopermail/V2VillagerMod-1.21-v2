@@ -18,6 +18,7 @@ import net.minecraft.item.SwordItem;
 import net.minecraft.item.TridentItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
 
 import java.util.EnumSet;
 import java.util.Optional;
@@ -61,6 +62,9 @@ public class WeaponsmithDistributionGoal extends Goal {
             return false;
         }
         if (!world.isDay()) {
+            return false;
+        }
+        if (villager.getVillagerData().getProfession() != VillagerProfession.WEAPONSMITH) {
             return false;
         }
         if (chestPos == null) {
