@@ -13,8 +13,12 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.RegistryKeys;
 import net.minecraft.registry.tag.TagKey;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.recipe.RecipeType;
+import net.minecraft.recipe.input.SingleStackRecipeInput;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
@@ -23,8 +27,7 @@ public class ArmorerBlastFurnaceGoal extends Goal {
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int CHECK_INTERVAL_TICKS = 10;
-    private static final TagKey<Item> COMMON_ORES_TAG = TagKey.of(RegistryKeys.ITEM, new Identifier("c", "ores"));
-    private static final TagKey<Item> MINECRAFT_ORES_TAG = TagKey.of(RegistryKeys.ITEM, new Identifier("minecraft", "ores"));
+    private static final TagKey<Item> ORES_TAG = TagKey.of(RegistryKeys.ITEM, Identifier.of("c", "ores"));
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -35,7 +38,7 @@ public class ArmorerBlastFurnaceGoal extends Goal {
     private enum Stage {
         IDLE,
         MOVE_TO_CHEST,
-        MOVE_TO_BLAST_FURNACE,
+        MOVE_TO_FURNACE,
         DONE
     }
 
@@ -96,7 +99,7 @@ public class ArmorerBlastFurnaceGoal extends Goal {
                 return;
             }
             if (isNear(chestPos)) {
-                stage = Stage.MOVE_TO_BLAST_FURNACE;
+                stage = Stage.MOVE_TO_FURNACE;
                 moveTo(jobPos);
             } else if (villager.getNavigation().isIdle()) {
                 moveTo(chestPos);
@@ -104,7 +107,7 @@ public class ArmorerBlastFurnaceGoal extends Goal {
             return;
         }
 
-        if (stage == Stage.MOVE_TO_BLAST_FURNACE) {
+        if (stage == Stage.MOVE_TO_FURNACE) {
             if (!hasTransferableItems(world)) {
                 stage = Stage.DONE;
                 return;
@@ -126,74 +129,76 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         if (chestInventory == null) {
             return false;
         }
-        Optional<BlastFurnaceBlockEntity> blastFurnaceOpt = getBlastFurnaceInventory(world);
-        if (blastFurnaceOpt.isEmpty()) {
+        Optional<BlastFurnaceBlockEntity> furnaceOpt = getFurnaceInventory(world);
+        if (furnaceOpt.isEmpty()) {
             return false;
         }
-        BlastFurnaceBlockEntity blastFurnace = blastFurnaceOpt.get();
-        if (!blastFurnace.getStack(2).isEmpty() && blastFurnace.getStack(0).isEmpty()) {
+        BlastFurnaceBlockEntity furnace = furnaceOpt.get();
+        ItemStack inputStack = furnace.getStack(0);
+        ItemStack outputStack = furnace.getStack(2);
+        if (!outputStack.isEmpty() && (inputStack.isEmpty() || hasDifferentOreInChest(world, chestInventory, inputStack))) {
             return true;
         }
-        return findBestOre(chestInventory).isPresent() || findBestFuel(chestInventory).isPresent();
+        return findBestOre(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
     }
 
     private void transferItems(ServerWorld world) {
         Inventory chestInventory = getChestInventory(world);
-        Optional<BlastFurnaceBlockEntity> blastFurnaceOpt = getBlastFurnaceInventory(world);
-        if (chestInventory == null || blastFurnaceOpt.isEmpty()) {
+        Optional<BlastFurnaceBlockEntity> furnaceOpt = getFurnaceInventory(world);
+        if (chestInventory == null || furnaceOpt.isEmpty()) {
             return;
         }
-        BlastFurnaceBlockEntity blastFurnace = blastFurnaceOpt.get();
-        if (blastFurnace.getStack(0).isEmpty()) {
-            extractBlastFurnaceOutput(chestInventory, blastFurnace);
+        BlastFurnaceBlockEntity furnace = furnaceOpt.get();
+        ItemStack inputStack = furnace.getStack(0);
+        ItemStack outputStack = furnace.getStack(2);
+        Optional<ItemStack> bestOre = findBestOre(world, chestInventory);
+        if (!outputStack.isEmpty() && (inputStack.isEmpty() || (bestOre.isPresent() && !ItemStack.areItemsAndComponentsEqual(inputStack, bestOre.get())))) {
+            extractFurnaceOutput(chestInventory, furnace);
         }
-        ItemStack oreStack = extractBestOre(chestInventory);
+        ItemStack oreStack = extractBestOre(world, chestInventory);
         if (!oreStack.isEmpty()) {
-            ItemStack currentInput = blastFurnace.getStack(0);
-            if (!currentInput.isEmpty() && !ItemStack.areItemsAndComponentsEqual(currentInput, oreStack)) {
-                extractBlastFurnaceOutput(chestInventory, blastFurnace);
-                if (!blastFurnace.getStack(2).isEmpty()) {
-                    insertIntoInventory(chestInventory, oreStack);
-                    chestInventory.markDirty();
-                    return;
-                }
-            }
-            ItemStack remaining = insertIntoBlastFurnace(blastFurnace, oreStack, 0);
+            ItemStack remaining = insertIntoFurnace(furnace, oreStack, 0);
             if (!remaining.isEmpty()) {
                 insertIntoInventory(chestInventory, remaining);
             }
         }
         ItemStack fuelStack = extractBestFuel(chestInventory);
         if (!fuelStack.isEmpty()) {
-            ItemStack remaining = insertIntoBlastFurnace(blastFurnace, fuelStack, 1);
+            ItemStack remaining = insertIntoFurnace(furnace, fuelStack, 1);
             if (!remaining.isEmpty()) {
                 insertIntoInventory(chestInventory, remaining);
             }
         }
         chestInventory.markDirty();
-        blastFurnace.markDirty();
+        furnace.markDirty();
     }
 
-    private Optional<ItemStack> findBestOre(Inventory inventory) {
+    private boolean hasDifferentOreInChest(ServerWorld world, Inventory inventory, ItemStack currentInput) {
+        return findBestOre(world, inventory)
+                .filter(stack -> !ItemStack.areItemsAndComponentsEqual(stack, currentInput))
+                .isPresent();
+    }
+
+    private Optional<ItemStack> findBestOre(ServerWorld world, Inventory inventory) {
         return inventoryToStream(inventory)
-                .filter(this::isOre)
-                .sorted(stackComparator())
+                .filter(stack -> isBlastable(world, stack))
+                .sorted(stackComparator(false))
                 .findFirst();
     }
 
     private Optional<ItemStack> findBestFuel(Inventory inventory) {
         return inventoryToStream(inventory)
                 .filter(this::isFuel)
-                .sorted(stackComparator())
+                .sorted(stackComparator(true))
                 .findFirst();
     }
 
-    private ItemStack extractBestOre(Inventory inventory) {
-        return extractBestStack(inventory, this::isOre);
+    private ItemStack extractBestOre(ServerWorld world, Inventory inventory) {
+        return extractBestStack(inventory, stack -> isBlastable(world, stack), false);
     }
 
     private ItemStack extractBestFuel(Inventory inventory) {
-        return extractBestStack(inventory, this::isFuel);
+        return extractBestStack(inventory, this::isFuel, true);
     }
 
     private java.util.stream.Stream<ItemStack> inventoryToStream(Inventory inventory) {
@@ -202,10 +207,10 @@ public class ArmorerBlastFurnaceGoal extends Goal {
                 .filter(stack -> !stack.isEmpty());
     }
 
-    private ItemStack extractBestStack(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
+    private ItemStack extractBestStack(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, boolean fuel) {
         int bestSlot = -1;
         ItemStack bestStack = ItemStack.EMPTY;
-        Comparator<ItemStack> comparator = stackComparator();
+        Comparator<ItemStack> comparator = stackComparator(fuel);
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (stack.isEmpty() || !predicate.test(stack)) {
@@ -224,28 +229,52 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         return extracted;
     }
 
-    private Comparator<ItemStack> stackComparator() {
-        return Comparator.<ItemStack>comparingInt(ItemStack::getCount).reversed();
+    private Comparator<ItemStack> stackComparator(boolean fuel) {
+        Comparator<ItemStack> comparator = Comparator.<ItemStack>comparingInt(ItemStack::getCount).reversed();
+        if (fuel) {
+            comparator = comparator.thenComparingInt(this::fuelPriority);
+        }
+        return comparator;
+    }
+
+    private int fuelPriority(ItemStack stack) {
+        if (stack.isOf(Items.LAVA_BUCKET)) {
+            return 0;
+        }
+        if (stack.isOf(Items.COAL) || stack.isOf(Items.CHARCOAL)) {
+            return 1;
+        }
+        if (stack.isIn(ItemTags.LOGS) || stack.isIn(ItemTags.PLANKS) || stack.isIn(ItemTags.LOGS_THAT_BURN)) {
+            return 2;
+        }
+        return 3;
     }
 
     private boolean isFuel(ItemStack stack) {
         return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
 
-    private boolean isOre(ItemStack stack) {
-        return stack.isIn(COMMON_ORES_TAG) || stack.isIn(MINECRAFT_ORES_TAG);
+    private boolean isBlastable(ServerWorld world, ItemStack stack) {
+        if (stack.isEmpty()) {
+            return false;
+        }
+        if (stack.isIn(ORES_TAG)) {
+            return true;
+        }
+        SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
+        return world.getRecipeManager().getFirstMatch(RecipeType.BLASTING, input, world).isPresent();
     }
 
-    private ItemStack insertIntoBlastFurnace(BlastFurnaceBlockEntity blastFurnace, ItemStack stack, int slot) {
-        ItemStack existing = blastFurnace.getStack(slot);
+    private ItemStack insertIntoFurnace(BlastFurnaceBlockEntity furnace, ItemStack stack, int slot) {
+        ItemStack existing = furnace.getStack(slot);
         if (existing.isEmpty()) {
-            blastFurnace.setStack(slot, stack.copy());
+            furnace.setStack(slot, stack.copy());
             return ItemStack.EMPTY;
         }
         if (!ItemStack.areItemsAndComponentsEqual(existing, stack)) {
             return stack;
         }
-        int maxStack = Math.min(existing.getMaxCount(), blastFurnace.getMaxCountPerStack());
+        int maxStack = Math.min(existing.getMaxCount(), furnace.getMaxCountPerStack());
         int space = maxStack - existing.getCount();
         if (space <= 0) {
             return stack;
@@ -257,16 +286,16 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         return remaining;
     }
 
-    private void extractBlastFurnaceOutput(Inventory chestInventory, BlastFurnaceBlockEntity blastFurnace) {
-        ItemStack output = blastFurnace.getStack(2);
+    private void extractFurnaceOutput(Inventory chestInventory, BlastFurnaceBlockEntity furnace) {
+        ItemStack output = furnace.getStack(2);
         if (output.isEmpty()) {
             return;
         }
         ItemStack remaining = insertIntoInventory(chestInventory, output.copy());
         if (remaining.isEmpty()) {
-            blastFurnace.setStack(2, ItemStack.EMPTY);
+            furnace.setStack(2, ItemStack.EMPTY);
         } else if (remaining.getCount() != output.getCount()) {
-            blastFurnace.setStack(2, remaining);
+            furnace.setStack(2, remaining);
         }
     }
 
@@ -296,10 +325,10 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         return remaining;
     }
 
-    private Optional<BlastFurnaceBlockEntity> getBlastFurnaceInventory(ServerWorld world) {
+    private Optional<BlastFurnaceBlockEntity> getFurnaceInventory(ServerWorld world) {
         BlockEntity blockEntity = world.getBlockEntity(jobPos);
-        if (blockEntity instanceof BlastFurnaceBlockEntity blastFurnace) {
-            return Optional.of(blastFurnace);
+        if (blockEntity instanceof BlastFurnaceBlockEntity furnace) {
+            return Optional.of(furnace);
         }
         return Optional.empty();
     }
