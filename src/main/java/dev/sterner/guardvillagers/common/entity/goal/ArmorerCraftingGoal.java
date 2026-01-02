@@ -11,12 +11,12 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ArmorItem;
-import net.minecraft.item.ArmorMaterial;
 import net.minecraft.item.ItemStack;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -47,7 +47,7 @@ public class ArmorerCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
-    private ArmorMaterial plannedMaterial;
+    private RegistryEntry<net.minecraft.item.ArmorMaterial> plannedMaterial;
     private final List<EquipmentSlot> remainingSlots = new ArrayList<>();
 
     public ArmorerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
@@ -511,14 +511,14 @@ public class ArmorerCraftingGoal extends Goal {
         return true;
     }
 
-    private ArmorRecipe findCraftableRecipeForSlot(ServerWorld world, Inventory inventory, ArmorMaterial material, EquipmentSlot slot) {
+    private ArmorRecipe findCraftableRecipeForSlot(ServerWorld world, Inventory inventory, RegistryEntry<net.minecraft.item.ArmorMaterial> material, EquipmentSlot slot) {
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (result.isEmpty() || !(result.getItem() instanceof ArmorItem armorItem)) {
                 continue;
             }
-            if (armorItem.getMaterial() != material || armorItem.getSlotType() != slot) {
+            if (!armorItem.getMaterial().equals(material) || armorItem.getSlotType() != slot) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
