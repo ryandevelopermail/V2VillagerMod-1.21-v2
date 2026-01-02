@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
@@ -279,18 +280,35 @@ public final class VillageGuardStandManager {
 
         Entity standEntity = world.getEntity(standId);
         if (!(standEntity instanceof ArmorStandEntity armorStand) || !armorStand.isAlive() || !armorStand.getCommandTags().contains(GUARD_STAND_TAG)) {
+            if (guard.isStandAnchorEnabled()) {
+                guard.setPairedStandUuid(null);
+                return;
+            }
             demoteGuard(world, guard);
         }
     }
 
     private static void assignGuardToStand(ServerWorld world, GuardEntity guard, ArmorStandEntity stand) {
         guard.setPairedStandUuid(stand.getUuid());
+        if (guard.isStandCustomizationEnabled()) {
+            if (GuardStandEquipmentSync.hasEquipment(stand)) {
+                GuardStandEquipmentSync.syncGuardFromStand(guard, stand);
+            } else {
+                GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+            }
+        } else {
+            GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+        }
         JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
     }
 
     private static List<BlockPos> demoteGuards(ServerWorld world, List<GuardEntity> guards) {
         List<BlockPos> demoted = new ArrayList<>();
         for (GuardEntity guard : guards) {
+            if (guard.isStandAnchorEnabled()) {
+                guard.setPairedStandUuid(null);
+                continue;
+            }
             if (demoteGuard(world, guard)) {
                 demoted.add(guard.getBlockPos());
             }

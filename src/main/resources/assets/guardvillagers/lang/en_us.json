@@ -5,6 +5,8 @@
   "item.guardvillagers.axe_guard_spawn_egg": "Axe Guard Spawn Egg",
   "entity.guardvillagers.butcher_guard": "Butcher Guard",
   "item.guardvillagers.butcher_guard_spawn_egg": "Butcher Guard Spawn Egg",
+  "block.guardvillagers.guard_stand_modifier": "Guard Stand Modifier",
+  "block.guardvillagers.guard_stand_anchor": "Guard Stand Anchor",
   "guardinventory.health": "Health: %s",
   "guardinventory.armor": "Armor: %s",
   "guardvillagers.midnightconfig.useSteveModel": "Use Steve Model",
@@ -25,5 +27,10 @@
   "guardvillagers.midnightconfig.guardAttackMobBlacklist": "Guard Attack Blacklist",
   "guardvillagers.midnightconfig.guardVillagerHelpRange": "Guard Help Range",
   "guardvillagers.midnightconfig.amountOfHealthRegenerated": "Guard Regen",
-  "guardvillagers.midnightconfig.attackAllMobs": "Guard Attack All Mobs"
+  "guardvillagers.midnightconfig.attackAllMobs": "Guard Attack All Mobs",
+  "guardvillagers.profession.v2_toolsmith": "V2 Toolsmith",
+  "guardvillagers.profession.v2_toolsmith.task.crafting": "Craft tools for the village chest",
+  "guardvillagers.profession.v2_toolsmith.task.distribution": "Distribute tools to guards and villagers",
+  "guardvillagers.profession.v2_leatherworker": "V2 Leatherworker",
+  "guardvillagers.profession.v2_leatherworker.task.crafting": "Craft leather items for the village chest"
 }
