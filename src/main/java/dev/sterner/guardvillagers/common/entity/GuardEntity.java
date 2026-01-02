@@ -664,6 +664,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         if (GuardVillagersConfig.clericHealing) this.goalSelector.add(6, new RunToClericGoal(this));
         if (GuardVillagersConfig.armorerRepairGuardEntityArmor)
             this.goalSelector.add(6, new ArmorerRepairGuardArmorGoal(this));
+        this.goalSelector.add(4, new GuardUpgradeFromStandGoal(this, 0.6D));
         this.goalSelector.add(4, new WalkBackToCheckPointGoal(this, 0.5D));
         this.goalSelector.add(5, new WanderAroundFarGoal(this, 0.5D));
         this.goalSelector.add(8, new LookAtEntityGoal(this, MerchantEntity.class, 8.0F));
