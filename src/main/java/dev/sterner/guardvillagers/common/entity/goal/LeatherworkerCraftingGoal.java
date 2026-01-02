@@ -18,7 +18,10 @@ import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -30,6 +33,9 @@ public class LeatherworkerCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int CRAFT_INTERVAL_MIN_TICKS = 20 * 60 * 3;
+    private static final int CRAFT_INTERVAL_MAX_TICKS = 20 * 60 * 10;
+    private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerCraftingGoal.class);
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -42,6 +48,11 @@ public class LeatherworkerCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private boolean craftCountdownActive;
+    private long craftCountdownStartTime;
+    private long craftCountdownTotalTicks;
+    private long nextCraftTriggerTime;
+    private int lastCountdownLogStep;
 
     public LeatherworkerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
@@ -82,6 +93,15 @@ public class LeatherworkerCraftingGoal extends Goal {
             return false;
         }
 
+        if (craftCountdownActive) {
+            if (nextCraftTriggerTime > 0L) {
+                logCraftCountdownProgress();
+            }
+            if (world.getTime() < nextCraftTriggerTime) {
+                return false;
+            }
+        }
+
         if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
@@ -100,6 +120,7 @@ public class LeatherworkerCraftingGoal extends Goal {
 
     @Override
     public void start() {
+        clearCraftCountdown();
         stage = Stage.GO_TO_TABLE;
         moveTo(craftingTablePos);
     }
@@ -127,6 +148,7 @@ public class LeatherworkerCraftingGoal extends Goal {
             }
             case CRAFT -> {
                 craftOnce(world);
+                startCraftCountdown("session ended");
                 stage = Stage.DONE;
             }
             case IDLE, DONE -> {
@@ -180,6 +202,48 @@ public class LeatherworkerCraftingGoal extends Goal {
             recordLastCrafted(recipe.output);
             CraftingCheckLogger.report(world, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+    private void startCraftCountdown(String reason) {
+        craftCountdownTotalTicks = nextRandomCraftInterval();
+        craftCountdownStartTime = villager.getWorld().getTime();
+        nextCraftTriggerTime = craftCountdownStartTime + craftCountdownTotalTicks;
+        lastCountdownLogStep = 0;
+        craftCountdownActive = true;
+        LOGGER.info("Leatherworker {} craft countdown started ({} ticks) {}",
+                villager.getUuidAsString(),
+                craftCountdownTotalTicks,
+                reason);
+    }
+
+    private void logCraftCountdownProgress() {
+        if (craftCountdownTotalTicks <= 0L) {
+            return;
+        }
+        long remainingTicks = nextCraftTriggerTime - villager.getWorld().getTime();
+        long elapsedTicks = villager.getWorld().getTime() - craftCountdownStartTime;
+        int step = Math.min(4, (int) ((elapsedTicks * 4L) / craftCountdownTotalTicks));
+        if (step <= lastCountdownLogStep || step == 0) {
+            return;
+        }
+        lastCountdownLogStep = step;
+        int percent = step * 25;
+        LOGGER.info("Leatherworker {} craft countdown {}% ({} ticks remaining)",
+                villager.getUuidAsString(),
+                percent,
+                Math.max(remainingTicks, 0L));
+    }
+
+    private long nextRandomCraftInterval() {
+        return MathHelper.nextInt(villager.getRandom(), CRAFT_INTERVAL_MIN_TICKS, CRAFT_INTERVAL_MAX_TICKS);
+    }
+
+    private void clearCraftCountdown() {
+        nextCraftTriggerTime = 0L;
+        craftCountdownTotalTicks = 0L;
+        craftCountdownStartTime = 0L;
+        lastCountdownLogStep = 0;
+        craftCountdownActive = false;
     }
 
     private List<LeatherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
