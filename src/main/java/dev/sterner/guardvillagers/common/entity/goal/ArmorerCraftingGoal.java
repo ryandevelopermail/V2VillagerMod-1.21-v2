@@ -203,7 +203,7 @@ public class ArmorerCraftingGoal extends Goal {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
             lastCraftDay = day;
-            dailyCraftLimit = 2 + villager.getRandom().nextInt(3);
+            dailyCraftLimit = 4;
             craftedToday = 0;
             immediateCheckPending = false;
         }
