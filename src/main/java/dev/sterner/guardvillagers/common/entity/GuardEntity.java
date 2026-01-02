@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.*;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.item.v1.EnchantmentEvents;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerFactory;
@@ -31,6 +32,7 @@ import net.minecraft.entity.damage.DamageTypes;
 import net.minecraft.entity.data.DataTracker;
 import net.minecraft.entity.data.TrackedData;
 import net.minecraft.entity.data.TrackedDataHandlerRegistry;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.*;
 import net.minecraft.entity.passive.IronGolemEntity;
@@ -862,7 +864,16 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
 
     @Override
     public void onInventoryChanged(Inventory sender) {
+        if (this.getWorld().isClient || this.pairedStandUuid == null || !(this.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
 
+        Entity standEntity = serverWorld.getEntity(this.pairedStandUuid);
+        if (standEntity instanceof ArmorStandEntity armorStand
+                && armorStand.isAlive()
+                && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
+            GuardStandEquipmentSync.syncStandFromGuard(this, armorStand);
+        }
     }
 
 
