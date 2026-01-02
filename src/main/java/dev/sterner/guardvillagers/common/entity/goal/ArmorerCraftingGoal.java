@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -167,7 +168,11 @@ public class ArmorerCraftingGoal extends Goal {
 
         ArmorRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
         if (consumeIngredients(inventory, recipe.recipe)) {
-            ItemStack remaining = insertStack(inventory, recipe.output.copy());
+            ItemStack crafted = recipe.output.copy();
+            if (ArmorerStandManager.tryPlaceArmorOnStand(world, villager, craftingTablePos, crafted)) {
+                crafted.decrement(1);
+            }
+            ItemStack remaining = insertStack(inventory, crafted);
             if (!remaining.isEmpty()) {
                 ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
                 if (!villagerRemaining.isEmpty()) {
