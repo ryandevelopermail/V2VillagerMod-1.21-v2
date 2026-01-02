@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
@@ -285,7 +286,15 @@ public final class VillageGuardStandManager {
 
     private static void assignGuardToStand(ServerWorld world, GuardEntity guard, ArmorStandEntity stand) {
         guard.setPairedStandUuid(stand.getUuid());
-        GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+        if (guard.isStandCustomizationEnabled()) {
+            if (GuardStandEquipmentSync.hasEquipment(stand)) {
+                GuardStandEquipmentSync.syncGuardFromStand(guard, stand);
+            } else {
+                GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+            }
+        } else {
+            GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+        }
         JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
     }
 

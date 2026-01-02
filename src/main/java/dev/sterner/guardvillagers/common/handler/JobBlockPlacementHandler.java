@@ -4,6 +4,8 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.SpecialModifier;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
@@ -84,6 +86,7 @@ public final class JobBlockPlacementHandler {
             BlockState placedState = serverWorld.getBlockState(placementPos);
             if (JobBlockPairingHelper.isSpecialModifierBlock(placedState.getBlock())) {
                 JobBlockPairingHelper.handleSpecialModifierPlacement(serverWorld, placementPos, placedState);
+                applySpecialModifierToNearbyGuards(serverWorld, placementPos, placedState);
             }
         }
 
@@ -132,6 +135,7 @@ public final class JobBlockPlacementHandler {
             return;
         }
 
+        guard.setConvertedFromArmorStand(true);
         guard.spawnWithArmor = true;
         guard.initialize(world, world.getLocalDifficulty(villager.getBlockPos()), SpawnReason.CONVERSION, null);
         guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
@@ -152,10 +156,46 @@ public final class JobBlockPlacementHandler {
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
+        applySpecialModifierFromNearbyBlocks(world, guard);
 
         villager.releaseTicketFor(MemoryModuleType.HOME);
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
         villager.discard();
+    }
+
+    private static void applySpecialModifierToNearbyGuards(ServerWorld world, BlockPos placedPos, BlockState placedState) {
+        Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(placedState.getBlock());
+        if (modifier.isEmpty()) {
+            return;
+        }
+
+        double range = modifier.get().range();
+        Box searchBox = new Box(placedPos).expand(range);
+        for (GuardEntity guard : world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive)) {
+            if (guard.isConvertedFromArmorStand()) {
+                guard.setStandCustomizationEnabled(true);
+            }
+        }
+    }
+
+    private static void applySpecialModifierFromNearbyBlocks(ServerWorld world, GuardEntity guard) {
+        Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(GuardVillagers.GUARD_STAND_MODIFIER);
+        if (modifier.isEmpty()) {
+            return;
+        }
+
+        double range = modifier.get().range();
+        int checkRange = (int) Math.ceil(range);
+        BlockPos guardPos = guard.getBlockPos();
+        for (BlockPos pos : BlockPos.iterate(guardPos.add(-checkRange, -checkRange, -checkRange), guardPos.add(checkRange, checkRange, checkRange))) {
+            if (!guardPos.isWithinDistance(pos, range)) {
+                continue;
+            }
+            if (world.getBlockState(pos).isOf(modifier.get().block())) {
+                guard.setStandCustomizationEnabled(true);
+                return;
+            }
+        }
     }
 }
