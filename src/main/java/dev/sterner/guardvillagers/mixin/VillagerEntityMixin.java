@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import dev.sterner.guardvillagers.common.util.ArmorerStandMemoryHolder;
+import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandMemoryHolder;
@@ -20,12 +21,15 @@ import java.util.Map;
 import java.util.UUID;
 
 @Mixin(VillagerEntity.class)
-public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder {
+public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder {
     private static final String WEAPONSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastWeaponsmithCrafted";
+    private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
     private Identifier guardvillagers$lastWeaponsmithCrafted;
+    @Nullable
+    private Identifier guardvillagers$lastToolsmithCrafted;
 
     @Override
     public Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$getArmorerStandMemory() {
@@ -45,6 +49,16 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Override
     public void guardvillagers$setLastWeaponsmithCrafted(@Nullable Identifier identifier) {
         guardvillagers$lastWeaponsmithCrafted = identifier;
+    }
+
+    @Override
+    public @Nullable Identifier guardvillagers$getLastToolsmithCrafted() {
+        return guardvillagers$lastToolsmithCrafted;
+    }
+
+    @Override
+    public void guardvillagers$setLastToolsmithCrafted(@Nullable Identifier identifier) {
+        guardvillagers$lastToolsmithCrafted = identifier;
     }
 
     @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
@@ -99,6 +113,16 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         guardvillagers$lastWeaponsmithCrafted = parsed;
     }
 
+    @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
+    private void guardvillagers$readToolsmithCraftingMemory(NbtCompound nbt, CallbackInfo ci) {
+        guardvillagers$lastToolsmithCrafted = null;
+        if (!nbt.contains(TOOLSMITH_LAST_CRAFTED_KEY, 8)) {
+            return;
+        }
+        Identifier parsed = Identifier.tryParse(nbt.getString(TOOLSMITH_LAST_CRAFTED_KEY));
+        guardvillagers$lastToolsmithCrafted = parsed;
+    }
+
     @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
     private void guardvillagers$writeArmorerStandMemory(NbtCompound nbt, CallbackInfo ci) {
         NbtList list = new NbtList();
@@ -129,6 +153,15 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
             nbt.putString(WEAPONSMITH_LAST_CRAFTED_KEY, guardvillagers$lastWeaponsmithCrafted.toString());
         } else {
             nbt.remove(WEAPONSMITH_LAST_CRAFTED_KEY);
+        }
+    }
+
+    @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
+    private void guardvillagers$writeToolsmithCraftingMemory(NbtCompound nbt, CallbackInfo ci) {
+        if (guardvillagers$lastToolsmithCrafted != null) {
+            nbt.putString(TOOLSMITH_LAST_CRAFTED_KEY, guardvillagers$lastToolsmithCrafted.toString());
+        } else {
+            nbt.remove(TOOLSMITH_LAST_CRAFTED_KEY);
         }
     }
 }
