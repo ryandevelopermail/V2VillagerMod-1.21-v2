@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ClericBrewingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ClericCraftingGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -21,7 +22,9 @@ import java.util.WeakHashMap;
 public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClericBehavior.class);
     private static final int BREWING_GOAL_PRIORITY = 4;
+    private static final int CRAFTING_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, ClericBrewingGoal> BREWING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ClericCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -55,6 +58,26 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         } else {
             brewingGoal.setTargets(jobPos, chestPos);
         }
+
+        ClericCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        if (craftingGoal != null) {
+            craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
+        }
+        updateChestListener(world, villager, chestPos);
+    }
+
+    @Override
+    public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        ClericCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        if (goal == null) {
+            goal = new ClericCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            CRAFTING_GOALS.put(villager, goal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(CRAFTING_GOAL_PRIORITY, goal);
+        } else {
+            goal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        goal.requestImmediateCraft(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -75,6 +98,10 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             ClericBrewingGoal goal = BREWING_GOALS.get(villager);
             if (goal != null && villager.getWorld() instanceof ServerWorld) {
                 goal.requestImmediateCheck();
+            }
+            ClericCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                craftingGoal.requestImmediateCraft(serverWorld);
             }
         };
         simpleInventory.addListener(listener);
