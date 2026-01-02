@@ -9,7 +9,6 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.recipe.BrewingRecipeRegistry;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
@@ -184,7 +183,7 @@ public class ClericCraftingGoal extends Goal {
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (result.isEmpty() || !isAllowedOutput(recipe, result)) {
+            if (result.isEmpty() || !isAllowedOutput(world, recipe, result)) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
@@ -194,15 +193,15 @@ public class ClericCraftingGoal extends Goal {
         return recipes;
     }
 
-    private boolean isAllowedOutput(CraftingRecipe recipe, ItemStack result) {
+    private boolean isAllowedOutput(ServerWorld world, CraftingRecipe recipe, ItemStack result) {
         if (result.isOf(Items.GLASS_BOTTLE) || result.isOf(Items.BREWING_STAND)) {
             return true;
         }
-        return isBrewingIngredient(result) && countNonEmptyIngredients(recipe) >= 2;
+        return isBrewingIngredient(world, result) && countNonEmptyIngredients(recipe) >= 2;
     }
 
-    private boolean isBrewingIngredient(ItemStack stack) {
-        return BrewingRecipeRegistry.isValidIngredient(stack);
+    private boolean isBrewingIngredient(ServerWorld world, ItemStack stack) {
+        return world.getServer().getBrewingRecipeRegistry().isValidIngredient(stack);
     }
 
     private int countNonEmptyIngredients(CraftingRecipe recipe) {
