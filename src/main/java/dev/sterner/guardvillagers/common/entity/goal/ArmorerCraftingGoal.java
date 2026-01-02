@@ -11,6 +11,7 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ArmorItem;
+import net.minecraft.item.ArmorMaterial;
 import net.minecraft.item.ItemStack;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
@@ -46,6 +47,8 @@ public class ArmorerCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private ArmorMaterial plannedMaterial;
+    private final List<EquipmentSlot> remainingSlots = new ArrayList<>();
 
     public ArmorerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -104,6 +107,9 @@ public class ArmorerCraftingGoal extends Goal {
 
     @Override
     public void start() {
+        if (villager.getWorld() instanceof ServerWorld world) {
+            initializeCraftingSession(world);
+        }
         stage = Stage.GO_TO_TABLE;
         moveTo(craftingTablePos);
     }
@@ -111,6 +117,7 @@ public class ArmorerCraftingGoal extends Goal {
     @Override
     public void stop() {
         villager.getNavigation().stop();
+        clearCraftingSession();
         stage = Stage.DONE;
     }
 
@@ -130,7 +137,7 @@ public class ArmorerCraftingGoal extends Goal {
                 }
             }
             case CRAFT -> {
-                craftOnce(world);
+                craftSet(world);
                 stage = pendingStandItem.isEmpty() ? Stage.DONE : Stage.GO_TO_STAND;
             }
             case GO_TO_STAND -> {
@@ -171,7 +178,12 @@ public class ArmorerCraftingGoal extends Goal {
                 }
                 if (ArmorerStandManager.placeArmorOnStand(world, villager, stand, pendingStandItem)) {
                     clearPendingStand();
-                    stage = Stage.DONE;
+                    if (hasRemainingSetPieces() && craftedToday < dailyCraftLimit) {
+                        stage = Stage.GO_TO_TABLE;
+                    } else {
+                        clearCraftingSession();
+                        stage = Stage.DONE;
+                    }
                     return;
                 }
                 if (selectNextStand(world)) {
@@ -179,6 +191,7 @@ public class ArmorerCraftingGoal extends Goal {
                     return;
                 }
                 returnPendingItem(world);
+                clearCraftingSession();
                 stage = Stage.DONE;
             }
             case IDLE, DONE -> {
@@ -210,19 +223,30 @@ public class ArmorerCraftingGoal extends Goal {
         return getCraftableRecipes(world, inventory).size();
     }
 
-    private void craftOnce(ServerWorld world) {
+    private void craftSet(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
+            clearCraftingSession();
             return;
         }
 
-        List<ArmorRecipe> craftable = getCraftableRecipes(world, inventory);
-        if (craftable.isEmpty()) {
+        if (!initializeCraftingSession(world)) {
             return;
         }
 
-        ArmorRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
-        if (consumeIngredients(inventory, recipe.recipe)) {
+        while (hasRemainingSetPieces()) {
+            if (craftedToday >= dailyCraftLimit) {
+                clearCraftingSession();
+                return;
+            }
+
+            EquipmentSlot slot = remainingSlots.get(0);
+            ArmorRecipe recipe = findCraftableRecipeForSlot(world, inventory, plannedMaterial, slot);
+            if (recipe == null || !consumeIngredients(inventory, recipe.recipe)) {
+                clearCraftingSession();
+                return;
+            }
+
             ItemStack crafted = recipe.output.copy();
             if (crafted.getItem() instanceof ArmorItem armorItem) {
                 Optional<ArmorStandEntity> stand = ArmorerStandManager.findPlacementStand(world, villager, craftingTablePos, armorItem.getSlotType());
@@ -245,8 +269,15 @@ public class ArmorerCraftingGoal extends Goal {
             }
             inventory.markDirty();
             craftedToday++;
+            remainingSlots.remove(0);
             CraftingCheckLogger.report(world, "Armorer", formatCraftedResult(lastCheckCount, recipe.output));
+
+            if (!pendingStandItem.isEmpty()) {
+                return;
+            }
         }
+
+        clearCraftingSession();
     }
 
     private List<ArmorRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
@@ -447,5 +478,62 @@ public class ArmorerCraftingGoal extends Goal {
             villager.getInventory().markDirty();
         }
         clearPendingStand();
+    }
+
+    private boolean initializeCraftingSession(ServerWorld world) {
+        if (plannedMaterial != null && !remainingSlots.isEmpty()) {
+            return true;
+        }
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            clearCraftingSession();
+            return false;
+        }
+
+        List<ArmorRecipe> craftable = getCraftableRecipes(world, inventory);
+        if (craftable.isEmpty()) {
+            clearCraftingSession();
+            return false;
+        }
+
+        ItemStack result = craftable.get(0).output;
+        if (!(result.getItem() instanceof ArmorItem armorItem)) {
+            clearCraftingSession();
+            return false;
+        }
+
+        plannedMaterial = armorItem.getMaterial();
+        remainingSlots.clear();
+        remainingSlots.add(EquipmentSlot.HEAD);
+        remainingSlots.add(EquipmentSlot.CHEST);
+        remainingSlots.add(EquipmentSlot.LEGS);
+        remainingSlots.add(EquipmentSlot.FEET);
+        return true;
+    }
+
+    private ArmorRecipe findCraftableRecipeForSlot(ServerWorld world, Inventory inventory, ArmorMaterial material, EquipmentSlot slot) {
+        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            CraftingRecipe recipe = entry.value();
+            ItemStack result = recipe.getResult(world.getRegistryManager());
+            if (result.isEmpty() || !(result.getItem() instanceof ArmorItem armorItem)) {
+                continue;
+            }
+            if (armorItem.getMaterial() != material || armorItem.getSlotType() != slot) {
+                continue;
+            }
+            if (canCraft(inventory, recipe)) {
+                return new ArmorRecipe(recipe, result);
+            }
+        }
+        return null;
+    }
+
+    private boolean hasRemainingSetPieces() {
+        return !remainingSlots.isEmpty();
+    }
+
+    private void clearCraftingSession() {
+        plannedMaterial = null;
+        remainingSlots.clear();
     }
 }
