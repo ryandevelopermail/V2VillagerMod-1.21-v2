@@ -37,20 +37,10 @@ public final class ArmorerStandManager {
             return false;
         }
 
-        ArmorStandEntity stand = target.get();
-        if (!stand.getEquippedStack(slot).isEmpty()) {
-            markSlotPlaced(villager, stand.getUuid(), slot);
-            return false;
-        }
-
-        ItemStack toPlace = stack.copy();
-        toPlace.setCount(1);
-        stand.equipStack(slot, toPlace);
-        markSlotPlaced(villager, stand.getUuid(), slot);
-        return true;
+        return placeArmorOnStand(world, villager, target.get(), stack);
     }
 
-    private static Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, VillagerEntity villager, BlockPos center, EquipmentSlot slot) {
+    public static Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, VillagerEntity villager, BlockPos center, EquipmentSlot slot) {
         List<ArmorStandEntity> stands = world.getEntitiesByClass(ArmorStandEntity.class, new Box(center).expand(STAND_SCAN_RANGE), ArmorStandEntity::isAlive);
         if (stands.isEmpty()) {
             return Optional.empty();
@@ -67,6 +57,10 @@ public final class ArmorerStandManager {
                 .sorted(distanceComparator)
                 .filter(stand -> isStandAvailableForSlot(stand, memory, slot))
                 .findFirst();
+    }
+
+    public static boolean isStandAvailableForSlot(VillagerEntity villager, ArmorStandEntity stand, EquipmentSlot slot) {
+        return isStandAvailableForSlot(stand, getStandMemory(villager), slot);
     }
 
     private static boolean isStandAvailableForSlot(ArmorStandEntity stand, Map<UUID, StandProgress> memory, EquipmentSlot slot) {
@@ -94,6 +88,27 @@ public final class ArmorerStandManager {
         Map<UUID, StandProgress> memory = getStandMemory(villager);
         StandProgress progress = memory.computeIfAbsent(standId, id -> new StandProgress());
         progress.markSlot(slot);
+    }
+
+    public static boolean placeArmorOnStand(ServerWorld world, VillagerEntity villager, ArmorStandEntity stand, ItemStack stack) {
+        if (!(stack.getItem() instanceof ArmorItem armorItem)) {
+            return false;
+        }
+        if (!stand.isAlive() || stand.getWorld() != world) {
+            return false;
+        }
+
+        EquipmentSlot slot = armorItem.getSlotType();
+        if (!stand.getEquippedStack(slot).isEmpty()) {
+            markSlotPlaced(villager, stand.getUuid(), slot);
+            return false;
+        }
+
+        ItemStack toPlace = stack.copy();
+        toPlace.setCount(1);
+        stand.equipStack(slot, toPlace);
+        markSlotPlaced(villager, stand.getUuid(), slot);
+        return true;
     }
 
     public static Map<UUID, StandProgress> getStandMemory(VillagerEntity villager) {

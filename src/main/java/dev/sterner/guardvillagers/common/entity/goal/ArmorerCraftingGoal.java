@@ -5,7 +5,9 @@ import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ArmorItem;
@@ -22,6 +24,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public class ArmorerCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -32,6 +35,10 @@ public class ArmorerCraftingGoal extends Goal {
     private BlockPos jobPos;
     private BlockPos chestPos;
     private BlockPos craftingTablePos;
+    private BlockPos standTargetPos;
+    private ItemStack pendingStandItem = ItemStack.EMPTY;
+    private EquipmentSlot pendingSlot;
+    private UUID pendingStandId;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long lastCraftDay = -1L;
@@ -124,6 +131,54 @@ public class ArmorerCraftingGoal extends Goal {
             }
             case CRAFT -> {
                 craftOnce(world);
+                stage = pendingStandItem.isEmpty() ? Stage.DONE : Stage.GO_TO_STAND;
+            }
+            case GO_TO_STAND -> {
+                if (pendingStandItem.isEmpty()) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                ArmorStandEntity stand = resolveTargetStand(world);
+                if (stand == null || !ArmorerStandManager.isStandAvailableForSlot(villager, stand, pendingSlot)) {
+                    if (!selectNextStand(world)) {
+                        returnPendingItem(world);
+                        stage = Stage.DONE;
+                        return;
+                    }
+                    moveTo(standTargetPos);
+                    return;
+                }
+                if (isNear(standTargetPos)) {
+                    stage = Stage.PLACE_ON_STAND;
+                } else {
+                    moveTo(standTargetPos);
+                }
+            }
+            case PLACE_ON_STAND -> {
+                if (pendingStandItem.isEmpty()) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                ArmorStandEntity stand = resolveTargetStand(world);
+                if (stand == null || !ArmorerStandManager.isStandAvailableForSlot(villager, stand, pendingSlot)) {
+                    if (!selectNextStand(world)) {
+                        returnPendingItem(world);
+                        stage = Stage.DONE;
+                        return;
+                    }
+                    stage = Stage.GO_TO_STAND;
+                    return;
+                }
+                if (ArmorerStandManager.placeArmorOnStand(world, villager, stand, pendingStandItem)) {
+                    clearPendingStand();
+                    stage = Stage.DONE;
+                    return;
+                }
+                if (selectNextStand(world)) {
+                    stage = Stage.GO_TO_STAND;
+                    return;
+                }
+                returnPendingItem(world);
                 stage = Stage.DONE;
             }
             case IDLE, DONE -> {
@@ -169,8 +224,16 @@ public class ArmorerCraftingGoal extends Goal {
         ArmorRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
         if (consumeIngredients(inventory, recipe.recipe)) {
             ItemStack crafted = recipe.output.copy();
-            if (ArmorerStandManager.tryPlaceArmorOnStand(world, villager, craftingTablePos, crafted)) {
-                crafted.decrement(1);
+            if (crafted.getItem() instanceof ArmorItem armorItem) {
+                Optional<ArmorStandEntity> stand = ArmorerStandManager.findPlacementStand(world, villager, craftingTablePos, armorItem.getSlotType());
+                if (stand.isPresent()) {
+                    pendingStandItem = crafted.copy();
+                    pendingStandItem.setCount(1);
+                    pendingSlot = armorItem.getSlotType();
+                    pendingStandId = stand.get().getUuid();
+                    standTargetPos = stand.get().getBlockPos();
+                    crafted.decrement(1);
+                }
             }
             ItemStack remaining = insertStack(inventory, crafted);
             if (!remaining.isEmpty()) {
@@ -324,6 +387,8 @@ public class ArmorerCraftingGoal extends Goal {
         IDLE,
         GO_TO_TABLE,
         CRAFT,
+        GO_TO_STAND,
+        PLACE_ON_STAND,
         DONE
     }
 
@@ -343,5 +408,44 @@ public class ArmorerCraftingGoal extends Goal {
             return "1 armor item available to craft - 1 " + craftedName + " crafted";
         }
         return craftableCount + " armor items available to craft - 1 " + craftedName + " crafted";
+    }
+
+    private void clearPendingStand() {
+        pendingStandItem = ItemStack.EMPTY;
+        pendingStandId = null;
+        standTargetPos = null;
+        pendingSlot = null;
+    }
+
+    private ArmorStandEntity resolveTargetStand(ServerWorld world) {
+        if (pendingStandId == null) {
+            return null;
+        }
+        return world.getEntity(pendingStandId) instanceof ArmorStandEntity stand ? stand : null;
+    }
+
+    private boolean selectNextStand(ServerWorld world) {
+        Optional<ArmorStandEntity> stand = ArmorerStandManager.findPlacementStand(world, villager, craftingTablePos, pendingSlot);
+        if (stand.isEmpty()) {
+            return false;
+        }
+        pendingStandId = stand.get().getUuid();
+        standTargetPos = stand.get().getBlockPos();
+        return true;
+    }
+
+    private void returnPendingItem(ServerWorld world) {
+        if (pendingStandItem.isEmpty()) {
+            return;
+        }
+        ItemStack remaining = insertStack(getChestInventory(world).orElse(villager.getInventory()), pendingStandItem);
+        if (!remaining.isEmpty()) {
+            ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
+            if (!villagerRemaining.isEmpty()) {
+                villager.dropStack(villagerRemaining);
+            }
+            villager.getInventory().markDirty();
+        }
+        clearPendingStand();
     }
 }
