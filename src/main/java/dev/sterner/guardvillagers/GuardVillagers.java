@@ -1,7 +1,8 @@
 package dev.sterner.guardvillagers;
 
+import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
-import dev.sterner.guardvillagers.common.entity.GuardEntityLootTables;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
@@ -11,6 +12,7 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviors;
+import dev.sterner.guardvillagers.common.villager.behavior.ButcherBehavior;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
@@ -72,6 +74,16 @@ public class GuardVillagers implements ModInitializer {
 
     public static final Item GUARD_SPAWN_EGG = new SpawnEggItem(GUARD_VILLAGER, 5651507, 8412749, new Item.Settings());
 
+    public static final EntityType<AxeGuardEntity> AXE_GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("axe_guard"),
+            FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, AxeGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
+
+    public static final Item AXE_GUARD_SPAWN_EGG = new SpawnEggItem(AXE_GUARD_VILLAGER, 5651507, 9477598, new Item.Settings());
+
+    public static final EntityType<ButcherGuardEntity> BUTCHER_GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("butcher_guard"),
+            FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, ButcherGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
+
+    public static final Item BUTCHER_GUARD_SPAWN_EGG = new SpawnEggItem(BUTCHER_GUARD_VILLAGER, 5651507, 11250603, new Item.Settings());
+
     public static Hand getHandWith(LivingEntity livingEntity, Predicate<Item> itemPredicate) {
         return itemPredicate.test(livingEntity.getMainHandStack().getItem()) ? Hand.MAIN_HAND : Hand.OFF_HAND;
     }
@@ -88,9 +100,13 @@ public class GuardVillagers implements ModInitializer {
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(AXE_GUARD_VILLAGER, GuardEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
         VillagerProfessionBehaviors.register();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
+        Registry.register(Registries.ITEM, id("axe_guard_spawn_egg"), AXE_GUARD_SPAWN_EGG);
+        Registry.register(Registries.ITEM, id("butcher_guard_spawn_egg"), BUTCHER_GUARD_SPAWN_EGG);
         Registry.register(Registries.SCREEN_HANDLER, id("guard_screen"), GUARD_SCREEN_HANDLER);
         Registry.register(Registries.SOUND_EVENT, id("entity.guard.ambient"), GUARD_AMBIENT);
         Registry.register(Registries.SOUND_EVENT, id( "entity.guard.hurt"), GUARD_HURT);
@@ -105,7 +121,11 @@ public class GuardVillagers implements ModInitializer {
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
 
-        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> entries.add(GUARD_SPAWN_EGG));
+        ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> {
+            entries.add(GUARD_SPAWN_EGG);
+            entries.add(AXE_GUARD_SPAWN_EGG);
+            entries.add(BUTCHER_GUARD_SPAWN_EGG);
+        });
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
         UseEntityCallback.EVENT.register(this::villagerConvert);
@@ -154,6 +174,9 @@ public class GuardVillagers implements ModInitializer {
                     }
                 }
             }
+            if (entity instanceof ButcherGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity);
+            }
         });
 
         ServerWorldEvents.LOAD.register((server, world) -> JobBlockPairingHelper.refreshWorldPairings(world));
@@ -164,6 +187,9 @@ public class GuardVillagers implements ModInitializer {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
                 VillagerBellTracker.tickVillagerReports(world);
+                if (world.getTime() % 40L == 0L) {
+                    ButcherBehavior.tryConvertButchersWithAxe(world);
+                }
             }
         });
     }
