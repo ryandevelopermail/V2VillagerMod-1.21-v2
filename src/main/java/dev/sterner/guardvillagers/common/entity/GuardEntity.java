@@ -114,6 +114,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     @Nullable
     private UUID pairedStandUuid;
     private boolean standCustomizationEnabled;
+    private boolean standAnchorEnabled;
     private boolean convertedFromArmorStand;
     private int remainingPersistentAngerTime;
     private UUID persistentAngerTarget;
@@ -247,6 +248,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         this.lastGossipTime = nbt.getLong("LastGossipTime");
         this.spawnWithArmor = nbt.getBoolean("SpawnWithArmor");
         this.standCustomizationEnabled = nbt.getBoolean("StandCustomizationEnabled");
+        this.standAnchorEnabled = nbt.getBoolean("StandAnchorEnabled");
         this.convertedFromArmorStand = nbt.getBoolean("ConvertedFromArmorStand");
         if (nbt.contains("PatrolPosX")) {
             int x = nbt.getInt("PatrolPosX");
@@ -322,6 +324,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         nbt.putBoolean("Patrolling", this.isPatrolling());
         nbt.putBoolean("SpawnWithArmor", this.spawnWithArmor);
         nbt.putBoolean("StandCustomizationEnabled", this.standCustomizationEnabled);
+        nbt.putBoolean("StandAnchorEnabled", this.standAnchorEnabled);
         nbt.putBoolean("ConvertedFromArmorStand", this.convertedFromArmorStand);
         nbt.putLong("LastGossipTime", this.lastGossipTime);
         nbt.putLong("LastGossipDecay", this.lastGossipDecayTime);
@@ -519,6 +522,14 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
 
     public void setStandCustomizationEnabled(boolean standCustomizationEnabled) {
         this.standCustomizationEnabled = standCustomizationEnabled;
+    }
+
+    public boolean isStandAnchorEnabled() {
+        return this.standAnchorEnabled;
+    }
+
+    public void setStandAnchorEnabled(boolean standAnchorEnabled) {
+        this.standAnchorEnabled = standAnchorEnabled;
     }
 
     public boolean isConvertedFromArmorStand() {
