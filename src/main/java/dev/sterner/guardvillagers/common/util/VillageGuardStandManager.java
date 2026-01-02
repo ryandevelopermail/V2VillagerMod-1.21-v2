@@ -206,6 +206,7 @@ public final class VillageGuardStandManager {
         List<ArmorStandEntity> newStands = new ArrayList<>();
         for (BlockPos position : positions) {
             ArmorStandEntity armorStand = new ArmorStandEntity(world, position.getX() + 0.5D, position.getY(), position.getZ() + 0.5D);
+            armorStand.setShowArms(true);
             armorStand.addCommandTag(GUARD_STAND_TAG);
             world.spawnEntity(armorStand);
             newStands.add(armorStand);

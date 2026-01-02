@@ -119,6 +119,7 @@ public final class JobBlockPlacementHandler {
         }
 
         ArmorStandEntity armorStand = stand.get();
+        armorStand.setShowArms(true);
         armorStand.addCommandTag(VillageGuardStandManager.GUARD_STAND_TAG);
         VillagerEntity villager = nearestVillager.get();
         JobBlockPairingHelper.playPairingAnimation(world, placementPos, villager, placementPos);
