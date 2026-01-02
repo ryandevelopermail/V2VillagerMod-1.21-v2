@@ -47,9 +47,13 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
                 jobPos.toShortString());
 
         ToolsmithCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-        if (craftingGoal != null) {
+        if (craftingGoal == null) {
+            craftingGoal = new ToolsmithCraftingGoal(villager, jobPos, chestPos, null);
+            CRAFTING_GOALS.put(villager, craftingGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(CRAFTING_GOAL_PRIORITY, craftingGoal);
+        } else {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
-            craftingGoal.requestImmediateCraft(world);
         }
         updateChestListener(world, villager, chestPos);
     }

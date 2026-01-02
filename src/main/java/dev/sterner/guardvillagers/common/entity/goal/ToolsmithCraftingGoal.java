@@ -21,6 +21,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -35,7 +36,7 @@ public class ToolsmithCraftingGoal extends Goal {
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
-    private BlockPos craftingTablePos;
+    private @Nullable BlockPos craftingTablePos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long lastCraftDay = -1L;
@@ -44,20 +45,20 @@ public class ToolsmithCraftingGoal extends Goal {
     private int lastCheckCount;
     private boolean immediateCheckPending;
 
-    public ToolsmithCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public ToolsmithCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
         setTargets(jobPos, chestPos, craftingTablePos);
         setControls(EnumSet.of(Control.MOVE));
     }
 
-    public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public void setTargets(BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
-        this.craftingTablePos = craftingTablePos.toImmutable();
+        this.craftingTablePos = craftingTablePos == null ? null : craftingTablePos.toImmutable();
         this.stage = Stage.IDLE;
     }
 
-    public BlockPos getCraftingTablePos() {
+    public @Nullable BlockPos getCraftingTablePos() {
         return craftingTablePos;
     }
 
