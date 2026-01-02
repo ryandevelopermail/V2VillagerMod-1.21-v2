@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -18,12 +18,8 @@ import net.minecraft.item.SwordItem;
 import net.minecraft.item.TridentItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Vec3d;
 
-import java.util.Comparator;
 import java.util.EnumSet;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -31,8 +27,6 @@ public class WeaponsmithDistributionGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
-    private static final int STAND_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
-
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
@@ -142,7 +136,7 @@ public class WeaponsmithDistributionGoal extends Goal {
                     return;
                 }
                 ArmorStandEntity stand = resolveTargetStand(world);
-                if (stand == null || !isStandAvailable(stand)) {
+                if (stand == null || !WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND)) {
                     if (!selectStand(world)) {
                         returnPendingItem(world);
                         stage = Stage.DONE;
@@ -163,7 +157,7 @@ public class WeaponsmithDistributionGoal extends Goal {
                     return;
                 }
                 ArmorStandEntity stand = resolveTargetStand(world);
-                if (stand == null || !isStandAvailable(stand)) {
+                if (stand == null || !WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND)) {
                     if (!selectStand(world)) {
                         returnPendingItem(world);
                         stage = Stage.DONE;
@@ -172,7 +166,7 @@ public class WeaponsmithDistributionGoal extends Goal {
                     stage = Stage.GO_TO_STAND;
                     return;
                 }
-                if (placeWeaponOnStand(stand)) {
+                if (WeaponsmithStandManager.placeWeaponOnStand(world, villager, stand, pendingItem, EquipmentSlot.MAINHAND)) {
                     clearPendingStand();
                     stage = Stage.DONE;
                     return;
@@ -235,41 +229,8 @@ public class WeaponsmithDistributionGoal extends Goal {
     }
 
     private Optional<ArmorStandEntity> findPlacementStand(ServerWorld world) {
-        BlockPos center = craftingTablePos != null ? craftingTablePos : chestPos;
-        List<ArmorStandEntity> stands = world.getEntitiesByClass(ArmorStandEntity.class, new Box(center).expand(STAND_SCAN_RANGE),
-                stand -> stand.isAlive() && stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG));
-        if (stands.isEmpty()) {
-            return Optional.empty();
-        }
-
-        Comparator<ArmorStandEntity> comparator = Comparator
-                .comparingDouble((ArmorStandEntity stand) -> stand.squaredDistanceTo(Vec3d.ofCenter(center)))
-                .thenComparing(stand -> stand.getBlockPos().getX())
-                .thenComparing(stand -> stand.getBlockPos().getY())
-                .thenComparing(stand -> stand.getBlockPos().getZ());
-
-        return stands.stream()
-                .sorted(comparator)
-                .filter(this::isStandAvailable)
-                .findFirst();
-    }
-
-    private boolean isStandAvailable(ArmorStandEntity stand) {
-        return stand.getEquippedStack(EquipmentSlot.MAINHAND).isEmpty();
-    }
-
-    private boolean placeWeaponOnStand(ArmorStandEntity stand) {
-        if (!stand.isAlive()) {
-            return false;
-        }
-        if (!stand.getEquippedStack(EquipmentSlot.MAINHAND).isEmpty()) {
-            return false;
-        }
-        ItemStack toPlace = pendingItem.copy();
-        toPlace.setCount(1);
-        stand.equipStack(EquipmentSlot.MAINHAND, toPlace);
-        pendingItem.decrement(1);
-        return true;
+        BlockPos center = craftingTablePos != null ? craftingTablePos : villager.getBlockPos();
+        return WeaponsmithStandManager.findPlacementStand(world, villager, center, EquipmentSlot.MAINHAND);
     }
 
     private void returnPendingItem(ServerWorld world) {
