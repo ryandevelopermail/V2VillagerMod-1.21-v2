@@ -25,5 +25,8 @@
   "guardvillagers.midnightconfig.guardAttackMobBlacklist": "Guard Attack Blacklist",
   "guardvillagers.midnightconfig.guardVillagerHelpRange": "Guard Help Range",
   "guardvillagers.midnightconfig.amountOfHealthRegenerated": "Guard Regen",
-  "guardvillagers.midnightconfig.attackAllMobs": "Guard Attack All Mobs"
+  "guardvillagers.midnightconfig.attackAllMobs": "Guard Attack All Mobs",
+  "guardvillagers.profession.v2_toolsmith": "V2 Toolsmith",
+  "guardvillagers.profession.v2_toolsmith.task.crafting": "Craft tools for the village chest",
+  "guardvillagers.profession.v2_toolsmith.task.distribution": "Distribute tools to guards and villagers"
 }
