@@ -74,7 +74,7 @@ public final class ArmorerStandManager {
     private static StandProgress syncProgressWithStand(ArmorStandEntity stand, Map<UUID, StandProgress> memory) {
         StandProgress progress = memory.computeIfAbsent(stand.getUuid(), id -> new StandProgress());
         for (EquipmentSlot slot : EquipmentSlot.values()) {
-            if (slot.getType() != EquipmentSlot.Type.ARMOR) {
+            if (!slot.isArmorSlot()) {
                 continue;
             }
             if (!stand.getEquippedStack(slot).isEmpty()) {
