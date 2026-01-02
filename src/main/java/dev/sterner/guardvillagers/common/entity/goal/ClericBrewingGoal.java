@@ -153,7 +153,7 @@ public class ClericBrewingGoal extends Goal {
     }
 
     private boolean shouldExtractPotions(BrewingStandBlockEntity stand) {
-        if (stand.getBrewTime() > 0) {
+        if (stand.brewTime > 0) {
             return false;
         }
         if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
