@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ArmorItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
@@ -29,9 +30,14 @@ public class ArmorStandEntityMixin {
             return;
         }
 
-        EquipmentSlot slot = stand.getPreferredEquipmentSlot(stackInHand);
+        if (!(stackInHand.getItem() instanceof ArmorItem armorItem)) {
+            cir.setReturnValue(ActionResult.FAIL);
+            return;
+        }
+
+        EquipmentSlot slot = armorItem.getSlotType();
         ItemStack current = stand.getEquippedStack(slot);
-        if (!GearGradeComparator.isUpgrade(stackInHand, current, slot)) {
+        if (!current.isEmpty() && !GearGradeComparator.isUpgrade(stackInHand, current, slot)) {
             cir.setReturnValue(ActionResult.FAIL);
         }
     }
