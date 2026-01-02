@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import dev.sterner.guardvillagers.common.util.ArmorerStandMemoryHolder;
+import dev.sterner.guardvillagers.common.util.LeatherworkerCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
@@ -21,15 +22,18 @@ import java.util.Map;
 import java.util.UUID;
 
 @Mixin(VillagerEntity.class)
-public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder {
+public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder {
     private static final String WEAPONSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastWeaponsmithCrafted";
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
+    private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
     private Identifier guardvillagers$lastWeaponsmithCrafted;
     @Nullable
     private Identifier guardvillagers$lastToolsmithCrafted;
+    @Nullable
+    private Identifier guardvillagers$lastLeatherworkerCrafted;
 
     @Override
     public Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$getArmorerStandMemory() {
@@ -59,6 +63,16 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Override
     public void guardvillagers$setLastToolsmithCrafted(@Nullable Identifier identifier) {
         guardvillagers$lastToolsmithCrafted = identifier;
+    }
+
+    @Override
+    public @Nullable Identifier guardvillagers$getLastLeatherworkerCrafted() {
+        return guardvillagers$lastLeatherworkerCrafted;
+    }
+
+    @Override
+    public void guardvillagers$setLastLeatherworkerCrafted(@Nullable Identifier identifier) {
+        guardvillagers$lastLeatherworkerCrafted = identifier;
     }
 
     @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
@@ -123,6 +137,16 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         guardvillagers$lastToolsmithCrafted = parsed;
     }
 
+    @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
+    private void guardvillagers$readLeatherworkerCraftingMemory(NbtCompound nbt, CallbackInfo ci) {
+        guardvillagers$lastLeatherworkerCrafted = null;
+        if (!nbt.contains(LEATHERWORKER_LAST_CRAFTED_KEY, 8)) {
+            return;
+        }
+        Identifier parsed = Identifier.tryParse(nbt.getString(LEATHERWORKER_LAST_CRAFTED_KEY));
+        guardvillagers$lastLeatherworkerCrafted = parsed;
+    }
+
     @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
     private void guardvillagers$writeArmorerStandMemory(NbtCompound nbt, CallbackInfo ci) {
         NbtList list = new NbtList();
@@ -162,6 +186,15 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
             nbt.putString(TOOLSMITH_LAST_CRAFTED_KEY, guardvillagers$lastToolsmithCrafted.toString());
         } else {
             nbt.remove(TOOLSMITH_LAST_CRAFTED_KEY);
+        }
+    }
+
+    @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
+    private void guardvillagers$writeLeatherworkerCraftingMemory(NbtCompound nbt, CallbackInfo ci) {
+        if (guardvillagers$lastLeatherworkerCrafted != null) {
+            nbt.putString(LEATHERWORKER_LAST_CRAFTED_KEY, guardvillagers$lastLeatherworkerCrafted.toString());
+        } else {
+            nbt.remove(LEATHERWORKER_LAST_CRAFTED_KEY);
         }
     }
 }
