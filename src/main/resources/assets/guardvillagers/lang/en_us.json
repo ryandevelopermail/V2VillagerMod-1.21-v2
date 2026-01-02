@@ -34,5 +34,8 @@
   "guardvillagers.profession.v2_fletcher": "V2 Fletcher",
   "guardvillagers.profession.v2_fletcher.task.crafting": "Craft archery items for the village chest",
   "guardvillagers.profession.v2_leatherworker": "V2 Leatherworker",
-  "guardvillagers.profession.v2_leatherworker.task.crafting": "Craft leather items for the village chest"
+  "guardvillagers.profession.v2_leatherworker.task.crafting": "Craft leather items for the village chest",
+  "guardvillagers.profession.v2_cleric": "V2 Cleric",
+  "guardvillagers.profession.v2_cleric.task.brewing": "Brew potions for the village chest",
+  "guardvillagers.profession.v2_cleric.task.crafting": "Craft brewing supplies for the village chest"
 }
