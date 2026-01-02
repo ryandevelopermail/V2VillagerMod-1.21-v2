@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.mixin;
 
-import dev.sterner.guardvillagers.common.util.GuardStandEquipmentComparator;
+import dev.sterner.guardvillagers.common.util.GearGradeComparator;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -31,7 +31,7 @@ public class ArmorStandEntityMixin {
 
         EquipmentSlot slot = stand.getPreferredEquipmentSlot(stackInHand);
         ItemStack current = stand.getEquippedStack(slot);
-        if (!GuardStandEquipmentComparator.isUpgrade(stackInHand, current, slot)) {
+        if (!GearGradeComparator.isUpgrade(stackInHand, current, slot)) {
             cir.setReturnValue(ActionResult.FAIL);
         }
     }

@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
-import dev.sterner.guardvillagers.common.util.GuardGearGradeComparator;
+import dev.sterner.guardvillagers.common.util.GearGradeComparator;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.entity.Entity;
@@ -134,6 +134,6 @@ public class GuardUpgradeFromStandGoal extends Goal {
     private boolean isStandUpgrade(EquipmentSlot slot, ArmorStandEntity armorStand) {
         ItemStack standStack = armorStand.getEquippedStack(slot);
         ItemStack guardStack = guard.getEquippedStack(slot);
-        return GuardGearGradeComparator.isHigherGrade(standStack, guardStack);
+        return GearGradeComparator.isUpgrade(standStack, guardStack, slot);
     }
 }
