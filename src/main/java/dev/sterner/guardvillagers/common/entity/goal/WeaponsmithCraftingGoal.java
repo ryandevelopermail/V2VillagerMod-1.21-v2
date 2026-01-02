@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -12,13 +13,18 @@ import net.minecraft.item.BowItem;
 import net.minecraft.item.CrossbowItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.MaceItem;
+import net.minecraft.item.PickaxeItem;
+import net.minecraft.item.ShovelItem;
 import net.minecraft.item.SwordItem;
 import net.minecraft.item.TridentItem;
+import net.minecraft.item.HoeItem;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
@@ -175,6 +181,7 @@ public class WeaponsmithCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            recordLastCrafted(recipe.output);
             CraftingCheckLogger.report(world, "Weaponsmith", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
@@ -191,7 +198,7 @@ public class WeaponsmithCraftingGoal extends Goal {
                 recipes.add(new WeaponRecipe(recipe, result));
             }
         }
-        return recipes;
+        return filterLastCrafted(recipes);
     }
 
     private boolean isWeaponItem(ItemStack stack) {
@@ -200,7 +207,38 @@ public class WeaponsmithCraftingGoal extends Goal {
                 || stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof CrossbowItem
                 || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof MaceItem;
+                || stack.getItem() instanceof MaceItem
+                || stack.getItem() instanceof PickaxeItem
+                || stack.getItem() instanceof ShovelItem
+                || stack.getItem() instanceof HoeItem;
+    }
+
+    private List<WeaponRecipe> filterLastCrafted(List<WeaponRecipe> recipes) {
+        Identifier lastCrafted = getLastCraftedId();
+        if (lastCrafted == null || recipes.size() <= 1) {
+            return recipes;
+        }
+        List<WeaponRecipe> filtered = new ArrayList<>();
+        for (WeaponRecipe recipe : recipes) {
+            Identifier resultId = Registries.ITEM.getId(recipe.output.getItem());
+            if (!lastCrafted.equals(resultId)) {
+                filtered.add(recipe);
+            }
+        }
+        return filtered.isEmpty() ? recipes : filtered;
+    }
+
+    private Identifier getLastCraftedId() {
+        if (villager instanceof WeaponsmithCraftingMemoryHolder holder) {
+            return holder.guardvillagers$getLastWeaponsmithCrafted();
+        }
+        return null;
+    }
+
+    private void recordLastCrafted(ItemStack stack) {
+        if (villager instanceof WeaponsmithCraftingMemoryHolder holder) {
+            holder.guardvillagers$setLastWeaponsmithCrafted(Registries.ITEM.getId(stack.getItem()));
+        }
     }
 
     private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
