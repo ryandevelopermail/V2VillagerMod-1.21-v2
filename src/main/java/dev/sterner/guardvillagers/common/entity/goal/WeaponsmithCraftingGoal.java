@@ -17,6 +17,7 @@ import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.item.SwordItem;
 import net.minecraft.item.TridentItem;
+import net.minecraft.item.ToolItem;
 import net.minecraft.item.HoeItem;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
@@ -202,15 +203,22 @@ public class WeaponsmithCraftingGoal extends Goal {
     }
 
     private boolean isWeaponItem(ItemStack stack) {
-        return stack.getItem() instanceof SwordItem
+        if (stack.getItem() instanceof SwordItem
                 || stack.getItem() instanceof AxeItem
                 || stack.getItem() instanceof BowItem
                 || stack.getItem() instanceof CrossbowItem
                 || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof MaceItem
-                || stack.getItem() instanceof PickaxeItem
-                || stack.getItem() instanceof ShovelItem
-                || stack.getItem() instanceof HoeItem;
+                || stack.getItem() instanceof MaceItem) {
+            return true;
+        }
+
+        if (stack.getItem() instanceof ToolItem) {
+            return !(stack.getItem() instanceof PickaxeItem
+                    || stack.getItem() instanceof ShovelItem
+                    || stack.getItem() instanceof HoeItem);
+        }
+
+        return false;
     }
 
     private List<WeaponRecipe> filterLastCrafted(List<WeaponRecipe> recipes) {
