@@ -113,6 +113,8 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     public boolean spawnWithArmor;
     @Nullable
     private UUID pairedStandUuid;
+    private boolean standCustomizationEnabled;
+    private boolean convertedFromArmorStand;
     private int remainingPersistentAngerTime;
     private UUID persistentAngerTarget;
 
@@ -244,6 +246,8 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         this.lastGossipDecayTime = nbt.getLong("LastGossipDecay");
         this.lastGossipTime = nbt.getLong("LastGossipTime");
         this.spawnWithArmor = nbt.getBoolean("SpawnWithArmor");
+        this.standCustomizationEnabled = nbt.getBoolean("StandCustomizationEnabled");
+        this.convertedFromArmorStand = nbt.getBoolean("ConvertedFromArmorStand");
         if (nbt.contains("PatrolPosX")) {
             int x = nbt.getInt("PatrolPosX");
             int y = nbt.getInt("PatrolPosY");
@@ -317,6 +321,8 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         nbt.putBoolean("Interacting", this.interacting);
         nbt.putBoolean("Patrolling", this.isPatrolling());
         nbt.putBoolean("SpawnWithArmor", this.spawnWithArmor);
+        nbt.putBoolean("StandCustomizationEnabled", this.standCustomizationEnabled);
+        nbt.putBoolean("ConvertedFromArmorStand", this.convertedFromArmorStand);
         nbt.putLong("LastGossipTime", this.lastGossipTime);
         nbt.putLong("LastGossipDecay", this.lastGossipDecayTime);
         if (this.getOwnerId() != null) {
@@ -492,6 +498,9 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         if (!this.getWorld().isClient && this.age % 40 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
             VillageGuardStandManager.validateGuardStandPairing(serverWorld, this);
         }
+        if (!this.getWorld().isClient && this.standCustomizationEnabled && this.age % 20 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+            syncGuardFromStand(serverWorld);
+        }
         super.tick();
     }
 
@@ -502,6 +511,22 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
 
     public void setPairedStandUuid(@Nullable UUID pairedStandUuid) {
         this.pairedStandUuid = pairedStandUuid;
+    }
+
+    public boolean isStandCustomizationEnabled() {
+        return this.standCustomizationEnabled;
+    }
+
+    public void setStandCustomizationEnabled(boolean standCustomizationEnabled) {
+        this.standCustomizationEnabled = standCustomizationEnabled;
+    }
+
+    public boolean isConvertedFromArmorStand() {
+        return this.convertedFromArmorStand;
+    }
+
+    public void setConvertedFromArmorStand(boolean convertedFromArmorStand) {
+        this.convertedFromArmorStand = convertedFromArmorStand;
     }
 
     @Override
@@ -865,6 +890,9 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
 
     @Override
     public void onInventoryChanged(Inventory sender) {
+        if (this.standCustomizationEnabled) {
+            return;
+        }
         if (this.getWorld().isClient || this.pairedStandUuid == null || !(this.getWorld() instanceof ServerWorld serverWorld)) {
             return;
         }
@@ -874,6 +902,19 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 && armorStand.isAlive()
                 && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
             GuardStandEquipmentSync.syncStandFromGuard(this, armorStand);
+        }
+    }
+
+    private void syncGuardFromStand(ServerWorld serverWorld) {
+        if (this.pairedStandUuid == null) {
+            return;
+        }
+
+        Entity standEntity = serverWorld.getEntity(this.pairedStandUuid);
+        if (standEntity instanceof ArmorStandEntity armorStand
+                && armorStand.isAlive()
+                && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
+            GuardStandEquipmentSync.syncGuardFromStand(this, armorStand);
         }
     }
 

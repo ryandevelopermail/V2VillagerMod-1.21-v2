@@ -11,6 +11,8 @@ import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandle
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.SpecialModifier;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviors;
 import dev.sterner.guardvillagers.common.villager.behavior.ButcherBehavior;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -28,7 +30,10 @@ import net.fabricmc.fabric.api.object.builder.v1.entity.FabricDefaultAttributeRe
 import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.block.AbstractBlock;
 import net.minecraft.block.BellBlock;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockSoundGroup;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
@@ -83,6 +88,8 @@ public class GuardVillagers implements ModInitializer {
             FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, ButcherGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
 
     public static final Item BUTCHER_GUARD_SPAWN_EGG = new SpawnEggItem(BUTCHER_GUARD_VILLAGER, 5651507, 11250603, new Item.Settings());
+    public static final Block GUARD_STAND_MODIFIER = new Block(AbstractBlock.Settings.create().strength(2.0F).sounds(BlockSoundGroup.STONE));
+    public static final Item GUARD_STAND_MODIFIER_ITEM = new BlockItem(GUARD_STAND_MODIFIER, new Item.Settings());
 
     public static Hand getHandWith(LivingEntity livingEntity, Predicate<Item> itemPredicate) {
         return itemPredicate.test(livingEntity.getMainHandStack().getItem()) ? Hand.MAIN_HAND : Hand.OFF_HAND;
@@ -103,10 +110,13 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(AXE_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
         VillagerProfessionBehaviors.register();
+        VillagerProfessionBehaviorRegistry.registerSpecialModifier(new SpecialModifier(id("guard_stand_modifier"), GUARD_STAND_MODIFIER, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE));
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("axe_guard_spawn_egg"), AXE_GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("butcher_guard_spawn_egg"), BUTCHER_GUARD_SPAWN_EGG);
+        Registry.register(Registries.BLOCK, id("guard_stand_modifier"), GUARD_STAND_MODIFIER);
+        Registry.register(Registries.ITEM, id("guard_stand_modifier"), GUARD_STAND_MODIFIER_ITEM);
         Registry.register(Registries.SCREEN_HANDLER, id("guard_screen"), GUARD_SCREEN_HANDLER);
         Registry.register(Registries.SOUND_EVENT, id("entity.guard.ambient"), GUARD_AMBIENT);
         Registry.register(Registries.SOUND_EVENT, id( "entity.guard.hurt"), GUARD_HURT);
@@ -125,6 +135,7 @@ public class GuardVillagers implements ModInitializer {
             entries.add(GUARD_SPAWN_EGG);
             entries.add(AXE_GUARD_SPAWN_EGG);
             entries.add(BUTCHER_GUARD_SPAWN_EGG);
+            entries.add(GUARD_STAND_MODIFIER_ITEM);
         });
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register(this::onDamage);
