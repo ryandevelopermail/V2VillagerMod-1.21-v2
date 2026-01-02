@@ -178,6 +178,9 @@ public class WeaponsmithCraftingGoal extends Goal {
         }
 
         WeaponRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        if (!canInsertOutput(inventory, recipe.output)) {
+            return;
+        }
         if (consumeIngredients(inventory, recipe.recipe)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
@@ -366,6 +369,43 @@ public class WeaponsmithCraftingGoal extends Goal {
         }
 
         return remaining;
+    }
+
+    private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            remaining.decrement(moved);
+        }
+
+        return remaining.isEmpty();
     }
 
     private enum Stage {
