@@ -229,7 +229,7 @@ public class WeaponsmithDistributionGoal extends Goal {
     }
 
     private Optional<ArmorStandEntity> findPlacementStand(ServerWorld world) {
-        BlockPos center = craftingTablePos != null ? craftingTablePos : villager.getBlockPos();
+        BlockPos center = chestPos != null ? chestPos : (craftingTablePos != null ? craftingTablePos : villager.getBlockPos());
         return WeaponsmithStandManager.findPlacementStand(world, villager, center, EquipmentSlot.MAINHAND);
     }
 
