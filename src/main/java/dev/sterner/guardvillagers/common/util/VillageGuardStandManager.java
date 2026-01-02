@@ -280,6 +280,10 @@ public final class VillageGuardStandManager {
 
         Entity standEntity = world.getEntity(standId);
         if (!(standEntity instanceof ArmorStandEntity armorStand) || !armorStand.isAlive() || !armorStand.getCommandTags().contains(GUARD_STAND_TAG)) {
+            if (guard.isStandAnchorEnabled()) {
+                guard.setPairedStandUuid(null);
+                return;
+            }
             demoteGuard(world, guard);
         }
     }
@@ -301,6 +305,10 @@ public final class VillageGuardStandManager {
     private static List<BlockPos> demoteGuards(ServerWorld world, List<GuardEntity> guards) {
         List<BlockPos> demoted = new ArrayList<>();
         for (GuardEntity guard : guards) {
+            if (guard.isStandAnchorEnabled()) {
+                guard.setPairedStandUuid(null);
+                continue;
+            }
             if (demoteGuard(world, guard)) {
                 demoted.add(guard.getBlockPos());
             }

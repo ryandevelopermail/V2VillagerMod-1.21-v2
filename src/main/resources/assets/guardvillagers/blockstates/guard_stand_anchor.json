@@ -1,0 +1,7 @@
+{
+  "variants": {
+    "": {
+      "model": "guardvillagers:block/guard_stand_anchor"
+    }
+  }
+}

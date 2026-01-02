@@ -7,6 +7,7 @@ import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EquipmentSlot;
@@ -174,13 +175,18 @@ public final class JobBlockPlacementHandler {
         Box searchBox = new Box(placedPos).expand(range);
         for (GuardEntity guard : world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive)) {
             if (guard.isConvertedFromArmorStand()) {
-                guard.setStandCustomizationEnabled(true);
+                applySpecialModifierToGuard(guard, modifier.get().block());
             }
         }
     }
 
     private static void applySpecialModifierFromNearbyBlocks(ServerWorld world, GuardEntity guard) {
-        Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(GuardVillagers.GUARD_STAND_MODIFIER);
+        applyModifierFromNearbyBlocks(world, guard, GuardVillagers.GUARD_STAND_MODIFIER);
+        applyModifierFromNearbyBlocks(world, guard, GuardVillagers.GUARD_STAND_ANCHOR);
+    }
+
+    private static void applyModifierFromNearbyBlocks(ServerWorld world, GuardEntity guard, Block modifierBlock) {
+        Optional<SpecialModifier> modifier = VillagerProfessionBehaviorRegistry.getSpecialModifier(modifierBlock);
         if (modifier.isEmpty()) {
             return;
         }
@@ -193,9 +199,17 @@ public final class JobBlockPlacementHandler {
                 continue;
             }
             if (world.getBlockState(pos).isOf(modifier.get().block())) {
-                guard.setStandCustomizationEnabled(true);
+                applySpecialModifierToGuard(guard, modifier.get().block());
                 return;
             }
+        }
+    }
+
+    private static void applySpecialModifierToGuard(GuardEntity guard, Block modifierBlock) {
+        if (modifierBlock == GuardVillagers.GUARD_STAND_MODIFIER) {
+            guard.setStandCustomizationEnabled(true);
+        } else if (modifierBlock == GuardVillagers.GUARD_STAND_ANCHOR) {
+            guard.setStandAnchorEnabled(true);
         }
     }
 }
