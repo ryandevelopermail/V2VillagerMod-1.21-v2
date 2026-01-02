@@ -488,6 +488,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                     this.equipStack(equipmentslottype, stack);
                 }
             }
+            syncStandFromGuard(serverWorld);
             this.spawnWithArmor = false;
         }
         if (!getWorld().isClient) this.tickAngerLogic((ServerWorld) getWorld(), true);
@@ -926,6 +927,19 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 && armorStand.isAlive()
                 && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
             GuardStandEquipmentSync.syncGuardFromStand(this, armorStand);
+        }
+    }
+
+    private void syncStandFromGuard(ServerWorld serverWorld) {
+        if (this.pairedStandUuid == null) {
+            return;
+        }
+
+        Entity standEntity = serverWorld.getEntity(this.pairedStandUuid);
+        if (standEntity instanceof ArmorStandEntity armorStand
+                && armorStand.isAlive()
+                && armorStand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG)) {
+            GuardStandEquipmentSync.syncStandFromGuard(this, armorStand);
         }
     }
 
