@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.mixin.BrewingStandBlockEntityAccessor;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -10,7 +11,6 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.recipe.BrewingRecipeRegistry;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -149,11 +149,11 @@ public class ClericBrewingGoal extends Goal {
         if (needsFuel(stand) && hasFuelInChest(chestInventory)) {
             return true;
         }
-        return needsIngredient(stand) && hasIngredientInChest(chestInventory);
+        return needsIngredient(stand) && hasIngredientInChest(chestInventory, stand);
     }
 
     private boolean shouldExtractPotions(BrewingStandBlockEntity stand) {
-        if (stand.getBrewTime() > 0) {
+        if (((BrewingStandBlockEntityAccessor) stand).guardvillagers$getBrewTime() > 0) {
             return false;
         }
         if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
@@ -180,10 +180,10 @@ public class ClericBrewingGoal extends Goal {
         return stand.getStack(INGREDIENT_SLOT).isEmpty() && hasAnyPotion(stand);
     }
 
-    private boolean hasIngredientInChest(Inventory inventory) {
+    private boolean hasIngredientInChest(Inventory inventory, BrewingStandBlockEntity stand) {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && BrewingRecipeRegistry.isValidIngredient(stack)) {
+            if (!stack.isEmpty() && stand.getBrewingRecipeRegistry().isValidIngredient(stack)) {
                 return true;
             }
         }
@@ -240,7 +240,7 @@ public class ClericBrewingGoal extends Goal {
         }
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
-            if (stack.isEmpty() || !BrewingRecipeRegistry.isValidIngredient(stack)) {
+            if (stack.isEmpty() || !stand.getBrewingRecipeRegistry().isValidIngredient(stack)) {
                 continue;
             }
             ItemStack toInsert = stack.copy();
