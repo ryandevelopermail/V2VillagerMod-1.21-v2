@@ -315,13 +315,24 @@ public class ClericBrewingGoal extends Goal {
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
             if (isTargetPotionMarker(stack)) {
-                ItemStack marker = stack.copy();
-                marker.setCount(1);
-                targetPotion = marker;
-                return marker;
+                ItemStack canonical = canonicalizeTargetPotion(stack);
+                if (!canonical.isEmpty()) {
+                    targetPotion = canonical;
+                    return canonical;
+                }
             }
         }
         return ItemStack.EMPTY;
+    }
+
+    private ItemStack canonicalizeTargetPotion(ItemStack marker) {
+        var potionContents = marker.get(DataComponentTypes.POTION_CONTENTS);
+        if (potionContents == null) {
+            return ItemStack.EMPTY;
+        }
+        ItemStack canonical = new ItemStack(marker.getItem());
+        canonical.set(DataComponentTypes.POTION_CONTENTS, potionContents);
+        return canonical;
     }
 
     private boolean isTargetPotionMarker(ItemStack stack) {
@@ -353,7 +364,7 @@ public class ClericBrewingGoal extends Goal {
             if (output.isEmpty()) {
                 continue;
             }
-            if (ItemStack.areItemsAndComponentsEqual(output, targetPotion)) {
+            if (matchesTargetPotion(output, targetPotion)) {
                 return true;
             }
             if (canBrewIntoTarget(world, inventory, output, targetPotion)) {
@@ -374,11 +385,23 @@ public class ClericBrewingGoal extends Goal {
                 continue;
             }
             ItemStack output = registry.craft(ingredient, inputPotion);
-            if (!output.isEmpty() && ItemStack.areItemsAndComponentsEqual(output, targetPotion)) {
+            if (!output.isEmpty() && matchesTargetPotion(output, targetPotion)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean matchesTargetPotion(ItemStack candidate, ItemStack targetPotion) {
+        if (candidate.isEmpty() || targetPotion.isEmpty()) {
+            return false;
+        }
+        if (!candidate.isOf(targetPotion.getItem())) {
+            return false;
+        }
+        var candidateContents = candidate.get(DataComponentTypes.POTION_CONTENTS);
+        var targetContents = targetPotion.get(DataComponentTypes.POTION_CONTENTS);
+        return candidateContents != null && candidateContents.equals(targetContents);
     }
 
     private Optional<BrewingStandBlockEntity> getBrewingStand(ServerWorld world) {
