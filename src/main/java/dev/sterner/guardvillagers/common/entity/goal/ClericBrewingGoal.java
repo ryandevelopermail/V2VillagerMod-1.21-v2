@@ -187,7 +187,7 @@ public class ClericBrewingGoal extends Goal {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!stack.isEmpty() && world.getServer().getBrewingRecipeRegistry().isValidIngredient(stack)) {
-                if (targetPotion.isEmpty() || isIngredientForTarget(world, stand, stack, targetPotion)) {
+                if (targetPotion.isEmpty() || isIngredientForTarget(world, inventory, stand, stack, targetPotion)) {
                     return true;
                 }
             }
@@ -249,7 +249,7 @@ public class ClericBrewingGoal extends Goal {
             if (stack.isEmpty() || !world.getServer().getBrewingRecipeRegistry().isValidIngredient(stack)) {
                 continue;
             }
-            if (!targetPotion.isEmpty() && !isIngredientForTarget(world, stand, stack, targetPotion)) {
+            if (!targetPotion.isEmpty() && !isIngredientForTarget(world, chestInventory, stand, stack, targetPotion)) {
                 continue;
             }
             ItemStack toInsert = stack.copy();
@@ -337,16 +337,41 @@ public class ClericBrewingGoal extends Goal {
         return stack.isOf(Items.POTION) || stack.isOf(Items.SPLASH_POTION) || stack.isOf(Items.LINGERING_POTION);
     }
 
-    private boolean isIngredientForTarget(ServerWorld world, BrewingStandBlockEntity stand, ItemStack ingredient, ItemStack targetPotion) {
+    private boolean isIngredientForTarget(ServerWorld world, Inventory inventory, BrewingStandBlockEntity stand, ItemStack ingredient, ItemStack targetPotion) {
+        var registry = world.getServer().getBrewingRecipeRegistry();
         for (int slot = 0; slot < 3; slot++) {
             ItemStack inputPotion = stand.getStack(slot);
             if (inputPotion.isEmpty()) {
                 continue;
             }
-            if (!world.getServer().getBrewingRecipeRegistry().hasRecipe(inputPotion, ingredient)) {
+            if (!registry.hasRecipe(inputPotion, ingredient)) {
                 continue;
             }
-            ItemStack output = world.getServer().getBrewingRecipeRegistry().craft(ingredient, inputPotion);
+            ItemStack output = registry.craft(ingredient, inputPotion);
+            if (output.isEmpty()) {
+                continue;
+            }
+            if (ItemStack.areItemsAndComponentsEqual(output, targetPotion)) {
+                return true;
+            }
+            if (canBrewIntoTarget(world, inventory, output, targetPotion)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean canBrewIntoTarget(ServerWorld world, Inventory inventory, ItemStack inputPotion, ItemStack targetPotion) {
+        var registry = world.getServer().getBrewingRecipeRegistry();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack ingredient = inventory.getStack(slot);
+            if (ingredient.isEmpty() || !registry.isValidIngredient(ingredient)) {
+                continue;
+            }
+            if (!registry.hasRecipe(inputPotion, ingredient)) {
+                continue;
+            }
+            ItemStack output = registry.craft(ingredient, inputPotion);
             if (!output.isEmpty() && ItemStack.areItemsAndComponentsEqual(output, targetPotion)) {
                 return true;
             }
