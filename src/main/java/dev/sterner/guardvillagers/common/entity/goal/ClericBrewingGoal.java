@@ -324,7 +324,7 @@ public class ClericBrewingGoal extends Goal {
     }
 
     private boolean isTargetPotionMarker(ItemStack stack) {
-        if (stack.isEmpty() || !stack.hasCustomName()) {
+        if (stack.isEmpty() || stack.getCustomName() == null) {
             return false;
         }
         if (!isPotionItem(stack)) {
