@@ -6,6 +6,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BrewingStandBlockEntity;
+import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -381,9 +382,19 @@ public class ClericBrewingGoal extends Goal {
         if (!candidate.isOf(targetPotion.getItem())) {
             return false;
         }
-        var candidateContents = candidate.get(DataComponentTypes.POTION_CONTENTS);
-        var targetContents = targetPotion.get(DataComponentTypes.POTION_CONTENTS);
-        return candidateContents != null && candidateContents.equals(targetContents);
+        var candidateContents = getPotionContents(candidate);
+        var targetContents = getPotionContents(targetPotion);
+        return candidateContents.equals(targetContents);
+    }
+
+    private PotionContentsComponent getPotionContents(ItemStack stack) {
+        for (var component : stack.getComponents()) {
+            Object value = component.value();
+            if (value instanceof PotionContentsComponent potionContents) {
+                return potionContents;
+            }
+        }
+        return PotionContentsComponent.DEFAULT;
     }
 
     private List<ItemStack> collectReachablePotions(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand) {
