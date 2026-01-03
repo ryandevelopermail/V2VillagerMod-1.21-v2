@@ -24,6 +24,7 @@ public class ClericBrewingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 10;
     private static final int INGREDIENT_SLOT = 3;
     private static final int FUEL_SLOT = 4;
+    private static final String TARGET_POTION_MARKER = "Target Potion:";
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -31,6 +32,7 @@ public class ClericBrewingGoal extends Goal {
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private boolean immediateCheckPending;
+    private ItemStack targetPotion = ItemStack.EMPTY;
 
     private enum Stage {
         IDLE,
@@ -143,13 +145,14 @@ public class ClericBrewingGoal extends Goal {
             return false;
         }
         BrewingStandBlockEntity stand = standOpt.get();
+        ItemStack resolvedTargetPotion = resolveTargetPotion(chestInventory);
         if (shouldExtractPotions(stand)) {
             return true;
         }
         if (needsFuel(stand) && hasFuelInChest(chestInventory)) {
             return true;
         }
-        return needsIngredient(stand) && hasIngredientInChest(world, chestInventory);
+        return needsIngredient(stand) && hasIngredientInChest(world, chestInventory, stand, resolvedTargetPotion);
     }
 
     private boolean shouldExtractPotions(BrewingStandBlockEntity stand) {
@@ -180,11 +183,13 @@ public class ClericBrewingGoal extends Goal {
         return stand.getStack(INGREDIENT_SLOT).isEmpty() && hasAnyPotion(stand);
     }
 
-    private boolean hasIngredientInChest(ServerWorld world, Inventory inventory) {
+    private boolean hasIngredientInChest(ServerWorld world, Inventory inventory, BrewingStandBlockEntity stand, ItemStack targetPotion) {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!stack.isEmpty() && world.getServer().getBrewingRecipeRegistry().isValidIngredient(stack)) {
-                return true;
+                if (targetPotion.isEmpty() || isIngredientForTarget(world, stand, stack, targetPotion)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -206,11 +211,12 @@ public class ClericBrewingGoal extends Goal {
             return;
         }
         BrewingStandBlockEntity stand = standOpt.get();
+        ItemStack resolvedTargetPotion = resolveTargetPotion(chestInventory);
         if (shouldExtractPotions(stand)) {
             extractPotions(chestInventory, stand);
         }
         if (needsIngredient(stand)) {
-            insertIngredient(world, chestInventory, stand);
+            insertIngredient(world, chestInventory, stand, resolvedTargetPotion);
         }
         if (needsFuel(stand)) {
             insertFuel(chestInventory, stand);
@@ -234,13 +240,16 @@ public class ClericBrewingGoal extends Goal {
         }
     }
 
-    private void insertIngredient(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand) {
+    private void insertIngredient(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand, ItemStack targetPotion) {
         if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
             return;
         }
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
             if (stack.isEmpty() || !world.getServer().getBrewingRecipeRegistry().isValidIngredient(stack)) {
+                continue;
+            }
+            if (!targetPotion.isEmpty() && !isIngredientForTarget(world, stand, stack, targetPotion)) {
                 continue;
             }
             ItemStack toInsert = stack.copy();
@@ -298,6 +307,51 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         return remaining;
+    }
+
+    private ItemStack resolveTargetPotion(Inventory chestInventory) {
+        targetPotion = ItemStack.EMPTY;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (isTargetPotionMarker(stack)) {
+                ItemStack marker = stack.copy();
+                marker.setCount(1);
+                targetPotion = marker;
+                return marker;
+            }
+        }
+        return ItemStack.EMPTY;
+    }
+
+    private boolean isTargetPotionMarker(ItemStack stack) {
+        if (stack.isEmpty() || !stack.hasCustomName()) {
+            return false;
+        }
+        if (!isPotionItem(stack)) {
+            return false;
+        }
+        return stack.getName().getString().startsWith(TARGET_POTION_MARKER);
+    }
+
+    private boolean isPotionItem(ItemStack stack) {
+        return stack.isOf(Items.POTION) || stack.isOf(Items.SPLASH_POTION) || stack.isOf(Items.LINGERING_POTION);
+    }
+
+    private boolean isIngredientForTarget(ServerWorld world, BrewingStandBlockEntity stand, ItemStack ingredient, ItemStack targetPotion) {
+        for (int slot = 0; slot < 3; slot++) {
+            ItemStack inputPotion = stand.getStack(slot);
+            if (inputPotion.isEmpty()) {
+                continue;
+            }
+            if (!world.getServer().getBrewingRecipeRegistry().hasRecipe(inputPotion, ingredient)) {
+                continue;
+            }
+            ItemStack output = world.getServer().getBrewingRecipeRegistry().craft(ingredient, inputPotion);
+            if (!output.isEmpty() && ItemStack.areItemsAndComponentsEqual(output, targetPotion)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Optional<BrewingStandBlockEntity> getBrewingStand(ServerWorld world) {
