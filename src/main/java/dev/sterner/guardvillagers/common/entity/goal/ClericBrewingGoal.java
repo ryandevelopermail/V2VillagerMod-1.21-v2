@@ -24,7 +24,8 @@ import java.util.Optional;
 public class ClericBrewingGoal extends Goal {
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final int CHECK_INTERVAL_TICKS = 10;
+    private static final int MIN_CHECK_INTERVAL_TICKS = 20 * 60 * 2;
+    private static final int MAX_CHECK_INTERVAL_TICKS = 20 * 60 * 4;
     private static final int INGREDIENT_SLOT = 3;
     private static final int FUEL_SLOT = 4;
     private final VillagerEntity villager;
@@ -79,10 +80,10 @@ public class ClericBrewingGoal extends Goal {
         if (!world.getBlockState(jobPos).isOf(Blocks.BREWING_STAND)) {
             return false;
         }
-        if (!immediateCheckPending && world.getTime() < nextCheckTime) {
+        if (!immediateCheckPending && world.getTimeOfDay() < nextCheckTime) {
             return false;
         }
-        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        scheduleNextCheck(world);
         immediateCheckPending = false;
         return hasBrewingWork(world);
     }
@@ -472,5 +473,11 @@ public class ClericBrewingGoal extends Goal {
             return false;
         }
         return villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    private void scheduleNextCheck(ServerWorld world) {
+        int range = MAX_CHECK_INTERVAL_TICKS - MIN_CHECK_INTERVAL_TICKS + 1;
+        int interval = MIN_CHECK_INTERVAL_TICKS + villager.getRandom().nextInt(range);
+        nextCheckTime = world.getTimeOfDay() + interval;
     }
 }
