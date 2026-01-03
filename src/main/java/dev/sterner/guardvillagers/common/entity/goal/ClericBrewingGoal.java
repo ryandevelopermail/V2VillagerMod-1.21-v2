@@ -6,6 +6,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BrewingStandBlockEntity;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -324,13 +325,14 @@ public class ClericBrewingGoal extends Goal {
     }
 
     private boolean isTargetPotionMarker(ItemStack stack) {
-        if (stack.isEmpty() || stack.getCustomName() == null) {
+        if (stack.isEmpty()) {
             return false;
         }
         if (!isPotionItem(stack)) {
             return false;
         }
-        return stack.getName().getString().startsWith(TARGET_POTION_MARKER);
+        var customName = stack.get(DataComponentTypes.CUSTOM_NAME);
+        return customName != null && customName.getString().startsWith(TARGET_POTION_MARKER);
     }
 
     private boolean isPotionItem(ItemStack stack) {
