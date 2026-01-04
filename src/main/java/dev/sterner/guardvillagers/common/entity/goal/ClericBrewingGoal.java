@@ -15,6 +15,8 @@ import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Optional;
 
 public class ClericBrewingGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ClericBrewingGoal.class);
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MIN_CHECK_INTERVAL_TICKS = 20 * 60 * 2;
@@ -145,10 +148,18 @@ public class ClericBrewingGoal extends Goal {
         Inventory chestInventory = getChestInventory(world);
         Optional<BrewingStandBlockEntity> standOpt = getBrewingStand(world);
         if (chestInventory == null || standOpt.isEmpty()) {
+            LOGGER.info("Cleric {} checking chest for potion ingredients: reachable potions none (chest={}, stand={})",
+                    villager.getUuidAsString(),
+                    chestInventory != null,
+                    standOpt.isPresent());
             return false;
         }
         BrewingStandBlockEntity stand = standOpt.get();
-        ItemStack resolvedTargetPotion = selectTargetPotion(world, chestInventory, stand);
+        List<ItemStack> reachablePotions = collectReachablePotions(world, chestInventory, stand);
+        LOGGER.info("Cleric {} checking chest for potion ingredients: reachable potions {}",
+                villager.getUuidAsString(),
+                formatReachablePotions(reachablePotions));
+        ItemStack resolvedTargetPotion = selectTargetPotion(reachablePotions);
         if (shouldExtractPotions(stand)) {
             return true;
         }
@@ -217,7 +228,8 @@ public class ClericBrewingGoal extends Goal {
             return;
         }
         BrewingStandBlockEntity stand = standOpt.get();
-        ItemStack resolvedTargetPotion = selectTargetPotion(world, chestInventory, stand);
+        List<ItemStack> reachablePotions = collectReachablePotions(world, chestInventory, stand);
+        ItemStack resolvedTargetPotion = selectTargetPotion(reachablePotions);
         if (shouldExtractPotions(stand)) {
             extractPotions(chestInventory, stand);
         }
@@ -318,8 +330,7 @@ public class ClericBrewingGoal extends Goal {
         return remaining;
     }
 
-    private ItemStack selectTargetPotion(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand) {
-        List<ItemStack> reachablePotions = collectReachablePotions(world, chestInventory, stand);
+    private ItemStack selectTargetPotion(List<ItemStack> reachablePotions) {
         if (reachablePotions.isEmpty()) {
             targetPotion = ItemStack.EMPTY;
             return ItemStack.EMPTY;
@@ -331,6 +342,23 @@ public class ClericBrewingGoal extends Goal {
         selected.setCount(1);
         targetPotion = selected;
         return selected;
+    }
+
+    private String formatReachablePotions(List<ItemStack> reachablePotions) {
+        if (reachablePotions.isEmpty()) {
+            return "none";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < reachablePotions.size(); index++) {
+            if (index > 0) {
+                builder.append(", ");
+            }
+            ItemStack potion = reachablePotions.get(index);
+            builder.append(potion.getItem());
+            builder.append(" ");
+            builder.append(getPotionContents(potion));
+        }
+        return builder.toString();
     }
 
     private boolean isIngredientForTarget(ServerWorld world, Inventory inventory, BrewingStandBlockEntity stand, ItemStack ingredient, ItemStack targetPotion) {
