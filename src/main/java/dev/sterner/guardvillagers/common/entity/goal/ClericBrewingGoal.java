@@ -244,12 +244,28 @@ public class ClericBrewingGoal extends Goal {
     }
 
     private void extractPotions(Inventory chestInventory, BrewingStandBlockEntity stand) {
+        boolean finishedBrewing = ((BrewingStandBlockEntityAccessor) stand).guardvillagers$getBrewTime() == 0;
         for (int slot = 0; slot < 3; slot++) {
             ItemStack potionStack = stand.getStack(slot);
             if (potionStack.isEmpty()) {
                 continue;
             }
             ItemStack remaining = insertIntoInventory(chestInventory, potionStack.copy());
+            if (finishedBrewing) {
+                String qualifier = "";
+                if (!remaining.isEmpty()) {
+                    if (remaining.getCount() == potionStack.getCount()) {
+                        qualifier = " (chest full)";
+                    } else {
+                        qualifier = " (partial insert)";
+                    }
+                }
+                LOGGER.info("Finished brewing {} {} and loaded it into chest {}{}",
+                        potionStack.getItem(),
+                        getPotionContents(potionStack),
+                        chestPos,
+                        qualifier);
+            }
             if (remaining.isEmpty()) {
                 stand.setStack(slot, ItemStack.EMPTY);
             } else if (remaining.getCount() != potionStack.getCount()) {
