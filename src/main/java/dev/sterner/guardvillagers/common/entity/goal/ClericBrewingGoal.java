@@ -598,7 +598,7 @@ public class ClericBrewingGoal extends Goal {
         ArrayDeque<PotionPathNode> queue = new ArrayDeque<>();
         for (int slot = 0; slot < 3; slot++) {
             ItemStack potion = stand.getStack(slot);
-            if (seedPotionQueue(visited, queue, potion)) {
+            if (seedPotionPathQueue(visited, queue, potion)) {
                 continue;
             }
         }
@@ -647,7 +647,7 @@ public class ClericBrewingGoal extends Goal {
         return true;
     }
 
-    private boolean seedPotionQueue(List<ItemStack> visited, ArrayDeque<PotionPathNode> queue, ItemStack potion) {
+    private boolean seedPotionPathQueue(List<ItemStack> visited, ArrayDeque<PotionPathNode> queue, ItemStack potion) {
         if (potion.isEmpty() || !isPotionItem(potion)) {
             return false;
         }
