@@ -446,13 +446,16 @@ public class ClericBrewingGoal extends Goal {
         List<ItemStack> reachable = new ArrayList<>();
         List<ItemStack> visited = new ArrayList<>();
         ArrayDeque<ItemStack> queue = new ArrayDeque<>();
+        boolean hasStandInput = false;
         for (int slot = 0; slot < 3; slot++) {
             ItemStack potion = stand.getStack(slot);
-            if (!potion.isEmpty() && isPotionItem(potion) && !containsPotion(visited, potion)) {
-                ItemStack normalized = potion.copy();
-                normalized.setCount(1);
-                visited.add(normalized);
-                queue.add(normalized);
+            if (seedPotionQueue(visited, queue, potion)) {
+                hasStandInput = true;
+            }
+        }
+        if (!hasStandInput) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                seedPotionQueue(visited, queue, chestInventory.getStack(slot));
             }
         }
 
@@ -482,6 +485,20 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         return reachable;
+    }
+
+    private boolean seedPotionQueue(List<ItemStack> visited, ArrayDeque<ItemStack> queue, ItemStack potion) {
+        if (potion.isEmpty() || !isPotionItem(potion)) {
+            return false;
+        }
+        ItemStack normalized = potion.copy();
+        normalized.setCount(1);
+        if (containsPotion(visited, normalized)) {
+            return false;
+        }
+        visited.add(normalized);
+        queue.add(normalized);
+        return true;
     }
 
     private boolean containsPotion(List<ItemStack> potions, ItemStack candidate) {
