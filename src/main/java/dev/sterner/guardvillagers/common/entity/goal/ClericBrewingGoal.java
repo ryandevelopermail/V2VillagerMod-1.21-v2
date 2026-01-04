@@ -157,9 +157,7 @@ public class ClericBrewingGoal extends Goal {
         }
         BrewingStandBlockEntity stand = standOpt.get();
         List<ItemStack> reachablePotions = collectReachablePotions(world, chestInventory, stand);
-        LOGGER.info("Cleric {} checking chest for potion ingredients: reachable potions {}",
-                villager.getUuidAsString(),
-                formatReachablePotions(reachablePotions));
+        logPotionCheck(reachablePotions);
         ItemStack resolvedTargetPotion = selectTargetPotion(world, chestInventory, stand, reachablePotions);
         if (shouldExtractPotions(stand)) {
             return true;
@@ -298,8 +296,7 @@ public class ClericBrewingGoal extends Goal {
                     }
                 }
                 LOGGER.info("Finished brewing {} {} and loaded it into chest {}{}",
-                        potionStack.getItem(),
-                        getPotionContents(potionStack),
+                        getPotionDisplayName(potionStack),
                         chestPos,
                         qualifier);
             }
@@ -452,9 +449,7 @@ public class ClericBrewingGoal extends Goal {
                 builder.append(", ");
             }
             ItemStack potion = reachablePotions.get(index);
-            builder.append(potion.getItem());
-            builder.append(" ");
-            builder.append(getPotionContents(potion));
+            builder.append(getPotionDisplayName(potion));
         }
         return builder.toString();
     }
@@ -533,6 +528,19 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         return PotionContentsComponent.DEFAULT;
+    }
+
+    private String getPotionDisplayName(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return "empty";
+        }
+        return stack.getName().getString();
+    }
+
+    private void logPotionCheck(List<ItemStack> reachablePotions) {
+        LOGGER.info("Cleric {} checking chest for potion ingredients: reachable potions {}",
+                villager.getUuidAsString(),
+                formatReachablePotions(reachablePotions));
     }
 
     private List<ItemStack> collectReachablePotions(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand) {
