@@ -163,6 +163,9 @@ public class ClericBrewingGoal extends Goal {
         if (shouldExtractPotions(stand)) {
             return true;
         }
+        if (needsPotionInputs(stand) && hasPotionInputsInChest(world, chestInventory, resolvedTargetPotion)) {
+            return true;
+        }
         if (needsFuel(stand) && hasFuelInChest(chestInventory)) {
             return true;
         }
@@ -181,6 +184,28 @@ public class ClericBrewingGoal extends Goal {
 
     private boolean needsFuel(BrewingStandBlockEntity stand) {
         return stand.getStack(FUEL_SLOT).isEmpty();
+    }
+
+    private boolean needsPotionInputs(BrewingStandBlockEntity stand) {
+        for (int slot = 0; slot < 3; slot++) {
+            if (stand.getStack(slot).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasPotionInputsInChest(ServerWorld world, Inventory inventory, ItemStack targetPotion) {
+        if (targetPotion.isEmpty()) {
+            return false;
+        }
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && isPotionItem(stack) && canReachTargetPotion(world, inventory, stack, targetPotion)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasFuelInChest(Inventory inventory) {
@@ -233,6 +258,9 @@ public class ClericBrewingGoal extends Goal {
         if (shouldExtractPotions(stand)) {
             extractPotions(chestInventory, stand);
         }
+        if (needsPotionInputs(stand)) {
+            insertPotions(world, chestInventory, stand, resolvedTargetPotion);
+        }
         if (needsIngredient(stand)) {
             insertIngredient(world, chestInventory, stand, resolvedTargetPotion);
         }
@@ -270,6 +298,34 @@ public class ClericBrewingGoal extends Goal {
                 stand.setStack(slot, ItemStack.EMPTY);
             } else if (remaining.getCount() != potionStack.getCount()) {
                 stand.setStack(slot, remaining);
+            }
+        }
+    }
+
+    private void insertPotions(ServerWorld world, Inventory chestInventory, BrewingStandBlockEntity stand, ItemStack targetPotion) {
+        if (targetPotion.isEmpty()) {
+            return;
+        }
+        for (int standSlot = 0; standSlot < 3; standSlot++) {
+            if (!stand.getStack(standSlot).isEmpty()) {
+                continue;
+            }
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                ItemStack stack = chestInventory.getStack(slot);
+                if (stack.isEmpty() || !isPotionItem(stack)) {
+                    continue;
+                }
+                if (!canReachTargetPotion(world, chestInventory, stack, targetPotion)) {
+                    continue;
+                }
+                ItemStack toInsert = stack.copy();
+                toInsert.setCount(1);
+                stand.setStack(standSlot, toInsert);
+                stack.decrement(1);
+                if (stack.isEmpty()) {
+                    chestInventory.setStack(slot, ItemStack.EMPTY);
+                }
+                break;
             }
         }
     }
@@ -396,6 +452,51 @@ public class ClericBrewingGoal extends Goal {
             }
             if (canBrewIntoTarget(world, inventory, output, targetPotion)) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean canReachTargetPotion(ServerWorld world, Inventory inventory, ItemStack inputPotion, ItemStack targetPotion) {
+        if (inputPotion.isEmpty() || targetPotion.isEmpty()) {
+            return false;
+        }
+        if (!isPotionItem(inputPotion)) {
+            return false;
+        }
+        if (matchesTargetPotion(inputPotion, targetPotion)) {
+            return true;
+        }
+        var registry = world.getServer().getBrewingRecipeRegistry();
+        List<ItemStack> visited = new ArrayList<>();
+        ArrayDeque<ItemStack> queue = new ArrayDeque<>();
+        ItemStack normalized = inputPotion.copy();
+        normalized.setCount(1);
+        visited.add(normalized);
+        queue.add(normalized);
+        while (!queue.isEmpty()) {
+            ItemStack potion = queue.removeFirst();
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                ItemStack ingredient = inventory.getStack(slot);
+                if (ingredient.isEmpty() || !registry.isValidIngredient(ingredient)) {
+                    continue;
+                }
+                if (!registry.hasRecipe(potion, ingredient)) {
+                    continue;
+                }
+                ItemStack output = registry.craft(ingredient, potion);
+                if (output.isEmpty() || !isPotionItem(output)) {
+                    continue;
+                }
+                if (matchesTargetPotion(output, targetPotion)) {
+                    return true;
+                }
+                output.setCount(1);
+                if (containsPotion(visited, output)) {
+                    continue;
+                }
+                visited.add(output.copy());
+                queue.add(output.copy());
             }
         }
         return false;
