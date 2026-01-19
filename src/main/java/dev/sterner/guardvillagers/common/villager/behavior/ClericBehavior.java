@@ -15,7 +15,10 @@ import net.minecraft.util.math.BlockPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.WeakHashMap;
 
 public class ClericBehavior implements VillagerProfessionBehavior {
@@ -24,6 +27,12 @@ public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericBrewingGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<UUID, EnumSet<ClericKnownPotion>> KNOWN_POTIONS = new HashMap<>();
+
+    public enum ClericKnownPotion {
+        HEALING,
+        SPLASH_HEALING
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -72,6 +81,13 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             existing.inventory().removeListener(existing.listener());
         }
+    }
+
+    public static EnumSet<ClericKnownPotion> getKnownPotions(VillagerEntity villager) {
+        return KNOWN_POTIONS.computeIfAbsent(
+                villager.getUuid(),
+                uuid -> EnumSet.of(ClericKnownPotion.HEALING, ClericKnownPotion.SPLASH_HEALING)
+        );
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
