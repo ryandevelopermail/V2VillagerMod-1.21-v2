@@ -28,6 +28,7 @@ public class ClericBrewingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int CHECK_INTERVAL_TICKS = 10;
     private static final int INGREDIENT_SLOT = 3;
+    private static final long REACHABLE_LOG_INTERVAL_TICKS = 200L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -36,6 +37,8 @@ public class ClericBrewingGoal extends Goal {
     private long nextCheckTime;
     private boolean immediateCheckPending;
     private TargetPotion targetPotion;
+    private EnumSet<ClericKnownPotion> lastReachablePotions = EnumSet.noneOf(ClericKnownPotion.class);
+    private long lastReachableLogTick = -1L;
 
     private enum Stage {
         IDLE,
@@ -179,8 +182,22 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         EnumSet<ClericKnownPotion> reachablePotions = getReachablePotions(chestInventory, stand, knownPotions);
-        LOGGER.info("Cleric {} reachable potions {}", villager.getUuidAsString(), reachablePotions);
+        if (shouldLogReachablePotions(world, reachablePotions)) {
+            lastReachablePotions = reachablePotions.isEmpty()
+                    ? EnumSet.noneOf(ClericKnownPotion.class)
+                    : EnumSet.copyOf(reachablePotions);
+            lastReachableLogTick = world.getTime();
+            LOGGER.debug("Cleric {} reachable potions {}", villager.getUuidAsString(), reachablePotions);
+        }
         return !reachablePotions.isEmpty();
+    }
+
+    private boolean shouldLogReachablePotions(ServerWorld world, EnumSet<ClericKnownPotion> reachablePotions) {
+        if (!reachablePotions.equals(lastReachablePotions)) {
+            return true;
+        }
+        return lastReachableLogTick < 0
+                || world.getTime() - lastReachableLogTick >= REACHABLE_LOG_INTERVAL_TICKS;
     }
 
     private void transferItems(ServerWorld world) {
