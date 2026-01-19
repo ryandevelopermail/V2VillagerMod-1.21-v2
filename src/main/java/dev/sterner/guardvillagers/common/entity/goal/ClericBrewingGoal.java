@@ -181,18 +181,35 @@ public class ClericBrewingGoal extends Goal {
         }
 
         EnumSet<ClericKnownPotion> knownPotions = ClericBehavior.getKnownPotions(villager);
+        boolean knowsHealing = knownPotions.contains(ClericKnownPotion.HEALING);
+        boolean knowsSplashHealing = knownPotions.contains(ClericKnownPotion.SPLASH_HEALING);
 
-        if (stage == BottleStage.WATER_READY && !knownPotions.isEmpty()) {
-            changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.NETHER_WART));
+        if (stage == BottleStage.AWKWARD_READY
+                && (!knowsHealing || !hasGlisteringMelon(chestInventory))) {
             if (changed) {
-                tryStartBrewing(world, stand);
+                chestInventory.markDirty();
+                stand.markDirty();
             }
-        } else if (stage == BottleStage.AWKWARD_READY && !knownPotions.isEmpty()) {
+            return;
+        }
+
+        if (stage == BottleStage.WATER_READY) {
+            boolean canStartHealing = knowsHealing && hasGlisteringMelon(chestInventory);
+            boolean canStartSplashHealing = knowsSplashHealing
+                    && hasGlisteringMelon(chestInventory)
+                    && hasGunpowder(chestInventory);
+            if (canStartHealing || canStartSplashHealing) {
+                changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.NETHER_WART));
+                if (changed) {
+                    tryStartBrewing(world, stand);
+                }
+            }
+        } else if (stage == BottleStage.AWKWARD_READY && (knowsHealing || knowsSplashHealing)) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
             if (changed) {
                 tryStartBrewing(world, stand);
             }
-        } else if (stage == BottleStage.HEALING_READY && knownPotions.contains(ClericKnownPotion.SPLASH_HEALING)) {
+        } else if (stage == BottleStage.HEALING_READY && knowsSplashHealing) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.GUNPOWDER));
             if (changed) {
                 tryStartBrewing(world, stand);
@@ -285,10 +302,15 @@ public class ClericBrewingGoal extends Goal {
             return reachable;
         }
         BottleStage stage = getBottleStage(stand);
-        if (knownPotions.contains(ClericKnownPotion.HEALING) && canReachHealing(stage, chestInventory)) {
+        boolean knowsHealing = knownPotions.contains(ClericKnownPotion.HEALING);
+        boolean knowsSplashHealing = knownPotions.contains(ClericKnownPotion.SPLASH_HEALING);
+        if (stage == BottleStage.AWKWARD_READY && !knowsHealing) {
+            return reachable;
+        }
+        if (knowsHealing && canReachHealing(stage, chestInventory)) {
             reachable.add(ClericKnownPotion.HEALING);
         }
-        if (knownPotions.contains(ClericKnownPotion.SPLASH_HEALING) && canReachSplashHealing(stage, chestInventory)) {
+        if (knowsSplashHealing && canReachSplashHealing(stage, chestInventory)) {
             reachable.add(ClericKnownPotion.SPLASH_HEALING);
         }
         return reachable;
@@ -392,6 +414,14 @@ public class ClericBrewingGoal extends Goal {
 
     private boolean hasWaterBottle(Inventory inventory) {
         return hasItem(inventory, this::isWaterBottle);
+    }
+
+    private boolean hasGlisteringMelon(Inventory inventory) {
+        return hasItem(inventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
+    }
+
+    private boolean hasGunpowder(Inventory inventory) {
+        return hasItem(inventory, stack -> stack.isOf(Items.GUNPOWDER));
     }
 
     private boolean hasItem(Inventory inventory, Predicate<ItemStack> predicate) {
