@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior;
+import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior.ClericKnownPotion;
 import java.util.EnumSet;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -17,8 +19,11 @@ import net.minecraft.potion.PotionUtil;
 import net.minecraft.potion.Potions;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ClericBrewingGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ClericBrewingGoal.class);
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int CHECK_INTERVAL_TICKS = 10;
@@ -146,20 +151,10 @@ public class ClericBrewingGoal extends Goal {
             return false;
         }
         BrewingStandBlockEntity stand = standOpt.get();
-        if (hasSplashHealingPotions(stand)) {
-            return true;
-        }
-        if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
-            return false;
-        }
-        BottleStage stage = getBottleStage(stand);
-        return switch (stage) {
-            case EMPTY, WATER_PARTIAL -> hasWaterBottle(chestInventory);
-            case WATER_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.NETHER_WART));
-            case AWKWARD_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
-            case HEALING_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.GUNPOWDER));
-            default -> false;
-        };
+        EnumSet<ClericKnownPotion> knownPotions = ClericBehavior.getKnownPotions(villager);
+        EnumSet<ClericKnownPotion> reachablePotions = getReachablePotions(chestInventory, stand, knownPotions);
+        LOGGER.info("Cleric {} reachable potions {}", villager.getUuidAsString(), reachablePotions);
+        return !reachablePotions.isEmpty();
     }
 
     private void transferItems(ServerWorld world) {
@@ -185,17 +180,19 @@ public class ClericBrewingGoal extends Goal {
             stage = getBottleStage(stand);
         }
 
-        if (stage == BottleStage.WATER_READY) {
+        EnumSet<ClericKnownPotion> knownPotions = ClericBehavior.getKnownPotions(villager);
+
+        if (stage == BottleStage.WATER_READY && !knownPotions.isEmpty()) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.NETHER_WART));
             if (changed) {
                 tryStartBrewing(world, stand);
             }
-        } else if (stage == BottleStage.AWKWARD_READY) {
+        } else if (stage == BottleStage.AWKWARD_READY && !knownPotions.isEmpty()) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
             if (changed) {
                 tryStartBrewing(world, stand);
             }
-        } else if (stage == BottleStage.HEALING_READY) {
+        } else if (stage == BottleStage.HEALING_READY && knownPotions.contains(ClericKnownPotion.SPLASH_HEALING)) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(Items.GUNPOWDER));
             if (changed) {
                 tryStartBrewing(world, stand);
@@ -276,6 +273,54 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private EnumSet<ClericKnownPotion> getReachablePotions(Inventory chestInventory, BrewingStandBlockEntity stand,
+                                                          EnumSet<ClericKnownPotion> knownPotions) {
+        EnumSet<ClericKnownPotion> reachable = EnumSet.noneOf(ClericKnownPotion.class);
+        if (knownPotions.contains(ClericKnownPotion.SPLASH_HEALING) && hasSplashHealingPotions(stand)) {
+            reachable.add(ClericKnownPotion.SPLASH_HEALING);
+        }
+        if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
+            return reachable;
+        }
+        BottleStage stage = getBottleStage(stand);
+        if (knownPotions.contains(ClericKnownPotion.HEALING) && canReachHealing(stage, chestInventory)) {
+            reachable.add(ClericKnownPotion.HEALING);
+        }
+        if (knownPotions.contains(ClericKnownPotion.SPLASH_HEALING) && canReachSplashHealing(stage, chestInventory)) {
+            reachable.add(ClericKnownPotion.SPLASH_HEALING);
+        }
+        return reachable;
+    }
+
+    private boolean canReachHealing(BottleStage stage, Inventory chestInventory) {
+        return switch (stage) {
+            case EMPTY, WATER_PARTIAL -> hasWaterBottle(chestInventory)
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.NETHER_WART))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
+            case WATER_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.NETHER_WART))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
+            case AWKWARD_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
+            default -> false;
+        };
+    }
+
+    private boolean canReachSplashHealing(BottleStage stage, Inventory chestInventory) {
+        return switch (stage) {
+            case EMPTY, WATER_PARTIAL -> hasWaterBottle(chestInventory)
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.NETHER_WART))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GUNPOWDER));
+            case WATER_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.NETHER_WART))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GUNPOWDER));
+            case AWKWARD_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE))
+                    && hasItem(chestInventory, stack -> stack.isOf(Items.GUNPOWDER));
+            case HEALING_READY -> hasItem(chestInventory, stack -> stack.isOf(Items.GUNPOWDER));
+            case SPLASH_HEALING -> true;
+            default -> false;
+        };
     }
 
     private BottleStage getBottleStage(BrewingStandBlockEntity stand) {
