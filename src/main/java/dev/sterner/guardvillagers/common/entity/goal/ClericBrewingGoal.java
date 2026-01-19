@@ -152,6 +152,25 @@ public class ClericBrewingGoal extends Goal {
         }
         BrewingStandBlockEntity stand = standOpt.get();
         EnumSet<ClericKnownPotion> knownPotions = ClericBehavior.getKnownPotions(villager);
+        BottleStage stage = getBottleStage(stand);
+        if (stage == BottleStage.AWKWARD_READY && !hasGlisteringMelon(chestInventory)) {
+            return false;
+        }
+        if (stage == BottleStage.WATER_READY) {
+            boolean hasNetherWart = hasNetherWart(chestInventory);
+            boolean hasMelon = hasGlisteringMelon(chestInventory);
+            boolean hasGunpowder = hasGunpowder(chestInventory);
+            boolean canHeal = knownPotions.contains(ClericKnownPotion.HEALING)
+                    && hasNetherWart
+                    && hasMelon;
+            boolean canSplash = knownPotions.contains(ClericKnownPotion.SPLASH_HEALING)
+                    && hasNetherWart
+                    && hasMelon
+                    && hasGunpowder;
+            if (!canHeal && !canSplash) {
+                return false;
+            }
+        }
         EnumSet<ClericKnownPotion> reachablePotions = getReachablePotions(chestInventory, stand, knownPotions);
         LOGGER.info("Cleric {} reachable potions {}", villager.getUuidAsString(), reachablePotions);
         return !reachablePotions.isEmpty();
@@ -194,8 +213,11 @@ public class ClericBrewingGoal extends Goal {
         }
 
         if (stage == BottleStage.WATER_READY) {
-            boolean canStartHealing = knowsHealing && hasGlisteringMelon(chestInventory);
+            boolean canStartHealing = knowsHealing
+                    && hasNetherWart(chestInventory)
+                    && hasGlisteringMelon(chestInventory);
             boolean canStartSplashHealing = knowsSplashHealing
+                    && hasNetherWart(chestInventory)
                     && hasGlisteringMelon(chestInventory)
                     && hasGunpowder(chestInventory);
             if (canStartHealing || canStartSplashHealing) {
@@ -418,6 +440,10 @@ public class ClericBrewingGoal extends Goal {
 
     private boolean hasGlisteringMelon(Inventory inventory) {
         return hasItem(inventory, stack -> stack.isOf(Items.GLISTERING_MELON_SLICE));
+    }
+
+    private boolean hasNetherWart(Inventory inventory) {
+        return hasItem(inventory, stack -> stack.isOf(Items.NETHER_WART));
     }
 
     private boolean hasGunpowder(Inventory inventory) {
