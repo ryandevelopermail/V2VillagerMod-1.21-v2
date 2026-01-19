@@ -274,6 +274,7 @@ public class ClericBrewingGoal extends Goal {
 
     private boolean extractFinishedPotions(Inventory chestInventory, BrewingStandBlockEntity stand, TargetPotion targetPotion) {
         boolean movedAny = false;
+        int movedCount = 0;
         for (int slot = 0; slot < 3; slot++) {
             ItemStack stack = stand.getStack(slot);
             if (!isTargetPotion(stack, targetPotion)) {
@@ -283,10 +284,15 @@ public class ClericBrewingGoal extends Goal {
             if (!remaining.isEmpty()) {
                 remaining = insertStack(villager.getInventory(), remaining);
             }
-            if (remaining.getCount() != stack.getCount()) {
+            int moved = stack.getCount() - remaining.getCount();
+            if (moved > 0) {
                 movedAny = true;
+                movedCount += moved;
             }
             stand.setStack(slot, remaining);
+        }
+        if (movedAny) {
+            LOGGER.info("Finished brewing {} {} and loaded it into chest {}", movedCount, targetPotion, chestPos);
         }
         return movedAny;
     }
