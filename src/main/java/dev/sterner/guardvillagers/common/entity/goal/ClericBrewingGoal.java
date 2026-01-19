@@ -277,7 +277,7 @@ public class ClericBrewingGoal extends Goal {
         int movedCount = 0;
         for (int slot = 0; slot < 3; slot++) {
             ItemStack stack = stand.getStack(slot);
-            if (!isTargetPotion(stack, targetPotion)) {
+            if (!isFinishedPotion(stack, targetPotion)) {
                 continue;
             }
             ItemStack remaining = insertStack(chestInventory, stack.copy());
@@ -292,6 +292,8 @@ public class ClericBrewingGoal extends Goal {
             stand.setStack(slot, remaining);
         }
         if (movedAny) {
+            chestInventory.markDirty();
+            villager.getInventory().markDirty();
             LOGGER.info("Finished brewing {} {} and loaded it into chest {}", movedCount, targetPotion, chestPos);
         }
         return movedAny;
@@ -472,14 +474,18 @@ public class ClericBrewingGoal extends Goal {
         return stack.isOf(Items.SPLASH_POTION) && PotionUtil.getPotion(stack) == Potions.HEALING;
     }
 
-    private boolean isTargetPotion(ItemStack stack, TargetPotion targetPotion) {
-        if (targetPotion == TargetPotion.SPLASH_HEALING) {
-            return isHealingSplashPotion(stack);
+    private boolean isAnySplashPotion(ItemStack stack) {
+        return stack.isOf(Items.SPLASH_POTION) && PotionUtil.getPotion(stack) != Potions.EMPTY;
+    }
+
+    private boolean isFinishedPotion(ItemStack stack, TargetPotion targetPotion) {
+        if (isAnySplashPotion(stack)) {
+            return true;
         }
-        if (targetPotion == TargetPotion.HEALING) {
+        if (targetPotion == TargetPotion.HEALING || targetPotion == null) {
             return isHealingPotion(stack);
         }
-        return isHealingPotion(stack) || isHealingSplashPotion(stack);
+        return false;
     }
 
     private void updateTargetPotion(BottleStage stage) {
