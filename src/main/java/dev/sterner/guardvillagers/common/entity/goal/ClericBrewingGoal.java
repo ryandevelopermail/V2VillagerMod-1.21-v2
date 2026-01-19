@@ -28,8 +28,6 @@ public class ClericBrewingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int CHECK_INTERVAL_TICKS = 10;
     private static final int INGREDIENT_SLOT = 3;
-    private static final long REACHABLE_LOG_INTERVAL_TICKS = 200L;
-
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
@@ -38,7 +36,7 @@ public class ClericBrewingGoal extends Goal {
     private boolean immediateCheckPending;
     private TargetPotion targetPotion;
     private EnumSet<ClericKnownPotion> lastReachablePotions = EnumSet.noneOf(ClericKnownPotion.class);
-    private long lastReachableLogTick = -1L;
+    private BottleStage lastReachableBottleStage;
 
     private enum Stage {
         IDLE,
@@ -182,22 +180,22 @@ public class ClericBrewingGoal extends Goal {
             }
         }
         EnumSet<ClericKnownPotion> reachablePotions = getReachablePotions(chestInventory, stand, knownPotions);
-        if (shouldLogReachablePotions(world, reachablePotions)) {
+        if (shouldLogReachablePotions(stage, reachablePotions)) {
             lastReachablePotions = reachablePotions.isEmpty()
                     ? EnumSet.noneOf(ClericKnownPotion.class)
                     : EnumSet.copyOf(reachablePotions);
-            lastReachableLogTick = world.getTime();
-            LOGGER.debug("Cleric {} reachable potions {}", villager.getUuidAsString(), reachablePotions);
+            lastReachableBottleStage = stage;
+            LOGGER.debug("Cleric {} reachable potions count={} {}", villager.getUuidAsString(), reachablePotions.size(),
+                    reachablePotions);
         }
         return !reachablePotions.isEmpty();
     }
 
-    private boolean shouldLogReachablePotions(ServerWorld world, EnumSet<ClericKnownPotion> reachablePotions) {
-        if (!reachablePotions.equals(lastReachablePotions)) {
+    private boolean shouldLogReachablePotions(BottleStage bottleStage, EnumSet<ClericKnownPotion> reachablePotions) {
+        if (bottleStage != lastReachableBottleStage) {
             return true;
         }
-        return lastReachableLogTick < 0
-                || world.getTime() - lastReachableLogTick >= REACHABLE_LOG_INTERVAL_TICKS;
+        return !reachablePotions.equals(lastReachablePotions);
     }
 
     private void transferItems(ServerWorld world) {
@@ -232,7 +230,7 @@ public class ClericBrewingGoal extends Goal {
         boolean knowsSplashHealing = knownPotions.contains(ClericKnownPotion.SPLASH_HEALING);
 
         if (stage == BottleStage.AWKWARD_READY && targetPotion == null) {
-            targetPotion = selectTargetPotion(chestInventory, knownPotions);
+            setTargetPotion(selectTargetPotion(chestInventory, knownPotions));
         }
 
         if (stage == BottleStage.AWKWARD_READY && (!knowsHealing && !knowsSplashHealing)) {
@@ -244,7 +242,7 @@ public class ClericBrewingGoal extends Goal {
         }
 
         if (stage == BottleStage.WATER_READY) {
-            targetPotion = selectTargetPotion(chestInventory, knownPotions);
+            setTargetPotion(selectTargetPotion(chestInventory, knownPotions));
             if (!canStartTarget(chestInventory, knownPotions, targetPotion)) {
                 if (changed) {
                     chestInventory.markDirty();
@@ -507,11 +505,11 @@ public class ClericBrewingGoal extends Goal {
 
     private void updateTargetPotion(BottleStage stage) {
         if (stage == BottleStage.HEALING_READY) {
-            targetPotion = TargetPotion.HEALING;
+            setTargetPotion(TargetPotion.HEALING);
         } else if (stage == BottleStage.SPLASH_HEALING) {
-            targetPotion = TargetPotion.SPLASH_HEALING;
+            setTargetPotion(TargetPotion.SPLASH_HEALING);
         } else if (stage == BottleStage.EMPTY) {
-            targetPotion = null;
+            setTargetPotion(null);
         }
     }
 
@@ -525,6 +523,14 @@ public class ClericBrewingGoal extends Goal {
             return TargetPotion.HEALING;
         }
         return null;
+    }
+
+    private void setTargetPotion(TargetPotion newTargetPotion) {
+        if (targetPotion == newTargetPotion) {
+            return;
+        }
+        targetPotion = newTargetPotion;
+        LOGGER.debug("Cleric {} target potion {}", villager.getUuidAsString(), targetPotion);
     }
 
     private boolean canStartTarget(Inventory chestInventory, EnumSet<ClericKnownPotion> knownPotions,
