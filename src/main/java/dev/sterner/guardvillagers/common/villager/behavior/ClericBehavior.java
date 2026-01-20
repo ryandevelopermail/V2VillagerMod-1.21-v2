@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ClericBrewingGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
+import net.minecraft.block.entity.BrewingStandBlockEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -15,10 +16,8 @@ import net.minecraft.util.math.BlockPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.UUID;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ClericBehavior implements VillagerProfessionBehavior {
@@ -27,11 +26,10 @@ public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericBrewingGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
-    private static final Map<UUID, EnumSet<ClericKnownPotion>> KNOWN_POTIONS = new HashMap<>();
-
-    public enum ClericKnownPotion {
-        HEALING,
-        SPLASH_HEALING
+    public static Set<ClericBrewingGoal.PotionTarget> getReachableRecipes(VillagerEntity villager,
+                                                                           Inventory chestInventory,
+                                                                           BrewingStandBlockEntity stand) {
+        return ClericBrewingGoal.getReachableRecipes(chestInventory, stand);
     }
 
     @Override
@@ -81,13 +79,6 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             existing.inventory().removeListener(existing.listener());
         }
-    }
-
-    public static EnumSet<ClericKnownPotion> getKnownPotions(VillagerEntity villager) {
-        return KNOWN_POTIONS.computeIfAbsent(
-                villager.getUuid(),
-                uuid -> EnumSet.of(ClericKnownPotion.HEALING, ClericKnownPotion.SPLASH_HEALING)
-        );
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
