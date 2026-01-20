@@ -69,6 +69,21 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        if (!villager.isAlive()) {
+            clearChestListener(villager);
+            return;
+        }
+
+        if (!world.getBlockState(jobPos).isOf(Blocks.CARTOGRAPHY_TABLE)) {
+            clearChestListener(villager);
+            return;
+        }
+
+        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            clearChestListener(villager);
+            return;
+        }
+
         CartographerCraftingGoal goal = CRAFTING_GOALS.get(villager);
         if (goal == null) {
             goal = new CartographerCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
