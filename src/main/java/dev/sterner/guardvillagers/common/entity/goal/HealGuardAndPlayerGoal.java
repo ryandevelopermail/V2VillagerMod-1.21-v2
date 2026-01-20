@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.TargetPredicate;
@@ -18,8 +19,6 @@ import net.minecraft.entity.projectile.thrown.PotionEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.potion.Potion;
-import net.minecraft.potion.PotionUtil;
 import net.minecraft.potion.Potions;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.MathHelper;
@@ -196,7 +195,8 @@ public class HealGuardAndPlayerGoal extends Goal {
     }
 
     private boolean isHealingSplashPotion(ItemStack stack) {
-        return !stack.isEmpty() && stack.isOf(Items.SPLASH_POTION) && PotionUtil.getPotion(stack) == Potions.HEALING;
+        return !stack.isEmpty() && stack.isOf(Items.SPLASH_POTION)
+                && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
     }
 
     private Inventory getPairedChestInventory(VillagerEntity villager) {

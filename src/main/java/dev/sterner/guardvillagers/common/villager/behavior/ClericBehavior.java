@@ -29,7 +29,10 @@ public class ClericBehavior implements VillagerProfessionBehavior {
     public static Set<ClericBrewingGoal.PotionTarget> getReachableRecipes(VillagerEntity villager,
                                                                            Inventory chestInventory,
                                                                            BrewingStandBlockEntity stand) {
-        return ClericBrewingGoal.getReachableRecipes(chestInventory, stand);
+        if (!(villager.getWorld() instanceof ServerWorld world)) {
+            return Set.of();
+        }
+        return ClericBrewingGoal.getReachableRecipes(chestInventory, stand, world.getBrewingRecipeRegistry());
     }
 
     @Override
