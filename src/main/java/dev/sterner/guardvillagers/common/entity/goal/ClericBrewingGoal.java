@@ -16,6 +16,8 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BrewingStandBlockEntity;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -23,10 +25,9 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.potion.Potion;
-import net.minecraft.potion.PotionUtil;
 import net.minecraft.potion.Potions;
 import net.minecraft.recipe.BrewingRecipeRegistry;
-import net.minecraft.registry.Registries;
+import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import org.slf4j.Logger;
@@ -65,10 +66,10 @@ public class ClericBrewingGoal extends Goal {
         INVALID
     }
 
-    public record PotionTarget(Potion potion, boolean splash) {
+    public record PotionTarget(RegistryEntry<Potion> potion, boolean splash) {
     }
 
-    private record BottleState(BottleStage stage, Potion potion, boolean splash) {
+    private record BottleState(BottleStage stage, RegistryEntry<Potion> potion, boolean splash) {
     }
 
     public ClericBrewingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -322,7 +323,7 @@ public class ClericBrewingGoal extends Goal {
         if (!stand.getStack(INGREDIENT_SLOT).isEmpty() || state.stage() == BottleStage.SPLASH_READY) {
             return reachable;
         }
-        Potion startPotion = getStartPotion(state, chestInventory);
+        RegistryEntry<Potion> startPotion = getStartPotion(state, chestInventory);
         if (startPotion == null) {
             return reachable;
         }
@@ -330,9 +331,9 @@ public class ClericBrewingGoal extends Goal {
         boolean hasGunpowder = availableIngredients.remove(Items.GUNPOWDER);
         availableIngredients.remove(Items.POTION);
         availableIngredients.remove(Items.SPLASH_POTION);
-        Map<Potion, List<Item>> reachablePotions = getReachablePotionPaths(startPotion, availableIngredients);
-        for (Potion potion : reachablePotions.keySet()) {
-            if (potion == Potions.WATER || potion == Potions.AWKWARD || potion == Potions.EMPTY) {
+        Map<RegistryEntry<Potion>, List<Item>> reachablePotions = getReachablePotionPaths(startPotion, availableIngredients);
+        for (RegistryEntry<Potion> potion : reachablePotions.keySet()) {
+            if (potion.matches(Potions.WATER) || potion.matches(Potions.AWKWARD)) {
                 continue;
             }
             reachable.add(new PotionTarget(potion, false));
@@ -345,7 +346,7 @@ public class ClericBrewingGoal extends Goal {
 
     private static BottleState getBottleState(BrewingStandBlockEntity stand) {
         boolean anyEmpty = false;
-        Potion potionType = null;
+        RegistryEntry<Potion> potionType = null;
         boolean splash = false;
 
         for (int slot = 0; slot < 3; slot++) {
@@ -355,55 +356,55 @@ public class ClericBrewingGoal extends Goal {
                 continue;
             }
             if (stack.isOf(Items.SPLASH_POTION)) {
-                Potion potion = PotionUtil.getPotion(stack);
-                if (potion == Potions.EMPTY) {
-                    return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+                RegistryEntry<Potion> potion = getPotionEntry(stack);
+                if (potion == null) {
+                    return new BottleState(BottleStage.INVALID, null, false);
                 }
                 if (potionType == null) {
                     potionType = potion;
                     splash = true;
-                } else if (potionType != potion || !splash) {
-                    return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+                } else if (!potionType.matches(potion) || !splash) {
+                    return new BottleState(BottleStage.INVALID, null, false);
                 }
                 continue;
             }
             if (!stack.isOf(Items.POTION)) {
-                return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+                return new BottleState(BottleStage.INVALID, null, false);
             }
-            Potion potion = PotionUtil.getPotion(stack);
-            if (potion == Potions.EMPTY) {
-                return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+            RegistryEntry<Potion> potion = getPotionEntry(stack);
+            if (potion == null) {
+                return new BottleState(BottleStage.INVALID, null, false);
             }
             if (potionType == null) {
                 potionType = potion;
                 splash = false;
-            } else if (potionType != potion || splash) {
-                return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+            } else if (!potionType.matches(potion) || splash) {
+                return new BottleState(BottleStage.INVALID, null, false);
             }
         }
 
         if (potionType == null) {
-            return new BottleState(BottleStage.EMPTY, Potions.EMPTY, false);
+            return new BottleState(BottleStage.EMPTY, null, false);
         }
         if (splash) {
             return anyEmpty
-                    ? new BottleState(BottleStage.INVALID, Potions.EMPTY, false)
+                    ? new BottleState(BottleStage.INVALID, null, false)
                     : new BottleState(BottleStage.SPLASH_READY, potionType, true);
         }
-        if (potionType == Potions.WATER) {
+        if (potionType.matches(Potions.WATER)) {
             return new BottleState(anyEmpty ? BottleStage.WATER_PARTIAL : BottleStage.WATER_READY, potionType, false);
         }
         if (anyEmpty) {
-            return new BottleState(BottleStage.INVALID, Potions.EMPTY, false);
+            return new BottleState(BottleStage.INVALID, null, false);
         }
-        if (potionType == Potions.AWKWARD) {
+        if (potionType.matches(Potions.AWKWARD)) {
             return new BottleState(BottleStage.AWKWARD_READY, potionType, false);
         }
         return new BottleState(BottleStage.POTION_READY, potionType, false);
     }
 
     private static boolean isWaterBottle(ItemStack stack) {
-        return stack.isOf(Items.POTION) && PotionUtil.getPotion(stack) == Potions.WATER;
+        return stack.isOf(Items.POTION) && getPotionContents(stack).matches(Potions.WATER);
     }
 
     private boolean isPotionMatch(ItemStack stack, PotionTarget target) {
@@ -411,9 +412,9 @@ public class ClericBrewingGoal extends Goal {
             return false;
         }
         if (target.splash()) {
-            return stack.isOf(Items.SPLASH_POTION) && PotionUtil.getPotion(stack) == target.potion();
+            return stack.isOf(Items.SPLASH_POTION) && getPotionContents(stack).matches(target.potion());
         }
-        return stack.isOf(Items.POTION) && PotionUtil.getPotion(stack) == target.potion();
+        return stack.isOf(Items.POTION) && getPotionContents(stack).matches(target.potion());
     }
 
     private void updateTargetPotion(BottleState state, Inventory chestInventory, BrewingStandBlockEntity stand) {
@@ -434,7 +435,7 @@ public class ClericBrewingGoal extends Goal {
             return null;
         }
         List<PotionTarget> targets = reachable.stream()
-                .filter(target -> target.potion() != Potions.WATER && target.potion() != Potions.AWKWARD)
+                .filter(target -> !target.potion().matches(Potions.WATER) && !target.potion().matches(Potions.AWKWARD))
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         if (targets.isEmpty()) {
             return null;
@@ -447,7 +448,7 @@ public class ClericBrewingGoal extends Goal {
         if (targets.contains(healing)) {
             return healing;
         }
-        targets.sort(Comparator.comparing((PotionTarget target) -> Registries.POTION.getId(target.potion()).toString())
+        targets.sort(Comparator.comparing((PotionTarget target) -> target.potion().getIdAsString())
                 .thenComparing(PotionTarget::splash));
         return targets.get(0);
     }
@@ -470,7 +471,7 @@ public class ClericBrewingGoal extends Goal {
         if (state.stage() == BottleStage.INVALID || state.stage() == BottleStage.SPLASH_READY) {
             return null;
         }
-        Potion startPotion = getStartPotion(state, chestInventory);
+        RegistryEntry<Potion> startPotion = getStartPotion(state, chestInventory);
         if (startPotion == null) {
             return null;
         }
@@ -499,7 +500,7 @@ public class ClericBrewingGoal extends Goal {
         };
     }
 
-    private static Potion getStartPotion(BottleState state, Inventory chestInventory) {
+    private static RegistryEntry<Potion> getStartPotion(BottleState state, Inventory chestInventory) {
         return switch (state.stage()) {
             case WATER_READY -> Potions.WATER;
             case WATER_PARTIAL, EMPTY -> hasWaterBottle(chestInventory) ? Potions.WATER : null;
@@ -520,16 +521,16 @@ public class ClericBrewingGoal extends Goal {
         return items;
     }
 
-    private static Map<Potion, List<Item>> getReachablePotionPaths(Potion startPotion, Set<Item> ingredients) {
-        Map<Potion, List<Item>> paths = new HashMap<>();
-        Queue<Potion> queue = new ArrayDeque<>();
+    private static Map<RegistryEntry<Potion>, List<Item>> getReachablePotionPaths(RegistryEntry<Potion> startPotion, Set<Item> ingredients) {
+        Map<RegistryEntry<Potion>, List<Item>> paths = new HashMap<>();
+        Queue<RegistryEntry<Potion>> queue = new ArrayDeque<>();
         paths.put(startPotion, List.of());
         queue.add(startPotion);
         while (!queue.isEmpty()) {
-            Potion current = queue.remove();
+            RegistryEntry<Potion> current = queue.remove();
             List<Item> currentPath = paths.get(current);
             for (Item ingredient : ingredients) {
-                ItemStack input = PotionUtil.setPotion(new ItemStack(Items.POTION), current);
+                ItemStack input = PotionContentsComponent.createStack(Items.POTION, current);
                 ItemStack ingredientStack = new ItemStack(ingredient);
                 if (!BrewingRecipeRegistry.hasRecipe(input, ingredientStack)) {
                     continue;
@@ -538,8 +539,8 @@ public class ClericBrewingGoal extends Goal {
                 if (!outputStack.isOf(Items.POTION)) {
                     continue;
                 }
-                Potion outputPotion = PotionUtil.getPotion(outputStack);
-                if (outputPotion == Potions.EMPTY || paths.containsKey(outputPotion)) {
+                RegistryEntry<Potion> outputPotion = getPotionEntry(outputStack);
+                if (outputPotion == null || paths.containsKey(outputPotion)) {
                     continue;
                 }
                 List<Item> nextPath = new ArrayList<>(currentPath);
@@ -551,11 +552,11 @@ public class ClericBrewingGoal extends Goal {
         return paths;
     }
 
-    private static List<Item> getPotionPath(Potion startPotion, Potion targetPotion, Set<Item> ingredients) {
-        if (startPotion == targetPotion) {
+    private static List<Item> getPotionPath(RegistryEntry<Potion> startPotion, RegistryEntry<Potion> targetPotion, Set<Item> ingredients) {
+        if (startPotion.matches(targetPotion)) {
             return List.of();
         }
-        Map<Potion, List<Item>> paths = getReachablePotionPaths(startPotion, ingredients);
+        Map<RegistryEntry<Potion>, List<Item>> paths = getReachablePotionPaths(startPotion, ingredients);
         return paths.get(targetPotion);
     }
 
@@ -582,6 +583,14 @@ public class ClericBrewingGoal extends Goal {
             return stack.split(1);
         }
         return ItemStack.EMPTY;
+    }
+
+    private static PotionContentsComponent getPotionContents(ItemStack stack) {
+        return stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT);
+    }
+
+    private static RegistryEntry<Potion> getPotionEntry(ItemStack stack) {
+        return getPotionContents(stack).potion().orElse(null);
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {
