@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.CartographerCraftingGoal;
-import dev.sterner.guardvillagers.common.entity.goal.CartographerExplorationGoal;
+import dev.sterner.guardvillagers.common.entity.goal.CartographerMapExplorationGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -23,7 +23,7 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerBehavior.class);
     private static final int EXPLORATION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
-    private static final Map<VillagerEntity, CartographerExplorationGoal> EXPLORATION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, CartographerMapExplorationGoal> EXPLORATION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
@@ -49,16 +49,16 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
                 chestPos.toShortString(),
                 jobPos.toShortString());
 
-        CartographerExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
+        CartographerMapExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
         if (explorationGoal == null) {
-            explorationGoal = new CartographerExplorationGoal(villager, jobPos, chestPos);
+            explorationGoal = new CartographerMapExplorationGoal(villager, jobPos, chestPos);
             EXPLORATION_GOALS.put(villager, explorationGoal);
             GoalSelector selector = villager.goalSelector;
             selector.add(EXPLORATION_GOAL_PRIORITY, explorationGoal);
         } else {
             explorationGoal.setTargets(jobPos, chestPos);
         }
-        explorationGoal.requestImmediateCheck();
+        explorationGoal.requestImmediateCheck(world);
 
         CartographerCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal != null) {
@@ -80,15 +80,15 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         }
         goal.requestImmediateCraft(world);
 
-        CartographerExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
+        CartographerMapExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
         if (explorationGoal == null) {
-            explorationGoal = new CartographerExplorationGoal(villager, jobPos, chestPos);
+            explorationGoal = new CartographerMapExplorationGoal(villager, jobPos, chestPos);
             EXPLORATION_GOALS.put(villager, explorationGoal);
             villager.goalSelector.add(EXPLORATION_GOAL_PRIORITY, explorationGoal);
         } else {
             explorationGoal.setTargets(jobPos, chestPos);
         }
-        explorationGoal.requestImmediateCheck();
+        explorationGoal.requestImmediateCheck(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -106,9 +106,9 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             return;
         }
         InventoryChangedListener listener = sender -> {
-            CartographerExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
+            CartographerMapExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
             if (explorationGoal != null) {
-                explorationGoal.requestImmediateCheck();
+                explorationGoal.requestImmediateCheck(world);
             }
             CartographerCraftingGoal goal = CRAFTING_GOALS.get(villager);
             if (goal != null) {
