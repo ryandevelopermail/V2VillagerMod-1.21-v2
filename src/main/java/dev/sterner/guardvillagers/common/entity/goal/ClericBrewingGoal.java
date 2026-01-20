@@ -240,6 +240,7 @@ public class ClericBrewingGoal extends Goal {
         if (targetPotion != null && !targetPotion.equals(finishedTarget)) {
             return false;
         }
+        boolean allowInventoryFallback = !finishedTarget.splash();
         boolean movedAny = false;
         int movedCount = 0;
         for (int slot = 0; slot < 3; slot++) {
@@ -248,7 +249,7 @@ public class ClericBrewingGoal extends Goal {
                 continue;
             }
             ItemStack remaining = insertStack(chestInventory, stack.copy());
-            if (!remaining.isEmpty()) {
+            if (!remaining.isEmpty() && allowInventoryFallback) {
                 remaining = insertStack(villager.getInventory(), remaining);
             }
             int moved = stack.getCount() - remaining.getCount();
