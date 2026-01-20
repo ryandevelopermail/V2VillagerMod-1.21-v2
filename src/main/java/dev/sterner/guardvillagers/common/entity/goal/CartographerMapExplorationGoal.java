@@ -7,8 +7,8 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.item.map.MapItem;
 import net.minecraft.item.map.MapState;
+import net.minecraft.item.FilledMapItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -123,7 +123,7 @@ public class CartographerMapExplorationGoal extends Goal {
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
                 }
-                activeMap = MapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
+                activeMap = FilledMapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
                 villager.setStackInHand(Hand.MAIN_HAND, activeMap);
                 stage = Stage.GO_TO_TARGET;
                 moveTo(currentTarget.toPos(jobPos.getY()));
@@ -183,7 +183,7 @@ public class CartographerMapExplorationGoal extends Goal {
             if (!stack.isOf(Items.FILLED_MAP)) {
                 continue;
             }
-            MapState state = MapItem.getMapState(stack, world);
+            MapState state = FilledMapItem.getMapState(stack, world);
             if (state == null) {
                 continue;
             }
@@ -268,7 +268,7 @@ public class CartographerMapExplorationGoal extends Goal {
         if (!stack.isOf(Items.FILLED_MAP)) {
             return false;
         }
-        return MapItem.getMapState(stack, world) == null;
+        return FilledMapItem.getMapState(stack, world) == null;
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
