@@ -286,7 +286,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 inventory.setStack(slot, stack);
                 return;
             }
-            if (ItemStack.canCombine(existing, stack) && existing.getCount() < existing.getMaxCount()) {
+            if (ItemStack.areItemsAndComponentsEqual(existing, stack) && existing.getCount() < existing.getMaxCount()) {
                 int move = Math.min(stack.getCount(), existing.getMaxCount() - existing.getCount());
                 existing.increment(move);
                 stack.decrement(move);
