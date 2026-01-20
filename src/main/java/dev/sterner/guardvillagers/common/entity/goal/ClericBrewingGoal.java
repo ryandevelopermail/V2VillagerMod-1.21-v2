@@ -172,13 +172,14 @@ public class ClericBrewingGoal extends Goal {
         BrewingStandBlockEntity stand = standOpt.get();
         BottleState state = getBottleState(stand);
         Set<PotionTarget> reachablePotions = getReachableRecipes(chestInventory, stand);
+        PotionTarget selectedTarget = selectTargetPotion(reachablePotions);
         if (shouldLogReachablePotions(state.stage(), reachablePotions)) {
             lastReachablePotions = reachablePotions.isEmpty()
                     ? Set.of()
                     : Set.copyOf(reachablePotions);
             lastReachableBottleStage = state.stage();
-            LOGGER.debug("Cleric {} reachable potions count={} {}", villager.getUuidAsString(), reachablePotions.size(),
-                    reachablePotions);
+            LOGGER.debug("Cleric {} reachable potions count={} selected={} {}", villager.getUuidAsString(),
+                    reachablePotions.size(), selectedTarget, reachablePotions);
         }
         return !reachablePotions.isEmpty();
     }
@@ -431,12 +432,23 @@ public class ClericBrewingGoal extends Goal {
         if (reachable.isEmpty()) {
             return null;
         }
-        return reachable.stream()
+        List<PotionTarget> targets = reachable.stream()
                 .filter(target -> target.potion() != Potions.WATER && target.potion() != Potions.AWKWARD)
-                .sorted(Comparator.comparing(PotionTarget::splash).reversed()
-                        .thenComparing(target -> Registries.POTION.getId(target.potion()).toString()))
-                .findFirst()
-                .orElse(null);
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        if (targets.isEmpty()) {
+            return null;
+        }
+        PotionTarget splashHealing = new PotionTarget(Potions.HEALING, true);
+        if (targets.contains(splashHealing)) {
+            return splashHealing;
+        }
+        PotionTarget healing = new PotionTarget(Potions.HEALING, false);
+        if (targets.contains(healing)) {
+            return healing;
+        }
+        targets.sort(Comparator.comparing((PotionTarget target) -> Registries.POTION.getId(target.potion()).toString())
+                .thenComparing(PotionTarget::splash));
+        return targets.get(0);
     }
 
     private void setTargetPotion(PotionTarget newTargetPotion) {
