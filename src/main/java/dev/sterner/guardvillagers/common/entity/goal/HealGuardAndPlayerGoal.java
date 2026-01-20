@@ -1,6 +1,10 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.TargetPredicate;
@@ -12,14 +16,16 @@ import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.projectile.thrown.PotionEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.potion.Potion;
 import net.minecraft.potion.Potions;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.World;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -49,6 +55,9 @@ public class HealGuardAndPlayerGoal extends Goal {
     @Override
     public boolean canStart() {
         if (((VillagerEntity) this.healer).getVillagerData().getProfession() != VillagerProfession.CLERIC || this.healer.isSleeping()) {
+            return false;
+        }
+        if (!hasHealingPotionAvailable()) {
             return false;
         }
         List<LivingEntity> list = this.healer.getWorld().getNonSpectatingEntities(LivingEntity.class, this.healer.getBoundingBox().expand(10.0D, 3.0D, 10.0D));
@@ -103,6 +112,10 @@ public class HealGuardAndPlayerGoal extends Goal {
             if (!flag) {
                 return;
             }
+            if (!hasHealingPotionAvailable()) {
+                stop();
+                return;
+            }
             float f = this.attackRadius;
             float distanceFactor = MathHelper.clamp(f, 0.10F, 0.10F);
             this.throwPotion(mob, distanceFactor);
@@ -113,6 +126,9 @@ public class HealGuardAndPlayerGoal extends Goal {
     }
 
     public void throwPotion(LivingEntity target, float distanceFactor) {
+        if (!consumeHealingPotion()) {
+            return;
+        }
         Vec3d vec3d = target.getVelocity();
         double d0 = target.getX() + vec3d.x - healer.getX();
         double d1 = target.getEyeY() - (double) 1.1F - healer.getY();
@@ -130,5 +146,72 @@ public class HealGuardAndPlayerGoal extends Goal {
         potionentity.setVelocity(d0, d1 + (double) (f * 0.2F), d2, 0.75F, 8.0F);
         healer.getWorld().playSound(null, healer.getX(), healer.getY(), healer.getZ(), SoundEvents.ENTITY_SPLASH_POTION_THROW, healer.getSoundCategory(), 1.0F, 0.8F + healer.getRandom().nextFloat() * 0.4F);
         healer.getWorld().spawnEntity(potionentity);
+    }
+
+    private boolean hasHealingPotionAvailable() {
+        return findHealingPotionSource() != null;
+    }
+
+    private boolean consumeHealingPotion() {
+        PotionSource source = findHealingPotionSource();
+        if (source == null) {
+            return false;
+        }
+        ItemStack stack = source.inventory().getStack(source.slot());
+        if (stack.isEmpty()) {
+            return false;
+        }
+        stack.decrement(1);
+        source.inventory().markDirty();
+        return true;
+    }
+
+    private PotionSource findHealingPotionSource() {
+        if (!(this.healer instanceof VillagerEntity villager)) {
+            return null;
+        }
+        PotionSource source = findHealingPotionSource(villager.getInventory());
+        if (source != null) {
+            return source;
+        }
+        Inventory chestInventory = getPairedChestInventory(villager);
+        if (chestInventory == null) {
+            return null;
+        }
+        return findHealingPotionSource(chestInventory);
+    }
+
+    private PotionSource findHealingPotionSource(Inventory inventory) {
+        if (inventory == null) {
+            return null;
+        }
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (isHealingSplashPotion(stack)) {
+                return new PotionSource(inventory, slot);
+            }
+        }
+        return null;
+    }
+
+    private boolean isHealingSplashPotion(ItemStack stack) {
+        return !stack.isEmpty() && stack.isOf(Items.SPLASH_POTION)
+                && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
+    }
+
+    private Inventory getPairedChestInventory(VillagerEntity villager) {
+        BlockPos chestPos = ClericBehavior.getPairedChestPos(villager);
+        if (chestPos == null) {
+            return null;
+        }
+        World world = villager.getWorld();
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
+        }
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private record PotionSource(Inventory inventory, int slot) {
     }
 }
