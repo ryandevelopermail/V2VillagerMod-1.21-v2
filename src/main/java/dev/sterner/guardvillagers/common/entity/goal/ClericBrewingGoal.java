@@ -172,7 +172,8 @@ public class ClericBrewingGoal extends Goal {
         }
         BrewingStandBlockEntity stand = standOpt.get();
         BottleState state = getBottleState(stand);
-        Set<PotionTarget> reachablePotions = getReachableRecipes(chestInventory, stand);
+        BrewingRecipeRegistry registry = world.getBrewingRecipeRegistry();
+        Set<PotionTarget> reachablePotions = getReachableRecipes(chestInventory, stand, registry);
         PotionTarget selectedTarget = selectTargetPotion(reachablePotions);
         if (shouldLogReachablePotions(state.stage(), reachablePotions)) {
             lastReachablePotions = reachablePotions.isEmpty()
@@ -200,7 +201,8 @@ public class ClericBrewingGoal extends Goal {
         }
         BrewingStandBlockEntity stand = standOpt.get();
         BottleState state = getBottleState(stand);
-        updateTargetPotion(state, chestInventory, stand);
+        BrewingRecipeRegistry registry = world.getBrewingRecipeRegistry();
+        updateTargetPotion(state, chestInventory, stand, registry);
         boolean changed = extractFinishedPotions(chestInventory, stand, state);
 
         if (!stand.getStack(INGREDIENT_SLOT).isEmpty()) {
@@ -212,14 +214,14 @@ public class ClericBrewingGoal extends Goal {
         }
 
         state = getBottleState(stand);
-        updateTargetPotion(state, chestInventory, stand);
+        updateTargetPotion(state, chestInventory, stand, registry);
         if (state.stage() == BottleStage.EMPTY || state.stage() == BottleStage.WATER_PARTIAL) {
             changed |= fillWaterBottles(chestInventory, stand);
             state = getBottleState(stand);
-            updateTargetPotion(state, chestInventory, stand);
+            updateTargetPotion(state, chestInventory, stand, registry);
         }
 
-        Item nextIngredient = getNextIngredient(state, chestInventory);
+        Item nextIngredient = getNextIngredient(state, chestInventory, registry);
         if (nextIngredient != null) {
             changed |= insertIngredient(chestInventory, stand, stack -> stack.isOf(nextIngredient));
             if (changed) {
@@ -310,7 +312,8 @@ public class ClericBrewingGoal extends Goal {
         BrewingStandBlockEntity.tick(world, jobPos, state, stand);
     }
 
-    public static Set<PotionTarget> getReachableRecipes(Inventory chestInventory, BrewingStandBlockEntity stand) {
+    public static Set<PotionTarget> getReachableRecipes(Inventory chestInventory, BrewingStandBlockEntity stand,
+                                                       BrewingRecipeRegistry registry) {
         BottleState state = getBottleState(stand);
         if (state.stage() == BottleStage.INVALID) {
             return Set.of();
@@ -331,7 +334,7 @@ public class ClericBrewingGoal extends Goal {
         boolean hasGunpowder = availableIngredients.remove(Items.GUNPOWDER);
         availableIngredients.remove(Items.POTION);
         availableIngredients.remove(Items.SPLASH_POTION);
-        Map<RegistryEntry<Potion>, List<Item>> reachablePotions = getReachablePotionPaths(startPotion, availableIngredients);
+        Map<RegistryEntry<Potion>, List<Item>> reachablePotions = getReachablePotionPaths(startPotion, availableIngredients, registry);
         for (RegistryEntry<Potion> potion : reachablePotions.keySet()) {
             if (potion.matches(Potions.WATER) || potion.matches(Potions.AWKWARD)) {
                 continue;
@@ -417,8 +420,9 @@ public class ClericBrewingGoal extends Goal {
         return stack.isOf(Items.POTION) && getPotionContents(stack).matches(target.potion());
     }
 
-    private void updateTargetPotion(BottleState state, Inventory chestInventory, BrewingStandBlockEntity stand) {
-        Set<PotionTarget> reachable = getReachableRecipes(chestInventory, stand);
+    private void updateTargetPotion(BottleState state, Inventory chestInventory, BrewingStandBlockEntity stand,
+                                    BrewingRecipeRegistry registry) {
+        Set<PotionTarget> reachable = getReachableRecipes(chestInventory, stand, registry);
         PotionTarget finishedTarget = getFinishedTarget(state);
         if (finishedTarget != null && reachable.contains(finishedTarget)) {
             setTargetPotion(finishedTarget);
@@ -464,7 +468,7 @@ public class ClericBrewingGoal extends Goal {
         LOGGER.debug("Cleric {} target potion {}", villager.getUuidAsString(), targetPotion);
     }
 
-    private Item getNextIngredient(BottleState state, Inventory chestInventory) {
+    private Item getNextIngredient(BottleState state, Inventory chestInventory, BrewingRecipeRegistry registry) {
         if (targetPotion == null) {
             return null;
         }
@@ -479,7 +483,7 @@ public class ClericBrewingGoal extends Goal {
         boolean hasGunpowder = availableIngredients.remove(Items.GUNPOWDER);
         availableIngredients.remove(Items.POTION);
         availableIngredients.remove(Items.SPLASH_POTION);
-        List<Item> path = getPotionPath(startPotion, targetPotion.potion(), availableIngredients);
+        List<Item> path = getPotionPath(startPotion, targetPotion.potion(), availableIngredients, registry);
         if (path == null) {
             return null;
         }
@@ -521,7 +525,9 @@ public class ClericBrewingGoal extends Goal {
         return items;
     }
 
-    private static Map<RegistryEntry<Potion>, List<Item>> getReachablePotionPaths(RegistryEntry<Potion> startPotion, Set<Item> ingredients) {
+    private static Map<RegistryEntry<Potion>, List<Item>> getReachablePotionPaths(RegistryEntry<Potion> startPotion,
+                                                                                  Set<Item> ingredients,
+                                                                                  BrewingRecipeRegistry registry) {
         Map<RegistryEntry<Potion>, List<Item>> paths = new HashMap<>();
         Queue<RegistryEntry<Potion>> queue = new ArrayDeque<>();
         paths.put(startPotion, List.of());
@@ -532,10 +538,10 @@ public class ClericBrewingGoal extends Goal {
             for (Item ingredient : ingredients) {
                 ItemStack input = PotionContentsComponent.createStack(Items.POTION, current);
                 ItemStack ingredientStack = new ItemStack(ingredient);
-                if (!BrewingRecipeRegistry.hasRecipe(input, ingredientStack)) {
+                if (!registry.hasRecipe(input, ingredientStack)) {
                     continue;
                 }
-                ItemStack outputStack = BrewingRecipeRegistry.craft(ingredientStack, input);
+                ItemStack outputStack = registry.craft(ingredientStack, input);
                 if (!outputStack.isOf(Items.POTION)) {
                     continue;
                 }
@@ -552,11 +558,12 @@ public class ClericBrewingGoal extends Goal {
         return paths;
     }
 
-    private static List<Item> getPotionPath(RegistryEntry<Potion> startPotion, RegistryEntry<Potion> targetPotion, Set<Item> ingredients) {
+    private static List<Item> getPotionPath(RegistryEntry<Potion> startPotion, RegistryEntry<Potion> targetPotion,
+                                            Set<Item> ingredients, BrewingRecipeRegistry registry) {
         if (startPotion.matches(targetPotion)) {
             return List.of();
         }
-        Map<RegistryEntry<Potion>, List<Item>> paths = getReachablePotionPaths(startPotion, ingredients);
+        Map<RegistryEntry<Potion>, List<Item>> paths = getReachablePotionPaths(startPotion, ingredients, registry);
         return paths.get(targetPotion);
     }
 
