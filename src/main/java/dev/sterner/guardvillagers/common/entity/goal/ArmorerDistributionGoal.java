@@ -4,7 +4,6 @@ import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ArmorItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
@@ -26,75 +25,30 @@ public class ArmorerDistributionGoal extends AbstractInventoryDistributionGoal {
     }
 
     @Override
-    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (!hasDistributableItem(inventory)) {
-            return false;
+    protected Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, ItemStack stack) {
+        if (!(stack.getItem() instanceof ArmorItem armorItem)) {
+            return Optional.empty();
         }
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isDistributableItem(stack)) {
-                continue;
-            }
-            EquipmentSlot equipmentSlot = ((ArmorItem) stack.getItem()).getSlotType();
-            if (findPlacementStand(world, equipmentSlot).isPresent()) {
-                return true;
-            }
-        }
-        return false;
+        return ArmorerStandManager.findPlacementStand(world, villager, getDistributionCenter(), armorItem.getSlotType());
     }
 
     @Override
-    protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
-        if (inventory == null) {
-            return false;
+    protected void onPendingItemSelected(ItemStack pendingItem) {
+        if (pendingItem.getItem() instanceof ArmorItem armorItem) {
+            pendingSlot = armorItem.getSlotType();
+        } else {
+            pendingSlot = null;
         }
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isDistributableItem(stack)) {
-                continue;
-            }
-            EquipmentSlot equipmentSlot = ((ArmorItem) stack.getItem()).getSlotType();
-            Optional<ArmorStandEntity> stand = findPlacementStand(world, equipmentSlot);
-            if (stand.isEmpty()) {
-                continue;
-            }
-            ItemStack extracted = stack.split(1);
-            inventory.setStack(slot, stack);
-            inventory.markDirty();
-            pendingItem = extracted;
-            pendingSlot = equipmentSlot;
-            pendingTargetId = stand.get().getUuid();
-            pendingTargetPos = stand.get().getBlockPos();
-            return true;
-        }
-        return false;
     }
 
     @Override
-    protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        ArmorStandEntity stand = resolveTargetStand(world);
-        if (stand != null && ArmorerStandManager.isStandAvailableForSlot(villager, stand, pendingSlot)) {
-            pendingTargetPos = stand.getBlockPos();
-            return true;
-        }
-
-        Optional<ArmorStandEntity> selectedStand = findPlacementStand(world, pendingSlot);
-        if (selectedStand.isEmpty()) {
-            return false;
-        }
-        pendingTargetId = selectedStand.get().getUuid();
-        pendingTargetPos = selectedStand.get().getBlockPos();
-        return true;
+    protected boolean isStandAvailableForPendingItem(ServerWorld world, ArmorStandEntity stand) {
+        return pendingSlot != null && ArmorerStandManager.isStandAvailableForSlot(villager, stand, pendingSlot);
     }
 
     @Override
-    protected boolean executeTransfer(ServerWorld world) {
-        ArmorStandEntity stand = resolveTargetStand(world);
-        return stand != null
-                && ArmorerStandManager.isStandAvailableForSlot(villager, stand, pendingSlot)
-                && ArmorerStandManager.placeArmorOnStand(world, villager, stand, pendingItem);
+    protected boolean placePendingItemOnStand(ServerWorld world, ArmorStandEntity stand) {
+        return pendingSlot != null && ArmorerStandManager.placeArmorOnStand(world, villager, stand, pendingItem);
     }
 
     @Override
@@ -105,16 +59,5 @@ public class ArmorerDistributionGoal extends AbstractInventoryDistributionGoal {
     @Override
     protected boolean matchesProfession(VillagerEntity villager) {
         return villager.getVillagerData().getProfession() == VillagerProfession.ARMORER;
-    }
-
-    private Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, EquipmentSlot slot) {
-        return ArmorerStandManager.findPlacementStand(world, villager, getDistributionCenter(), slot);
-    }
-
-    private ArmorStandEntity resolveTargetStand(ServerWorld world) {
-        if (pendingTargetId == null) {
-            return null;
-        }
-        return world.getEntity(pendingTargetId) instanceof ArmorStandEntity stand ? stand : null;
     }
 }

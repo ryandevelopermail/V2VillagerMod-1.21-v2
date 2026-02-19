@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -293,13 +294,86 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     protected abstract boolean isDistributableItem(ItemStack stack);
 
-    protected abstract boolean canStartWithInventory(ServerWorld world, Inventory inventory);
+    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!isDistributableItem(stack)) {
+                continue;
+            }
+            if (findPlacementStand(world, stack).isPresent()) {
+                return true;
+            }
+        }
+        return false;
+    }
 
-    protected abstract boolean selectPendingTransfer(ServerWorld world, Inventory inventory);
+    protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (inventory == null) {
+            return false;
+        }
 
-    protected abstract boolean refreshTargetForPendingItem(ServerWorld world);
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!isDistributableItem(stack)) {
+                continue;
+            }
 
-    protected abstract boolean executeTransfer(ServerWorld world);
+            Optional<ArmorStandEntity> stand = findPlacementStand(world, stack);
+            if (stand.isEmpty()) {
+                continue;
+            }
+
+            ItemStack extracted = stack.split(1);
+            inventory.setStack(slot, stack);
+            inventory.markDirty();
+
+            pendingItem = extracted;
+            onPendingItemSelected(extracted);
+            pendingTargetId = stand.get().getUuid();
+            pendingTargetPos = stand.get().getBlockPos();
+            return true;
+        }
+        return false;
+    }
+
+    protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        ArmorStandEntity stand = resolveTargetStand(world);
+        if (stand != null && isStandAvailableForPendingItem(world, stand)) {
+            pendingTargetPos = stand.getBlockPos();
+            return true;
+        }
+
+        Optional<ArmorStandEntity> selectedStand = findPlacementStand(world, pendingItem);
+        if (selectedStand.isEmpty()) {
+            return false;
+        }
+        pendingTargetId = selectedStand.get().getUuid();
+        pendingTargetPos = selectedStand.get().getBlockPos();
+        return true;
+    }
+
+    protected boolean executeTransfer(ServerWorld world) {
+        ArmorStandEntity stand = resolveTargetStand(world);
+        return stand != null
+                && isStandAvailableForPendingItem(world, stand)
+                && placePendingItemOnStand(world, stand);
+    }
+
+    protected ArmorStandEntity resolveTargetStand(ServerWorld world) {
+        if (pendingTargetId == null) {
+            return null;
+        }
+        return world.getEntity(pendingTargetId) instanceof ArmorStandEntity stand ? stand : null;
+    }
+
+    protected void onPendingItemSelected(ItemStack pendingItem) {
+    }
+
+    protected abstract Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, ItemStack stack);
+
+    protected abstract boolean isStandAvailableForPendingItem(ServerWorld world, ArmorStandEntity stand);
+
+    protected abstract boolean placePendingItemOnStand(ServerWorld world, ArmorStandEntity stand);
 
     protected abstract void clearPendingTargetState();
 

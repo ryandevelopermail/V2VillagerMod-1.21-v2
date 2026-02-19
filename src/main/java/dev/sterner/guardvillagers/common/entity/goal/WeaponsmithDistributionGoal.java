@@ -4,7 +4,6 @@ import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.inventory.Inventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.CrossbowItem;
@@ -34,56 +33,18 @@ public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGo
     }
 
     @Override
-    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        return hasDistributableItem(inventory) && findPlacementStand(world).isPresent();
+    protected Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, ItemStack stack) {
+        return WeaponsmithStandManager.findPlacementStand(world, villager, getDistributionCenter(), EquipmentSlot.MAINHAND);
     }
 
     @Override
-    protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
-        if (inventory == null) {
-            return false;
-        }
-
-        ItemStack extracted = extractSingleDistributableItem(inventory);
-        if (extracted.isEmpty()) {
-            return false;
-        }
-        pendingItem = extracted;
-
-        Optional<ArmorStandEntity> stand = findPlacementStand(world);
-        if (stand.isEmpty()) {
-            pendingItem = ItemStack.EMPTY;
-            return false;
-        }
-
-        pendingTargetId = stand.get().getUuid();
-        pendingTargetPos = stand.get().getBlockPos();
-        return true;
+    protected boolean isStandAvailableForPendingItem(ServerWorld world, ArmorStandEntity stand) {
+        return WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND);
     }
 
     @Override
-    protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        ArmorStandEntity stand = resolveTargetStand(world);
-        if (stand != null && WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND)) {
-            pendingTargetPos = stand.getBlockPos();
-            return true;
-        }
-
-        Optional<ArmorStandEntity> selectedStand = findPlacementStand(world);
-        if (selectedStand.isEmpty()) {
-            return false;
-        }
-        pendingTargetId = selectedStand.get().getUuid();
-        pendingTargetPos = selectedStand.get().getBlockPos();
-        return true;
-    }
-
-    @Override
-    protected boolean executeTransfer(ServerWorld world) {
-        ArmorStandEntity stand = resolveTargetStand(world);
-        return stand != null
-                && WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND)
-                && WeaponsmithStandManager.placeWeaponOnStand(world, villager, stand, pendingItem, EquipmentSlot.MAINHAND);
+    protected boolean placePendingItemOnStand(ServerWorld world, ArmorStandEntity stand) {
+        return WeaponsmithStandManager.placeWeaponOnStand(world, villager, stand, pendingItem, EquipmentSlot.MAINHAND);
     }
 
     @Override
@@ -93,16 +54,5 @@ public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGo
     @Override
     protected boolean matchesProfession(VillagerEntity villager) {
         return villager.getVillagerData().getProfession() == VillagerProfession.WEAPONSMITH;
-    }
-
-    private Optional<ArmorStandEntity> findPlacementStand(ServerWorld world) {
-        return WeaponsmithStandManager.findPlacementStand(world, villager, getDistributionCenter(), EquipmentSlot.MAINHAND);
-    }
-
-    private ArmorStandEntity resolveTargetStand(ServerWorld world) {
-        if (pendingTargetId == null) {
-            return null;
-        }
-        return world.getEntity(pendingTargetId) instanceof ArmorStandEntity stand ? stand : null;
     }
 }
