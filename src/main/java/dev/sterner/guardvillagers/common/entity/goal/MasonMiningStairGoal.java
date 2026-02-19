@@ -245,6 +245,10 @@ public class MasonMiningStairGoal extends Goal {
         return origin.offset(miningDirection, index + 1).down(index + 1);
     }
 
+    private boolean isMiningTool(ItemStack stack) {
+        return stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem;
+    }
+
     private void beginReturn(ReturnReason reason) {
         if (stage != Stage.MINING) {
             return;
@@ -269,9 +273,17 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
+        ItemStack equippedTool = guard.getMainHandStack();
+        boolean reservedToolSkipped = false;
+
         for (int i = 0; i < guard.guardInventory.size(); i++) {
             ItemStack stack = guard.guardInventory.getStack(i);
             if (stack.isEmpty()) {
+                continue;
+            }
+            if (!reservedToolSkipped && !equippedTool.isEmpty() && isMiningTool(stack)
+                    && ItemStack.areItemsAndComponentsEqual(stack, equippedTool)) {
+                reservedToolSkipped = true;
                 continue;
             }
 
