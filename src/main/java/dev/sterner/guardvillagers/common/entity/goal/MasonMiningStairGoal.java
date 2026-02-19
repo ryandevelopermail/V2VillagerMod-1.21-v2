@@ -4,22 +4,28 @@ import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.registry.tag.FluidTags;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.Set;
 
 public class MasonMiningStairGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 1.8D;
     private static final int NO_PROGRESS_LIMIT = 5;
@@ -48,6 +54,9 @@ public class MasonMiningStairGoal extends Goal {
     private int stepIndex;
     private int noProgressTicks;
     private double lastDistanceToTarget = Double.MAX_VALUE;
+    private int minedBlockCount;
+    private int depositedItemCount;
+    private ReturnReason returnReason = ReturnReason.NONE;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -83,6 +92,9 @@ public class MasonMiningStairGoal extends Goal {
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
+        this.minedBlockCount = 0;
+        this.depositedItemCount = 0;
+        this.returnReason = ReturnReason.NONE;
         this.stage = Stage.MINING;
         return true;
     }
@@ -101,7 +113,7 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
         if (stage == Stage.MINING && !hasUsableMiningTool()) {
-            stage = Stage.RETURN;
+            beginReturn(ReturnReason.TOOL_BROKE);
         }
         return stage != Stage.DONE;
     }
@@ -114,6 +126,7 @@ public class MasonMiningStairGoal extends Goal {
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        clearTemporaryMiningState();
         stage = Stage.DONE;
     }
 
@@ -131,7 +144,7 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
-        if (stage == Stage.RETURN) {
+        if (stage == Stage.RETURN_TO_CHEST) {
             BlockPos chestPos = guard.getPairedChestPos();
             if (chestPos == null) {
                 stage = Stage.DONE;
@@ -139,14 +152,22 @@ public class MasonMiningStairGoal extends Goal {
             }
             guard.getNavigation().startMovingTo(chestPos.getX() + 0.5D, chestPos.getY(), chestPos.getZ() + 0.5D, MOVE_SPEED);
             if (guard.squaredDistanceTo(Vec3d.ofCenter(chestPos)) <= 4.0D) {
-                stage = Stage.DONE;
+                stage = Stage.DEPOSIT;
             }
+            return;
+        }
+
+        if (stage == Stage.DEPOSIT) {
+            depositMinedMaterials(world);
+            logTelemetry();
+            clearTemporaryMiningState();
+            stage = Stage.DONE;
         }
     }
 
     private void tickMining(ServerWorld world) {
         if (!ensureStepClear(world, currentStepTarget)) {
-            stage = Stage.RETURN;
+            beginReturn(ReturnReason.STUCK_5_TICKS);
             return;
         }
 
@@ -160,7 +181,7 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (noProgressTicks >= NO_PROGRESS_LIMIT) {
-            stage = Stage.RETURN;
+            beginReturn(ReturnReason.STUCK_5_TICKS);
             return;
         }
 
@@ -192,7 +213,9 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
 
-        world.breakBlock(pos, true, guard);
+        if (world.breakBlock(pos, true, guard)) {
+            minedBlockCount++;
+        }
         collectNearbyDrops(world, pos);
         return true;
     }
@@ -222,10 +245,126 @@ public class MasonMiningStairGoal extends Goal {
         return origin.offset(miningDirection, index + 1).down(index + 1);
     }
 
+    private boolean isMiningTool(ItemStack stack) {
+        return stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem;
+    }
+
+    private void beginReturn(ReturnReason reason) {
+        if (stage != Stage.MINING) {
+            return;
+        }
+        this.returnReason = reason;
+        this.stage = Stage.RETURN_TO_CHEST;
+    }
+
+    private void depositMinedMaterials(ServerWorld world) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) {
+            return;
+        }
+
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return;
+        }
+
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return;
+        }
+
+        for (int i = 0; i < guard.guardInventory.size(); i++) {
+            ItemStack stack = guard.guardInventory.getStack(i);
+            if (stack.isEmpty()) {
+                continue;
+            }
+            if (isMiningTool(stack)) {
+                continue;
+            }
+
+            int beforeCount = stack.getCount();
+            ItemStack remaining = insertStack(chestInventory, stack);
+            depositedItemCount += beforeCount - remaining.getCount();
+            guard.guardInventory.setStack(i, remaining);
+        }
+
+        guard.guardInventory.markDirty();
+        chestInventory.markDirty();
+    }
+
+    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+        return remaining;
+    }
+
+    private void clearTemporaryMiningState() {
+        this.noProgressTicks = 0;
+        this.lastDistanceToTarget = Double.MAX_VALUE;
+        this.currentStepTarget = null;
+        this.stepIndex = 0;
+    }
+
+    private void logTelemetry() {
+        String returnReasonText = switch (returnReason) {
+            case TOOL_BROKE -> "TOOL_BROKE";
+            case STUCK_5_TICKS -> "STUCK_5_TICKS";
+            default -> "NONE";
+        };
+
+        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, mainHand={} ",
+                guard.getUuidAsString(),
+                minedBlockCount,
+                depositedItemCount,
+                returnReasonText,
+                guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
+    }
+
     private enum Stage {
         IDLE,
         MINING,
-        RETURN,
+        RETURN_TO_CHEST,
+        DEPOSIT,
         DONE
+    }
+
+    private enum ReturnReason {
+        NONE,
+        TOOL_BROKE,
+        STUCK_5_TICKS
     }
 }
