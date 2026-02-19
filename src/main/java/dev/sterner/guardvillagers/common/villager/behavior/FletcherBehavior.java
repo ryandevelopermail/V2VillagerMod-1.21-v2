@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.FletcherCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FletcherDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -20,8 +21,10 @@ import java.util.WeakHashMap;
 
 public class FletcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(FletcherBehavior.class);
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final Map<VillagerEntity, FletcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, FletcherDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -45,6 +48,17 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
+
+        FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new FletcherDistributionGoal(villager, jobPos, chestPos, null);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        }
+        distributionGoal.requestImmediateDistribution();
 
         FletcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal == null) {
@@ -85,6 +99,16 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new FletcherDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        distributionGoal.requestImmediateDistribution();
         updateChestListener(world, villager, chestPos);
     }
 
@@ -105,6 +129,10 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             FletcherCraftingGoal goal = CRAFTING_GOALS.get(villager);
             if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
                 goal.requestImmediateCraft(serverWorld);
+            }
+            FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
             }
         };
         simpleInventory.addListener(listener);
