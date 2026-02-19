@@ -49,25 +49,27 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
                 chestPos.toShortString(),
                 jobPos.toShortString());
 
+        FletcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        BlockPos knownCraftingTablePos = craftingGoal != null ? craftingGoal.getCraftingTablePos() : null;
+
         FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
-            distributionGoal = new FletcherDistributionGoal(villager, jobPos, chestPos, null);
+            distributionGoal = new FletcherDistributionGoal(villager, jobPos, chestPos, knownCraftingTablePos);
             DISTRIBUTION_GOALS.put(villager, distributionGoal);
             GoalSelector selector = villager.goalSelector;
             selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
         } else {
-            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+            distributionGoal.setTargets(jobPos, chestPos, knownCraftingTablePos != null ? knownCraftingTablePos : distributionGoal.getCraftingTablePos());
         }
         distributionGoal.requestImmediateDistribution();
 
-        FletcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal == null) {
-            craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, null);
+            craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, distributionGoal.getCraftingTablePos());
             CRAFTING_GOALS.put(villager, craftingGoal);
             GoalSelector selector = villager.goalSelector;
             selector.add(CRAFTING_GOAL_PRIORITY, craftingGoal);
         } else {
-            craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
+            craftingGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
         }
         updateChestListener(world, villager, chestPos);
     }
@@ -89,16 +91,15 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        FletcherCraftingGoal goal = CRAFTING_GOALS.get(villager);
-        if (goal == null) {
-            goal = new FletcherCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
-            CRAFTING_GOALS.put(villager, goal);
+        FletcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        if (craftingGoal == null) {
+            craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            CRAFTING_GOALS.put(villager, craftingGoal);
             GoalSelector selector = villager.goalSelector;
-            selector.add(CRAFTING_GOAL_PRIORITY, goal);
+            selector.add(CRAFTING_GOAL_PRIORITY, craftingGoal);
         } else {
-            goal.setTargets(jobPos, chestPos, craftingTablePos);
+            craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
-        goal.requestImmediateCraft(world);
 
         FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -108,6 +109,11 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
         } else {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
+
+        craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+
+        craftingGoal.requestImmediateCraft(world);
         distributionGoal.requestImmediateDistribution();
         updateChestListener(world, villager, chestPos);
     }
