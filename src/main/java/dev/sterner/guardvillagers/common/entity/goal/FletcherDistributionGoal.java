@@ -25,7 +25,10 @@ import java.util.Optional;
 public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(FletcherDistributionGoal.class);
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
+    private static final long UNDELIVERABLE_RETRY_DELAY_TICKS = 40L;
     private static final RecipientScope RECIPIENT_SCOPE = RecipientScope.GUARDS_ONLY;
+    private ItemStack recentlyUndeliverable = ItemStack.EMPTY;
+    private long retryUndeliverableAfterTick;
 
     public FletcherDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -59,6 +62,9 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
+                continue;
+            }
+            if (isCoolingDownUndeliverable(world, stack)) {
                 continue;
             }
 
@@ -126,12 +132,13 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         if (isRangedWeapon(pendingItem)) {
             ItemStack currentMainHand = guard.getMainHandStack();
             if (!canEquipRangedWeapon(guard, pendingItem, currentMainHand)) {
+                markUndeliverable(world, pendingItem);
                 LOGGER.debug("Fletcher {} skipped weapon transfer {} -> guard {} (current main hand: {})",
                         villager.getUuidAsString(),
                         pendingItem.getItem(),
                         guard.getUuidAsString(),
                         currentMainHand.getItem());
-                return true;
+                return false;
             }
 
             guard.equipStack(EquipmentSlot.MAINHAND, pendingItem.copy());
@@ -146,11 +153,12 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         if (isArrow(pendingItem)) {
             ItemStack currentMainHand = guard.getMainHandStack();
             if (!usesBowOrCrossbow(currentMainHand)) {
+                markUndeliverable(world, pendingItem);
                 LOGGER.debug("Fletcher {} skipped arrow transfer to guard {} (main hand: {})",
                         villager.getUuidAsString(),
                         guard.getUuidAsString(),
                         currentMainHand.getItem());
-                return true;
+                return false;
             }
 
             ItemStack remaining = insertStack(guard.guardInventory, pendingItem);
@@ -187,6 +195,17 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected void clearPendingTargetState() {
+    }
+
+    private boolean isCoolingDownUndeliverable(ServerWorld world, ItemStack candidate) {
+        return !recentlyUndeliverable.isEmpty()
+                && world.getTime() < retryUndeliverableAfterTick
+                && ItemStack.areItemsAndComponentsEqual(recentlyUndeliverable, candidate);
+    }
+
+    private void markUndeliverable(ServerWorld world, ItemStack stack) {
+        recentlyUndeliverable = stack.copy();
+        retryUndeliverableAfterTick = world.getTime() + UNDELIVERABLE_RETRY_DELAY_TICKS;
     }
 
     @Override
