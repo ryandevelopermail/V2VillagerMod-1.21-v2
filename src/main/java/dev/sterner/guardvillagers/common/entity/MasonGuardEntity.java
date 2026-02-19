@@ -42,6 +42,7 @@ public class MasonGuardEntity extends GuardEntity {
     private BlockPos pairedJobPos;
     private ItemStack expectedMiningTool = ItemStack.EMPTY;
     private boolean loggedSpawnValidation;
+    private long nextMiningStartTick;
 
     public MasonGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -69,6 +70,14 @@ public class MasonGuardEntity extends GuardEntity {
 
     public ItemStack getExpectedMiningTool() {
         return expectedMiningTool;
+    }
+
+    public long getNextMiningStartTick() {
+        return nextMiningStartTick;
+    }
+
+    public void setNextMiningStartTick(long nextMiningStartTick) {
+        this.nextMiningStartTick = nextMiningStartTick;
     }
 
     @Override
@@ -147,6 +156,7 @@ public class MasonGuardEntity extends GuardEntity {
         } else {
             this.expectedMiningTool = ItemStack.EMPTY;
         }
+        this.nextMiningStartTick = nbt.contains("MasonNextMiningStartTick") ? nbt.getLong("MasonNextMiningStartTick") : 0L;
     }
 
     @Override
@@ -167,5 +177,6 @@ public class MasonGuardEntity extends GuardEntity {
             NbtCompound toolNbt = new NbtCompound();
             nbt.put("MasonExpectedTool", this.expectedMiningTool.encode(this.getRegistryManager(), toolNbt));
         }
+        nbt.putLong("MasonNextMiningStartTick", this.nextMiningStartTick);
     }
 }
