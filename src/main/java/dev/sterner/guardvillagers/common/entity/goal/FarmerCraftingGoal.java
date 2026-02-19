@@ -79,7 +79,7 @@ public class FarmerCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Farmer", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Farmer", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         return lastCheckCount > 0;
     }

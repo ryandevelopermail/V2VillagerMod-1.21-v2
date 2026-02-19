@@ -95,7 +95,7 @@ public class WeaponsmithCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Weaponsmith", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Weaponsmith", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;

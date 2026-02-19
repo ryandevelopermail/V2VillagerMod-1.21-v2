@@ -107,7 +107,7 @@ public class LeatherworkerCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Leatherworker", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Leatherworker", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;

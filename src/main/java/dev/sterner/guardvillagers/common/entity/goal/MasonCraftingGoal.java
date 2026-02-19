@@ -101,7 +101,7 @@ public class MasonCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Mason", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
