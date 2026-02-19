@@ -89,7 +89,7 @@ public class ToolsmithCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Toolsmith", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Toolsmith", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
