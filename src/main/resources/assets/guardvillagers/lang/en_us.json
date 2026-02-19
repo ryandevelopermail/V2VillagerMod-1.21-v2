@@ -32,5 +32,9 @@
   "guardvillagers.profession.v2_toolsmith.task.crafting": "Craft tools for the village chest",
   "guardvillagers.profession.v2_toolsmith.task.distribution": "Distribute tools to guards and villagers",
   "guardvillagers.profession.v2_leatherworker": "V2 Leatherworker",
-  "guardvillagers.profession.v2_leatherworker.task.crafting": "Craft leather items for the village chest"
+  "guardvillagers.profession.v2_leatherworker.task.crafting": "Craft leather items for the village chest",
+  "entity.guardvillagers.mason_guard": "Mason Guard",
+  "item.guardvillagers.mason_guard_spawn_egg": "Mason Guard Spawn Egg",
+  "entity.guardvillagers.fisherman_guard": "Fisherman Guard",
+  "item.guardvillagers.fisherman_guard_spawn_egg": "Fisherman Guard Spawn Egg"
 }

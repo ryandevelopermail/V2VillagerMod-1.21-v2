@@ -251,8 +251,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
     }
 
     private boolean canEquipRangedWeapon(GuardEntity guard, ItemStack candidate, ItemStack currentMainHand) {
-        if (!(candidate.getItem() instanceof RangedWeaponItem rangedWeaponItem)
-                || !guard.canUseRangedWeapon(rangedWeaponItem)) {
+        if (!(candidate.getItem() instanceof RangedWeaponItem rangedWeaponItem) || !guard.canUseRangedWeapon(rangedWeaponItem)) {
             return false;
         }
         return GearGradeComparator.isUpgrade(candidate, currentMainHand, EquipmentSlot.MAINHAND);
