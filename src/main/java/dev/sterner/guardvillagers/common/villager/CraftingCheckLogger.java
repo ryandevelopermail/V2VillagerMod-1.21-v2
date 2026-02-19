@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public final class CraftingCheckLogger {
@@ -17,21 +18,33 @@ public final class CraftingCheckLogger {
     }
 
     public static void report(ServerWorld world, String profession, String result) {
-        report(world, profession, null, result);
+        report(world, profession, null, 0, result);
     }
 
-    public static void report(ServerWorld world, String profession, String triggerContext, String result) {
+    public static void report(ServerWorld world, String profession, String triggerSource, int intervalTicks, String result) {
         long tick = world.getTime();
         if (tick != lastTick) {
             clear();
             lastTick = tick;
         }
 
-        String logResult = (triggerContext == null || triggerContext.isBlank())
+        String logResult = (triggerSource == null || triggerSource.isBlank())
                 ? result
-                : "[" + triggerContext + "] " + result;
+                : "[" + formatTrigger(triggerSource, intervalTicks) + "] " + result;
         ENTRIES.put(profession, logResult);
         logCurrent(tick);
+    }
+
+    public static void report(ServerWorld world, String profession, String triggerContext, String result) {
+        report(world, profession, triggerContext, 0, result);
+    }
+
+    private static String formatTrigger(String triggerSource, int intervalTicks) {
+        String normalized = triggerSource.toLowerCase(Locale.ROOT).replace('_', ' ');
+        if (intervalTicks > 0) {
+            return normalized + " (" + intervalTicks + " ticks)";
+        }
+        return normalized + " (immediate)";
     }
 
     private static void clear() {

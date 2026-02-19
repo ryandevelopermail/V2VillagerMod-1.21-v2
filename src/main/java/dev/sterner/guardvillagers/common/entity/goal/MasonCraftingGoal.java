@@ -61,6 +61,7 @@ public class MasonCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private CraftingCheckTrigger pendingTrigger = CraftingCheckTrigger.SCHEDULED;
 
     public MasonCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -101,9 +102,12 @@ public class MasonCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckTrigger checkTrigger = immediateCheckPending ? pendingTrigger : CraftingCheckTrigger.SCHEDULED;
+        int intervalTicks = immediateCheckPending ? 0 : CHECK_INTERVAL_TICKS;
+        CraftingCheckLogger.report(world, "Mason", checkTrigger.name(), intervalTicks, formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
+        pendingTrigger = CraftingCheckTrigger.SCHEDULED;
         return lastCheckCount > 0;
     }
 
@@ -155,12 +159,14 @@ public class MasonCraftingGoal extends Goal {
             dailyCraftLimit = 4;
             craftedToday = 0;
             immediateCheckPending = false;
+            pendingTrigger = CraftingCheckTrigger.SCHEDULED;
         }
     }
 
-    public void requestImmediateCraft(ServerWorld world) {
+    public void requestImmediateCraft(ServerWorld world, CraftingCheckTrigger trigger) {
         refreshDailyLimit(world);
         immediateCheckPending = true;
+        pendingTrigger = trigger;
         nextCheckTime = 0L;
     }
 
@@ -362,6 +368,12 @@ public class MasonCraftingGoal extends Goal {
     }
 
     private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output) {
+    }
+
+    public enum CraftingCheckTrigger {
+        SCHEDULED,
+        CHEST_PAIRED,
+        CHEST_CONTENT_CHANGED
     }
 
     private String formatCheckResult(int craftableCount) {
