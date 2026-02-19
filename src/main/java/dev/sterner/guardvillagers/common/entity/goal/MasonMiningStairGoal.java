@@ -273,17 +273,12 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
-        ItemStack equippedTool = guard.getMainHandStack();
-        boolean reservedToolSkipped = false;
-
         for (int i = 0; i < guard.guardInventory.size(); i++) {
             ItemStack stack = guard.guardInventory.getStack(i);
             if (stack.isEmpty()) {
                 continue;
             }
-            if (!reservedToolSkipped && !equippedTool.isEmpty() && isMiningTool(stack)
-                    && ItemStack.areItemsAndComponentsEqual(stack, equippedTool)) {
-                reservedToolSkipped = true;
+            if (isMiningTool(stack)) {
                 continue;
             }
 
