@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ToolsmithCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ToolsmithDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -20,8 +21,10 @@ import java.util.WeakHashMap;
 
 public class ToolsmithBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ToolsmithBehavior.class);
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final Map<VillagerEntity, ToolsmithCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ToolsmithDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -45,6 +48,17 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
+
+        ToolsmithDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new ToolsmithDistributionGoal(villager, jobPos, chestPos, null);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        }
+        distributionGoal.requestImmediateDistribution();
 
         ToolsmithCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal == null) {
@@ -70,6 +84,16 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        ToolsmithDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new ToolsmithDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        distributionGoal.requestImmediateDistribution();
         updateChestListener(world, villager, chestPos);
     }
 
@@ -87,9 +111,13 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
             return;
         }
         InventoryChangedListener listener = sender -> {
-            ToolsmithCraftingGoal goal = CRAFTING_GOALS.get(villager);
-            if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                goal.requestImmediateCraft(serverWorld);
+            ToolsmithCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                craftingGoal.requestImmediateCraft(serverWorld);
+            }
+            ToolsmithDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
             }
         };
         simpleInventory.addListener(listener);
