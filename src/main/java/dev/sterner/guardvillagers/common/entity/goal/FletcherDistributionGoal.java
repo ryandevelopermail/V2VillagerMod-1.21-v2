@@ -67,7 +67,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
                 continue;
             }
 
-            RecipientRecord recipient = recipients.getFirst();
+            RecipientRecord recipient = recipients.get(0);
             ItemStack extracted = stack.split(1);
             inventory.setStack(slot, stack);
             inventory.markDirty();
@@ -103,7 +103,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             }
         }
 
-        RecipientRecord recipient = recipients.getFirst();
+        RecipientRecord recipient = recipients.get(0);
         pendingTargetId = recipient.guard().getUuid();
         pendingTargetPos = recipient.guard().getBlockPos();
         LOGGER.debug("Fletcher {} retargeted pending {} to guard {} at {}",
