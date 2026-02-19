@@ -9,17 +9,21 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.recipe.CraftingRecipe;
+import net.minecraft.recipe.Ingredient;
+import net.minecraft.recipe.RecipeEntry;
+import net.minecraft.recipe.RecipeType;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Predicate;
 
-public class FarmerCraftingGoal extends Goal {
+public class FletcherCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
@@ -27,31 +31,44 @@ public class FarmerCraftingGoal extends Goal {
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
-    private BlockPos craftingTablePos;
+    private @Nullable BlockPos craftingTablePos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long lastCraftDay = -1L;
     private int dailyCraftLimit;
     private int craftedToday;
     private int lastCheckCount;
-    private boolean guaranteedCraftPending;
-    private long guaranteedCraftDay = -1L;
+    private boolean immediateCheckPending;
 
-    public FarmerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public FletcherCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
         setTargets(jobPos, chestPos, craftingTablePos);
         setControls(EnumSet.of(Control.MOVE));
     }
 
-    public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
-        this.craftingTablePos = craftingTablePos.toImmutable();
+    public void setTargets(BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
+        BlockPos updatedJobPos = jobPos.toImmutable();
+        BlockPos updatedChestPos = chestPos.toImmutable();
+        BlockPos updatedCraftingTablePos = craftingTablePos == null ? null : craftingTablePos.toImmutable();
+        if (updatedJobPos.equals(this.jobPos)
+                && updatedChestPos.equals(this.chestPos)
+                && java.util.Objects.equals(updatedCraftingTablePos, this.craftingTablePos)) {
+            return;
+        }
+        this.jobPos = updatedJobPos;
+        this.chestPos = updatedChestPos;
+        this.craftingTablePos = updatedCraftingTablePos;
         this.stage = Stage.IDLE;
     }
 
-    public BlockPos getCraftingTablePos() {
+    public @Nullable BlockPos getCraftingTablePos() {
         return craftingTablePos;
+    }
+
+    public void requestImmediateCraft(ServerWorld world) {
+        refreshDailyLimit(world);
+        immediateCheckPending = true;
+        nextCheckTime = 0L;
     }
 
     @Override
@@ -60,6 +77,9 @@ public class FarmerCraftingGoal extends Goal {
             return false;
         }
         if (!world.isDay()) {
+            return false;
+        }
+        if (villager.getVillagerData().getProfession() != VillagerProfession.FLETCHER) {
             return false;
         }
         if (craftingTablePos == null || chestPos == null) {
@@ -73,14 +93,14 @@ public class FarmerCraftingGoal extends Goal {
             return false;
         }
 
-        boolean skipThrottle = guaranteedCraftPending && guaranteedCraftDay == world.getTimeOfDay() / 24000L;
-        if (!skipThrottle && world.getTime() < nextCheckTime) {
+        if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Farmer", skipThrottle ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Fletcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        immediateCheckPending = false;
         return lastCheckCount > 0;
     }
 
@@ -129,23 +149,10 @@ public class FarmerCraftingGoal extends Goal {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
             lastCraftDay = day;
-            dailyCraftLimit = 2 + villager.getRandom().nextInt(3);
+            dailyCraftLimit = 4;
             craftedToday = 0;
-            guaranteedCraftPending = false;
-            guaranteedCraftDay = day;
+            immediateCheckPending = false;
         }
-    }
-
-    public void notifyDailyHarvestComplete(long day) {
-        if (day != lastCraftDay) {
-            return;
-        }
-        if (craftedToday > 0) {
-            return;
-        }
-        guaranteedCraftPending = true;
-        guaranteedCraftDay = day;
-        nextCheckTime = 0L;
     }
 
     private int countCraftableRecipes(ServerWorld world) {
@@ -153,7 +160,7 @@ public class FarmerCraftingGoal extends Goal {
         if (inventory == null) {
             return 0;
         }
-        return getCraftableRecipes(inventory).size();
+        return getCraftableRecipes(world, inventory).size();
     }
 
     private void craftOnce(ServerWorld world) {
@@ -162,76 +169,108 @@ public class FarmerCraftingGoal extends Goal {
             return;
         }
 
-        List<Recipe> craftable = getCraftableRecipes(inventory);
+        List<FletcherRecipe> craftable = getCraftableRecipes(world, inventory);
         if (craftable.isEmpty()) {
             return;
         }
 
-        Recipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
-        if (consumeIngredients(inventory, recipe.requirements)) {
+        FletcherRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        if (!canInsertOutput(inventory, recipe.output)) {
+            return;
+        }
+        if (consumeIngredients(inventory, recipe.recipe)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            guaranteedCraftPending = false;
-            CraftingCheckLogger.report(world, "Farmer", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Fletcher", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
-    private List<Recipe> getCraftableRecipes(Inventory inventory) {
-        List<Recipe> recipes = new ArrayList<>();
-        for (Recipe recipe : Recipe.values()) {
-            if (hasIngredients(inventory, recipe.requirements)) {
-                recipes.add(recipe);
+    private List<FletcherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+        List<FletcherRecipe> recipes = new ArrayList<>();
+        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            CraftingRecipe recipe = entry.value();
+            ItemStack result = recipe.getResult(world.getRegistryManager());
+            if (!isFletcherOutput(result)) {
+                continue;
+            }
+            if (canCraft(inventory, recipe)) {
+                recipes.add(new FletcherRecipe(recipe, result));
             }
         }
         return recipes;
     }
 
-    private boolean hasIngredients(Inventory inventory, IngredientRequirement[] requirements) {
-        for (IngredientRequirement requirement : requirements) {
-            if (countMatching(inventory, requirement.matcher) < requirement.count) {
-                return false;
+    private boolean isFletcherOutput(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return false;
+        }
+        return stack.isOf(Items.BOW)
+                || stack.isOf(Items.CROSSBOW)
+                || stack.isOf(Items.ARROW)
+                || stack.isOf(Items.STICK)
+                || stack.isOf(Items.TARGET);
+    }
+
+    private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
+        List<ItemStack> available = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty()) {
+                available.add(stack.copy());
             }
         }
+
+        for (Ingredient ingredient : recipe.getIngredients()) {
+            if (ingredient.isEmpty()) {
+                continue;
+            }
+            int matchIndex = findMatchingStack(available, ingredient);
+            if (matchIndex < 0) {
+                return false;
+            }
+            ItemStack matched = available.get(matchIndex);
+            matched.decrement(1);
+            if (matched.isEmpty()) {
+                available.remove(matchIndex);
+            }
+        }
+
         return true;
     }
 
-    private boolean consumeIngredients(Inventory inventory, IngredientRequirement[] requirements) {
-        if (!hasIngredients(inventory, requirements)) {
+    private int findMatchingStack(List<ItemStack> available, Ingredient ingredient) {
+        for (int i = 0; i < available.size(); i++) {
+            if (ingredient.test(available.get(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean consumeIngredients(Inventory inventory, CraftingRecipe recipe) {
+        if (!canCraft(inventory, recipe)) {
             return false;
         }
 
-        for (IngredientRequirement requirement : requirements) {
-            int remaining = requirement.count;
+        for (Ingredient ingredient : recipe.getIngredients()) {
+            if (ingredient.isEmpty()) {
+                continue;
+            }
             for (int slot = 0; slot < inventory.size(); slot++) {
-                if (remaining <= 0) {
-                    break;
-                }
                 ItemStack stack = inventory.getStack(slot);
-                if (stack.isEmpty() || !requirement.matcher.test(stack)) {
+                if (stack.isEmpty() || !ingredient.test(stack)) {
                     continue;
                 }
-                int removed = Math.min(remaining, stack.getCount());
-                stack.decrement(removed);
-                remaining -= removed;
+                stack.decrement(1);
                 if (stack.isEmpty()) {
                     inventory.setStack(slot, ItemStack.EMPTY);
                 }
+                break;
             }
         }
 
         return true;
-    }
-
-    private int countMatching(Inventory inventory, Predicate<ItemStack> matcher) {
-        int total = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && matcher.test(stack)) {
-                total += stack.getCount();
-            }
-        }
-        return total;
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
@@ -292,6 +331,43 @@ public class FarmerCraftingGoal extends Goal {
         return remaining;
     }
 
+    private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            remaining.decrement(moved);
+        }
+
+        return remaining.isEmpty();
+    }
+
     private enum Stage {
         IDLE,
         GO_TO_TABLE,
@@ -299,39 +375,21 @@ public class FarmerCraftingGoal extends Goal {
         DONE
     }
 
-    private record IngredientRequirement(Predicate<ItemStack> matcher, int count) {
-    }
-
-    private enum Recipe {
-        WOODEN_HOE(new ItemStack(Items.WOODEN_HOE), new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        STONE_HOE(new ItemStack(Items.STONE_HOE), new IngredientRequirement(stack -> stack.isOf(Items.COBBLESTONE), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        IRON_HOE(new ItemStack(Items.IRON_HOE), new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        GOLDEN_HOE(new ItemStack(Items.GOLDEN_HOE), new IngredientRequirement(stack -> stack.isOf(Items.GOLD_INGOT), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        DIAMOND_HOE(new ItemStack(Items.DIAMOND_HOE), new IngredientRequirement(stack -> stack.isOf(Items.DIAMOND), 2), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
-        BREAD(new ItemStack(Items.BREAD), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 3)),
-        HAY_BALE(new ItemStack(Items.HAY_BLOCK), new IngredientRequirement(stack -> stack.isOf(Items.WHEAT), 9));
-
-        private final ItemStack output;
-        private final IngredientRequirement[] requirements;
-
-        Recipe(ItemStack output, IngredientRequirement... requirements) {
-            this.output = output;
-            this.requirements = requirements;
-        }
+    private record FletcherRecipe(CraftingRecipe recipe, ItemStack output) {
     }
 
     private String formatCheckResult(int craftableCount) {
         if (craftableCount == 1) {
-            return "1 item available to craft";
+            return "1 fletching item available to craft";
         }
-        return craftableCount + " items available to craft";
+        return craftableCount + " fletching items available to craft";
     }
 
     private String formatCraftedResult(int craftableCount, ItemStack crafted) {
         String craftedName = crafted.getName().getString();
         if (craftableCount == 1) {
-            return "1 item available to craft - 1 " + craftedName + " crafted";
+            return "1 fletching item available to craft - 1 " + craftedName + " crafted";
         }
-        return craftableCount + " items available to craft - 1 " + craftedName + " crafted";
+        return craftableCount + " fletching items available to craft - 1 " + craftedName + " crafted";
     }
 }

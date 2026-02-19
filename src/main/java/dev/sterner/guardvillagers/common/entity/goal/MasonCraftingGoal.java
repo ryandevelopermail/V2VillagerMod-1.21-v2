@@ -1,6 +1,5 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -8,24 +7,14 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
-import net.minecraft.item.AxeItem;
-import net.minecraft.item.BowItem;
-import net.minecraft.item.CrossbowItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.MaceItem;
-import net.minecraft.item.PickaxeItem;
-import net.minecraft.item.ShovelItem;
-import net.minecraft.item.SwordItem;
-import net.minecraft.item.TridentItem;
-import net.minecraft.item.ToolItem;
-import net.minecraft.item.HoeItem;
-import net.minecraft.recipe.CraftingRecipe;
+import net.minecraft.item.Items;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
-import net.minecraft.registry.Registries;
+import net.minecraft.recipe.StonecuttingRecipe;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
@@ -33,16 +22,38 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
-public class WeaponsmithCraftingGoal extends Goal {
+public class MasonCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final Set<Item> MASONRY_OUTPUTS = Set.of(
+            Items.STONE_BRICKS,
+            Items.CHISELED_STONE_BRICKS,
+            Items.POLISHED_ANDESITE,
+            Items.POLISHED_DIORITE,
+            Items.POLISHED_GRANITE,
+            Items.STONE_SLAB,
+            Items.STONE_BRICK_SLAB,
+            Items.STONE_STAIRS,
+            Items.STONE_BRICK_STAIRS,
+            Items.COBBLESTONE_WALL,
+            Items.STONE_BRICK_WALL,
+            Items.BRICK,
+            Items.BRICKS,
+            Items.TERRACOTTA,
+            Items.QUARTZ_PILLAR,
+            Items.SMOOTH_QUARTZ,
+            Items.QUARTZ_SLAB,
+            Items.QUARTZ_STAIRS,
+            Items.SMOOTH_QUARTZ_SLAB,
+            Items.SMOOTH_QUARTZ_STAIRS
+    );
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
-    private BlockPos craftingTablePos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
     private long lastCraftDay = -1L;
@@ -50,22 +61,18 @@ public class WeaponsmithCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private CraftingCheckTrigger pendingTrigger = CraftingCheckTrigger.SCHEDULED;
 
-    public WeaponsmithCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public MasonCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
-        setTargets(jobPos, chestPos, craftingTablePos);
+        setTargets(jobPos, chestPos);
         setControls(EnumSet.of(Control.MOVE));
     }
 
-    public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public void setTargets(BlockPos jobPos, BlockPos chestPos) {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
-        this.craftingTablePos = craftingTablePos.toImmutable();
         this.stage = Stage.IDLE;
-    }
-
-    public BlockPos getCraftingTablePos() {
-        return craftingTablePos;
     }
 
     @Override
@@ -76,13 +83,13 @@ public class WeaponsmithCraftingGoal extends Goal {
         if (!world.isDay()) {
             return false;
         }
-        if (villager.getVillagerData().getProfession() != VillagerProfession.WEAPONSMITH) {
+        if (villager.getVillagerData().getProfession() != VillagerProfession.MASON) {
             return false;
         }
-        if (craftingTablePos == null || chestPos == null) {
+        if (jobPos == null || chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+        if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
             return false;
         }
         refreshDailyLimit(world);
@@ -95,9 +102,12 @@ public class WeaponsmithCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Weaponsmith", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckTrigger checkTrigger = immediateCheckPending ? pendingTrigger : CraftingCheckTrigger.SCHEDULED;
+        int intervalTicks = immediateCheckPending ? 0 : CHECK_INTERVAL_TICKS;
+        CraftingCheckLogger.report(world, "Mason", checkTrigger.name(), intervalTicks, formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
+        pendingTrigger = CraftingCheckTrigger.SCHEDULED;
         return lastCheckCount > 0;
     }
 
@@ -108,8 +118,8 @@ public class WeaponsmithCraftingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+        stage = Stage.GO_TO_STONECUTTER;
+        moveTo(jobPos);
     }
 
     @Override
@@ -126,11 +136,11 @@ public class WeaponsmithCraftingGoal extends Goal {
         }
 
         switch (stage) {
-            case GO_TO_TABLE -> {
-                if (isNear(craftingTablePos)) {
+            case GO_TO_STONECUTTER -> {
+                if (isNear(jobPos)) {
                     stage = Stage.CRAFT;
                 } else {
-                    moveTo(craftingTablePos);
+                    moveTo(jobPos);
                 }
             }
             case CRAFT -> {
@@ -149,12 +159,14 @@ public class WeaponsmithCraftingGoal extends Goal {
             dailyCraftLimit = 4;
             craftedToday = 0;
             immediateCheckPending = false;
+            pendingTrigger = CraftingCheckTrigger.SCHEDULED;
         }
     }
 
-    public void requestImmediateCraft(ServerWorld world) {
+    public void requestImmediateCraft(ServerWorld world, CraftingCheckTrigger trigger) {
         refreshDailyLimit(world);
         immediateCheckPending = true;
+        pendingTrigger = trigger;
         nextCheckTime = 0L;
     }
 
@@ -172,145 +184,85 @@ public class WeaponsmithCraftingGoal extends Goal {
             return;
         }
 
-        List<WeaponRecipe> craftable = getCraftableRecipes(world, inventory);
+        List<MasonRecipe> craftable = getCraftableRecipes(world, inventory);
         if (craftable.isEmpty()) {
             return;
         }
 
-        WeaponRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        MasonRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
-        if (consumeIngredients(inventory, recipe.recipe)) {
+        if (consumeIngredient(inventory, recipe.recipe)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            recordLastCrafted(recipe.output);
-            CraftingCheckLogger.report(world, "Weaponsmith", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
-    private List<WeaponRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
-        List<WeaponRecipe> recipes = new ArrayList<>();
-        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
-            CraftingRecipe recipe = entry.value();
+    private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+        List<MasonRecipe> recipes = new ArrayList<>();
+        for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
+            StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (result.isEmpty() || !isWeaponItem(result)) {
+            if (result.isEmpty() || !isMasonryItem(result)) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
-                recipes.add(new WeaponRecipe(recipe, result));
+                recipes.add(new MasonRecipe(recipe, result));
             }
         }
-        return filterLastCrafted(recipes);
+        return recipes;
     }
 
-    private boolean isWeaponItem(ItemStack stack) {
-        if (stack.getItem() instanceof SwordItem
-                || stack.getItem() instanceof AxeItem
-                || stack.getItem() instanceof BowItem
-                || stack.getItem() instanceof CrossbowItem
-                || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof MaceItem) {
-            return true;
-        }
-
-        if (stack.getItem() instanceof ToolItem) {
-            return !(stack.getItem() instanceof PickaxeItem
-                    || stack.getItem() instanceof ShovelItem
-                    || stack.getItem() instanceof HoeItem);
-        }
-
-        return false;
+    private boolean isMasonryItem(ItemStack stack) {
+        return MASONRY_OUTPUTS.contains(stack.getItem());
     }
 
-    private List<WeaponRecipe> filterLastCrafted(List<WeaponRecipe> recipes) {
-        Identifier lastCrafted = getLastCraftedId();
-        if (lastCrafted == null || recipes.size() <= 1) {
-            return recipes;
+    private boolean canCraft(Inventory inventory, StonecuttingRecipe recipe) {
+        Ingredient ingredient = getPrimaryIngredient(recipe);
+        if (ingredient == null || ingredient.isEmpty()) {
+            return false;
         }
-        List<WeaponRecipe> filtered = new ArrayList<>();
-        for (WeaponRecipe recipe : recipes) {
-            Identifier resultId = Registries.ITEM.getId(recipe.output.getItem());
-            if (!lastCrafted.equals(resultId)) {
-                filtered.add(recipe);
-            }
-        }
-        return filtered.isEmpty() ? recipes : filtered;
+        return findMatchingSlot(inventory, ingredient) >= 0;
     }
 
-    private Identifier getLastCraftedId() {
-        if (villager instanceof WeaponsmithCraftingMemoryHolder holder) {
-            return holder.guardvillagers$getLastWeaponsmithCrafted();
-        }
-        return null;
-    }
-
-    private void recordLastCrafted(ItemStack stack) {
-        if (villager instanceof WeaponsmithCraftingMemoryHolder holder) {
-            holder.guardvillagers$setLastWeaponsmithCrafted(Registries.ITEM.getId(stack.getItem()));
-        }
-    }
-
-    private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
-        List<ItemStack> available = new ArrayList<>();
+    private int findMatchingSlot(Inventory inventory, Ingredient ingredient) {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty()) {
-                available.add(stack.copy());
-            }
-        }
-
-        for (Ingredient ingredient : recipe.getIngredients()) {
-            if (ingredient.isEmpty()) {
-                continue;
-            }
-            int matchIndex = findMatchingStack(available, ingredient);
-            if (matchIndex < 0) {
-                return false;
-            }
-            ItemStack matched = available.get(matchIndex);
-            matched.decrement(1);
-            if (matched.isEmpty()) {
-                available.remove(matchIndex);
-            }
-        }
-
-        return true;
-    }
-
-    private int findMatchingStack(List<ItemStack> available, Ingredient ingredient) {
-        for (int i = 0; i < available.size(); i++) {
-            if (ingredient.test(available.get(i))) {
-                return i;
+            if (!stack.isEmpty() && ingredient.test(stack)) {
+                return slot;
             }
         }
         return -1;
     }
 
-    private boolean consumeIngredients(Inventory inventory, CraftingRecipe recipe) {
-        if (!canCraft(inventory, recipe)) {
+    private boolean consumeIngredient(Inventory inventory, StonecuttingRecipe recipe) {
+        Ingredient ingredient = getPrimaryIngredient(recipe);
+        if (ingredient == null || ingredient.isEmpty()) {
             return false;
         }
 
-        for (Ingredient ingredient : recipe.getIngredients()) {
-            if (ingredient.isEmpty()) {
-                continue;
-            }
-            for (int slot = 0; slot < inventory.size(); slot++) {
-                ItemStack stack = inventory.getStack(slot);
-                if (stack.isEmpty() || !ingredient.test(stack)) {
-                    continue;
-                }
-                stack.decrement(1);
-                if (stack.isEmpty()) {
-                    inventory.setStack(slot, ItemStack.EMPTY);
-                }
-                break;
-            }
+        int slot = findMatchingSlot(inventory, ingredient);
+        if (slot < 0) {
+            return false;
         }
 
+        ItemStack stack = inventory.getStack(slot);
+        stack.decrement(1);
+        if (stack.isEmpty()) {
+            inventory.setStack(slot, ItemStack.EMPTY);
+        }
         return true;
+    }
+
+    private Ingredient getPrimaryIngredient(StonecuttingRecipe recipe) {
+        List<Ingredient> ingredients = recipe.getIngredients();
+        if (ingredients.isEmpty()) {
+            return null;
+        }
+        return ingredients.get(0);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
@@ -410,26 +362,32 @@ public class WeaponsmithCraftingGoal extends Goal {
 
     private enum Stage {
         IDLE,
-        GO_TO_TABLE,
+        GO_TO_STONECUTTER,
         CRAFT,
         DONE
     }
 
-    private record WeaponRecipe(CraftingRecipe recipe, ItemStack output) {
+    private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output) {
+    }
+
+    public enum CraftingCheckTrigger {
+        SCHEDULED,
+        CHEST_PAIRED,
+        CHEST_CONTENT_CHANGED
     }
 
     private String formatCheckResult(int craftableCount) {
         if (craftableCount == 1) {
-            return "1 weapon available to craft";
+            return "1 masonry item available to craft";
         }
-        return craftableCount + " weapons available to craft";
+        return craftableCount + " masonry items available to craft";
     }
 
     private String formatCraftedResult(int craftableCount, ItemStack crafted) {
         String craftedName = crafted.getName().getString();
         if (craftableCount == 1) {
-            return "1 weapon available to craft - 1 " + craftedName + " crafted";
+            return "1 masonry item available to craft - 1 " + craftedName + " crafted";
         }
-        return craftableCount + " weapons available to craft - 1 " + craftedName + " crafted";
+        return craftableCount + " masonry items available to craft - 1 " + craftedName + " crafted";
     }
 }
