@@ -61,7 +61,6 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
         } else {
             distributionGoal.setTargets(jobPos, chestPos, knownCraftingTablePos != null ? knownCraftingTablePos : distributionGoal.getCraftingTablePos());
         }
-        distributionGoal.requestImmediateDistribution();
 
         if (craftingGoal == null) {
             craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, distributionGoal.getCraftingTablePos());
@@ -71,6 +70,9 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
         } else {
             craftingGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
         }
+
+        craftingGoal.requestImmediateCraft(world);
+        distributionGoal.requestImmediateDistribution();
         updateChestListener(world, villager, chestPos);
     }
 
@@ -109,9 +111,6 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
         } else {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
-
-        craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
-        distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
 
         craftingGoal.requestImmediateCraft(world);
         distributionGoal.requestImmediateDistribution();

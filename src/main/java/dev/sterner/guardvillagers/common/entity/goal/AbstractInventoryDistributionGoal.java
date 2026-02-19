@@ -38,9 +38,17 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
-        this.craftingTablePos = craftingTablePos != null ? craftingTablePos.toImmutable() : null;
+        BlockPos updatedJobPos = jobPos.toImmutable();
+        BlockPos updatedChestPos = chestPos.toImmutable();
+        BlockPos updatedCraftingTablePos = craftingTablePos != null ? craftingTablePos.toImmutable() : null;
+        if (updatedJobPos.equals(this.jobPos)
+                && updatedChestPos.equals(this.chestPos)
+                && java.util.Objects.equals(updatedCraftingTablePos, this.craftingTablePos)) {
+            return;
+        }
+        this.jobPos = updatedJobPos;
+        this.chestPos = updatedChestPos;
+        this.craftingTablePos = updatedCraftingTablePos;
         this.stage = Stage.IDLE;
     }
 
