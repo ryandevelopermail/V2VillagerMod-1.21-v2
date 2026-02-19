@@ -73,7 +73,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
                 continue;
             }
 
-            RecipientRecord recipient = recipients.getFirst();
+            RecipientRecord recipient = recipients.get(0);
             ItemStack extracted = stack.split(1);
             inventory.setStack(slot, stack);
             inventory.markDirty();
@@ -109,7 +109,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             }
         }
 
-        RecipientRecord recipient = recipients.getFirst();
+        RecipientRecord recipient = recipients.get(0);
         pendingTargetId = recipient.guard().getUuid();
         pendingTargetPos = recipient.guard().getBlockPos();
         LOGGER.debug("Fletcher {} retargeted pending {} to guard {} at {}",
@@ -251,7 +251,8 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
     }
 
     private boolean canEquipRangedWeapon(GuardEntity guard, ItemStack candidate, ItemStack currentMainHand) {
-        if (!(candidate.getItem() instanceof RangedWeaponItem) || !guard.canUseRangedWeapon(candidate.getItem())) {
+        if (!(candidate.getItem() instanceof RangedWeaponItem rangedWeaponItem)
+                || !guard.canUseRangedWeapon(rangedWeaponItem)) {
             return false;
         }
         return GearGradeComparator.isUpgrade(candidate, currentMainHand, EquipmentSlot.MAINHAND);
