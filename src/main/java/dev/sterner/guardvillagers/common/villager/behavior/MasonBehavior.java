@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingCheckTrigger;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
@@ -69,7 +70,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         } else {
             craftingGoal.setTargets(jobPos, chestPos);
         }
-        craftingGoal.requestImmediateCraft(world);
+        craftingGoal.requestImmediateCraft(world, CraftingCheckTrigger.CHEST_PAIRED);
         updateChestListener(world, villager, chestPos);
         tryConvertWithMiningTool(world, villager, jobPos, chestPos);
     }
@@ -111,7 +112,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         InventoryChangedListener listener = sender -> {
             MasonCraftingGoal goal = CRAFTING_GOALS.get(villager);
             if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                goal.requestImmediateCraft(serverWorld);
+                goal.requestImmediateCraft(serverWorld, CraftingCheckTrigger.CHEST_CONTENT_CHANGED);
             }
         };
         simpleInventory.addListener(listener);
