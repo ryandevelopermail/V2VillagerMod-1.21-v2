@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -11,10 +11,8 @@ import net.minecraft.entity.ai.TargetPredicate;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.task.LookTargetUtil;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.projectile.thrown.PotionEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -60,24 +58,20 @@ public class HealGuardAndPlayerGoal extends Goal {
         if (!hasHealingPotionAvailable()) {
             return false;
         }
-        List<LivingEntity> list = this.healer.getWorld().getNonSpectatingEntities(LivingEntity.class, this.healer.getBoundingBox().expand(10.0D, 3.0D, 10.0D));
-        if (!list.isEmpty()) {
-            for (LivingEntity mob : list) {
-                if (mob != null) {
-                    if (mob instanceof VillagerEntity && mob.isAlive() && mob.getHealth() < mob.getMaxHealth() && mob != healer || mob.getType() == GuardVillagers.GUARD_VILLAGER && mob != null && mob.isAlive() && mob.getHealth() < mob.getMaxHealth()
-                            || mob instanceof PlayerEntity && mob.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE) && !((PlayerEntity) mob).getAbilities().creativeMode && mob.getHealth() < mob.getMaxHealth()) {
-                        this.mob = mob;
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+
+        this.mob = findLowestHealthGuardTarget();
+        return this.mob != null;
     }
 
     @Override
     public boolean shouldContinue() {
-        return this.canStart() && mob != null && mob.getHealth() < mob.getMaxHealth();
+        if (((VillagerEntity) this.healer).getVillagerData().getProfession() != VillagerProfession.CLERIC || this.healer.isSleeping()) {
+            return false;
+        }
+        if (mob == null || !mob.isAlive() || mob.getHealth() >= mob.getMaxHealth()) {
+            mob = findLowestHealthGuardTarget();
+        }
+        return mob != null && hasHealingPotionAvailable();
     }
 
     @Override
@@ -103,7 +97,7 @@ public class HealGuardAndPlayerGoal extends Goal {
         if (!(d0 > (double) this.maxAttackDistance) && this.seeTime >= 5) {
             this.healer.getNavigation().stop();
         } else {
-            this.healer.getNavigation().startMovingTo(this.healer, this.entityMoveSpeed);
+            this.healer.getNavigation().startMovingTo(this.mob, this.entityMoveSpeed);
         }
         if (mob.distanceTo(healer) <= 3.0D) {
             healer.getMoveControl().strafeTo(-0.5F, 0);
@@ -134,18 +128,31 @@ public class HealGuardAndPlayerGoal extends Goal {
         double d1 = target.getEyeY() - (double) 1.1F - healer.getY();
         double d2 = target.getZ() + vec3d.z - healer.getZ();
         float f = MathHelper.sqrt((float) (d0 * d0 + d2 * d2));
-        var potion = Potions.REGENERATION;
-        if (target.getHealth() <= 4.0F) {
-            potion = Potions.HEALING;
-        } else {
-            potion = Potions.REGENERATION;
-        }
         PotionEntity potionentity = new PotionEntity(healer.getWorld(), healer);
-        potionentity.setItem(PotionContentsComponent.createStack(Items.SPLASH_POTION, potion));
+        potionentity.setItem(PotionContentsComponent.createStack(Items.SPLASH_POTION, Potions.HEALING));
         potionentity.setPitch(-20.0F);
         potionentity.setVelocity(d0, d1 + (double) (f * 0.2F), d2, 0.75F, 8.0F);
         healer.getWorld().playSound(null, healer.getX(), healer.getY(), healer.getZ(), SoundEvents.ENTITY_SPLASH_POTION_THROW, healer.getSoundCategory(), 1.0F, 0.8F + healer.getRandom().nextFloat() * 0.4F);
         healer.getWorld().spawnEntity(potionentity);
+    }
+
+
+    private LivingEntity findLowestHealthGuardTarget() {
+        List<GuardEntity> guards = this.healer.getWorld().getEntitiesByClass(
+                GuardEntity.class,
+                this.healer.getBoundingBox().expand(14.0D, 4.0D, 14.0D),
+                guard -> guard.isAlive() && guard.getHealth() < guard.getMaxHealth()
+        );
+
+        if (guards.isEmpty()) {
+            return null;
+        }
+
+        guards.sort(java.util.Comparator
+                .comparingDouble((GuardEntity guard) -> guard.getHealth() / Math.max(guard.getMaxHealth(), 0.001F))
+                .thenComparingDouble(this.healer::squaredDistanceTo));
+
+        return guards.get(0);
     }
 
     private boolean hasHealingPotionAvailable() {

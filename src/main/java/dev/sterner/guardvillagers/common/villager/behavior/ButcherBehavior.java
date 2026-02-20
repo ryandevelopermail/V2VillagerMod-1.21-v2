@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -32,8 +33,10 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ButcherBehavior.class);
     private static final int SMOKER_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 6;
     private static final Map<VillagerEntity, ButcherSmokerGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ButcherMeatDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -53,6 +56,15 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
+
+        ButcherMeatDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new ButcherMeatDistributionGoal(villager, jobPos, chestPos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos);
+        }
 
         ButcherSmokerGoal goal = GOALS.get(villager);
         if (goal == null) {
