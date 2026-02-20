@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingCheckTrigger;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -36,7 +37,9 @@ import java.util.WeakHashMap;
 public class MasonBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int TABLE_CRAFTING_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, MasonCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, MasonTableCraftingGoal> TABLE_CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -73,6 +76,35 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         craftingGoal.requestImmediateCraft(world, CraftingCheckTrigger.CHEST_PAIRED);
         updateChestListener(world, villager, chestPos);
         tryConvertWithMiningTool(world, villager, jobPos, chestPos);
+    }
+
+    @Override
+    public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        if (!villager.isAlive()) {
+            clearChestListener(villager);
+            return;
+        }
+
+        if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
+            clearChestListener(villager);
+            return;
+        }
+
+        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            clearChestListener(villager);
+            return;
+        }
+
+        MasonTableCraftingGoal goal = TABLE_CRAFTING_GOALS.get(villager);
+        if (goal == null) {
+            goal = new MasonTableCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            TABLE_CRAFTING_GOALS.put(villager, goal);
+            villager.goalSelector.add(TABLE_CRAFTING_GOAL_PRIORITY, goal);
+        } else {
+            goal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+
+        goal.requestImmediateCraft(world);
     }
 
     public static void tryConvertMasonsWithMiningTool(ServerWorld world) {

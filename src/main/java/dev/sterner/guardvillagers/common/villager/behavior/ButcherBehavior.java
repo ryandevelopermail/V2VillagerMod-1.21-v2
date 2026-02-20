@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -30,7 +31,9 @@ import java.util.WeakHashMap;
 public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ButcherBehavior.class);
     private static final int SMOKER_GOAL_PRIORITY = 3;
+    private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final Map<VillagerEntity, ButcherSmokerGoal> GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ButcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -62,6 +65,31 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         }
 
         tryConvertWithAxe(world, villager, jobPos, chestPos);
+    }
+
+    @Override
+    public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        if (!villager.isAlive()) {
+            return;
+        }
+
+        if (!world.getBlockState(jobPos).isOf(Blocks.SMOKER)) {
+            return;
+        }
+
+        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            return;
+        }
+
+        ButcherCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        if (goal == null) {
+            goal = new ButcherCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            CRAFTING_GOALS.put(villager, goal);
+            villager.goalSelector.add(CRAFTING_GOAL_PRIORITY, goal);
+        } else {
+            goal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        goal.requestImmediateCraft(world);
     }
 
     public static void tryConvertButchersWithAxe(ServerWorld world) {

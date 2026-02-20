@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ClericBrewingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ClericCraftingGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.entity.BrewingStandBlockEntity;
 import net.minecraft.block.BlockState;
@@ -23,9 +24,11 @@ import java.util.WeakHashMap;
 public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClericBehavior.class);
     private static final int BREWING_GOAL_PRIORITY = 3;
+    private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericBrewingGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ClericCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     public static Set<ClericBrewingGoal.PotionTarget> getReachableRecipes(VillagerEntity villager,
                                                                            Inventory chestInventory,
                                                                            BrewingStandBlockEntity stand) {
@@ -69,6 +72,32 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         }
         goal.requestImmediateBrew();
         updateChestListener(world, villager, chestPos);
+    }
+
+    @Override
+    public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        if (!villager.isAlive()) {
+            return;
+        }
+
+        if (!world.getBlockState(jobPos).isOf(Blocks.BREWING_STAND)) {
+            return;
+        }
+
+        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            return;
+        }
+
+        ClericCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        if (goal == null) {
+            goal = new ClericCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            CRAFTING_GOALS.put(villager, goal);
+            villager.goalSelector.add(CRAFTING_GOAL_PRIORITY, goal);
+        } else {
+            goal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+
+        goal.requestImmediateCraft(world);
     }
 
     public static BlockPos getPairedChestPos(VillagerEntity villager) {

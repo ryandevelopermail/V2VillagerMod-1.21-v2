@@ -11,6 +11,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -18,7 +19,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
 
-public class ShepherdCraftingGoal extends Goal {
+public class MasonTableCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
@@ -35,7 +36,7 @@ public class ShepherdCraftingGoal extends Goal {
     private int lastCheckCount;
     private boolean immediateCheckPending;
 
-    public ShepherdCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+    public MasonTableCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
         setTargets(jobPos, chestPos, craftingTablePos);
         setControls(EnumSet.of(Control.MOVE));
@@ -48,8 +49,10 @@ public class ShepherdCraftingGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
-    public BlockPos getCraftingTablePos() {
-        return craftingTablePos;
+    public void requestImmediateCraft(ServerWorld world) {
+        refreshDailyLimit(world);
+        immediateCheckPending = true;
+        nextCheckTime = 0L;
     }
 
     @Override
@@ -58,6 +61,9 @@ public class ShepherdCraftingGoal extends Goal {
             return false;
         }
         if (!world.isDay()) {
+            return false;
+        }
+        if (villager.getVillagerData().getProfession() != VillagerProfession.MASON) {
             return false;
         }
         if (craftingTablePos == null || chestPos == null) {
@@ -70,13 +76,12 @@ public class ShepherdCraftingGoal extends Goal {
         if (craftedToday >= dailyCraftLimit) {
             return false;
         }
-
         if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Shepherd", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -127,16 +132,10 @@ public class ShepherdCraftingGoal extends Goal {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
             lastCraftDay = day;
-            dailyCraftLimit = 2 + villager.getRandom().nextInt(3);
+            dailyCraftLimit = 2;
             craftedToday = 0;
             immediateCheckPending = false;
         }
-    }
-
-    public void requestImmediateCraft(ServerWorld world) {
-        refreshDailyLimit(world);
-        immediateCheckPending = true;
-        nextCheckTime = 0L;
     }
 
     private int countCraftableRecipes(ServerWorld world) {
@@ -163,7 +162,7 @@ public class ShepherdCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Shepherd", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
@@ -293,22 +292,9 @@ public class ShepherdCraftingGoal extends Goal {
     }
 
     private enum Recipe {
-        WHITE_BANNER(new ItemStack(Items.WHITE_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.WHITE_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        ORANGE_BANNER(new ItemStack(Items.ORANGE_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.ORANGE_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        MAGENTA_BANNER(new ItemStack(Items.MAGENTA_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.MAGENTA_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        LIGHT_BLUE_BANNER(new ItemStack(Items.LIGHT_BLUE_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.LIGHT_BLUE_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        YELLOW_BANNER(new ItemStack(Items.YELLOW_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.YELLOW_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        LIME_BANNER(new ItemStack(Items.LIME_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.LIME_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        PINK_BANNER(new ItemStack(Items.PINK_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.PINK_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        GRAY_BANNER(new ItemStack(Items.GRAY_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.GRAY_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        LIGHT_GRAY_BANNER(new ItemStack(Items.LIGHT_GRAY_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.LIGHT_GRAY_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        CYAN_BANNER(new ItemStack(Items.CYAN_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.CYAN_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        PURPLE_BANNER(new ItemStack(Items.PURPLE_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.PURPLE_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        BLUE_BANNER(new ItemStack(Items.BLUE_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.BLUE_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        BROWN_BANNER(new ItemStack(Items.BROWN_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.BROWN_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        GREEN_BANNER(new ItemStack(Items.GREEN_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.GREEN_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        RED_BANNER(new ItemStack(Items.RED_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.RED_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1)),
-        BLACK_BANNER(new ItemStack(Items.BLACK_BANNER), new IngredientRequirement(stack -> stack.isOf(Items.BLACK_WOOL), 6), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 1));
+        STONECUTTER(new ItemStack(Items.STONECUTTER),
+                new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 1),
+                new IngredientRequirement(stack -> stack.isOf(Items.STONE), 3));
 
         private final ItemStack output;
         private final IngredientRequirement[] requirements;
