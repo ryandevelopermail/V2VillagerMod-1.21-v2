@@ -62,13 +62,17 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, knownCraftingTablePos != null ? knownCraftingTablePos : distributionGoal.getCraftingTablePos());
         }
 
+        BlockPos resolvedCraftingTablePos = knownCraftingTablePos != null
+                ? knownCraftingTablePos
+                : distributionGoal.getCraftingTablePos();
+
         if (craftingGoal == null) {
-            craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, distributionGoal.getCraftingTablePos());
+            craftingGoal = new FletcherCraftingGoal(villager, jobPos, chestPos, resolvedCraftingTablePos);
             CRAFTING_GOALS.put(villager, craftingGoal);
             GoalSelector selector = villager.goalSelector;
             selector.add(CRAFTING_GOAL_PRIORITY, craftingGoal);
         } else {
-            craftingGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+            craftingGoal.setTargets(jobPos, chestPos, resolvedCraftingTablePos);
         }
 
         craftingGoal.requestImmediateCraft(world);
