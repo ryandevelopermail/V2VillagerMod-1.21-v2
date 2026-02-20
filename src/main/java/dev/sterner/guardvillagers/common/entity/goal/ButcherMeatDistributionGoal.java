@@ -199,7 +199,7 @@ public class ButcherMeatDistributionGoal extends Goal {
         Box box = new Box(villager.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
         return world.getEntitiesByClass(GuardEntity.class, box, guard -> guard.isAlive() && canReceive(guard, candidateStack))
                 .stream()
-                .sorted(Comparator.comparingDouble(villager::squaredDistanceTo)
+                 .sorted(Comparator.comparingDouble((GuardEntity guard) -> villager.squaredDistanceTo(guard))
                         .thenComparing(GuardEntity::getUuid, UUID::compareTo))
                 .toList();
     }
