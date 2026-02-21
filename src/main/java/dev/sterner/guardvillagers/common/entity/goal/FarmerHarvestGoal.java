@@ -15,7 +15,6 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.HoeItem;
-import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -285,7 +284,8 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 depositInventory(serverWorld);
-                if (pickUpHoeFromChest(serverWorld)) {
+                boolean hasHoe = hasHoeInInventory() || pickUpHoeFromChest(serverWorld);
+                if (hasHoe) {
                     populateHoeTargets(serverWorld);
                 } else {
                     hoeTargets.clear();
@@ -308,6 +308,7 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
+                    populatePlantTargets(serverWorld);
                     if (!plantTargets.isEmpty()) {
                         setStage(Stage.PLANT_FARMLAND);
                     } else {
@@ -324,7 +325,7 @@ public class FarmerHarvestGoal extends Goal {
                     moveTo(target, MOVE_SPEED);
                     return;
                 }
-                if (isHoeTarget(serverWorld, target) && isWaterInRange(serverWorld, target)) {
+                if (isHoeTarget(serverWorld, target)) {
                     serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
                 }
                 hoeTargets.removeFirst();
@@ -777,7 +778,7 @@ public class FarmerHarvestGoal extends Goal {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
-            if (isHoeTarget(world, pos) && isWaterInRange(world, pos)) {
+            if (isHoeTarget(world, pos)) {
                 hoeTargets.add(pos.toImmutable());
             }
         }
@@ -819,24 +820,6 @@ public class FarmerHarvestGoal extends Goal {
         return null;
     }
 
-    private void hoeNearbyDirt(ServerWorld world) {
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
-                continue;
-            }
-            if (!isHoeTarget(world, pos)) {
-                continue;
-            }
-            if (!isWaterInRange(world, pos)) {
-                continue;
-            }
-            world.setBlockState(pos, Blocks.FARMLAND.getDefaultState());
-        }
-    }
 
     private boolean pickUpHoeFromChest(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
@@ -901,7 +884,7 @@ public class FarmerHarvestGoal extends Goal {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
-            if (isHoeTarget(world, pos) && isWaterInRange(world, pos)) {
+            if (isHoeTarget(world, pos)) {
                 return true;
             }
         }
@@ -965,20 +948,6 @@ public class FarmerHarvestGoal extends Goal {
         return world.getBlockState(pos.up()).isAir();
     }
 
-    private boolean isWaterInRange(ServerWorld world, BlockPos pos) {
-        int range = 5;
-        BlockPos start = pos.add(-range, 0, -range);
-        BlockPos end = pos.add(range, 0, range);
-        for (BlockPos checkPos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(checkPos) > range * range) {
-                continue;
-            }
-            if (world.getFluidState(checkPos).isIn(FluidTags.WATER)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
     private BlockPos findGateWalkTarget(BlockPos gatePos, Direction direction, int distance) {
         if (direction == null) {
