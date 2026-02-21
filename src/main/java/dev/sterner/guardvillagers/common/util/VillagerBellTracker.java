@@ -1,9 +1,11 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStandAssignment;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStandPairingReport;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.Entity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import net.minecraft.entity.ai.brain.BlockPosLookTarget;
@@ -13,6 +15,11 @@ import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.WrittenBookContentComponent;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
@@ -47,6 +54,7 @@ public final class VillagerBellTracker {
     private static final int WRITTEN_BOOK_MAX_PAGE_LENGTH = 255;
     private static final int WRITTEN_BOOK_MAX_PAGE_COUNT = 100;
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
+    private static final Map<GlobalPos, Long> LAST_BOOK_WRITE_TICK = new HashMap<>();
 
     private VillagerBellTracker() {
     }
@@ -303,6 +311,9 @@ public final class VillagerBellTracker {
     }
 
     private record ReportAssignment(GlobalPos jobSite, long endTime) {
+    }
+
+    private record BellVillageReport(List<String> orderedLines) {
     }
 
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {

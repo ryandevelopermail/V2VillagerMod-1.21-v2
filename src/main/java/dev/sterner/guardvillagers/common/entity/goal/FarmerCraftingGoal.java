@@ -54,6 +54,13 @@ public class FarmerCraftingGoal extends Goal {
         return craftingTablePos;
     }
 
+    public void requestImmediateCraft(ServerWorld world) {
+        refreshDailyLimit(world);
+        guaranteedCraftPending = true;
+        guaranteedCraftDay = world.getTimeOfDay() / 24000L;
+        nextCheckTime = 0L;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
