@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.common.entity.goal.PlaceOwnJobBlockNearJobSiteGoal;
-import dev.sterner.guardvillagers.common.util.ProfessionJobBlockHelper;
 import net.minecraft.block.Block;
 import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -43,7 +42,7 @@ public final class VillagerProfessionBehaviorRegistry {
     }
 
     public static void ensureUniversalJobBlockGoal(VillagerEntity villager, BlockPos jobPos) {
-        if (!ProfessionJobBlockHelper.hasSupportedJobBlock(villager.getVillagerData().getProfession())) {
+        if (!ProfessionDefinitions.hasDefinition(villager.getVillagerData().getProfession())) {
             return;
         }
 

@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -47,7 +48,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FISHERMAN, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }
@@ -89,7 +90,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FISHERMAN, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }
@@ -142,7 +143,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             }
 
             BlockPos jobPos = jobSite.get();
-            if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+            if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FISHERMAN, world.getBlockState(jobPos))) {
                 continue;
             }
 

@@ -1,6 +1,6 @@
 # Villager Profession Modification Framework
 
-This document outlines the new framework for building villager profession upgrades around paired blocks.
+This document outlines the profession framework for villager upgrades around paired blocks.
 It focuses on three event categories:
 
 1. **Chest pairing** within 3 blocks of a villager’s job site.
@@ -18,14 +18,34 @@ Pairing events are emitted by `JobBlockPairingHelper` when a block is placed:
 
 All three events play a pairing animation and then notify the profession registry.
 
+### Single source of truth: `ProfessionDefinitions`
+`ProfessionDefinitions` is the canonical registration path for profession behavior metadata.
+Each `ProfessionDefinition` contains:
+
+- Profession id.
+- Profession instance.
+- Expected job block set.
+- Behavior factory.
+- Optional conversion hook (run from server tick loop).
+- Optional profession-specific modifier definitions.
+
+The registration bootstrap lives in:
+- `src/main/java/dev/sterner/guardvillagers/common/villager/ProfessionDefinitions.java`
+
+`GuardVillagers.onInitialize()` now calls:
+
+```java
+ProfessionDefinitions.registerAll();
+```
+
+This single bootstrap registers all profession behaviors and all special modifiers (including global ones).
+
 ### Behavior registry
-`VillagerProfessionBehaviorRegistry` wires professions to behaviors and special modifiers.
+`VillagerProfessionBehaviorRegistry` remains the runtime dispatcher.
+`ProfessionDefinitions.registerAll()` populates it once.
 
 - **Profession behavior**: handles chest/crafting/special modifier callbacks.
 - **Special modifier**: defines a block plus the max range it must be from the job site + chest pair.
-
-The registry lives in:
-- `src/main/java/dev/sterner/guardvillagers/common/villager/VillagerProfessionBehaviorRegistry.java`
 
 ### Behavior interface
 Implement `VillagerProfessionBehavior` to handle profession-specific logic.
@@ -41,53 +61,27 @@ Callbacks:
 ## How to add a profession behavior
 
 1. Create a behavior implementation per profession.
-2. Register it in `VillagerProfessionBehaviors.register()`.
+2. Add a `ProfessionDefinition` entry in `ProfessionDefinitions`.
 3. Implement profession-specific logic in the callbacks.
 
-Example skeleton:
+Example definition entry:
 
 ```java
-public final class FarmerBehavior implements VillagerProfessionBehavior {
-    @Override
-    public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
-        // Enable chest storage + job block interactions.
-    }
-
-    @Override
-    public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        // Unlock farmer-specific crafting recipes.
-    }
-}
-```
-
-Registration entry point:
-- `src/main/java/dev/sterner/guardvillagers/common/villager/VillagerProfessionBehaviors.java`
-
-```java
-public static void register() {
-    VillagerProfessionBehaviorRegistry.registerBehavior(VillagerProfession.FARMER, new FarmerBehavior());
-}
+definition(VillagerProfession.FARMER, Set.of(Blocks.COMPOSTER), FarmerBehavior::new)
 ```
 
 ## How to add a special modifier block
 
 1. Create a `SpecialModifier` with an ID, block, and range.
-2. Register it in `VillagerProfessionBehaviors.register()`.
-3. Handle it in `onSpecialModifierPaired`.
-
-```java
-public static void register() {
-    VillagerProfessionBehaviorRegistry.registerSpecialModifier(
-        new SpecialModifier(GuardVillagers.id("shepherd_banner"), Blocks.WHITE_BANNER, 6.0D)
-    );
-}
-```
-
-When the banner is placed within the modifier range of both the job site and the paired chest, the registry dispatches `onSpecialModifierPaired`.
+2. Register it either in:
+   - `GLOBAL_SPECIAL_MODIFIERS` (applies for all professions), or
+   - the `specialModifiers` list inside a specific `ProfessionDefinition`.
+3. Handle it in `onSpecialModifierPaired` inside profession behavior(s).
 
 ## Where to hook new functionality
 
-- **Registry wiring**: `VillagerProfessionBehaviors.register()`
+- **Single registration/bootstrap**: `ProfessionDefinitions.registerAll()`
+- **Definition source of truth**: `ProfessionDefinitions`
 - **Pairing event dispatch**: `JobBlockPairingHelper`
 - **Placement trigger**: `JobBlockPlacementHandler`
 
@@ -97,4 +91,4 @@ When the banner is placed within the modifier range of both the job site and the
 - Crafting table pairing enables profession-specific crafting.
 - Special modifiers enable richer behavior (e.g., a shepherd guiding animals between banners).
 
-Each profession can opt into any subset of these callbacks.
+Each profession can opt into any subset of callbacks and an optional conversion hook.

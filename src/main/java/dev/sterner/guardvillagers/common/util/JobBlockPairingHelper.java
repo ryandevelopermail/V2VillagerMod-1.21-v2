@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ButcherBannerTracker;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -272,7 +273,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.COMPOSTER)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FARMER, world.getBlockState(jobPos))) {
             return false;
         }
 

@@ -1,8 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -69,7 +69,7 @@ public class ToolsmithSmithingGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.TOOLSMITH) {
             return false;
         }
-        if (!world.getBlockState(jobPos).isOf(Blocks.SMITHING_TABLE)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.TOOLSMITH, world.getBlockState(jobPos))) {
             return false;
         }
 
