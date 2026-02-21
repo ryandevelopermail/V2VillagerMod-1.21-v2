@@ -57,10 +57,14 @@ public class BellChestMappingState extends PersistentState {
                 continue;
             }
 
-            BlockPos bellPos = NbtHelper.toBlockPos(entry.getCompound(BELL_POS_KEY));
-            BlockPos chestPos = NbtHelper.toBlockPos(entry.getCompound(CHEST_POS_KEY));
+            Optional<BlockPos> bellPos = NbtHelper.toBlockPos(entry, BELL_POS_KEY);
+            Optional<BlockPos> chestPos = NbtHelper.toBlockPos(entry, CHEST_POS_KEY);
+            if (bellPos.isEmpty() || chestPos.isEmpty()) {
+                continue;
+            }
+
             RegistryKey<net.minecraft.world.World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimId);
-            state.bellToChest.put(GlobalPos.create(worldKey, bellPos.toImmutable()), chestPos.toImmutable());
+            state.bellToChest.put(GlobalPos.create(worldKey, bellPos.get().toImmutable()), chestPos.get().toImmutable());
         }
 
         return state;
