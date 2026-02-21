@@ -79,6 +79,19 @@ public final class VillagerBellTracker {
         return splitLinesIntoWrittenBookPages(reportLines);
     }
 
+    public static void writeBellReportBooks(ServerWorld world, BlockPos bellPos) {
+        GlobalPos reportKey = GlobalPos.create(world.getRegistryKey(), bellPos.toImmutable());
+        long gameTime = world.getTime();
+        Long lastWriteTick = LAST_BOOK_WRITE_TICK.get(reportKey);
+        if (lastWriteTick != null && gameTime - lastWriteTick < 20L) {
+            return;
+        }
+
+        LAST_BOOK_WRITE_TICK.put(reportKey, gameTime);
+        List<String> pages = buildBellReportBookPages(world, bellPos);
+        LOGGER.info("Bell report book generation requested at {} with {} pages.", bellPos.toShortString(), pages.size());
+    }
+
     private static BellReportSummary collectBellReportSummary(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
