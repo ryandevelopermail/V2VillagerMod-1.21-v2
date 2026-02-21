@@ -138,7 +138,10 @@ public final class VillagerBellTracker {
     }
 
     private static Optional<Inventory> findBellReportChestInventory(ServerWorld world, BlockPos bellPos) {
-        Optional<BlockPos> nearestChestPos = findNearestBellReportChest(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS);
+        Optional<BlockPos> nearestChestPos = VillageBellChestPlacementHelper.reconcileBellChestForBell(world, bellPos);
+        if (nearestChestPos.isEmpty()) {
+            nearestChestPos = findNearestBellReportChest(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS);
+        }
 
         int fallbackRadius = Math.max(0, GuardVillagersConfig.bellReportChestFallbackRadius);
         if (nearestChestPos.isEmpty() && fallbackRadius > REPORT_CHEST_PRIMARY_SEARCH_RADIUS) {

@@ -13,6 +13,7 @@ import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandle
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
+import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
@@ -211,7 +212,10 @@ public class GuardVillagers implements ModInitializer {
             }
         });
 
-        ServerWorldEvents.LOAD.register((server, world) -> JobBlockPairingHelper.refreshWorldPairings(world));
+        ServerWorldEvents.LOAD.register((server, world) -> {
+            JobBlockPairingHelper.refreshWorldPairings(world);
+            VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+        });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -219,6 +223,9 @@ public class GuardVillagers implements ModInitializer {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
                 VillagerBellTracker.tickVillagerReports(world);
+                if (world.getTime() % 100L == 0L) {
+                    VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+                }
                 if (world.getTime() % 40L == 0L) {
                     ButcherBehavior.tryConvertButchersWithAxe(world);
                     MasonBehavior.tryConvertMasonsWithMiningTool(world);
