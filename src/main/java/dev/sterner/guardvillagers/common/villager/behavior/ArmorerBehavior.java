@@ -24,7 +24,6 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ArmorerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ArmorerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
 
     public static BlockPos getPairedChestPos(VillagerEntity villager) {
         return PAIRED_CHESTS.get(villager);
@@ -43,7 +42,6 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
 
         PAIRED_CHESTS.put(villager, chestPos.toImmutable());
         LOGGER.info("Armorer {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
-        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
 
         ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
                 () -> new ArmorerBlastFurnaceGoal(villager, jobPos, chestPos));
@@ -95,10 +93,5 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
                 crafting.requestImmediateCraft(serverWorld);
             }
         });
-    }
-
-    public static BlockPos getPairedChestPos(VillagerEntity villager) {
-        BlockPos pos = PAIRED_CHESTS.get(villager);
-        return pos == null ? null : pos.toImmutable();
     }
 }
