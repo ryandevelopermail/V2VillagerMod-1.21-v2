@@ -58,6 +58,10 @@ public class ButcherMeatDistributionGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
+    public void requestImmediateDistribution() {
+        nextCheckTime = 0L;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
