@@ -37,6 +37,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -138,43 +139,55 @@ public final class VillagerBellTracker {
     }
 
     private static Optional<Inventory> findBellReportChestInventory(ServerWorld world, BlockPos bellPos) {
-        Optional<BlockPos> nearestChestPos = VillageBellChestPlacementHelper.reconcileBellChestForBell(world, bellPos);
-        if (nearestChestPos.isEmpty()) {
-            nearestChestPos = findNearestBellReportChest(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS);
-        }
+        LinkedHashSet<BlockPos> candidateChestPositions = new LinkedHashSet<>();
+        VillageBellChestPlacementHelper.reconcileBellChestForBell(world, bellPos).ifPresent(candidateChestPositions::add);
+        candidateChestPositions.addAll(findNearestBellReportChestCandidates(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS));
 
         int fallbackRadius = Math.max(0, GuardVillagersConfig.bellReportChestFallbackRadius);
-        if (nearestChestPos.isEmpty() && fallbackRadius > REPORT_CHEST_PRIMARY_SEARCH_RADIUS) {
+        if (candidateChestPositions.isEmpty() && fallbackRadius > REPORT_CHEST_PRIMARY_SEARCH_RADIUS) {
             LOGGER.info(
                     "Bell report chest lookup at {}: no chest found within primary radius {}; retrying with fallback radius {}.",
                     bellPos.toShortString(),
                     REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
                     fallbackRadius
             );
-            nearestChestPos = findNearestBellReportChest(world, bellPos, fallbackRadius);
+            candidateChestPositions.addAll(findNearestBellReportChestCandidates(world, bellPos, fallbackRadius));
         }
 
-        if (nearestChestPos.isEmpty()) {
+        if (candidateChestPositions.isEmpty()) {
             return Optional.empty();
         }
 
-        BlockPos chestPos = nearestChestPos.get();
-        BlockState chestState = world.getBlockState(chestPos);
-        if (!(chestState.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        for (BlockPos chestPos : candidateChestPositions) {
+            BlockState chestState = world.getBlockState(chestPos);
+            if (!(chestState.getBlock() instanceof ChestBlock chestBlock)) {
+                continue;
+            }
+
+            Inventory inventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
+            if (inventory != null) {
+                return Optional.of(inventory);
+            }
+
+            LOGGER.info(
+                    "Bell report chest lookup at {}: chest-like block at {} has no accessible inventory (blocked or unavailable).",
+                    bellPos.toShortString(),
+                    chestPos.toShortString()
+            );
         }
 
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true));
+        return Optional.empty();
     }
 
-    private static Optional<BlockPos> findNearestBellReportChest(ServerWorld world, BlockPos bellPos, int radius) {
+    private static List<BlockPos> findNearestBellReportChestCandidates(ServerWorld world, BlockPos bellPos, int radius) {
         return BlockPos.streamOutwards(bellPos, radius, 1, radius)
-                .filter(pos -> world.getBlockState(pos).isOf(Blocks.CHEST))
-                .min(Comparator
+                .filter(pos -> world.getBlockState(pos).getBlock() instanceof ChestBlock)
+                .sorted(Comparator
                         .comparingDouble((BlockPos pos) -> pos.getSquaredDistance(bellPos))
                         .thenComparingInt(BlockPos::getY)
                         .thenComparingInt(BlockPos::getX)
-                        .thenComparingInt(BlockPos::getZ));
+                        .thenComparingInt(BlockPos::getZ))
+                .toList();
     }
 
     private static boolean tryInsertIntoInventory(Inventory inventory, ItemStack stack) {
