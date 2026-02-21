@@ -48,6 +48,7 @@ public class FarmerHarvestGoal extends Goal {
     private boolean enabled;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
+    private boolean immediateRunRequested;
     private long lastHarvestDay = -1L;
     private boolean dailyHarvestRun;
     private FarmerCraftingGoal craftingGoal;
@@ -83,6 +84,11 @@ public class FarmerHarvestGoal extends Goal {
         this.craftingGoal = craftingGoal;
     }
 
+    public void requestImmediateWorkCheck() {
+        immediateRunRequested = true;
+        nextCheckTime = 0L;
+    }
+
     @Override
     public boolean canStart() {
         if (!enabled || !villager.isAlive() || jobPos == null || chestPos == null) {
@@ -91,7 +97,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             return false;
         }
-        if (world.getTime() < nextCheckTime) {
+        if (!immediateRunRequested && world.getTime() < nextCheckTime) {
             return false;
         }
 
@@ -104,8 +110,12 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         int matureCount = countMatureCrops(world);
+        boolean canRunForHoeing = hasHoeableGroundInRange(world) && (hasHoeInInventory() || hasHoeInChest(world));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-        return matureCount >= 1;
+        if (immediateRunRequested) {
+            immediateRunRequested = false;
+        }
+        return matureCount >= 1 || canRunForHoeing;
     }
 
     @Override
@@ -848,6 +858,52 @@ public class FarmerHarvestGoal extends Goal {
             chestInventory.markDirty();
             villager.getInventory().markDirty();
             return true;
+        }
+        return false;
+    }
+
+    private boolean hasHoeInInventory() {
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasHoeInChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return false;
+        }
+
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasHoeableGroundInRange(ServerWorld world) {
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (isHoeTarget(world, pos) && isWaterInRange(world, pos)) {
+                return true;
+            }
         }
         return false;
     }
