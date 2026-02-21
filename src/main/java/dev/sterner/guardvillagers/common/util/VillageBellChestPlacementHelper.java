@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
 import net.minecraft.block.BellBlock;
-import net.minecraft.block.enums.BellAttachment;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -95,7 +94,7 @@ public final class VillageBellChestPlacementHelper {
         }
 
         if (bellState.contains(BellBlock.ATTACHMENT)) {
-            BellAttachment attachment = bellState.get(BellBlock.ATTACHMENT);
+            var attachment = bellState.get(BellBlock.ATTACHMENT);
             return switch (attachment) {
                 case FLOOR -> Direction.WEST;
                 case CEILING -> Direction.EAST;
