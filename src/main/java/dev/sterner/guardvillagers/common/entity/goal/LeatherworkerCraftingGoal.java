@@ -107,7 +107,7 @@ public class LeatherworkerCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Leatherworker", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Leatherworker", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -200,7 +200,7 @@ public class LeatherworkerCraftingGoal extends Goal {
             inventory.markDirty();
             craftedToday++;
             recordLastCrafted(recipe.output);
-            CraftingCheckLogger.report(world, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

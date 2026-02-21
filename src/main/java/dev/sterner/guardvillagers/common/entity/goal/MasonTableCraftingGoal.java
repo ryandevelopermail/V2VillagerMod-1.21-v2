@@ -81,7 +81,7 @@ public class MasonTableCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -162,7 +162,7 @@ public class MasonTableCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

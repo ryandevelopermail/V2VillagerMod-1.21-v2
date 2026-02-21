@@ -82,7 +82,7 @@ public class ButcherCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Butcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Butcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -163,7 +163,7 @@ public class ButcherCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Butcher", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Butcher", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

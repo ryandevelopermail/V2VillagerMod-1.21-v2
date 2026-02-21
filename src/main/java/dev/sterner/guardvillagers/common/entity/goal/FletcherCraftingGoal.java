@@ -102,7 +102,7 @@ public class FletcherCraftingGoal extends Goal {
         }
         List<FletcherRecipe> craftableRecipes = getCraftableRecipes(world, inventory, hasCraftingTable);
         lastCheckCount = craftableRecipes.size();
-        CraftingCheckLogger.report(world, "Fletcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Fletcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         if (craftableRecipes.isEmpty()) {
@@ -213,7 +213,7 @@ public class FletcherCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Fletcher", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Fletcher", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

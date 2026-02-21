@@ -86,7 +86,7 @@ public class FarmerCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Farmer", skipThrottle ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Farmer", skipThrottle ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         return lastCheckCount > 0;
     }
@@ -180,7 +180,7 @@ public class FarmerCraftingGoal extends Goal {
             inventory.markDirty();
             craftedToday++;
             guaranteedCraftPending = false;
-            CraftingCheckLogger.report(world, "Farmer", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Farmer", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

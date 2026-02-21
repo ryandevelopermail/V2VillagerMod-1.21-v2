@@ -83,7 +83,7 @@ public class ToolsmithSmithingGoal extends Goal {
         }
 
         lastCheckCount = countSmithableRecipes(world);
-        CraftingCheckLogger.report(world, "Toolsmith", immediateCheckPending ? "immediate smithing request" : "natural smithing interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Toolsmith", immediateCheckPending ? "immediate smithing request" : "natural smithing interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -190,7 +190,7 @@ public class ToolsmithSmithingGoal extends Goal {
 
         inventory.markDirty();
         smithedToday++;
-        CraftingCheckLogger.report(world, "Toolsmith", formatSmithResult(lastCheckCount, plan.output));
+        CraftingCheckLogger.report(villager, "Toolsmith", formatSmithResult(lastCheckCount, plan.output));
         LOGGER.info("Toolsmith {} smithed {} via {}",
                 villager.getUuidAsString(),
                 plan.output.getName().getString(),

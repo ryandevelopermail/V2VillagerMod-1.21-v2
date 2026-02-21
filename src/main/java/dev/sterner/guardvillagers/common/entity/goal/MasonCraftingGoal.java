@@ -104,7 +104,7 @@ public class MasonCraftingGoal extends Goal {
         lastCheckCount = countCraftableRecipes(world);
         CraftingCheckTrigger checkTrigger = immediateCheckPending ? pendingTrigger : CraftingCheckTrigger.SCHEDULED;
         int intervalTicks = immediateCheckPending ? 0 : CHECK_INTERVAL_TICKS;
-        CraftingCheckLogger.report(world, "Mason", checkTrigger.name(), intervalTicks, formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(villager, "Mason", checkTrigger.name(), intervalTicks, formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         pendingTrigger = CraftingCheckTrigger.SCHEDULED;
@@ -197,7 +197,7 @@ public class MasonCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(villager, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
