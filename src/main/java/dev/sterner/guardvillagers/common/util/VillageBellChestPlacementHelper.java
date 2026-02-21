@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import net.minecraft.block.BellBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -26,21 +27,23 @@ public final class VillageBellChestPlacementHelper {
 
     public static void tryPlaceChestForVillageBell(ServerWorldAccess world, BlockPos bellPos, BlockState bellState, StructurePlacementData placementData) {
         if (!bellState.isOf(Blocks.BELL)) {
+            LOGGER.debug("Skipping chest placement at {}: not a bell block", bellPos.toShortString());
             return;
         }
 
         if (!isVillagePlacementContext(world, bellPos, placementData)) {
+            LOGGER.debug("Skipping chest placement near bell {}: village placement context failed", bellPos.toShortString());
             return;
         }
 
         if (hasNearbyChest(world, bellPos)) {
-            LOGGER.debug("Skipping chest placement near bell {} because a chest already exists in the neighborhood", bellPos.toShortString());
+            LOGGER.debug("Skipping chest placement near bell {}: nearby chest already exists", bellPos.toShortString());
             return;
         }
 
         Optional<BlockPos> chestPos = findNearestAvailableChestPlacement(world, bellPos, bellState);
         if (chestPos.isEmpty()) {
-            LOGGER.info("No valid chest placement found for generated village bell at {}", bellPos.toShortString());
+            LOGGER.info("Skipping chest placement near bell {}: no valid chest position found", bellPos.toShortString());
             return;
         }
 
@@ -115,16 +118,22 @@ public final class VillageBellChestPlacementHelper {
 
     private static boolean isVillagePlacementContext(ServerWorldAccess world, BlockPos bellPos, StructurePlacementData placementData) {
         if (placementData == null) {
+            LOGGER.debug("Village context check failed at {}: missing structure placement data", bellPos.toShortString());
             return false;
         }
 
-        int radius = 6;
+        if (!GuardVillagersConfig.bellChestRequireNearbyBed) {
+            return true;
+        }
+
+        int radius = Math.max(0, GuardVillagersConfig.bellChestBedSearchRadius);
         for (BlockPos checkPos : BlockPos.iterate(bellPos.add(-radius, -2, -radius), bellPos.add(radius, 2, radius))) {
             if (world.getBlockState(checkPos).isIn(BlockTags.BEDS)) {
                 return true;
             }
         }
 
+        LOGGER.debug("Village context check failed at {}: no nearby bed within radius {}", bellPos.toShortString(), radius);
         return false;
     }
 

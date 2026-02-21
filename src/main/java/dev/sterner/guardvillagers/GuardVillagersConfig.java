@@ -67,4 +67,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static float spawnChancePerVillager = 0.5f;
     @Entry
     public static int bellReportChestFallbackRadius = 6;
+    @Entry
+    public static boolean bellChestRequireNearbyBed = false;
+    @Entry
+    public static int bellChestBedSearchRadius = 6;
 }
