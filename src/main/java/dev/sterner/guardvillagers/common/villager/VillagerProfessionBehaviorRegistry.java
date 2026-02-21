@@ -1,6 +1,9 @@
 package dev.sterner.guardvillagers.common.villager;
 
+import dev.sterner.guardvillagers.common.entity.goal.PlaceOwnJobBlockNearJobSiteGoal;
+import dev.sterner.guardvillagers.common.util.ProfessionJobBlockHelper;
 import net.minecraft.block.Block;
+import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -14,6 +17,7 @@ import java.util.Optional;
 public final class VillagerProfessionBehaviorRegistry {
     private static final Map<VillagerProfession, VillagerProfessionBehavior> BEHAVIORS = new HashMap<>();
     private static final Map<Block, SpecialModifier> SPECIAL_MODIFIERS = new IdentityHashMap<>();
+    private static final int UNIVERSAL_JOB_BLOCK_GOAL_PRIORITY = 5;
 
     private VillagerProfessionBehaviorRegistry() {
     }
@@ -38,17 +42,34 @@ public final class VillagerProfessionBehaviorRegistry {
         return SPECIAL_MODIFIERS.containsKey(block);
     }
 
+    public static void ensureUniversalJobBlockGoal(VillagerEntity villager, BlockPos jobPos) {
+        if (!ProfessionJobBlockHelper.hasSupportedJobBlock(villager.getVillagerData().getProfession())) {
+            return;
+        }
+
+        boolean hasGoal = villager.goalSelector.getGoals().stream()
+                .map(PrioritizedGoal::getGoal)
+                .anyMatch(goal -> goal instanceof PlaceOwnJobBlockNearJobSiteGoal);
+
+        if (!hasGoal) {
+            villager.goalSelector.add(UNIVERSAL_JOB_BLOCK_GOAL_PRIORITY, new PlaceOwnJobBlockNearJobSiteGoal(villager, jobPos));
+        }
+    }
+
     public static void notifyChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        ensureUniversalJobBlockGoal(villager, jobPos);
         getBehavior(villager.getVillagerData().getProfession())
                 .ifPresent(behavior -> behavior.onChestPaired(world, villager, jobPos, chestPos));
     }
 
     public static void notifyCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        ensureUniversalJobBlockGoal(villager, jobPos);
         getBehavior(villager.getVillagerData().getProfession())
                 .ifPresent(behavior -> behavior.onCraftingTablePaired(world, villager, jobPos, chestPos, craftingTablePos));
     }
 
     public static void notifySpecialModifierPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, SpecialModifier modifier, BlockPos modifierPos) {
+        ensureUniversalJobBlockGoal(villager, jobPos);
         getBehavior(villager.getVillagerData().getProfession())
                 .ifPresent(behavior -> behavior.onSpecialModifierPaired(world, villager, jobPos, chestPos, modifier, modifierPos));
     }
