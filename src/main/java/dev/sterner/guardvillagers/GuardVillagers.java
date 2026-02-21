@@ -12,6 +12,8 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
+import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
+import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
@@ -25,7 +27,6 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
-import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -35,7 +36,6 @@ import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.AbstractBlock;
-import net.minecraft.block.BellBlock;
 import net.minecraft.block.Block;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -119,6 +119,13 @@ public class GuardVillagers implements ModInitializer {
         return Identifier.of(MODID, name);
     }
 
+    public static void onBellRung(ServerWorld world, BlockPos bellPos) {
+        BellVillageReport report = VillagerBellTracker.snapshotBellVillageReport(world, bellPos);
+        VillagerBellTracker.logBellVillagerStats(world, bellPos, report);
+        VillagerBellTracker.writeBellReportBooks(world, bellPos, report);
+        VillagerBellTracker.directEmployedVillagersAndGuardsToStations(world, bellPos);
+    }
+
     @Override
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
@@ -168,18 +175,6 @@ public class GuardVillagers implements ModInitializer {
         UseEntityCallback.EVENT.register(this::villagerConvert);
         JobBlockPlacementHandler.register();
         UseItemCallback.EVENT.register(this::onUseItem);
-        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (!world.isClient()) {
-                BlockPos blockPos = hitResult.getBlockPos();
-                if (world.getBlockState(blockPos).getBlock() instanceof BellBlock && world instanceof ServerWorld serverWorld) {
-                    VillagerBellTracker.logBellVillagerStats(serverWorld, blockPos);
-                    VillagerBellTracker.writeBellReportBooks(serverWorld, blockPos);
-                    VillagerBellTracker.directEmployedVillagersAndGuardsToStations(serverWorld, blockPos);
-                }
-            }
-            return ActionResult.PASS;
-        });
-
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity) {
                 if (world instanceof ServerWorld serverWorld) {
@@ -217,7 +212,10 @@ public class GuardVillagers implements ModInitializer {
             }
         });
 
-        ServerWorldEvents.LOAD.register((server, world) -> JobBlockPairingHelper.refreshWorldPairings(world));
+        ServerWorldEvents.LOAD.register((server, world) -> {
+            JobBlockPairingHelper.refreshWorldPairings(world);
+            VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+        });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -225,6 +223,9 @@ public class GuardVillagers implements ModInitializer {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
                 VillagerBellTracker.tickVillagerReports(world);
+                if (world.getTime() % 100L == 0L) {
+                    VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+                }
                 if (world.getTime() % 40L == 0L) {
                     ButcherBehavior.tryConvertButchersWithAxe(world);
                     MasonBehavior.tryConvertMasonsWithMiningTool(world);
