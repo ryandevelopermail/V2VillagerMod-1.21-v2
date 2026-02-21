@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -21,7 +22,9 @@ import java.util.WeakHashMap;
 public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(LibrarianBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, LibrarianCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, LibrarianBellChestDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -55,6 +58,16 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         } else {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new LibrarianBellChestDistributionGoal(villager, jobPos, chestPos, null);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        }
         updateChestListener(world, villager, chestPos);
     }
 
@@ -85,6 +98,16 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new LibrarianBellChestDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
         updateChestListener(world, villager, chestPos);
     }
 
