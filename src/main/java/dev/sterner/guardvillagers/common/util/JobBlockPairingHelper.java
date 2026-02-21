@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.villager.ButcherBannerTracker;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -84,6 +85,8 @@ public final class JobBlockPairingHelper {
 
         world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
                 .forEach(villager -> tryPlayPairingAnimation(world, villager, placedPos));
+        VillagerConversionCandidateIndex.markCandidatesNear(world, placedPos, NEARBY_VILLAGER_SCAN_RANGE);
+        ProfessionDefinitions.runConversionHooks(world);
     }
 
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {

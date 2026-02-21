@@ -11,6 +11,7 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
@@ -135,7 +136,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertMasonsWithMiningTool(ServerWorld world) {
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, JobBlockPairingHelper.getWorldBounds(world), entity -> entity.isAlive() && entity.getVillagerData().getProfession() == VillagerProfession.MASON)) {
+        for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.MASON)) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;
@@ -176,6 +177,10 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             MasonToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
+            }
+            if (villager.getWorld() instanceof ServerWorld serverWorld) {
+                VillagerConversionCandidateIndex.markCandidate(serverWorld, villager);
+                ProfessionDefinitions.runConversionHooks(serverWorld);
             }
         };
         simpleInventory.addListener(listener);
