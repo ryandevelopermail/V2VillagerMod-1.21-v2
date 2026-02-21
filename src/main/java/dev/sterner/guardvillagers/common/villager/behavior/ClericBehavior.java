@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ClericBrewingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ClericCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ClericDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.entity.BrewingStandBlockEntity;
 import net.minecraft.block.BlockState;
@@ -25,10 +26,12 @@ public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClericBehavior.class);
     private static final int BREWING_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericBrewingGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ClericDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     public static Set<ClericBrewingGoal.PotionTarget> getReachableRecipes(VillagerEntity villager,
                                                                            Inventory chestInventory,
                                                                            BrewingStandBlockEntity stand) {
@@ -71,6 +74,17 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos);
         }
         goal.requestImmediateBrew();
+
+        ClericDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new ClericDistributionGoal(villager, jobPos, chestPos, null);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        }
+        distributionGoal.requestImmediateDistribution();
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -98,6 +112,16 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         }
 
         goal.requestImmediateCraft(world);
+
+        ClericDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new ClericDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        distributionGoal.requestImmediateDistribution();
     }
 
     public static BlockPos getPairedChestPos(VillagerEntity villager) {
@@ -130,6 +154,10 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             ClericBrewingGoal goal = GOALS.get(villager);
             if (goal != null) {
                 goal.requestImmediateBrew();
+            }
+            ClericDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
             }
         };
         simpleInventory.addListener(listener);
