@@ -23,8 +23,6 @@ import net.minecraft.item.Items;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.text.RawFilteredPair;
-import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -35,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -52,10 +51,8 @@ public final class VillagerBellTracker {
     private static final int JOB_REPORT_COMPLETION_RANGE = 1;
     private static final int JOB_HIGHLIGHT_PARTICLE_COUNT = 12;
     private static final double JOB_REPORT_HOLD_DISTANCE_SQUARED = 2.25D;
-    private static final int GENERATED_BELL_CHEST_RADIUS = 2;
-    private static final int BOOK_PAGE_CHAR_LIMIT = 255;
-    private static final int BOOK_PAGE_COUNT_LIMIT = 100;
-    private static final String BOOK_AUTHOR = "Guard Villagers";
+    private static final int WRITTEN_BOOK_MAX_PAGE_LENGTH = 255;
+    private static final int WRITTEN_BOOK_MAX_PAGE_COUNT = 100;
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
     private static final Map<GlobalPos, Long> LAST_BOOK_WRITE_TICK = new HashMap<>();
 
@@ -64,46 +61,25 @@ public final class VillagerBellTracker {
 
     public static void logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
         VillageGuardStandManager.refreshBellInventory(world, bellPos);
-        BellVillageReport report = buildBellVillageReport(world, bellPos);
-        for (String line : report.orderedLines()) {
-            LOGGER.info(line);
+        BellReportSummary summary = collectBellReportSummary(world, bellPos);
+        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
+        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
+
+        for (String line : reportLines) {
+            LOGGER.info("{}", line);
         }
 
-        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
-        logPairings(pairingReport);
         resetGuardsToWander(world, bellPos);
     }
 
-    public static void writeBellReportBooks(ServerWorld world, BlockPos bellPos) {
-        GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos);
-        long currentTick = world.getTime();
-        Long lastWriteTick = LAST_BOOK_WRITE_TICK.get(globalBellPos);
-        if (lastWriteTick != null && lastWriteTick == currentTick) {
-            return;
-        }
-
-        LAST_BOOK_WRITE_TICK.put(globalBellPos, currentTick);
-
-        BellVillageReport report = buildBellVillageReport(world, bellPos);
-        Optional<BlockPos> chestPos = findBellReportChest(world, bellPos);
-        if (chestPos.isEmpty()) {
-            LOGGER.warn("No chest found for bell report books near bell {}", bellPos.toShortString());
-            return;
-        }
-
-        Optional<Inventory> chestInventory = getChestInventory(world, chestPos.get());
-        if (chestInventory.isEmpty()) {
-            LOGGER.warn("Failed to access chest inventory at {} for bell {}", chestPos.get().toShortString(), bellPos.toShortString());
-            return;
-        }
-
-        ItemStack firstBook = createWrittenBook("Village Bell Report I", report.orderedLines());
-        ItemStack secondBook = createWrittenBook("Village Bell Report II", report.orderedLines());
-        storeBookInChestOrDrop(world, chestPos.get(), chestInventory.get(), firstBook);
-        storeBookInChestOrDrop(world, chestPos.get(), chestInventory.get(), secondBook);
+    public static List<String> buildBellReportBookPages(ServerWorld world, BlockPos bellPos) {
+        BellReportSummary summary = collectBellReportSummary(world, bellPos);
+        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
+        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
+        return splitLinesIntoWrittenBookPages(reportLines);
     }
 
-    private static BellVillageReport buildBellVillageReport(ServerWorld world, BlockPos bellPos) {
+    private static BellReportSummary collectBellReportSummary(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
@@ -152,24 +128,56 @@ public final class VillagerBellTracker {
         int totalPairedCraftingTables = professionWithCraftingTables.values().stream().mapToInt(Integer::intValue).sum();
         int totalEmployed = villagersWithJobs + guardVillagers;
 
-        List<String> orderedLines = new java.util.ArrayList<>();
-        orderedLines.add("Bell at [" + bellPos.toShortString() + "] triggered villager summary (" + BELL_TRACKING_RANGE + " block radius)");
-        orderedLines.add("Golems: " + ironGolems);
-        orderedLines.add("Total villagers: " + totalVillagers);
-        orderedLines.add("     Guards: " + guardVillagers);
-        orderedLines.add("     Armor Stands: " + armorStands);
-        orderedLines.add("     Employed: " + totalEmployed);
-        orderedLines.add("     Unemployed: " + villagersWithoutJobs);
-        orderedLines.add("Beds: " + villagersWithBeds);
-        orderedLines.add("Workstations: " + villagersWithJobs);
-        orderedLines.add("     Workstations by profession:");
-        professionCounts.entrySet().stream()
-                .sorted(Comparator.comparing(entry -> Registries.VILLAGER_PROFESSION.getId(entry.getKey()).toString()))
-                .forEach(entry -> orderedLines.add("     " + Registries.VILLAGER_PROFESSION.getId(entry.getKey()) + " - " + entry.getValue()));
-        orderedLines.add("Paired Chests: " + totalPairedChests);
-        orderedLines.add("Paired Crafting Tables: " + totalPairedCraftingTables);
+        return new BellReportSummary(
+                ironGolems,
+                totalVillagers,
+                guardVillagers,
+                armorStands,
+                totalEmployed,
+                villagersWithoutJobs,
+                villagersWithBeds,
+                villagersWithJobs,
+                totalPairedChests,
+                totalPairedCraftingTables,
+                professionCounts
+        );
+    }
 
-        return new BellVillageReport(orderedLines);
+    // NOTE: Do not duplicate report fields outside this formatter.
+    // Keep both logger and written-book output sourced from this single field list.
+    private static List<String> formatBellReportSections(BlockPos bellPos, BellReportSummary summary, GuardStandPairingReport pairingReport) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Bell Report Location: [" + bellPos.toShortString() + "]");
+        lines.add("Bell Report Radius: " + BELL_TRACKING_RANGE + " blocks");
+        lines.add("Golems: " + summary.ironGolems());
+        lines.add("Villagers (Total): " + summary.totalVillagers());
+        lines.add("Villagers (Guards): " + summary.guardVillagers());
+        lines.add("Armor Stands (Guard): " + summary.armorStands());
+        lines.add("Employment (Employed): " + summary.totalEmployed());
+        lines.add("Employment (Unemployed): " + summary.villagersWithoutJobs());
+        lines.add("Beds Claimed: " + summary.villagersWithBeds());
+        lines.add("Workstations Claimed: " + summary.villagersWithJobs());
+
+        lines.add("Profession Counts:");
+        summary.professionCounts().entrySet().stream()
+                .sorted(Comparator.comparing(entry -> Registries.VILLAGER_PROFESSION.getId(entry.getKey()).toString()))
+                .forEach(entry -> lines.add("- " + Registries.VILLAGER_PROFESSION.getId(entry.getKey()) + ": " + entry.getValue()));
+
+        lines.add("Paired Chests: " + summary.totalPairedChests());
+        lines.add("Paired Crafting Tables: " + summary.totalPairedCraftingTables());
+
+        lines.add("Guard-Stand Pairings:");
+        if (pairingReport.assignments().isEmpty()) {
+            lines.add("- None");
+        } else {
+            for (GuardStandAssignment assignment : pairingReport.assignments()) {
+                lines.add("- Guard " + assignment.guardPos().toShortString() + " -> Stand " + assignment.standPos().toShortString());
+            }
+        }
+
+        lines.add("Guard Demotions: " + pairingReport.demotedGuards().size());
+        pairingReport.demotedGuards().forEach(pos -> lines.add("- Demoted Guard Position: " + pos.toShortString()));
+        return lines;
     }
 
     public static void directEmployedVillagersAndGuardsToStations(ServerWorld world, BlockPos bellPos) {
@@ -318,128 +326,72 @@ public final class VillagerBellTracker {
         return false;
     }
 
-    private static Optional<BlockPos> findBellReportChest(ServerWorld world, BlockPos bellPos) {
-        Optional<BlockPos> generatedChest = findNearestChestWithin(world, bellPos, GENERATED_BELL_CHEST_RADIUS);
-        if (generatedChest.isPresent()) {
-            return generatedChest;
-        }
-
-        if (GuardVillagersConfig.bellReportChestFallbackRadius <= 0) {
-            return Optional.empty();
-        }
-
-        return findNearestChestWithin(world, bellPos, GuardVillagersConfig.bellReportChestFallbackRadius);
+    private static void incrementCount(Map<VillagerProfession, Integer> map, VillagerProfession profession) {
+        map.merge(profession, 1, Integer::sum);
     }
 
-    private static Optional<BlockPos> findNearestChestWithin(ServerWorld world, BlockPos center, int radius) {
-        BlockPos nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
-        for (BlockPos checkPos : BlockPos.iterate(center.add(-radius, -1, -radius), center.add(radius, 1, radius))) {
-            if (!center.isWithinDistance(checkPos, radius)) {
-                continue;
-            }
-            if (!world.getBlockState(checkPos).isOf(Blocks.CHEST)) {
-                continue;
-            }
+    private static List<String> splitLinesIntoWrittenBookPages(List<String> lines) {
+        List<String> pages = new ArrayList<>();
+        StringBuilder currentPage = new StringBuilder();
 
-            double distance = checkPos.getSquaredDistance(center);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = checkPos.toImmutable();
-            }
-        }
-
-        return Optional.ofNullable(nearest);
-    }
-
-    private static Optional<Inventory> getChestInventory(ServerWorld world, BlockPos chestPos) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
-    }
-
-    private static ItemStack createWrittenBook(String title, List<String> reportLines) {
-        ItemStack stack = new ItemStack(Items.WRITTEN_BOOK);
-        List<RawFilteredPair<Text>> pages = paginateLines(reportLines).stream()
-                .map(page -> RawFilteredPair.<Text>of(Text.literal(page)))
-                .toList();
-        WrittenBookContentComponent content = new WrittenBookContentComponent(
-                RawFilteredPair.of(title),
-                BOOK_AUTHOR,
-                0,
-                pages,
-                true);
-        stack.set(DataComponentTypes.WRITTEN_BOOK_CONTENT, content);
-        return stack;
-    }
-
-    private static List<String> paginateLines(List<String> lines) {
-        List<String> pages = new java.util.ArrayList<>();
-        StringBuilder pageBuilder = new StringBuilder();
         for (String line : lines) {
-            String pageLine = line + "\n";
-            if (pageBuilder.length() + pageLine.length() > BOOK_PAGE_CHAR_LIMIT) {
-                if (pages.size() >= BOOK_PAGE_COUNT_LIMIT) {
-                    break;
+            for (String segment : splitLineIntoSegments(line)) {
+                int separatorLength = currentPage.isEmpty() ? 0 : 1;
+                if (currentPage.length() + separatorLength + segment.length() > WRITTEN_BOOK_MAX_PAGE_LENGTH) {
+                    if (!currentPage.isEmpty()) {
+                        pages.add(currentPage.toString());
+                        if (pages.size() >= WRITTEN_BOOK_MAX_PAGE_COUNT) {
+                            return pages;
+                        }
+                        currentPage = new StringBuilder();
+                    }
                 }
-                pages.add(pageBuilder.toString());
-                pageBuilder = new StringBuilder();
+
+                if (!currentPage.isEmpty()) {
+                    currentPage.append('\n');
+                }
+                currentPage.append(segment);
             }
-            pageBuilder.append(pageLine);
         }
 
-        if (pages.size() < BOOK_PAGE_COUNT_LIMIT && pageBuilder.length() > 0) {
-            pages.add(pageBuilder.toString());
+        if (!currentPage.isEmpty() && pages.size() < WRITTEN_BOOK_MAX_PAGE_COUNT) {
+            pages.add(currentPage.toString());
         }
 
         if (pages.isEmpty()) {
-            pages.add("No report data available.");
+            pages.add("Bell Report: No data available.");
         }
 
         return pages;
     }
 
-    private static void storeBookInChestOrDrop(ServerWorld world, BlockPos chestPos, Inventory inventory, ItemStack book) {
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            if (inventory.getStack(slot).isEmpty()) {
-                inventory.setStack(slot, book);
-                inventory.markDirty();
-                return;
-            }
+    private static List<String> splitLineIntoSegments(String line) {
+        if (line.isEmpty()) {
+            return List.of("");
         }
 
-        LOGGER.warn("Chest at {} is full; dropping bell report book", chestPos.toShortString());
-        BlockPos dropPos = chestPos.up();
-        world.spawnEntity(new net.minecraft.entity.ItemEntity(
-                world,
-                dropPos.getX() + 0.5D,
-                dropPos.getY() + 0.25D,
-                dropPos.getZ() + 0.5D,
-                book.copy()));
+        List<String> segments = new ArrayList<>();
+        int start = 0;
+        while (start < line.length()) {
+            int end = Math.min(start + WRITTEN_BOOK_MAX_PAGE_LENGTH, line.length());
+            segments.add(line.substring(start, end));
+            start = end;
+        }
+        return segments;
     }
 
-    private static void incrementCount(Map<VillagerProfession, Integer> map, VillagerProfession profession) {
-        map.merge(profession, 1, Integer::sum);
-    }
-
-    private static void logPairings(GuardStandPairingReport pairingReport) {
-        if (pairingReport.assignments().isEmpty()) {
-            LOGGER.info("No guard to armor stand pairings were created.");
-            return;
-        }
-
-        LOGGER.info("Guard and armor stand pairings:");
-        for (GuardStandAssignment assignment : pairingReport.assignments()) {
-            LOGGER.info("Guard: {}", assignment.guardPos().toShortString());
-            LOGGER.info("Stand: {}", assignment.standPos().toShortString());
-        }
-
-        if (!pairingReport.demotedGuards().isEmpty()) {
-            LOGGER.info("Demoted excess guards: {}", pairingReport.demotedGuards().size());
-            pairingReport.demotedGuards()
-                    .forEach(pos -> LOGGER.info("- {}", pos.toShortString()));
-        }
+    private record BellReportSummary(
+            int ironGolems,
+            int totalVillagers,
+            int guardVillagers,
+            int armorStands,
+            int totalEmployed,
+            int villagersWithoutJobs,
+            int villagersWithBeds,
+            int villagersWithJobs,
+            int totalPairedChests,
+            int totalPairedCraftingTables,
+            Map<VillagerProfession, Integer> professionCounts
+    ) {
     }
 }
