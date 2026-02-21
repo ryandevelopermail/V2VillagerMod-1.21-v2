@@ -37,6 +37,9 @@ public class FarmerHarvestGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
+    private static final int WATER_HYDRATION_RADIUS = 4;
+    private static final int WATER_SEARCH_RADIUS = 64;
+    private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
@@ -792,18 +795,28 @@ public class FarmerHarvestGoal extends Goal {
 
     private void populateHoeTargets(ServerWorld world) {
         hoeTargets.clear();
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
+        BlockPos nearestWater = findNearestWaterBlock(world);
+        if (nearestWater == null) {
+            return;
+        }
+
+        List<BlockPos> hydratedTargets = new ArrayList<>();
+        BlockPos start = nearestWater.add(-WATER_HYDRATION_RADIUS, -1, -WATER_HYDRATION_RADIUS);
+        BlockPos end = nearestWater.add(WATER_HYDRATION_RADIUS, 1, WATER_HYDRATION_RADIUS);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+            if (!isWithinHarvestRange(pos)) {
+                continue;
+            }
+            if (horizontalDistanceSquared(pos, nearestWater) > WATER_HYDRATION_RADIUS * WATER_HYDRATION_RADIUS) {
                 continue;
             }
             if (isHoeTarget(world, pos)) {
-                hoeTargets.add(pos.toImmutable());
+                hydratedTargets.add(pos.toImmutable());
             }
         }
+
+        hydratedTargets.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
+        hoeTargets.addAll(hydratedTargets);
     }
 
     private void populatePlantTargets(ServerWorld world) {
@@ -898,12 +911,18 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean hasHoeableGroundInRange(ServerWorld world) {
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
+        BlockPos nearestWater = findNearestWaterBlock(world);
+        if (nearestWater == null) {
+            return false;
+        }
+
+        BlockPos start = nearestWater.add(-WATER_HYDRATION_RADIUS, -1, -WATER_HYDRATION_RADIUS);
+        BlockPos end = nearestWater.add(WATER_HYDRATION_RADIUS, 1, WATER_HYDRATION_RADIUS);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+            if (!isWithinHarvestRange(pos)) {
+                continue;
+            }
+            if (horizontalDistanceSquared(pos, nearestWater) > WATER_HYDRATION_RADIUS * WATER_HYDRATION_RADIUS) {
                 continue;
             }
             if (isHoeTarget(world, pos)) {
@@ -962,6 +981,47 @@ public class FarmerHarvestGoal extends Goal {
         }
         return null;
     }
+
+    private BlockPos findNearestWaterBlock(ServerWorld world) {
+        int radius = WATER_SEARCH_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -WATER_SEARCH_VERTICAL_RANGE, -radius);
+        BlockPos end = jobPos.add(radius, WATER_SEARCH_VERTICAL_RANGE, radius);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isOf(Blocks.WATER)) {
+                continue;
+            }
+
+            double distanceToVillager = distanceToVillagerSquared(pos);
+            if (distanceToVillager < nearestDistance) {
+                nearestDistance = distanceToVillager;
+                nearest = pos.toImmutable();
+            }
+        }
+
+        return nearest;
+    }
+
+    private boolean isWithinHarvestRange(BlockPos pos) {
+        return pos.getSquaredDistance(jobPos) <= HARVEST_RADIUS * HARVEST_RADIUS;
+    }
+
+    private double distanceToVillagerSquared(BlockPos pos) {
+        return villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+    }
+
+    private double horizontalDistanceSquared(BlockPos first, BlockPos second) {
+        int dx = first.getX() - second.getX();
+        int dz = first.getZ() - second.getZ();
+        return dx * dx + dz * dz;
+    }
+
     private boolean isHoeTarget(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (!(state.isOf(Blocks.DIRT) || state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT_PATH))) {
