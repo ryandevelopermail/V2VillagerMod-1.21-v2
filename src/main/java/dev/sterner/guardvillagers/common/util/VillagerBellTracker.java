@@ -363,8 +363,7 @@ public final class VillagerBellTracker {
     private static ItemStack createWrittenBook(String title, List<String> reportLines) {
         ItemStack stack = new ItemStack(Items.WRITTEN_BOOK);
         List<RawFilteredPair<Text>> pages = paginateLines(reportLines).stream()
-                .map(Text::literal)
-                .map(RawFilteredPair::of)
+                .map(page -> RawFilteredPair.<Text>of(Text.literal(page)))
                 .toList();
         WrittenBookContentComponent content = new WrittenBookContentComponent(
                 RawFilteredPair.of(title),
