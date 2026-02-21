@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStan
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager.GuardStandPairingReport;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.BellBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.Entity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
@@ -27,6 +28,8 @@ import net.minecraft.text.RawFilteredPair;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
@@ -109,6 +112,7 @@ public final class VillagerBellTracker {
         List<String> pages = splitLinesIntoWrittenBookPages(report.orderedLines());
         Optional<Inventory> chestInventory = findBellReportChestInventory(world, bellPos);
         if (chestInventory.isEmpty()) {
+            logBellReportChestLookupFailure(world, bellPos);
             LOGGER.info("Bell report book generation skipped at {}: no nearby chest found.", bellPos.toShortString());
             return;
         }
@@ -139,6 +143,10 @@ public final class VillagerBellTracker {
     }
 
     private static Optional<Inventory> findBellReportChestInventory(ServerWorld world, BlockPos bellPos) {
+        if (LOGGER.isDebugEnabled()) {
+            logExpectedGeneratedChestBlockState(world, bellPos);
+        }
+
         LinkedHashSet<BlockPos> candidateChestPositions = new LinkedHashSet<>();
         VillageBellChestPlacementHelper.reconcileBellChestForBell(world, bellPos).ifPresent(candidateChestPositions::add);
         candidateChestPositions.addAll(findNearestBellReportChestCandidates(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS));
@@ -180,6 +188,10 @@ public final class VillagerBellTracker {
     }
 
     private static List<BlockPos> findNearestBellReportChestCandidates(ServerWorld world, BlockPos bellPos, int radius) {
+        if (LOGGER.isDebugEnabled()) {
+            logNearbyNonAirSample(world, bellPos, radius);
+        }
+
         return BlockPos.streamOutwards(bellPos, radius, 1, radius)
                 .filter(pos -> world.getBlockState(pos).getBlock() instanceof ChestBlock)
                 .sorted(Comparator
@@ -188,6 +200,118 @@ public final class VillagerBellTracker {
                         .thenComparingInt(BlockPos::getX)
                         .thenComparingInt(BlockPos::getZ))
                 .toList();
+    }
+
+    private static void logBellReportChestLookupFailure(ServerWorld world, BlockPos bellPos) {
+        int fallbackRadius = Math.max(0, GuardVillagersConfig.bellReportChestFallbackRadius);
+        String dimension = world.getRegistryKey().getValue().toString();
+        boolean bellChunkLoaded = world.isChunkLoaded(bellPos);
+        String neighborChunkLoadStates = describeNeighborChunkLoadStates(world, bellPos);
+
+        LOGGER.info(
+                "Bell report chest lookup failed at {} in {}. primaryRadius={}, fallbackRadius={}, bellChunkLoaded={}, neighboringChunksLoaded={}",
+                bellPos.toShortString(),
+                dimension,
+                REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
+                fallbackRadius,
+                bellChunkLoaded,
+                neighborChunkLoadStates
+        );
+    }
+
+    private static String describeNeighborChunkLoadStates(ServerWorld world, BlockPos bellPos) {
+        ChunkPos bellChunk = new ChunkPos(bellPos);
+        List<String> states = new ArrayList<>();
+
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+
+                int chunkX = bellChunk.x + dx;
+                int chunkZ = bellChunk.z + dz;
+                states.add(chunkX + "," + chunkZ + "=" + world.isChunkLoaded(chunkX, chunkZ));
+            }
+        }
+
+        return String.join(";", states);
+    }
+
+    private static void logNearbyNonAirSample(ServerWorld world, BlockPos bellPos, int radius) {
+        List<BlockPos> nearbyNonAirBlocks = BlockPos.streamOutwards(bellPos, radius, 1, radius)
+                .filter(pos -> !world.getBlockState(pos).isAir())
+                .sorted(Comparator
+                        .comparingDouble((BlockPos pos) -> pos.getSquaredDistance(bellPos))
+                        .thenComparingInt(BlockPos::getY)
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getZ))
+                .limit(5)
+                .toList();
+
+        BlockPos leftOfBellPos = getExpectedGeneratedChestPos(world, bellPos);
+        LOGGER.debug(
+                "Bell chest scan sample at {} (radius={}): leftOfBell={}={} | nearestNonAirSample={}.",
+                bellPos.toShortString(),
+                radius,
+                leftOfBellPos.toShortString(),
+                describeBlockStateWithId(world.getBlockState(leftOfBellPos)),
+                formatBlockSample(world, nearbyNonAirBlocks)
+        );
+    }
+
+    private static void logExpectedGeneratedChestBlockState(ServerWorld world, BlockPos bellPos) {
+        BlockPos expectedChestPos = getExpectedGeneratedChestPos(world, bellPos);
+        BlockState expectedState = world.getBlockState(expectedChestPos);
+        LOGGER.debug(
+                "Expected generated chest location (left-of-bell convention) for bell {} is {} with exact state {}.",
+                bellPos.toShortString(),
+                expectedChestPos.toShortString(),
+                describeBlockStateWithId(expectedState)
+        );
+    }
+
+    private static BlockPos getExpectedGeneratedChestPos(ServerWorld world, BlockPos bellPos) {
+        BlockState bellState = world.getBlockState(bellPos);
+        Direction leftDirection = getLeftDirectionFromBellState(bellState);
+        return bellPos.offset(leftDirection);
+    }
+
+    private static Direction getLeftDirectionFromBellState(BlockState bellState) {
+        if (bellState.contains(BellBlock.FACING)) {
+            Direction facing = bellState.get(BellBlock.FACING);
+            if (facing.getAxis().isHorizontal()) {
+                return facing.rotateYCounterclockwise();
+            }
+        }
+
+        if (bellState.contains(BellBlock.ATTACHMENT)) {
+            var attachment = bellState.get(BellBlock.ATTACHMENT);
+            return switch (attachment) {
+                case FLOOR -> Direction.WEST;
+                case CEILING -> Direction.EAST;
+                case SINGLE_WALL -> Direction.NORTH;
+                case DOUBLE_WALL -> Direction.SOUTH;
+            };
+        }
+
+        return Direction.NORTH;
+    }
+
+    private static String formatBlockSample(ServerWorld world, List<BlockPos> positions) {
+        if (positions.isEmpty()) {
+            return "[]";
+        }
+
+        List<String> entries = new ArrayList<>();
+        for (BlockPos pos : positions) {
+            entries.add(pos.toShortString() + "=" + describeBlockStateWithId(world.getBlockState(pos)));
+        }
+        return "[" + String.join(", ", entries) + "]";
+    }
+
+    private static String describeBlockStateWithId(BlockState state) {
+        return Registries.BLOCK.getId(state.getBlock()) + " " + state;
     }
 
     private static boolean tryInsertIntoInventory(Inventory inventory, ItemStack stack) {
