@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.component.type.ItemEnchantmentsComponent;
@@ -38,7 +40,10 @@ public class FishermanGuardFishingGoal extends Goal {
     private long sessionDurationTicks;
     private boolean halfwayLogged;
     private final List<ItemStack> sessionLoot = new ArrayList<>();
+    private final List<ItemStack> butcherDeliveryLoot = new ArrayList<>();
+    private final List<ItemStack> localDeliveryLoot = new ArrayList<>();
     private long nextSessionAttemptTick;
+    private @Nullable ButcherTransferTarget butcherTransferTarget;
 
     public FishermanGuardFishingGoal(FishermanGuardEntity guard) {
         this.guard = guard;
@@ -70,7 +75,10 @@ public class FishermanGuardFishingGoal extends Goal {
     public void start() {
         this.stage = Stage.MOVING_TO_WATER;
         this.sessionLoot.clear();
+        this.butcherDeliveryLoot.clear();
+        this.localDeliveryLoot.clear();
         this.halfwayLogged = false;
+        this.butcherTransferTarget = null;
         if (this.targetWaterPos != null) {
             moveTo(this.targetWaterPos);
         }
@@ -81,6 +89,9 @@ public class FishermanGuardFishingGoal extends Goal {
         this.guard.getNavigation().stop();
         this.stage = Stage.DONE;
         this.targetWaterPos = null;
+        this.butcherTransferTarget = null;
+        this.butcherDeliveryLoot.clear();
+        this.localDeliveryLoot.clear();
     }
 
     @Override
@@ -93,6 +104,7 @@ public class FishermanGuardFishingGoal extends Goal {
         switch (this.stage) {
             case MOVING_TO_WATER -> tickMovingToWater(world);
             case FISHING -> tickFishing(world);
+            case DELIVERING_TO_BUTCHER -> tickDeliveringToButcher(world);
             case RETURNING_TO_STORAGE -> tickReturningToStorage(world);
             case DONE, IDLE -> {
             }
@@ -139,6 +151,26 @@ public class FishermanGuardFishingGoal extends Goal {
         this.sessionLoot.clear();
         this.sessionLoot.addAll(generateSessionLoot(world));
         logSessionCompletion();
+        splitSessionLoot(world);
+
+        if (!this.butcherDeliveryLoot.isEmpty()) {
+            this.butcherTransferTarget = findNearestButcherTransferTarget(world);
+            if (this.butcherTransferTarget != null) {
+                LOGGER.info("fisherman [{}] delivering cookable fish to butcher smoker {} chest {}",
+                        this.guard.getUuidAsString(),
+                        this.butcherTransferTarget.smokerPos().toShortString(),
+                        this.butcherTransferTarget.chestPos().toShortString());
+                this.stage = Stage.DELIVERING_TO_BUTCHER;
+                moveTo(this.butcherTransferTarget.chestPos());
+                return;
+            }
+
+            LOGGER.info("fisherman [{}] found no valid butcher smoker/chest target; falling back to local storage for cookable fish",
+                    this.guard.getUuidAsString());
+            this.localDeliveryLoot.addAll(copyLoot(this.butcherDeliveryLoot));
+            this.butcherDeliveryLoot.clear();
+        }
+
         this.stage = Stage.RETURNING_TO_STORAGE;
         BlockPos storage = getPreferredStoragePos();
         if (storage != null) {
@@ -146,17 +178,49 @@ public class FishermanGuardFishingGoal extends Goal {
         }
     }
 
+    private void tickDeliveringToButcher(ServerWorld world) {
+        if (this.butcherTransferTarget == null) {
+            this.stage = Stage.RETURNING_TO_STORAGE;
+            return;
+        }
+
+        BlockPos butcherChestPos = this.butcherTransferTarget.chestPos();
+        if (isNear(butcherChestPos)) {
+            List<ItemStack> remaining = depositLoot(world, butcherChestPos, this.butcherDeliveryLoot);
+            this.butcherDeliveryLoot.clear();
+            if (!remaining.isEmpty()) {
+                LOGGER.info("fisherman [{}] butcher chest full/invalid, returning {} cookable fish stacks to local storage",
+                        this.guard.getUuidAsString(),
+                        remaining.size());
+                this.localDeliveryLoot.addAll(remaining);
+            }
+
+            this.stage = Stage.RETURNING_TO_STORAGE;
+            BlockPos localStorage = getPreferredStoragePos();
+            if (localStorage != null) {
+                moveTo(localStorage);
+            }
+            return;
+        }
+
+        if (this.guard.getNavigation().isIdle()) {
+            moveTo(butcherChestPos);
+        }
+    }
+
     private void tickReturningToStorage(ServerWorld world) {
         BlockPos storage = getPreferredStoragePos();
         if (storage == null) {
-            this.sessionLoot.clear();
+            this.localDeliveryLoot.clear();
             this.stage = Stage.DONE;
             this.nextSessionAttemptTick = world.getTime() + MathHelper.nextInt(this.guard.getRandom(), 200, 600);
             return;
         }
 
         if (isNear(storage)) {
-            depositLoot(world, storage);
+            List<ItemStack> remaining = depositLoot(world, storage, this.localDeliveryLoot);
+            this.localDeliveryLoot.clear();
+            this.localDeliveryLoot.addAll(remaining);
             this.stage = Stage.DONE;
             this.nextSessionAttemptTick = world.getTime() + MathHelper.nextInt(this.guard.getRandom(), 200, 600);
             return;
@@ -221,28 +285,120 @@ public class FishermanGuardFishingGoal extends Goal {
         return enchantments.getLevel(wrapper.getOrThrow(enchantmentKey));
     }
 
-    private void depositLoot(ServerWorld world, BlockPos storagePos) {
-        if (this.sessionLoot.isEmpty()) {
-            return;
+    private List<ItemStack> depositLoot(ServerWorld world, BlockPos storagePos, List<ItemStack> lootToStore) {
+        if (lootToStore.isEmpty()) {
+            return List.of();
         }
 
         BlockEntity blockEntity = world.getBlockEntity(storagePos);
         if (!(blockEntity instanceof Inventory inventory)) {
-            this.sessionLoot.clear();
-            return;
+            return copyLoot(lootToStore);
         }
 
         List<ItemStack> remaining = new ArrayList<>();
-        for (ItemStack stack : this.sessionLoot) {
+        for (ItemStack stack : lootToStore) {
             ItemStack left = insertStack(inventory, stack.copy());
             if (!left.isEmpty()) {
                 remaining.add(left);
             }
         }
-
-        this.sessionLoot.clear();
-        this.sessionLoot.addAll(remaining);
         inventory.markDirty();
+        return remaining;
+    }
+
+    private void splitSessionLoot(ServerWorld world) {
+        this.butcherDeliveryLoot.clear();
+        this.localDeliveryLoot.clear();
+
+        for (ItemStack stack : this.sessionLoot) {
+            if (isCookableRawFish(world, stack)) {
+                this.butcherDeliveryLoot.add(stack.copy());
+            } else {
+                this.localDeliveryLoot.add(stack.copy());
+            }
+        }
+    }
+
+    private boolean isCookableRawFish(ServerWorld world, ItemStack stack) {
+        if (stack.isEmpty() || !isRawFish(stack)) {
+            return false;
+        }
+
+        return world.getRecipeManager().getFirstMatch(
+                net.minecraft.recipe.RecipeType.SMOKING,
+                new net.minecraft.recipe.input.SingleStackRecipeInput(stack.copy()),
+                world
+        ).isPresent();
+    }
+
+    private boolean isRawFish(ItemStack stack) {
+        return stack.isOf(Items.COD)
+                || stack.isOf(Items.SALMON)
+                || stack.isOf(Items.TROPICAL_FISH)
+                || stack.isOf(Items.PUFFERFISH);
+    }
+
+    private @Nullable ButcherTransferTarget findNearestButcherTransferTarget(ServerWorld world) {
+        BlockPos center = this.guard.getBlockPos();
+        ButcherTransferTarget bestTarget = null;
+        double nearestDistance = Double.MAX_VALUE;
+        int pairingRange = MathHelper.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+
+        for (BlockPos smokerPos : BlockPos.iterate(center.add(-WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS),
+                center.add(WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS))) {
+            if (!world.getBlockState(smokerPos).isOf(Blocks.SMOKER)) {
+                continue;
+            }
+
+            BlockPos pairedChest = findPairedChestForSmoker(world, smokerPos.toImmutable(), pairingRange);
+            if (pairedChest == null) {
+                continue;
+            }
+
+            double distance = center.getSquaredDistance(smokerPos);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                bestTarget = new ButcherTransferTarget(smokerPos.toImmutable(), pairedChest);
+            }
+        }
+
+        return bestTarget;
+    }
+
+    private @Nullable BlockPos findPairedChestForSmoker(ServerWorld world, BlockPos smokerPos, int pairingRange) {
+        BlockPos nearestChest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos candidatePos : BlockPos.iterate(smokerPos.add(-pairingRange, -pairingRange, -pairingRange),
+                smokerPos.add(pairingRange, pairingRange, pairingRange))) {
+            if (!(world.getBlockState(candidatePos).getBlock() instanceof ChestBlock)) {
+                continue;
+            }
+            if (!smokerPos.isWithinDistance(candidatePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                continue;
+            }
+
+            BlockEntity blockEntity = world.getBlockEntity(candidatePos);
+            if (!(blockEntity instanceof Inventory)) {
+                continue;
+            }
+
+            double distance = smokerPos.getSquaredDistance(candidatePos);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestChest = candidatePos.toImmutable();
+            }
+        }
+
+        return nearestChest;
+    }
+
+    private List<ItemStack> copyLoot(List<ItemStack> loot) {
+        List<ItemStack> copies = new ArrayList<>(loot.size());
+        for (ItemStack stack : loot) {
+            copies.add(stack.copy());
+        }
+        return copies;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {
@@ -319,7 +475,11 @@ public class FishermanGuardFishingGoal extends Goal {
         IDLE,
         MOVING_TO_WATER,
         FISHING,
+        DELIVERING_TO_BUTCHER,
         RETURNING_TO_STORAGE,
         DONE
+    }
+
+    private record ButcherTransferTarget(BlockPos smokerPos, BlockPos chestPos) {
     }
 }

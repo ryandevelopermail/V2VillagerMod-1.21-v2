@@ -39,6 +39,7 @@ public class FletcherCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private @Nullable FletcherRecipe selectedRecipe;
 
     public FletcherCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
@@ -82,12 +83,10 @@ public class FletcherCraftingGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.FLETCHER) {
             return false;
         }
-        if (craftingTablePos == null || chestPos == null) {
+        if (chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
-            return false;
-        }
+        boolean hasCraftingTable = hasCraftingTable(world);
         refreshDailyLimit(world);
         if (craftedToday >= dailyCraftLimit) {
             return false;
@@ -97,11 +96,22 @@ public class FletcherCraftingGoal extends Goal {
             return false;
         }
 
-        lastCheckCount = countCraftableRecipes(world);
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return false;
+        }
+        List<FletcherRecipe> craftableRecipes = getCraftableRecipes(world, inventory, hasCraftingTable);
+        lastCheckCount = craftableRecipes.size();
         CraftingCheckLogger.report(world, "Fletcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
-        return lastCheckCount > 0;
+        if (craftableRecipes.isEmpty()) {
+            selectedRecipe = null;
+            return false;
+        }
+
+        selectedRecipe = craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+        return true;
     }
 
     @Override
@@ -111,14 +121,27 @@ public class FletcherCraftingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+        FletcherRecipe recipe = selectedRecipe;
+        if (recipe == null) {
+            stage = Stage.DONE;
+            return;
+        }
+
+        if (requiresCraftingTable(recipe) && craftingTablePos != null) {
+            stage = Stage.GO_TO_TABLE;
+            moveTo(craftingTablePos);
+            return;
+        }
+
+        stage = Stage.GO_TO_CHEST;
+        moveTo(chestPos != null ? chestPos : jobPos);
     }
 
     @Override
     public void stop() {
         villager.getNavigation().stop();
         stage = Stage.DONE;
+        selectedRecipe = null;
     }
 
     @Override
@@ -134,6 +157,14 @@ public class FletcherCraftingGoal extends Goal {
                     stage = Stage.CRAFT;
                 } else {
                     moveTo(craftingTablePos);
+                }
+            }
+            case GO_TO_CHEST -> {
+                BlockPos workPos = chestPos != null ? chestPos : jobPos;
+                if (isNear(workPos)) {
+                    stage = Stage.CRAFT;
+                } else {
+                    moveTo(workPos);
                 }
             }
             case CRAFT -> {
@@ -155,26 +186,26 @@ public class FletcherCraftingGoal extends Goal {
         }
     }
 
-    private int countCraftableRecipes(ServerWorld world) {
-        Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) {
-            return 0;
-        }
-        return getCraftableRecipes(world, inventory).size();
-    }
-
     private void craftOnce(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
             return;
         }
 
-        List<FletcherRecipe> craftable = getCraftableRecipes(world, inventory);
-        if (craftable.isEmpty()) {
+        FletcherRecipe recipe = selectedRecipe;
+        if (recipe == null) {
+            boolean hasCraftingTable = hasCraftingTable(world);
+            List<FletcherRecipe> craftable = getCraftableRecipes(world, inventory, hasCraftingTable);
+            if (craftable.isEmpty()) {
+                return;
+            }
+            recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        }
+
+        if (requiresCraftingTable(recipe) && !hasCraftingTable(world)) {
             return;
         }
 
-        FletcherRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -186,12 +217,15 @@ public class FletcherCraftingGoal extends Goal {
         }
     }
 
-    private List<FletcherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+    private List<FletcherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory, boolean hasCraftingTable) {
         List<FletcherRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (!isFletcherOutput(result)) {
+                continue;
+            }
+            if (!hasCraftingTable && !isNoTableFletcherRecipe(result)) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
@@ -210,6 +244,18 @@ public class FletcherCraftingGoal extends Goal {
                 || stack.isOf(Items.ARROW)
                 || stack.isOf(Items.STICK)
                 || stack.isOf(Items.TARGET);
+    }
+
+    private boolean isNoTableFletcherRecipe(ItemStack output) {
+        return output.isOf(Items.ARROW);
+    }
+
+    private boolean requiresCraftingTable(FletcherRecipe recipe) {
+        return !isNoTableFletcherRecipe(recipe.output());
+    }
+
+    private boolean hasCraftingTable(ServerWorld world) {
+        return craftingTablePos != null && world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
     }
 
     private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
@@ -371,6 +417,7 @@ public class FletcherCraftingGoal extends Goal {
     private enum Stage {
         IDLE,
         GO_TO_TABLE,
+        GO_TO_CHEST,
         CRAFT,
         DONE
     }

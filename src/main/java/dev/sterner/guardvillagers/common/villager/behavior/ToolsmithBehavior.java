@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.ToolsmithCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ToolsmithDistributionGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ToolsmithSmithingGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -23,8 +24,10 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ToolsmithBehavior.class);
     private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int SMITHING_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, ToolsmithCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ToolsmithDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ToolsmithSmithingGoal> SMITHING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -69,6 +72,17 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
         } else {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        ToolsmithSmithingGoal smithingGoal = SMITHING_GOALS.get(villager);
+        if (smithingGoal == null) {
+            smithingGoal = new ToolsmithSmithingGoal(villager, jobPos, chestPos);
+            SMITHING_GOALS.put(villager, smithingGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(SMITHING_GOAL_PRIORITY, smithingGoal);
+        } else {
+            smithingGoal.setTargets(jobPos, chestPos);
+        }
+        smithingGoal.requestImmediateSmithing(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -94,6 +108,17 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         distributionGoal.requestImmediateDistribution();
+
+        ToolsmithSmithingGoal smithingGoal = SMITHING_GOALS.get(villager);
+        if (smithingGoal == null) {
+            smithingGoal = new ToolsmithSmithingGoal(villager, jobPos, chestPos);
+            SMITHING_GOALS.put(villager, smithingGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(SMITHING_GOAL_PRIORITY, smithingGoal);
+        } else {
+            smithingGoal.setTargets(jobPos, chestPos);
+        }
+        smithingGoal.requestImmediateSmithing(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -118,6 +143,10 @@ public class ToolsmithBehavior implements VillagerProfessionBehavior {
             ToolsmithDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
+            }
+            ToolsmithSmithingGoal smithingGoal = SMITHING_GOALS.get(villager);
+            if (smithingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                smithingGoal.requestImmediateSmithing(serverWorld);
             }
         };
         simpleInventory.addListener(listener);
