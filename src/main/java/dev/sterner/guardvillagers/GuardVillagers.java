@@ -25,7 +25,6 @@ import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
-import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -35,7 +34,6 @@ import net.fabricmc.fabric.api.object.builder.v1.entity.FabricEntityTypeBuilder;
 import net.fabricmc.fabric.api.screenhandler.v1.ExtendedScreenHandlerType;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.AbstractBlock;
-import net.minecraft.block.BellBlock;
 import net.minecraft.block.Block;
 import net.minecraft.entity.*;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -168,18 +166,6 @@ public class GuardVillagers implements ModInitializer {
         UseEntityCallback.EVENT.register(this::villagerConvert);
         JobBlockPlacementHandler.register();
         UseItemCallback.EVENT.register(this::onUseItem);
-        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
-            if (!world.isClient()) {
-                BlockPos blockPos = hitResult.getBlockPos();
-                if (world.getBlockState(blockPos).getBlock() instanceof BellBlock && world instanceof ServerWorld serverWorld) {
-                    VillagerBellTracker.logBellVillagerStats(serverWorld, blockPos);
-                    VillagerBellTracker.writeBellReportBooks(serverWorld, blockPos);
-                    VillagerBellTracker.directEmployedVillagersAndGuardsToStations(serverWorld, blockPos);
-                }
-            }
-            return ActionResult.PASS;
-        });
-
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity) {
                 if (world instanceof ServerWorld serverWorld) {
