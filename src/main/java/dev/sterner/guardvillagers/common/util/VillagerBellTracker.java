@@ -15,15 +15,16 @@ import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
+import net.minecraft.component.DataComponentTypes;
+import net.minecraft.component.type.WrittenBookContentComponent;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.nbt.NbtCompound;
-import net.minecraft.nbt.NbtList;
-import net.minecraft.nbt.NbtString;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.RawFilteredPair;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -361,16 +362,17 @@ public final class VillagerBellTracker {
 
     private static ItemStack createWrittenBook(String title, List<String> reportLines) {
         ItemStack stack = new ItemStack(Items.WRITTEN_BOOK);
-        NbtCompound nbt = stack.getOrCreateNbt();
-        nbt.putString("title", title);
-        nbt.putString("author", BOOK_AUTHOR);
-
-        NbtList pages = new NbtList();
-        for (String page : paginateLines(reportLines)) {
-            pages.add(NbtString.of(page));
-        }
-        nbt.put("pages", pages);
-        nbt.putBoolean("resolved", true);
+        List<RawFilteredPair<Text>> pages = paginateLines(reportLines).stream()
+                .map(Text::literal)
+                .map(RawFilteredPair::of)
+                .toList();
+        WrittenBookContentComponent content = new WrittenBookContentComponent(
+                RawFilteredPair.of(title),
+                BOOK_AUTHOR,
+                0,
+                pages,
+                true);
+        stack.set(DataComponentTypes.WRITTEN_BOOK_CONTENT, content);
         return stack;
     }
 
