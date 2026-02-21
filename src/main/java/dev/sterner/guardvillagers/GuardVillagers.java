@@ -15,12 +15,7 @@ import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
-import dev.sterner.guardvillagers.common.villager.SpecialModifier;
-import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
-import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviors;
-import dev.sterner.guardvillagers.common.villager.behavior.ButcherBehavior;
-import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
-import dev.sterner.guardvillagers.common.villager.behavior.FishermanBehavior;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
@@ -134,9 +129,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(MASON_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
-        VillagerProfessionBehaviors.register();
-        VillagerProfessionBehaviorRegistry.registerSpecialModifier(new SpecialModifier(id("guard_stand_modifier"), GUARD_STAND_MODIFIER, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE));
-        VillagerProfessionBehaviorRegistry.registerSpecialModifier(new SpecialModifier(id("guard_stand_anchor"), GUARD_STAND_ANCHOR, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE));
+        ProfessionDefinitions.registerAll();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("axe_guard_spawn_egg"), AXE_GUARD_SPAWN_EGG);
@@ -227,9 +220,7 @@ public class GuardVillagers implements ModInitializer {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
                 if (world.getTime() % 40L == 0L) {
-                    ButcherBehavior.tryConvertButchersWithAxe(world);
-                    MasonBehavior.tryConvertMasonsWithMiningTool(world);
-                    FishermanBehavior.tryConvertFishermenWithRod(world);
+                    ProfessionDefinitions.runConversionHooks(world);
                 }
             }
         });

@@ -10,8 +10,8 @@ import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingC
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.EquipmentSlot;
@@ -52,7 +52,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }
@@ -100,7 +100,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }
@@ -142,7 +142,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             }
 
             BlockPos jobPos = jobSite.get();
-            if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
+            if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
                 continue;
             }
 

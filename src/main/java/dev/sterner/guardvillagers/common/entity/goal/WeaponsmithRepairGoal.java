@@ -1,8 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -73,7 +73,7 @@ public class WeaponsmithRepairGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.WEAPONSMITH) {
             return false;
         }
-        if (chestPos == null || !world.getBlockState(jobPos).isOf(Blocks.GRINDSTONE)) {
+        if (chestPos == null || !ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.WEAPONSMITH, world.getBlockState(jobPos))) {
             return false;
         }
 
