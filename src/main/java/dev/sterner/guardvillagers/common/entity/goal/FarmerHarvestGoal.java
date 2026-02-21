@@ -64,6 +64,8 @@ public class FarmerHarvestGoal extends Goal {
     private int exitDelayTicks;
     private final Deque<BlockPos> hoeTargets = new ArrayDeque<>();
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
+    private BlockPos currentHoeTarget;
+    private long currentHoeTargetStartTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -77,6 +79,7 @@ public class FarmerHarvestGoal extends Goal {
         this.enabled = true;
         this.stage = Stage.IDLE;
         this.harvestTargets.clear();
+        this.currentHoeTarget = null;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -135,6 +138,7 @@ public class FarmerHarvestGoal extends Goal {
         villager.getNavigation().stop();
         harvestTargets.clear();
         currentTarget = null;
+        currentHoeTarget = null;
         setStage(Stage.DONE);
     }
 
@@ -308,6 +312,7 @@ public class FarmerHarvestGoal extends Goal {
             }
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
+                    currentHoeTarget = null;
                     populatePlantTargets(serverWorld);
                     if (!plantTargets.isEmpty()) {
                         setStage(Stage.PLANT_FARMLAND);
@@ -321,14 +326,31 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 BlockPos target = hoeTargets.peekFirst();
+                if (currentHoeTarget == null || !currentHoeTarget.equals(target)) {
+                    currentHoeTarget = target;
+                    currentHoeTargetStartTick = serverWorld.getTime();
+                }
+
+                if (serverWorld.getTime() - currentHoeTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    hoeTargets.removeFirst();
+                    currentHoeTarget = null;
+                    return;
+                }
+
+                if (!isHoeTarget(serverWorld, target)) {
+                    hoeTargets.removeFirst();
+                    currentHoeTarget = null;
+                    return;
+                }
+
                 if (!isNear(target)) {
                     moveTo(target, MOVE_SPEED);
                     return;
                 }
-                if (isHoeTarget(serverWorld, target)) {
-                    serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
-                }
+
+                serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
                 hoeTargets.removeFirst();
+                currentHoeTarget = null;
             }
             case PLANT_FARMLAND -> {
                 if (plantTargets.isEmpty()) {
