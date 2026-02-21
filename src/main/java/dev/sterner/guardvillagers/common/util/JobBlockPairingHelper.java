@@ -214,6 +214,7 @@ public final class JobBlockPairingHelper {
         }
 
         BlockPos jobPos = globalPos.pos();
+        VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
         Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
         nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
 
