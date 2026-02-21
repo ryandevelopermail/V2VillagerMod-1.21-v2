@@ -19,6 +19,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
     private static final int BLAST_FURNACE_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
+    private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ArmorerBlastFurnaceGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ArmorerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ArmorerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
@@ -33,6 +34,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         LOGGER.info("Armorer {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
 
         ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
                 () -> new ArmorerBlastFurnaceGoal(villager, jobPos, chestPos));
@@ -62,6 +64,8 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
+
         ArmorerCraftingGoal craftingGoal = upsertGoal(CRAFTING_GOALS, villager, CRAFTING_GOAL_PRIORITY,
                 () -> new ArmorerCraftingGoal(villager, jobPos, chestPos, craftingTablePos));
         craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
@@ -82,5 +86,10 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
                 crafting.requestImmediateCraft(serverWorld);
             }
         });
+    }
+
+    public static BlockPos getPairedChestPos(VillagerEntity villager) {
+        BlockPos pos = PAIRED_CHESTS.get(villager);
+        return pos == null ? null : pos.toImmutable();
     }
 }
