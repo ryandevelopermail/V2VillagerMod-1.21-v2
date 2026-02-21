@@ -23,15 +23,24 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ArmorerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ArmorerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
+
+    public static BlockPos getPairedChestPos(VillagerEntity villager) {
+        return PAIRED_CHESTS.get(villager);
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!checkPairingPreconditions(world, villager, jobPos, chestPos,
                 (serverWorld, pos) -> ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.ARMORER, serverWorld.getBlockState(pos)),
-                () -> clearChestListener(CHEST_LISTENERS, villager))) {
+                () -> {
+                    clearChestListener(CHEST_LISTENERS, villager);
+                    PAIRED_CHESTS.remove(villager);
+                })) {
             return;
         }
 
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
         LOGGER.info("Armorer {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
 
         ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
@@ -62,6 +71,8 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
+
         ArmorerCraftingGoal craftingGoal = upsertGoal(CRAFTING_GOALS, villager, CRAFTING_GOAL_PRIORITY,
                 () -> new ArmorerCraftingGoal(villager, jobPos, chestPos, craftingTablePos));
         craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
