@@ -55,7 +55,7 @@ public final class VillagerBellTracker {
     private static final double JOB_REPORT_HOLD_DISTANCE_SQUARED = 2.25D;
     private static final int WRITTEN_BOOK_MAX_PAGE_LENGTH = 255;
     private static final int WRITTEN_BOOK_MAX_PAGE_COUNT = 100;
-    private static final int REPORT_CHEST_SEARCH_RADIUS = 2;
+    private static final int REPORT_CHEST_PRIMARY_SEARCH_RADIUS = 2;
     private static final String REPORT_BOOK_AUTHOR = "Village Bell Tracker";
     private static final String REPORT_BOOK_TITLE_PREFIX = "Bell Report ";
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
@@ -132,9 +132,18 @@ public final class VillagerBellTracker {
     }
 
     private static Optional<Inventory> findBellReportChestInventory(ServerWorld world, BlockPos bellPos) {
-        Optional<BlockPos> nearestChestPos = BlockPos.streamOutwards(bellPos, REPORT_CHEST_SEARCH_RADIUS, 1, REPORT_CHEST_SEARCH_RADIUS)
-                .filter(pos -> world.getBlockState(pos).isOf(Blocks.CHEST))
-                .min(Comparator.comparingDouble(pos -> pos.getSquaredDistance(bellPos)));
+        Optional<BlockPos> nearestChestPos = findNearestBellReportChest(world, bellPos, REPORT_CHEST_PRIMARY_SEARCH_RADIUS);
+
+        int fallbackRadius = Math.max(0, GuardVillagersConfig.bellReportChestFallbackRadius);
+        if (nearestChestPos.isEmpty() && fallbackRadius > REPORT_CHEST_PRIMARY_SEARCH_RADIUS) {
+            LOGGER.info(
+                    "Bell report chest lookup at {}: no chest found within primary radius {}; retrying with fallback radius {}.",
+                    bellPos.toShortString(),
+                    REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
+                    fallbackRadius
+            );
+            nearestChestPos = findNearestBellReportChest(world, bellPos, fallbackRadius);
+        }
 
         if (nearestChestPos.isEmpty()) {
             return Optional.empty();
@@ -147,6 +156,16 @@ public final class VillagerBellTracker {
         }
 
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true));
+    }
+
+    private static Optional<BlockPos> findNearestBellReportChest(ServerWorld world, BlockPos bellPos, int radius) {
+        return BlockPos.streamOutwards(bellPos, radius, 1, radius)
+                .filter(pos -> world.getBlockState(pos).isOf(Blocks.CHEST))
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> pos.getSquaredDistance(bellPos))
+                        .thenComparingInt(BlockPos::getY)
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getZ));
     }
 
     private static boolean tryInsertIntoInventory(Inventory inventory, ItemStack stack) {
