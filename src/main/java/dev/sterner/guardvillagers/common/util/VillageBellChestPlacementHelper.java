@@ -7,6 +7,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.structure.StructurePlacementData;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.ServerWorldAccess;
@@ -47,6 +48,9 @@ public final class VillageBellChestPlacementHelper {
             return;
         }
 
+        recordBellChestCandidate(world, bellPos, chestPos.get());
+        LOGGER.info("generation-time chest candidate: bell {} -> chest {}", bellPos.toShortString(), chestPos.get().toShortString());
+
         if (world.setBlockState(chestPos.get(), Blocks.CHEST.getDefaultState().with(ChestBlock.FACING, getChestFacing(bellState)), 2)) {
             LOGGER.info("Placed generated village chest at {} for bell {}", chestPos.get().toShortString(), bellPos.toShortString());
         } else {
@@ -86,6 +90,73 @@ public final class VillageBellChestPlacementHelper {
                 .thenComparingInt(BlockPos::getZ));
 
         return candidates.stream().findFirst();
+    }
+
+    public static Optional<BlockPos> reconcileBellChestForBell(ServerWorld world, BlockPos bellPos) {
+        BellChestMappingState mappingState = BellChestMappingState.get(world.getServer());
+        Optional<BlockPos> mappedChest = mappingState.getChestPos(world, bellPos);
+        if (mappedChest.isEmpty()) {
+            return Optional.empty();
+        }
+
+        BlockPos mappedPos = mappedChest.get();
+        if (world.getBlockState(mappedPos).isOf(Blocks.CHEST)) {
+            LOGGER.debug("runtime chest confirmed: bell {} -> chest {}", bellPos.toShortString(), mappedPos.toShortString());
+            return Optional.of(mappedPos);
+        }
+
+        BlockState bellState = world.getBlockState(bellPos);
+        if (!bellState.isOf(Blocks.BELL)) {
+            mappingState.removeMapping(world, bellPos);
+            LOGGER.debug("Removing bell/chest mapping for {}: bell block no longer present", bellPos.toShortString());
+            return Optional.empty();
+        }
+
+        Optional<BlockPos> replacement = Optional.empty();
+        if (isValidChestPosition(world, mappedPos)) {
+            replacement = Optional.of(mappedPos.toImmutable());
+        } else {
+            replacement = findNearestAvailableChestPlacement(world, bellPos, bellState);
+        }
+
+        if (replacement.isPresent() && world.setBlockState(replacement.get(), Blocks.CHEST.getDefaultState().with(ChestBlock.FACING, getChestFacing(bellState)), 2)) {
+            mappingState.putMapping(world, bellPos, replacement.get());
+            LOGGER.info("runtime chest missing; repaired/researched: bell {} -> chest {}", bellPos.toShortString(), replacement.get().toShortString());
+            return replacement;
+        }
+
+        Optional<BlockPos> nearbyChest = findNearestExistingChest(world, bellPos, 3);
+        if (nearbyChest.isPresent()) {
+            mappingState.putMapping(world, bellPos, nearbyChest.get());
+            LOGGER.info("runtime chest missing; repaired/researched: bell {} -> chest {}", bellPos.toShortString(), nearbyChest.get().toShortString());
+        }
+        return nearbyChest;
+    }
+
+    public static void reconcileWorldBellChestMappings(ServerWorld world) {
+        BellChestMappingState mappingState = BellChestMappingState.get(world.getServer());
+        for (BlockPos bellPos : mappingState.getBellPositions(world)) {
+            reconcileBellChestForBell(world, bellPos);
+        }
+    }
+
+    public static Optional<BlockPos> getMappedChestPos(ServerWorld world, BlockPos bellPos) {
+        return BellChestMappingState.get(world.getServer()).getChestPos(world, bellPos);
+    }
+
+    private static void recordBellChestCandidate(ServerWorldAccess world, BlockPos bellPos, BlockPos chestPos) {
+        ServerWorld serverWorld = world.toServerWorld();
+        BellChestMappingState.get(serverWorld.getServer()).putMapping(serverWorld, bellPos, chestPos);
+    }
+
+    private static Optional<BlockPos> findNearestExistingChest(ServerWorldAccess world, BlockPos bellPos, int radius) {
+        return BlockPos.streamOutwards(bellPos, radius, 1, radius)
+                .filter(pos -> world.getBlockState(pos).isOf(Blocks.CHEST))
+                .min(Comparator
+                        .comparingDouble((BlockPos pos) -> pos.getSquaredDistance(bellPos))
+                        .thenComparingInt(BlockPos::getY)
+                        .thenComparingInt(BlockPos::getX)
+                        .thenComparingInt(BlockPos::getZ));
     }
 
     private static Direction getLeftDirection(BlockState bellState) {
