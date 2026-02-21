@@ -64,6 +64,12 @@ public final class VillagerBellTracker {
     private VillagerBellTracker() {
     }
 
+    public static void handleBellRung(ServerWorld world, BlockPos bellPos) {
+        logBellVillagerStats(world, bellPos);
+        writeBellReportBooks(world, bellPos);
+        directEmployedVillagersAndGuardsToStations(world, bellPos);
+    }
+
     public static void logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
         VillageGuardStandManager.refreshBellInventory(world, bellPos);
         BellReportSummary summary = collectBellReportSummary(world, bellPos);
