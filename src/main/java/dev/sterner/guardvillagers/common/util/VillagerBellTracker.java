@@ -16,7 +16,6 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -27,8 +26,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -43,6 +44,8 @@ public final class VillagerBellTracker {
     private static final int JOB_REPORT_COMPLETION_RANGE = 1;
     private static final int JOB_HIGHLIGHT_PARTICLE_COUNT = 12;
     private static final double JOB_REPORT_HOLD_DISTANCE_SQUARED = 2.25D;
+    private static final int WRITTEN_BOOK_MAX_PAGE_LENGTH = 255;
+    private static final int WRITTEN_BOOK_MAX_PAGE_COUNT = 100;
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
 
     private VillagerBellTracker() {
@@ -50,6 +53,25 @@ public final class VillagerBellTracker {
 
     public static void logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
         VillageGuardStandManager.refreshBellInventory(world, bellPos);
+        BellReportSummary summary = collectBellReportSummary(world, bellPos);
+        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
+        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
+
+        for (String line : reportLines) {
+            LOGGER.info("{}", line);
+        }
+
+        resetGuardsToWander(world, bellPos);
+    }
+
+    public static List<String> buildBellReportBookPages(ServerWorld world, BlockPos bellPos) {
+        BellReportSummary summary = collectBellReportSummary(world, bellPos);
+        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
+        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
+        return splitLinesIntoWrittenBookPages(reportLines);
+    }
+
+    private static BellReportSummary collectBellReportSummary(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(BELL_TRACKING_RANGE);
         var villagers = world.getEntitiesByClass(VillagerEntity.class, searchBox, Entity::isAlive);
 
@@ -98,22 +120,56 @@ public final class VillagerBellTracker {
         int totalPairedCraftingTables = professionWithCraftingTables.values().stream().mapToInt(Integer::intValue).sum();
         int totalEmployed = villagersWithJobs + guardVillagers;
 
-        LOGGER.info("Bell at [{}] triggered villager summary ({} block radius)", bellPos.toShortString(), BELL_TRACKING_RANGE);
-        LOGGER.info("Golems: {}", ironGolems);
-        LOGGER.info("Total villagers: {}", totalVillagers);
-        LOGGER.info("     Guards: {}", guardVillagers);
-        LOGGER.info("     Armor Stands: {}", armorStands);
-        LOGGER.info("     Employed: {}", totalEmployed);
-        LOGGER.info("     Unemployed: {}", villagersWithoutJobs);
-        LOGGER.info("Beds: {}", villagersWithBeds);
-        LOGGER.info("Workstations: {}", villagersWithJobs);
-        logByProfession(professionCounts);
-        LOGGER.info("Paired Chests: {}", totalPairedChests);
-        LOGGER.info("Paired Crafting Tables: {}", totalPairedCraftingTables);
+        return new BellReportSummary(
+                ironGolems,
+                totalVillagers,
+                guardVillagers,
+                armorStands,
+                totalEmployed,
+                villagersWithoutJobs,
+                villagersWithBeds,
+                villagersWithJobs,
+                totalPairedChests,
+                totalPairedCraftingTables,
+                professionCounts
+        );
+    }
 
-        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
-        logPairings(pairingReport);
-        resetGuardsToWander(world, bellPos);
+    // NOTE: Do not duplicate report fields outside this formatter.
+    // Keep both logger and written-book output sourced from this single field list.
+    private static List<String> formatBellReportSections(BlockPos bellPos, BellReportSummary summary, GuardStandPairingReport pairingReport) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Bell Report Location: [" + bellPos.toShortString() + "]");
+        lines.add("Bell Report Radius: " + BELL_TRACKING_RANGE + " blocks");
+        lines.add("Golems: " + summary.ironGolems());
+        lines.add("Villagers (Total): " + summary.totalVillagers());
+        lines.add("Villagers (Guards): " + summary.guardVillagers());
+        lines.add("Armor Stands (Guard): " + summary.armorStands());
+        lines.add("Employment (Employed): " + summary.totalEmployed());
+        lines.add("Employment (Unemployed): " + summary.villagersWithoutJobs());
+        lines.add("Beds Claimed: " + summary.villagersWithBeds());
+        lines.add("Workstations Claimed: " + summary.villagersWithJobs());
+
+        lines.add("Profession Counts:");
+        summary.professionCounts().entrySet().stream()
+                .sorted(Comparator.comparing(entry -> Registries.VILLAGER_PROFESSION.getId(entry.getKey()).toString()))
+                .forEach(entry -> lines.add("- " + Registries.VILLAGER_PROFESSION.getId(entry.getKey()) + ": " + entry.getValue()));
+
+        lines.add("Paired Chests: " + summary.totalPairedChests());
+        lines.add("Paired Crafting Tables: " + summary.totalPairedCraftingTables());
+
+        lines.add("Guard-Stand Pairings:");
+        if (pairingReport.assignments().isEmpty()) {
+            lines.add("- None");
+        } else {
+            for (GuardStandAssignment assignment : pairingReport.assignments()) {
+                lines.add("- Guard " + assignment.guardPos().toShortString() + " -> Stand " + assignment.standPos().toShortString());
+            }
+        }
+
+        lines.add("Guard Demotions: " + pairingReport.demotedGuards().size());
+        pairingReport.demotedGuards().forEach(pos -> lines.add("- Demoted Guard Position: " + pos.toShortString()));
+        return lines;
     }
 
     public static void directEmployedVillagersAndGuardsToStations(ServerWorld world, BlockPos bellPos) {
@@ -259,33 +315,72 @@ public final class VillagerBellTracker {
         return false;
     }
 
-    private static void logByProfession(Map<VillagerProfession, Integer> counts) {
-        LOGGER.info("     Workstations by profession:");
-        counts.entrySet().stream()
-                .sorted(Comparator.comparing(entry -> Registries.VILLAGER_PROFESSION.getId(entry.getKey()).toString()))
-                .forEach(entry -> LOGGER.info("     {} - {}", Registries.VILLAGER_PROFESSION.getId(entry.getKey()), entry.getValue()));
-    }
-
     private static void incrementCount(Map<VillagerProfession, Integer> map, VillagerProfession profession) {
         map.merge(profession, 1, Integer::sum);
     }
 
-    private static void logPairings(GuardStandPairingReport pairingReport) {
-        if (pairingReport.assignments().isEmpty()) {
-            LOGGER.info("No guard to armor stand pairings were created.");
-            return;
+    private static List<String> splitLinesIntoWrittenBookPages(List<String> lines) {
+        List<String> pages = new ArrayList<>();
+        StringBuilder currentPage = new StringBuilder();
+
+        for (String line : lines) {
+            for (String segment : splitLineIntoSegments(line)) {
+                int separatorLength = currentPage.isEmpty() ? 0 : 1;
+                if (currentPage.length() + separatorLength + segment.length() > WRITTEN_BOOK_MAX_PAGE_LENGTH) {
+                    if (!currentPage.isEmpty()) {
+                        pages.add(currentPage.toString());
+                        if (pages.size() >= WRITTEN_BOOK_MAX_PAGE_COUNT) {
+                            return pages;
+                        }
+                        currentPage = new StringBuilder();
+                    }
+                }
+
+                if (!currentPage.isEmpty()) {
+                    currentPage.append('\n');
+                }
+                currentPage.append(segment);
+            }
         }
 
-        LOGGER.info("Guard and armor stand pairings:");
-        for (GuardStandAssignment assignment : pairingReport.assignments()) {
-            LOGGER.info("Guard: {}", assignment.guardPos().toShortString());
-            LOGGER.info("Stand: {}", assignment.standPos().toShortString());
+        if (!currentPage.isEmpty() && pages.size() < WRITTEN_BOOK_MAX_PAGE_COUNT) {
+            pages.add(currentPage.toString());
         }
 
-        if (!pairingReport.demotedGuards().isEmpty()) {
-            LOGGER.info("Demoted excess guards: {}", pairingReport.demotedGuards().size());
-            pairingReport.demotedGuards()
-                    .forEach(pos -> LOGGER.info("- {}", pos.toShortString()));
+        if (pages.isEmpty()) {
+            pages.add("Bell Report: No data available.");
         }
+
+        return pages;
+    }
+
+    private static List<String> splitLineIntoSegments(String line) {
+        if (line.isEmpty()) {
+            return List.of("");
+        }
+
+        List<String> segments = new ArrayList<>();
+        int start = 0;
+        while (start < line.length()) {
+            int end = Math.min(start + WRITTEN_BOOK_MAX_PAGE_LENGTH, line.length());
+            segments.add(line.substring(start, end));
+            start = end;
+        }
+        return segments;
+    }
+
+    private record BellReportSummary(
+            int ironGolems,
+            int totalVillagers,
+            int guardVillagers,
+            int armorStands,
+            int totalEmployed,
+            int villagersWithoutJobs,
+            int villagersWithBeds,
+            int villagersWithJobs,
+            int totalPairedChests,
+            int totalPairedCraftingTables,
+            Map<VillagerProfession, Integer> professionCounts
+    ) {
     }
 }
