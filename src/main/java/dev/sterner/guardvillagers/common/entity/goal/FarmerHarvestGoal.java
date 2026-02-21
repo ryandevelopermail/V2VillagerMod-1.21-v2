@@ -38,6 +38,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
+    private static final int WATER_SEARCH_RADIUS = 64;
+    private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
@@ -981,10 +983,10 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private BlockPos findNearestWaterBlock(ServerWorld world) {
-        int radius = HARVEST_RADIUS;
+        int radius = WATER_SEARCH_RADIUS;
         int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -1, -radius);
-        BlockPos end = jobPos.add(radius, 1, radius);
+        BlockPos start = jobPos.add(-radius, -WATER_SEARCH_VERTICAL_RANGE, -radius);
+        BlockPos end = jobPos.add(radius, WATER_SEARCH_VERTICAL_RANGE, radius);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
 
