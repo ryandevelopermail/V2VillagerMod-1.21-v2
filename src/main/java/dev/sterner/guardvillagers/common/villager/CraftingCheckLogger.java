@@ -83,7 +83,7 @@ public final class CraftingCheckLogger {
 
     private static String resolveVillageKey(VillagerEntity villager, ServerWorld world) {
         return villager.getBrain().getOptionalMemory(MemoryModuleType.MEETING_POINT)
-                .map(GlobalPos::getPos)
+                .map(GlobalPos::pos)
                 .map(BlockPos::toImmutable)
                 .map(pos -> "bell@" + formatBlockPos(pos))
                 .orElseGet(() -> "unassigned@" + world.getRegistryKey().getValue());
