@@ -6,6 +6,9 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.goal.Goal;
+import dev.sterner.guardvillagers.common.villager.behavior.ArmorerBehavior;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -14,9 +17,9 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.Hand;
-import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.World;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -34,15 +37,14 @@ public class HealGolemGoal extends Goal {
 
     @Override
     public boolean canStart() {
-        VillagerEntity villager = (VillagerEntity) this.healer;
-        VillagerProfession profession = villager.getVillagerData().getProfession();
-
-        if ((profession != VillagerProfession.WEAPONSMITH && profession != VillagerProfession.TOOLSMITH
-                && profession != VillagerProfession.ARMORER) || this.healer.isSleeping()) {
+        if (!(this.healer instanceof VillagerEntity villager)) {
             return false;
         }
-
-        if (profession == VillagerProfession.ARMORER && !armorerHasIron(villager)) {
+        if (villager.getVillagerData().getProfession() != VillagerProfession.WEAPONSMITH && villager.getVillagerData().getProfession() != VillagerProfession.TOOLSMITH
+                && villager.getVillagerData().getProfession() != VillagerProfession.ARMORER || this.healer.isSleeping()) {
+            return false;
+        }
+        if (villager.getVillagerData().getProfession() == VillagerProfession.ARMORER && !hasIronInPairedChest(villager)) {
             return false;
         }
 
@@ -87,18 +89,15 @@ public class HealGolemGoal extends Goal {
         healer.equipStack(EquipmentSlot.MAINHAND, new ItemStack(Items.IRON_INGOT));
         healer.getNavigation().startMovingTo(golem, 0.5);
         if (healer.distanceTo(golem) <= 2.0D) {
-            long currentTick = healer.getWorld().getTime();
-            if (currentTick == lastHealTick) {
+            if (healer.getWorld().getTime() == lastHealTick) {
                 return;
             }
-
-            VillagerEntity villager = (VillagerEntity) healer;
-            if (villager.getVillagerData().getProfession() == VillagerProfession.ARMORER && !consumeArmorerIron(villager)) {
+            if (!consumeRepairMaterial()) {
                 return;
             }
 
             this.hasStartedHealing = true;
-            this.lastHealTick = currentTick;
+            this.lastHealTick = healer.getWorld().getTime();
             healer.swingHand(Hand.MAIN_HAND);
             golem.heal(15.0F);
             float f1 = 1.0F + (golem.getRandom().nextFloat() - golem.getRandom().nextFloat()) * 0.2F;
@@ -106,59 +105,61 @@ public class HealGolemGoal extends Goal {
         }
     }
 
-    private boolean armorerHasIron(VillagerEntity villager) {
-        Inventory inventory = getArmorerChestInventory(villager);
-        if (inventory == null) {
+    private boolean consumeRepairMaterial() {
+        if (!(healer instanceof VillagerEntity villager)) {
             return false;
         }
 
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (stack.isOf(Items.IRON_INGOT) && stack.getCount() > 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean consumeArmorerIron(VillagerEntity villager) {
-        Inventory inventory = getArmorerChestInventory(villager);
-        if (inventory == null) {
-            return false;
-        }
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isOf(Items.IRON_INGOT) || stack.getCount() <= 0) {
-                continue;
-            }
-
-            stack.decrement(1);
-            if (stack.isEmpty()) {
-                inventory.setStack(slot, ItemStack.EMPTY);
-            }
-            inventory.markDirty();
+        if (villager.getVillagerData().getProfession() != VillagerProfession.ARMORER) {
             return true;
         }
 
+        Inventory chestInventory = getPairedChestInventory(villager);
+        if (chestInventory == null) {
+            return false;
+        }
+
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (stack.isOf(Items.IRON_INGOT)) {
+                stack.decrement(1);
+                chestInventory.markDirty();
+                return true;
+            }
+        }
+
         return false;
     }
 
-    private Inventory getArmorerChestInventory(VillagerEntity villager) {
-        if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
-            return null;
+    private boolean hasIronInPairedChest(VillagerEntity villager) {
+        Inventory chestInventory = getPairedChestInventory(villager);
+        if (chestInventory == null) {
+            return false;
         }
 
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (stack.isOf(Items.IRON_INGOT)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private Inventory getPairedChestInventory(VillagerEntity villager) {
         BlockPos chestPos = ArmorerBehavior.getPairedChestPos(villager);
         if (chestPos == null) {
             return null;
         }
 
-        BlockState state = serverWorld.getBlockState(chestPos);
+        World world = villager.getWorld();
+        BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
 
-        return ChestBlock.getInventory(chestBlock, state, serverWorld, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
     }
+
 }
