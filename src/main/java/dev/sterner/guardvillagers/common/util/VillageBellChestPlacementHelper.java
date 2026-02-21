@@ -8,7 +8,7 @@ import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.structure.StructurePlacementData;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.StructureWorldAccess;
+import net.minecraft.world.ServerWorldAccess;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,7 +24,7 @@ public final class VillageBellChestPlacementHelper {
     private VillageBellChestPlacementHelper() {
     }
 
-    public static void tryPlaceChestForVillageBell(StructureWorldAccess world, BlockPos bellPos, BlockState bellState, StructurePlacementData placementData) {
+    public static void tryPlaceChestForVillageBell(ServerWorldAccess world, BlockPos bellPos, BlockState bellState, StructurePlacementData placementData) {
         if (!bellState.isOf(Blocks.BELL)) {
             return;
         }
@@ -51,7 +51,7 @@ public final class VillageBellChestPlacementHelper {
         }
     }
 
-    public static Optional<BlockPos> findNearestAvailableChestPlacement(StructureWorldAccess world, BlockPos bellPos, BlockState bellState) {
+    public static Optional<BlockPos> findNearestAvailableChestPlacement(ServerWorldAccess world, BlockPos bellPos, BlockState bellState) {
         Direction leftDirection = getLeftDirection(bellState);
         BlockPos preferredPos = bellPos.offset(leftDirection);
         if (isValidChestPosition(world, preferredPos)) {
@@ -113,7 +113,7 @@ public final class VillageBellChestPlacementHelper {
         return Direction.NORTH;
     }
 
-    private static boolean isVillagePlacementContext(StructureWorldAccess world, BlockPos bellPos, StructurePlacementData placementData) {
+    private static boolean isVillagePlacementContext(ServerWorldAccess world, BlockPos bellPos, StructurePlacementData placementData) {
         if (placementData == null) {
             return false;
         }
@@ -128,7 +128,7 @@ public final class VillageBellChestPlacementHelper {
         return false;
     }
 
-    private static boolean hasNearbyChest(StructureWorldAccess world, BlockPos bellPos) {
+    private static boolean hasNearbyChest(ServerWorldAccess world, BlockPos bellPos) {
         for (BlockPos checkPos : BlockPos.iterate(bellPos.add(-2, -1, -2), bellPos.add(2, 1, 2))) {
             if (world.getBlockState(checkPos).isOf(Blocks.CHEST)) {
                 return true;
@@ -137,7 +137,7 @@ public final class VillageBellChestPlacementHelper {
         return false;
     }
 
-    private static boolean isValidChestPosition(StructureWorldAccess world, BlockPos pos) {
+    private static boolean isValidChestPosition(ServerWorldAccess world, BlockPos pos) {
         BlockState stateAtPos = world.getBlockState(pos);
         if (!stateAtPos.isAir() && !stateAtPos.isReplaceable()) {
             return false;
