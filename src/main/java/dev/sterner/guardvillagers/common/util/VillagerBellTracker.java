@@ -65,32 +65,38 @@ public final class VillagerBellTracker {
     }
 
     public static void handleBellRung(ServerWorld world, BlockPos bellPos) {
-        logBellVillagerStats(world, bellPos);
-        writeBellReportBooks(world, bellPos);
+        BellVillageReport report = snapshotBellVillageReport(world, bellPos);
+        logBellVillagerStats(world, bellPos, report);
+        writeBellReportBooks(world, bellPos, report);
         directEmployedVillagersAndGuardsToStations(world, bellPos);
     }
 
-    public static void logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
-        VillageGuardStandManager.refreshBellInventory(world, bellPos);
+    public static BellVillageReport snapshotBellVillageReport(ServerWorld world, BlockPos bellPos) {
         BellReportSummary summary = collectBellReportSummary(world, bellPos);
         GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
-        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
+        List<String> orderedLines = formatBellReportSections(bellPos, summary, pairingReport);
 
-        for (String line : reportLines) {
+        return new BellVillageReport(summary, pairingReport, orderedLines);
+    }
+
+    public static BellVillageReport logBellVillagerStats(ServerWorld world, BlockPos bellPos) {
+        BellVillageReport report = snapshotBellVillageReport(world, bellPos);
+        logBellVillagerStats(world, bellPos, report);
+        return report;
+    }
+
+    public static List<String> logBellVillagerStats(ServerWorld world, BlockPos bellPos, BellVillageReport report) {
+        VillageGuardStandManager.refreshBellInventory(world, bellPos);
+
+        for (String line : report.orderedLines()) {
             LOGGER.info("{}", line);
         }
 
         resetGuardsToWander(world, bellPos);
+        return report.orderedLines();
     }
 
-    public static List<String> buildBellReportBookPages(ServerWorld world, BlockPos bellPos) {
-        BellReportSummary summary = collectBellReportSummary(world, bellPos);
-        GuardStandPairingReport pairingReport = VillageGuardStandManager.pairGuardsWithStands(world, bellPos);
-        List<String> reportLines = formatBellReportSections(bellPos, summary, pairingReport);
-        return splitLinesIntoWrittenBookPages(reportLines);
-    }
-
-    public static void writeBellReportBooks(ServerWorld world, BlockPos bellPos) {
+    public static void writeBellReportBooks(ServerWorld world, BlockPos bellPos, BellVillageReport report) {
         GlobalPos reportKey = GlobalPos.create(world.getRegistryKey(), bellPos.toImmutable());
         long gameTime = world.getTime();
         Long lastWriteTick = LAST_BOOK_WRITE_TICK.get(reportKey);
@@ -99,7 +105,7 @@ public final class VillagerBellTracker {
         }
 
         LAST_BOOK_WRITE_TICK.put(reportKey, gameTime);
-        List<String> pages = buildBellReportBookPages(world, bellPos);
+        List<String> pages = splitLinesIntoWrittenBookPages(report.orderedLines());
         Optional<Inventory> chestInventory = findBellReportChestInventory(world, bellPos);
         if (chestInventory.isEmpty()) {
             LOGGER.info("Bell report book generation skipped at {}: no nearby chest found.", bellPos.toShortString());
@@ -420,7 +426,11 @@ public final class VillagerBellTracker {
     private record ReportAssignment(GlobalPos jobSite, long endTime) {
     }
 
-    private record BellVillageReport(List<String> orderedLines) {
+    public record BellVillageReport(
+            BellReportSummary summary,
+            GuardStandPairingReport pairingReport,
+            List<String> orderedLines
+    ) {
     }
 
     private static boolean hasPairedBlock(ServerWorld world, BlockPos jobPos, Predicate<BlockState> predicate) {
@@ -487,7 +497,7 @@ public final class VillagerBellTracker {
         return segments;
     }
 
-    private record BellReportSummary(
+    public record BellReportSummary(
             int ironGolems,
             int totalVillagers,
             int guardVillagers,

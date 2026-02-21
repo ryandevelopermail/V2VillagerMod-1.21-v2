@@ -12,6 +12,7 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
+import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
@@ -115,6 +116,13 @@ public class GuardVillagers implements ModInitializer {
 
     public static Identifier id(String name){
         return Identifier.of(MODID, name);
+    }
+
+    public static void onBellRung(ServerWorld world, BlockPos bellPos) {
+        BellVillageReport report = VillagerBellTracker.snapshotBellVillageReport(world, bellPos);
+        VillagerBellTracker.logBellVillagerStats(world, bellPos, report);
+        VillagerBellTracker.writeBellReportBooks(world, bellPos, report);
+        VillagerBellTracker.directEmployedVillagersAndGuardsToStations(world, bellPos);
     }
 
     @Override

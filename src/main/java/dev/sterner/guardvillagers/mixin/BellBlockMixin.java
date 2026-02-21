@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.mixin;
 
-import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
+import dev.sterner.guardvillagers.GuardVillagers;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.server.world.ServerWorld;
@@ -19,7 +19,7 @@ public class BellBlockMixin {
     @Inject(method = "ring(Lnet/minecraft/entity/Entity;Lnet/minecraft/world/World;Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/util/math/Direction;)Z", at = @At("RETURN"))
     private void guardvillagers$onBellRing(@Nullable Entity entity, World world, BlockPos pos, @Nullable Direction direction, CallbackInfoReturnable<Boolean> cir) {
         if (cir.getReturnValue() && world instanceof ServerWorld serverWorld) {
-            VillagerBellTracker.handleBellRung(serverWorld, pos);
+            GuardVillagers.onBellRung(serverWorld, pos);
         }
     }
 }
