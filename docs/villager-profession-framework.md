@@ -92,3 +92,63 @@ definition(VillagerProfession.FARMER, Set.of(Blocks.COMPOSTER), FarmerBehavior::
 - Special modifiers enable richer behavior (e.g., a shepherd guiding animals between banners).
 
 Each profession can opt into any subset of callbacks and an optional conversion hook.
+
+## QA checklist: armorer chest-gated golem healing
+
+Use this checklist for manual validation of the armorer golem-healing path introduced via profession framework behavior.
+
+### Test setup
+
+- Spawn or locate an **armorer** villager with a valid armorer job site.
+- Ensure a **paired chest** exists for that armorer job-site pair.
+- Prepare an **iron golem with missing health** (pre-damaged).
+- Place known iron ingot stack counts in the paired chest (for consumption checks).
+
+### Scenario checks
+
+1. **Armorer + paired chest with iron + damaged golem => armorer approaches and heals**
+   - Preconditions:
+     - Armorer has a paired chest.
+     - Paired chest contains iron ingots.
+     - Damaged iron golem is in valid interaction range.
+   - Expected:
+     - Armorer selects golem-healing behavior and moves to/engages the golem.
+     - Golem receives healing ticks while iron is available.
+
+2. **Each heal consumes one ingot from the paired chest**
+   - Preconditions:
+     - Same as scenario (1), with a measurable stack count.
+   - Expected:
+     - After each successful heal event, chest iron count decreases by exactly 1.
+     - Over multiple heals, total consumption equals the number of successful heal events.
+
+3. **No iron in paired chest => armorer does not start golem healing**
+   - Preconditions:
+     - Armorer has a paired chest.
+     - Paired chest has zero iron ingots.
+     - Damaged golem present.
+   - Expected:
+     - Armorer does not enter golem-healing action path.
+     - No heal effects are applied to the golem.
+
+4. **Unpaired/missing chest => no healing attempt for armorer path**
+   - Preconditions:
+     - Remove pairing or remove/invalidate the paired chest.
+     - Damaged golem present.
+   - Expected:
+     - Armorer does not attempt chest-gated golem healing.
+     - No heal action should begin from the armorer profession logic.
+
+### Observable tester signals
+
+- **Successful heal emits sound:** golem repair sound plays whenever a heal is successfully applied.
+- **Resource consumption is visible:** iron stack count in the paired chest decreases after each successful heal.
+- **Healing stops when resources are exhausted:** once iron runs out, no further heal events occur.
+
+### Profession-safety regression checks
+
+Confirm existing non-armorer smith behavior remains unchanged:
+
+- **Weaponsmith golem-healing behavior remains unchanged** relative to previous baseline expectations.
+- **Toolsmith golem-healing behavior remains unchanged** relative to previous baseline expectations.
+- Verify there is no unintended cross-profession routing where armorer-only chest-gated logic alters weaponsmith/toolsmith behavior.
