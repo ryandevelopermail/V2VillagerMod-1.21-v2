@@ -16,9 +16,11 @@ import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageRep
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
@@ -172,6 +174,8 @@ public class GuardVillagers implements ModInitializer {
             if (entity instanceof VillagerEntity villagerEntity) {
                 if (world instanceof ServerWorld serverWorld) {
                     JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);
+                    VillagerConversionCandidateIndex.markCandidate(serverWorld, villagerEntity);
+                    ProfessionDefinitions.runConversionHooks(serverWorld);
                 }
                 if (villagerEntity.isNatural()) {
                     var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
@@ -205,6 +209,11 @@ public class GuardVillagers implements ModInitializer {
             }
         });
 
+        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z);
+            ProfessionDefinitions.runConversionHooks(world);
+        });
+
         ServerWorldEvents.LOAD.register((server, world) -> {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
@@ -221,6 +230,10 @@ public class GuardVillagers implements ModInitializer {
                 }
                 if (world.getTime() % 40L == 0L) {
                     ProfessionDefinitions.runConversionHooks(world);
+                }
+                if (GuardVillagersConfig.villagerConversionFallbackSweepEnabled
+                        && world.getTime() % Math.max(40, GuardVillagersConfig.villagerConversionFallbackSweepIntervalTicks) == 0L) {
+                    ProfessionDefinitions.runFallbackConversionSweep(world);
                 }
             }
         });

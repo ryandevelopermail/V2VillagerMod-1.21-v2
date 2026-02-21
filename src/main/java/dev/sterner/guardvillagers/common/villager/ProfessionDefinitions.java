@@ -1,11 +1,14 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.villager.behavior.*;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.village.VillagerProfession;
@@ -95,6 +98,27 @@ public final class ProfessionDefinitions {
                 conversionHook.accept(world);
             }
         }
+    }
+
+    public static void runFallbackConversionSweep(ServerWorld world) {
+        if (!GuardVillagersConfig.villagerConversionFallbackSweepEnabled) {
+            return;
+        }
+
+        int chunkRadius = 8;
+        for (PlayerEntity player : world.getPlayers()) {
+            ChunkPos center = player.getChunkPos();
+            for (int chunkX = center.x - chunkRadius; chunkX <= center.x + chunkRadius; chunkX++) {
+                for (int chunkZ = center.z - chunkRadius; chunkZ <= center.z + chunkRadius; chunkZ++) {
+                    if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                        continue;
+                    }
+                    VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunkX, chunkZ);
+                }
+            }
+        }
+
+        runConversionHooks(world);
     }
 
     private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory) {
