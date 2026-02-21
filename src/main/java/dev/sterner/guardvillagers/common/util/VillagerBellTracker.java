@@ -23,6 +23,8 @@ import net.minecraft.item.Items;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.RawFilteredPair;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -53,6 +55,9 @@ public final class VillagerBellTracker {
     private static final double JOB_REPORT_HOLD_DISTANCE_SQUARED = 2.25D;
     private static final int WRITTEN_BOOK_MAX_PAGE_LENGTH = 255;
     private static final int WRITTEN_BOOK_MAX_PAGE_COUNT = 100;
+    private static final int REPORT_CHEST_SEARCH_RADIUS = 2;
+    private static final String REPORT_BOOK_AUTHOR = "Village Bell Tracker";
+    private static final String REPORT_BOOK_TITLE_PREFIX = "Bell Report ";
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
     private static final Map<GlobalPos, Long> LAST_BOOK_WRITE_TICK = new HashMap<>();
 
@@ -89,7 +94,71 @@ public final class VillagerBellTracker {
 
         LAST_BOOK_WRITE_TICK.put(reportKey, gameTime);
         List<String> pages = buildBellReportBookPages(world, bellPos);
-        LOGGER.info("Bell report book generation requested at {} with {} pages.", bellPos.toShortString(), pages.size());
+        Optional<Inventory> chestInventory = findBellReportChestInventory(world, bellPos);
+        if (chestInventory.isEmpty()) {
+            LOGGER.info("Bell report book generation skipped at {}: no nearby chest found.", bellPos.toShortString());
+            return;
+        }
+
+        ItemStack reportBook = createBellReportBookItem(pages, bellPos);
+        if (!tryInsertIntoInventory(chestInventory.get(), reportBook)) {
+            LOGGER.info("Bell report book generation skipped at {}: nearby chest had no free slot.", bellPos.toShortString());
+            return;
+        }
+
+        LOGGER.info("Placed bell report book at {} with {} pages.", bellPos.toShortString(), pages.size());
+    }
+
+    private static ItemStack createBellReportBookItem(List<String> pages, BlockPos bellPos) {
+        List<RawFilteredPair<Text>> bookPages = pages.stream()
+                .map(page -> RawFilteredPair.of(Text.literal(page)))
+                .toList();
+
+        ItemStack reportBook = new ItemStack(Items.WRITTEN_BOOK);
+        reportBook.set(DataComponentTypes.WRITTEN_BOOK_CONTENT, new WrittenBookContentComponent(
+                RawFilteredPair.of(REPORT_BOOK_TITLE_PREFIX + "[" + bellPos.toShortString() + "]"),
+                REPORT_BOOK_AUTHOR,
+                0,
+                bookPages,
+                true
+        ));
+        return reportBook;
+    }
+
+    private static Optional<Inventory> findBellReportChestInventory(ServerWorld world, BlockPos bellPos) {
+        Optional<BlockPos> nearestChestPos = BlockPos.streamOutwards(bellPos, REPORT_CHEST_SEARCH_RADIUS, 1, REPORT_CHEST_SEARCH_RADIUS)
+                .filter(pos -> world.getBlockState(pos).isOf(Blocks.CHEST))
+                .min(Comparator.comparingDouble(pos -> pos.getSquaredDistance(bellPos)));
+
+        if (nearestChestPos.isEmpty()) {
+            return Optional.empty();
+        }
+
+        BlockPos chestPos = nearestChestPos.get();
+        BlockState chestState = world.getBlockState(chestPos);
+        if (!(chestState.getBlock() instanceof ChestBlock chestBlock)) {
+            return Optional.empty();
+        }
+
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true));
+    }
+
+    private static boolean tryInsertIntoInventory(Inventory inventory, ItemStack stack) {
+        if (stack.isEmpty()) {
+            return true;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (!inventory.getStack(slot).isEmpty()) {
+                continue;
+            }
+
+            inventory.setStack(slot, stack.copy());
+            inventory.markDirty();
+            return true;
+        }
+
+        return false;
     }
 
     private static BellReportSummary collectBellReportSummary(ServerWorld world, BlockPos bellPos) {
