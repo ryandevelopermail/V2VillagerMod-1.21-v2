@@ -111,7 +111,7 @@ public final class VillagerBellTracker {
 
     private static ItemStack createBellReportBookItem(List<String> pages, BlockPos bellPos) {
         List<RawFilteredPair<Text>> bookPages = pages.stream()
-                .map(page -> RawFilteredPair.of(Text.literal(page)))
+                .map(page -> RawFilteredPair.<Text>of(Text.literal(page)))
                 .toList();
 
         ItemStack reportBook = new ItemStack(Items.WRITTEN_BOOK);
