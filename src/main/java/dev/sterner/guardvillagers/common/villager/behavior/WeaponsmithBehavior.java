@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithDistributionGoal;
+import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithRepairGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -23,8 +24,10 @@ public class WeaponsmithBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(WeaponsmithBehavior.class);
     private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int REPAIR_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, WeaponsmithCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, WeaponsmithDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, WeaponsmithRepairGoal> REPAIR_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -64,6 +67,17 @@ public class WeaponsmithBehavior implements VillagerProfessionBehavior {
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        WeaponsmithRepairGoal repairGoal = REPAIR_GOALS.get(villager);
+        if (repairGoal == null) {
+            repairGoal = new WeaponsmithRepairGoal(villager, jobPos, chestPos);
+            REPAIR_GOALS.put(villager, repairGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(REPAIR_GOAL_PRIORITY, repairGoal);
+        } else {
+            repairGoal.setTargets(jobPos, chestPos);
+        }
+        repairGoal.requestImmediateRepairCheck(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -89,6 +103,17 @@ public class WeaponsmithBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         distributionGoal.requestImmediateDistribution();
+
+        WeaponsmithRepairGoal repairGoal = REPAIR_GOALS.get(villager);
+        if (repairGoal == null) {
+            repairGoal = new WeaponsmithRepairGoal(villager, jobPos, chestPos);
+            REPAIR_GOALS.put(villager, repairGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(REPAIR_GOAL_PRIORITY, repairGoal);
+        } else {
+            repairGoal.setTargets(jobPos, chestPos);
+        }
+        repairGoal.requestImmediateRepairCheck(world);
         updateChestListener(world, villager, chestPos);
     }
 
@@ -109,6 +134,10 @@ public class WeaponsmithBehavior implements VillagerProfessionBehavior {
             WeaponsmithDistributionGoal goal = DISTRIBUTION_GOALS.get(villager);
             if (goal != null) {
                 goal.requestImmediateDistribution();
+            }
+            WeaponsmithRepairGoal repairGoal = REPAIR_GOALS.get(villager);
+            if (repairGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                repairGoal.requestImmediateRepairCheck(serverWorld);
             }
         };
         simpleInventory.addListener(listener);
