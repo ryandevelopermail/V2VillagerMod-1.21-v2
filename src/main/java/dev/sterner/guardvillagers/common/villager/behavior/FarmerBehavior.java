@@ -45,6 +45,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
+            FarmerHarvestGoal harvest = GOALS.get(pairedVillager);
+            if (harvest != null) {
+                harvest.requestImmediateWorkCheck();
+            }
             FarmerDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
             if (distribution != null) {
                 distribution.requestImmediateDistribution();
@@ -74,6 +78,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
+            FarmerHarvestGoal harvest = GOALS.get(pairedVillager);
+            if (harvest != null) {
+                harvest.requestImmediateWorkCheck();
+            }
             FarmerDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
             if (distribution != null) {
                 distribution.requestImmediateDistribution();
