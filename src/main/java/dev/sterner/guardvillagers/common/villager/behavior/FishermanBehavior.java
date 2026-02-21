@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
@@ -34,7 +35,9 @@ import java.util.WeakHashMap;
 public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(FishermanBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, FishermanCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, FishermanDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -54,25 +57,27 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        FishermanCraftingGoal goal = CRAFTING_GOALS.get(villager);
-        if (goal == null || goal.getCraftingTablePos() == null) {
-            clearChestListener(villager);
-            tryConvertWithRod(world, villager, jobPos, chestPos);
-            return;
-        }
-
-        if (!world.getBlockState(goal.getCraftingTablePos()).isOf(Blocks.CRAFTING_TABLE)) {
-            clearChestListener(villager);
-            tryConvertWithRod(world, villager, jobPos, chestPos);
-            return;
-        }
-
         LOGGER.info("Fisherman {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
 
-        goal.setTargets(jobPos, chestPos, goal.getCraftingTablePos());
+        FishermanDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new FishermanDistributionGoal(villager, jobPos, chestPos, null);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            GoalSelector selector = villager.goalSelector;
+            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        }
+        distributionGoal.requestImmediateDistribution();
+
+        FishermanCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        if (goal != null) {
+            goal.setTargets(jobPos, chestPos, goal.getCraftingTablePos());
+        }
+
         updateChestListener(world, villager, chestPos);
         tryConvertWithRod(world, villager, jobPos, chestPos);
     }
@@ -114,6 +119,17 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        FishermanDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal == null) {
+            distributionGoal = new FishermanDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            DISTRIBUTION_GOALS.put(villager, distributionGoal);
+            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        } else {
+            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        distributionGoal.requestImmediateDistribution();
+
         updateChestListener(world, villager, chestPos);
         tryConvertWithRod(world, villager, jobPos, chestPos);
     }
@@ -225,6 +241,10 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             FishermanCraftingGoal goal = CRAFTING_GOALS.get(villager);
             if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
                 goal.requestImmediateCraft(serverWorld);
+            }
+            FishermanDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
             }
         };
         simpleInventory.addListener(listener);
