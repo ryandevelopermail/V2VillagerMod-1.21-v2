@@ -33,6 +33,10 @@ public final class DistributionRecipientHelper {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.FARMER, Blocks.COMPOSTER);
     }
 
+    public static List<RecipientRecord> findEligibleLibrarianRecipients(ServerWorld world, VillagerEntity source, double range) {
+        return findEligibleVillagerRecipients(world, source, range, VillagerProfession.LIBRARIAN, Blocks.LECTERN);
+    }
+
     private static List<RecipientRecord> findEligibleVillagerRecipients(
             ServerWorld world,
             VillagerEntity source,
