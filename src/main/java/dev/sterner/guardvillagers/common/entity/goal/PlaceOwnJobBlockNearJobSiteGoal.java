@@ -6,7 +6,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.entity.ShapeContext;
+import net.minecraft.block.ShapeContext;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
