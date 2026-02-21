@@ -5,11 +5,14 @@ import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ButcherToLeatherworkerDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
@@ -17,6 +20,8 @@ import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.inventory.InventoryChangedListener;
+import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
@@ -33,22 +38,28 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(ButcherBehavior.class);
     private static final int SMOKER_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
-    private static final int DISTRIBUTION_GOAL_PRIORITY = 6;
+    private static final int MEAT_DISTRIBUTION_GOAL_PRIORITY = 6;
+    private static final int LEATHER_DISTRIBUTION_GOAL_PRIORITY = 7;
     private static final Map<VillagerEntity, ButcherSmokerGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, ButcherMeatDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ButcherMeatDistributionGoal> MEAT_DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ButcherToLeatherworkerDistributionGoal> LEATHER_DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!villager.isAlive()) {
+            clearChestListener(villager);
             return;
         }
 
         if (!world.getBlockState(jobPos).isOf(Blocks.SMOKER)) {
+            clearChestListener(villager);
             return;
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            clearChestListener(villager);
             return;
         }
 
@@ -57,14 +68,25 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
                 chestPos.toShortString(),
                 jobPos.toShortString());
 
-        ButcherMeatDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal == null) {
-            distributionGoal = new ButcherMeatDistributionGoal(villager, jobPos, chestPos);
-            DISTRIBUTION_GOALS.put(villager, distributionGoal);
-            villager.goalSelector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
+        ButcherMeatDistributionGoal meatDistributionGoal = MEAT_DISTRIBUTION_GOALS.get(villager);
+        if (meatDistributionGoal == null) {
+            meatDistributionGoal = new ButcherMeatDistributionGoal(villager, jobPos, chestPos);
+            MEAT_DISTRIBUTION_GOALS.put(villager, meatDistributionGoal);
+            villager.goalSelector.add(MEAT_DISTRIBUTION_GOAL_PRIORITY, meatDistributionGoal);
         } else {
-            distributionGoal.setTargets(jobPos, chestPos);
+            meatDistributionGoal.setTargets(jobPos, chestPos);
         }
+        meatDistributionGoal.requestImmediateDistribution();
+
+        ButcherToLeatherworkerDistributionGoal leatherDistributionGoal = LEATHER_DISTRIBUTION_GOALS.get(villager);
+        if (leatherDistributionGoal == null) {
+            leatherDistributionGoal = new ButcherToLeatherworkerDistributionGoal(villager, jobPos, chestPos, null);
+            LEATHER_DISTRIBUTION_GOALS.put(villager, leatherDistributionGoal);
+            villager.goalSelector.add(LEATHER_DISTRIBUTION_GOAL_PRIORITY, leatherDistributionGoal);
+        } else {
+            leatherDistributionGoal.setTargets(jobPos, chestPos, leatherDistributionGoal.getCraftingTablePos());
+        }
+        leatherDistributionGoal.requestImmediateDistribution();
 
         ButcherSmokerGoal goal = GOALS.get(villager);
         if (goal == null) {
@@ -76,20 +98,25 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos);
         }
 
+        updateChestListener(world, villager, chestPos);
+
         tryConvertWithAxe(world, villager, jobPos, chestPos);
     }
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         if (!villager.isAlive()) {
+            clearChestListener(villager);
             return;
         }
 
         if (!world.getBlockState(jobPos).isOf(Blocks.SMOKER)) {
+            clearChestListener(villager);
             return;
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            clearChestListener(villager);
             return;
         }
 
@@ -102,6 +129,28 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        ButcherMeatDistributionGoal meatDistributionGoal = MEAT_DISTRIBUTION_GOALS.get(villager);
+        if (meatDistributionGoal == null) {
+            meatDistributionGoal = new ButcherMeatDistributionGoal(villager, jobPos, chestPos);
+            MEAT_DISTRIBUTION_GOALS.put(villager, meatDistributionGoal);
+            villager.goalSelector.add(MEAT_DISTRIBUTION_GOAL_PRIORITY, meatDistributionGoal);
+        } else {
+            meatDistributionGoal.setTargets(jobPos, chestPos);
+        }
+        meatDistributionGoal.requestImmediateDistribution();
+
+        ButcherToLeatherworkerDistributionGoal leatherDistributionGoal = LEATHER_DISTRIBUTION_GOALS.get(villager);
+        if (leatherDistributionGoal == null) {
+            leatherDistributionGoal = new ButcherToLeatherworkerDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
+            LEATHER_DISTRIBUTION_GOALS.put(villager, leatherDistributionGoal);
+            villager.goalSelector.add(LEATHER_DISTRIBUTION_GOAL_PRIORITY, leatherDistributionGoal);
+        } else {
+            leatherDistributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        leatherDistributionGoal.requestImmediateDistribution();
+
+        updateChestListener(world, villager, chestPos);
     }
 
     public static void tryConvertButchersWithAxe(ServerWorld world) {
@@ -186,5 +235,60 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         }
 
         return ItemStack.EMPTY;
+    }
+
+    private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
+        Inventory inventory = getChestInventory(world, chestPos);
+        ChestListener existing = CHEST_LISTENERS.get(villager);
+        if (existing != null && existing.inventory() == inventory) {
+            return;
+        }
+        if (existing != null) {
+            removeChestListener(existing);
+            CHEST_LISTENERS.remove(villager);
+        }
+        if (!(inventory instanceof SimpleInventory simpleInventory)) {
+            return;
+        }
+        InventoryChangedListener listener = sender -> {
+            ButcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                craftingGoal.requestImmediateCraft(serverWorld);
+            }
+
+            ButcherMeatDistributionGoal meatDistributionGoal = MEAT_DISTRIBUTION_GOALS.get(villager);
+            if (meatDistributionGoal != null) {
+                meatDistributionGoal.requestImmediateDistribution();
+            }
+
+            ButcherToLeatherworkerDistributionGoal leatherDistributionGoal = LEATHER_DISTRIBUTION_GOALS.get(villager);
+            if (leatherDistributionGoal != null) {
+                leatherDistributionGoal.requestImmediateDistribution();
+            }
+        };
+        simpleInventory.addListener(listener);
+        CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
+    }
+
+    private void clearChestListener(VillagerEntity villager) {
+        ChestListener existing = CHEST_LISTENERS.remove(villager);
+        if (existing != null) {
+            removeChestListener(existing);
+        }
+    }
+
+    private void removeChestListener(ChestListener existing) {
+        existing.inventory().removeListener(existing.listener());
+    }
+
+    private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
+        }
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
     }
 }
