@@ -3,8 +3,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -13,6 +13,7 @@ import net.minecraft.inventory.InventoryChangedListener;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +35,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.LECTERN)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.LIBRARIAN, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }
@@ -78,7 +79,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        if (!world.getBlockState(jobPos).isOf(Blocks.LECTERN)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.LIBRARIAN, world.getBlockState(jobPos))) {
             clearChestListener(villager);
             return;
         }

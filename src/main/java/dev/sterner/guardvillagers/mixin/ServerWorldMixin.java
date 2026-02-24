@@ -5,7 +5,9 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.AttackEntityDaytimeGoal;
 import dev.sterner.guardvillagers.common.entity.goal.HealGolemGoal;
 import dev.sterner.guardvillagers.common.entity.goal.HealGuardAndPlayerGoal;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.ActiveTargetGoal;
 import net.minecraft.entity.ai.goal.FleeEntityGoal;
 import net.minecraft.entity.ai.goal.PrioritizedGoal;
@@ -73,6 +75,10 @@ public abstract class ServerWorldMixin extends World implements StructureWorldAc
                 villagerEntity.goalSelector.add(1, new HealGolemGoal(villagerEntity));
             if (GuardVillagersConfig.clericHealing)
                 villagerEntity.goalSelector.add(1, new HealGuardAndPlayerGoal(villagerEntity, 1.0D, 100, 0, 10.0F));
+
+            villagerEntity.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .filter(globalPos -> globalPos.dimension() == villagerEntity.getWorld().getRegistryKey())
+                    .ifPresent(globalPos -> VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villagerEntity, globalPos.pos()));
         }
 
         if (entity instanceof IronGolemEntity golem) {

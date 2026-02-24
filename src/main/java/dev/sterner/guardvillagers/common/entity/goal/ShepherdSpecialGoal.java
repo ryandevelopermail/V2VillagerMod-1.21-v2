@@ -45,12 +45,18 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEAR_CHECK_INTERVAL_VARIANCE_TICKS = 200;
     private static final int SHEEP_SENSOR_INTERVAL_TICKS = 80;
     private static final double MOVE_SPEED = 0.6D;
+    private static final double SLOW_GUIDE_SPEED = 0.45D;
+    private static final double FAST_GATE_CLOSE_SPEED = 0.9D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
+    private static final int GATHER_RADIUS = 50;
+    private static final int GATHER_MIN_SESSION_TICKS = 1200;
+    private static final int GATHER_MAX_SESSION_TICKS = 2200;
+    private static final int GATHER_WANDER_REPATH_TICKS = 120;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -75,6 +81,11 @@ public class ShepherdSpecialGoal extends Goal {
     private ItemStack carriedItem = ItemStack.EMPTY;
     private boolean openedPenGate;
     private boolean wasInsidePen;
+    private BlockPos gatherBannerPos;
+    private long gatherSessionStartTick;
+    private long gatherSessionDurationTicks;
+    private long nextGatherRepathTick;
+    private boolean gatherHalfLogged;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -205,13 +216,19 @@ public class ShepherdSpecialGoal extends Goal {
                 stage = Stage.DONE;
                 return;
             }
-        } else {
+        } else if (taskType == TaskType.BANNER) {
             if (hasBannerInInventoryOrHand()) {
                 carriedItem = getBannerInInventoryOrHand();
             } else {
                 carriedItem = takeItemFromChest(world, taskType);
             }
             if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+                return;
+            }
+        } else {
+            if (!equipWheatForGathering(world)) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -232,14 +249,31 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        penTarget = findNearestPenTarget(world);
-        if (penTarget == null) {
-            nextCheckTime = world.getTime() + nextRandomCheckInterval();
-            stage = Stage.DONE;
+        if (taskType == TaskType.BANNER) {
+            penTarget = findNearestPenTarget(world);
+            if (penTarget == null) {
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+                return;
+            }
+            stage = Stage.GO_TO_PEN;
+            moveTo(penTarget);
             return;
         }
-        stage = Stage.GO_TO_PEN;
-        moveTo(penTarget);
+
+        gatherBannerPos = findNearestGroundBanner(world);
+        if (gatherBannerPos == null) {
+            stage = Stage.DONE;
+            nextCheckTime = world.getTime() + nextRandomCheckInterval();
+            return;
+        }
+
+        gatherSessionStartTick = world.getTime();
+        gatherSessionDurationTicks = randomGatherSessionDuration();
+        gatherHalfLogged = false;
+        nextGatherRepathTick = 0L;
+        LOGGER.info("Shepherd {} started wheat gather session near banner {} for {} ticks", villager.getUuidAsString(), gatherBannerPos.toShortString(), gatherSessionDurationTicks);
+        stage = Stage.GATHER_WANDER;
     }
 
     @Override
@@ -309,6 +343,65 @@ public class ShepherdSpecialGoal extends Goal {
                     moveTo(penTarget);
                 }
             }
+            case GATHER_WANDER -> {
+                if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                long elapsed = world.getTime() - gatherSessionStartTick;
+                if (!gatherHalfLogged && elapsed >= gatherSessionDurationTicks / 2L) {
+                    gatherHalfLogged = true;
+                    LOGGER.info("Shepherd {} wheat gather session 50% complete", villager.getUuidAsString());
+                }
+
+                if (elapsed >= gatherSessionDurationTicks) {
+                    PenTarget penWithBanner = findNearestPenWithBanner(world, gatherBannerPos);
+                    if (penWithBanner == null) {
+                        stage = Stage.DONE;
+                        nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                        return;
+                    }
+                    penTarget = penWithBanner.center();
+                    penGatePos = penWithBanner.gate();
+                    stage = Stage.GUIDE_TO_PEN_CENTER;
+                    return;
+                }
+
+                if (world.getTime() >= nextGatherRepathTick || villager.getNavigation().isIdle()) {
+                    moveTo(randomGatherWanderTarget(world, gatherBannerPos), SLOW_GUIDE_SPEED);
+                    nextGatherRepathTick = world.getTime() + GATHER_WANDER_REPATH_TICKS;
+                }
+            }
+            case GUIDE_TO_PEN_CENTER -> {
+                if (penTarget == null || penGatePos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                ensureGateOpen(world, penGatePos);
+                if (isNear(penTarget)) {
+                    villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
+                    stage = Stage.RUSH_TO_GATE_AND_CLOSE;
+                } else {
+                    moveTo(penTarget, SLOW_GUIDE_SPEED);
+                }
+            }
+            case RUSH_TO_GATE_AND_CLOSE -> {
+                if (penGatePos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                if (isNear(penGatePos)) {
+                    openGate(world, penGatePos, false);
+                    LOGGER.info("Shepherd {} closed pen gate at {} after wheat gather", villager.getUuidAsString(), penGatePos.toShortString());
+                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                    stage = Stage.DONE;
+                } else {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                }
+            }
             case RETURN_TO_CHEST -> {
                 updatePenGateAccess(world, penGatePos);
                 if (isNear(chestPos)) {
@@ -332,11 +425,19 @@ public class ShepherdSpecialGoal extends Goal {
             if (hasShearsInInventoryOrHand()) {
                 return TaskType.SHEARS;
             }
+            if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
+                return TaskType.WHEAT_GATHER;
+            }
             return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
             return TaskType.SHEARS;
+        }
+
+        if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
+                && hasGroundBannerNearby(world)) {
+            return TaskType.WHEAT_GATHER;
         }
 
         if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
@@ -371,6 +472,13 @@ public class ShepherdSpecialGoal extends Goal {
         Inventory villagerInventory = villager.getInventory();
         return hasMatchingItem(villagerInventory, stack -> stack.isIn(ItemTags.BANNERS))
                 || villager.getMainHandStack().isIn(ItemTags.BANNERS);
+    }
+
+    private boolean hasWheatInInventoryOrOffhand() {
+        Inventory villagerInventory = villager.getInventory();
+        return hasMatchingItem(villagerInventory, stack -> stack.isOf(Items.WHEAT))
+                || villager.getMainHandStack().isOf(Items.WHEAT)
+                || villager.getOffHandStack().isOf(Items.WHEAT);
     }
 
     private ItemStack getBannerInInventoryOrHand() {
@@ -467,6 +575,44 @@ public class ShepherdSpecialGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
+    private boolean equipWheatForGathering(ServerWorld world) {
+        if (villager.getOffHandStack().isOf(Items.WHEAT)) {
+            return true;
+        }
+
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.WHEAT)) {
+                continue;
+            }
+            ItemStack extracted = stack.split(1);
+            villager.setStackInHand(Hand.OFF_HAND, extracted);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            inventory.markDirty();
+            return true;
+        }
+
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return false;
+        }
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.WHEAT)) {
+                continue;
+            }
+            ItemStack extracted = stack.split(1);
+            villager.setStackInHand(Hand.OFF_HAND, extracted);
+            chestInventory.setStack(slot, stack);
+            chestInventory.markDirty();
+            return true;
+        }
+        return false;
+    }
+
     private int countSheepNearby(ServerWorld world) {
         Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
         List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, box, SheepEntity::isAlive);
@@ -490,7 +636,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (stack.isEmpty()) {
                 continue;
             }
-            if (!(stack.isIn(ItemTags.BANNERS) || stack.isIn(ItemTags.WOOL))) {
+            if (!(stack.isIn(ItemTags.BANNERS) || stack.isIn(ItemTags.WOOL) || stack.isOf(Items.WHEAT))) {
                 continue;
             }
 
@@ -499,9 +645,15 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         ItemStack mainHand = villager.getMainHandStack();
-        if (mainHand.isIn(ItemTags.BANNERS) || mainHand.isIn(ItemTags.WOOL)) {
+        if (mainHand.isIn(ItemTags.BANNERS) || mainHand.isIn(ItemTags.WOOL) || mainHand.isOf(Items.WHEAT)) {
             ItemStack remaining = insertStack(chestInventory, mainHand);
             villager.setStackInHand(Hand.MAIN_HAND, remaining);
+        }
+
+        ItemStack offHand = villager.getOffHandStack();
+        if (offHand.isOf(Items.WHEAT)) {
+            ItemStack remaining = insertStack(chestInventory, offHand);
+            villager.setStackInHand(Hand.OFF_HAND, remaining);
         }
 
         villagerInventory.markDirty();
@@ -940,6 +1092,9 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
+        if (taskType == TaskType.WHEAT_GATHER) {
+            return;
+        }
         if (gatePos == null) {
             return;
         }
@@ -1032,23 +1187,113 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void moveTo(BlockPos target) {
-        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+        moveTo(target, MOVE_SPEED);
+    }
+
+    private void moveTo(BlockPos target, double speed) {
+        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, speed);
     }
 
     private boolean isNear(BlockPos target) {
         return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
     }
 
+    private void ensureGateOpen(ServerWorld world, BlockPos gatePos) {
+        if (gatePos == null) {
+            return;
+        }
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        if (!state.get(FenceGateBlock.OPEN)) {
+            openGate(world, gatePos, true);
+        }
+    }
+
+    private boolean hasGroundBannerNearby(ServerWorld world) {
+        return findNearestGroundBanner(world) != null;
+    }
+
+    private BlockPos findNearestGroundBanner(ServerWorld world) {
+        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
+        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            BlockState state = world.getBlockState(pos);
+            if (!state.isIn(BlockTags.BANNERS)) {
+                continue;
+            }
+            double distance = villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = pos.toImmutable();
+            }
+        }
+        return nearest;
+    }
+
+    private PenTarget findNearestPenWithBanner(ServerWorld world, BlockPos bannerPos) {
+        BlockPos start = bannerPos.add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
+        BlockPos end = bannerPos.add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        PenTarget nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            BlockState state = world.getBlockState(pos);
+            if (!(state.getBlock() instanceof FenceGateBlock)) {
+                continue;
+            }
+
+            BlockPos insidePos = getPenInterior(world, pos, state);
+            if (insidePos == null || !isInsideFencePen(world, insidePos)) {
+                continue;
+            }
+
+            BlockPos center = getPenCenter(world, insidePos);
+            if (center == null || !hasBannerInPen(world, center)) {
+                continue;
+            }
+
+            double distanceToBanner = center.getSquaredDistance(bannerPos);
+            if (distanceToBanner < nearestDistance) {
+                nearestDistance = distanceToBanner;
+                nearest = new PenTarget(center.toImmutable(), pos.toImmutable());
+            }
+        }
+        return nearest;
+    }
+
+    private BlockPos randomGatherWanderTarget(ServerWorld world, BlockPos origin) {
+        int dx = villager.getRandom().nextBetween(-GATHER_RADIUS, GATHER_RADIUS);
+        int dz = villager.getRandom().nextBetween(-GATHER_RADIUS, GATHER_RADIUS);
+        BlockPos target = origin.add(dx, 0, dz);
+        int topY = world.getTopY() - 1;
+        int clampedY = Math.max(world.getBottomY(), Math.min(topY, target.getY()));
+        return new BlockPos(target.getX(), clampedY, target.getZ());
+    }
+
+    private long randomGatherSessionDuration() {
+        return GATHER_MIN_SESSION_TICKS + villager.getRandom().nextInt(GATHER_MAX_SESSION_TICKS - GATHER_MIN_SESSION_TICKS + 1);
+    }
+
     private enum Stage {
         IDLE,
         GO_TO_SHEEP,
         GO_TO_PEN,
+        GATHER_WANDER,
+        GUIDE_TO_PEN_CENTER,
+        RUSH_TO_GATE_AND_CLOSE,
         RETURN_TO_CHEST,
         DONE
     }
 
     private enum TaskType {
         SHEARS,
-        BANNER
+        BANNER,
+        WHEAT_GATHER
+    }
+
+    private record PenTarget(BlockPos center, BlockPos gate) {
     }
 }

@@ -1,8 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -89,7 +89,7 @@ public class MasonCraftingGoal extends Goal {
         if (jobPos == null || chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(jobPos).isOf(Blocks.STONECUTTER)) {
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
             return false;
         }
         refreshDailyLimit(world);
