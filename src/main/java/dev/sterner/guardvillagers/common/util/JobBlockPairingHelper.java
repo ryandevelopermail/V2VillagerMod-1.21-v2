@@ -380,7 +380,7 @@ public final class JobBlockPairingHelper {
         return Optional.empty();
     }
 
-    private static Collection<BlockPos> findBannersWithinRange(ServerWorld world, BlockPos center, int range) {
+    public static Collection<BlockPos> findBannersWithinRange(ServerWorld world, BlockPos center, int range) {
         int chunkRadius = MathHelper.ceil(range / 16.0D);
         int centerChunkX = center.getX() >> 4;
         int centerChunkZ = center.getZ() >> 4;
