@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 public class ShepherdBehavior implements VillagerProfessionBehavior {
+    private static final long SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS = 10L;
     private static final int SPECIAL_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
@@ -27,6 +28,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ShepherdSpecialGoal> SPECIAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -108,14 +110,21 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             removeChestListener(existing);
             CHEST_LISTENERS.remove(villager);
+            LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
         }
         if (!(inventory instanceof SimpleInventory simpleInventory)) {
             return;
         }
         InventoryChangedListener listener = sender -> {
             ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
-            if (specialGoal != null) {
-                specialGoal.requestImmediateCheck();
+            if (specialGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                specialGoal.onChestInventoryChanged();
+                long now = serverWorld.getTime();
+                long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+                if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
+                    specialGoal.requestImmediateCheck();
+                    LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
+                }
             }
             ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
             if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
@@ -132,6 +141,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
 
     private void clearChestListener(VillagerEntity villager) {
         ChestListener existing = CHEST_LISTENERS.remove(villager);
+        LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
         if (existing != null) {
             removeChestListener(existing);
         }
