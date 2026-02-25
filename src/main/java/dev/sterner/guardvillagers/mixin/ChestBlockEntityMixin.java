@@ -10,11 +10,15 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(ChestBlockEntity.class)
+@Mixin(BlockEntity.class)
 public abstract class ChestBlockEntityMixin {
     @Inject(method = "markDirty", at = @At("TAIL"))
     private void guardvillagers$notifyShepherdListeners(CallbackInfo ci) {
         BlockEntity self = (BlockEntity) (Object) this;
+        if (!(self instanceof ChestBlockEntity)) {
+            return;
+        }
+
         World world = self.getWorld();
         if (world instanceof ServerWorld serverWorld) {
             ChestInventoryChangeDispatcher.notifyChestMarkedDirty(serverWorld, self.getPos());
