@@ -14,7 +14,6 @@ import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
-import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -25,6 +24,7 @@ import net.minecraft.inventory.InventoryChangedListener;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.SwordItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -101,7 +101,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
 
         updateChestListener(world, villager, chestPos);
 
-        tryConvertWithAxe(world, villager, jobPos, chestPos);
+        tryConvertWithWeapon(world, villager, jobPos, chestPos);
     }
 
     @Override
@@ -152,9 +152,10 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         leatherDistributionGoal.requestImmediateDistribution();
 
         updateChestListener(world, villager, chestPos);
+        tryConvertWithWeapon(world, villager, jobPos, chestPos);
     }
 
-    public static void tryConvertButchersWithAxe(ServerWorld world) {
+    public static void tryConvertButchersWithWeapon(ServerWorld world) {
         for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER)) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
@@ -171,18 +172,18 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
                 continue;
             }
 
-            tryConvertWithAxe(world, villager, jobPos, chestPos.get());
+            tryConvertWithWeapon(world, villager, jobPos, chestPos.get());
         }
     }
 
-    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+    private static void tryConvertWithWeapon(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         ButcherGuardEntity guard = GuardVillagers.BUTCHER_GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
         }
 
-        ItemStack axeStack = takeAxeFromChest(world, chestPos);
-        if (axeStack.isEmpty()) {
+        ItemStack weaponStack = takeWeaponFromChest(world, chestPos);
+        if (weaponStack.isEmpty()) {
             return;
         }
 
@@ -201,7 +202,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
-        guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
+        guard.equipStack(EquipmentSlot.MAINHAND, weaponStack);
         guard.setHuntOnSpawn();
         guard.setPairedChestPos(chestPos);
         guard.setPairedSmokerPos(jobPos);
@@ -209,7 +210,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
-        LOGGER.info("Butcher {} converted into Butcher Guard {} using axe from chest {}",
+        LOGGER.info("Butcher {} converted into Butcher Guard {} using weapon from chest {}",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),
                 chestPos.toShortString());
@@ -220,15 +221,20 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         villager.discard();
     }
 
-    private static ItemStack takeAxeFromChest(ServerWorld world, BlockPos chestPos) {
-        BlockEntity blockEntity = world.getBlockEntity(chestPos);
-        if (!(blockEntity instanceof Inventory inventory)) {
+    private static ItemStack takeWeaponFromChest(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return ItemStack.EMPTY;
+        }
+
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (inventory == null) {
             return ItemStack.EMPTY;
         }
 
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && stack.getItem() instanceof AxeItem) {
+            if (!stack.isEmpty() && (stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem)) {
                 ItemStack extracted = stack.split(1);
                 inventory.markDirty();
                 return extracted;
