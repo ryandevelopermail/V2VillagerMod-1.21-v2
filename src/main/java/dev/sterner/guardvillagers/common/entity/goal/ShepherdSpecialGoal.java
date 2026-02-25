@@ -10,6 +10,7 @@ import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -64,6 +65,11 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
     private static final int GATHER_MAX_SESSION_TICKS = 2200;
     private static final int GATHER_WANDER_REPATH_TICKS = 120;
+    private static final int ACTIVE_HERD_LIMIT = 6;
+    private static final double HERD_SELECTION_RANGE = 24.0D;
+    private static final double HERD_FOLLOW_DISTANCE_SQUARED = 81.0D;
+    private static final double HERD_PEN_CLOSE_DISTANCE_SQUARED = 25.0D;
+    private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
 
     private final VillagerEntity villager;
@@ -93,7 +99,9 @@ public class ShepherdSpecialGoal extends Goal {
     private long gatherSessionStartTick;
     private long gatherSessionDurationTicks;
     private long nextGatherRepathTick;
+    private long nextGatherFollowCheckTick;
     private boolean gatherHalfLogged;
+    private final List<AnimalEntity> activeHerd = new ArrayList<>();
     private long nearestPenCacheTick = Long.MIN_VALUE;
     private BlockPos cachedNearestPenTarget;
     private BlockPos cachedNearestPenGatePos;
@@ -309,6 +317,9 @@ public class ShepherdSpecialGoal extends Goal {
         gatherSessionDurationTicks = randomGatherSessionDuration();
         gatherHalfLogged = false;
         nextGatherRepathTick = 0L;
+        nextGatherFollowCheckTick = 0L;
+        activeHerd.clear();
+        refreshActiveHerd(world);
         LOGGER.info("Shepherd {} started wheat gather session near banner {} for {} ticks", villager.getUuidAsString(), gatherBannerPos.toShortString(), gatherSessionDurationTicks);
         stage = Stage.GATHER_WANDER;
     }
@@ -325,6 +336,7 @@ public class ShepherdSpecialGoal extends Goal {
         carriedItem = ItemStack.EMPTY;
         openedPenGate = false;
         wasInsidePen = false;
+        activeHerd.clear();
     }
 
     @Override
@@ -387,13 +399,18 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                if (world.getTime() >= nextGatherFollowCheckTick) {
+                    refreshActiveHerd(world);
+                    nextGatherFollowCheckTick = world.getTime() + GATHER_FOLLOW_CHECK_INTERVAL_TICKS;
+                }
+
                 long elapsed = world.getTime() - gatherSessionStartTick;
                 if (!gatherHalfLogged && elapsed >= gatherSessionDurationTicks / 2L) {
                     gatherHalfLogged = true;
                     LOGGER.info("Shepherd {} wheat gather session 50% complete", villager.getUuidAsString());
                 }
 
-                if (elapsed >= gatherSessionDurationTicks) {
+                if (elapsed >= gatherSessionDurationTicks && isActiveHerdFollowing()) {
                     PenTarget penWithBanner = findNearestPenWithBanner(world, gatherBannerPos);
                     if (penWithBanner == null) {
                         stage = Stage.DONE;
@@ -407,7 +424,8 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 if (world.getTime() >= nextGatherRepathTick || villager.getNavigation().isIdle()) {
-                    moveTo(randomGatherWanderTarget(world, gatherBannerPos), SLOW_GUIDE_SPEED);
+                    BlockPos wanderTarget = getHerdAnchoredWanderTarget(world);
+                    moveTo(wanderTarget, SLOW_GUIDE_SPEED);
                     nextGatherRepathTick = world.getTime() + GATHER_WANDER_REPATH_TICKS;
                 }
             }
@@ -418,11 +436,13 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 ensureGateOpen(world, penGatePos);
-                if (isNear(penTarget)) {
+                refreshActiveHerd(world);
+
+                if (isHerdInsidePen(world, penTarget)) {
                     villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
                     stage = Stage.RUSH_TO_GATE_AND_CLOSE;
                 } else {
-                    moveTo(penTarget, SLOW_GUIDE_SPEED);
+                    moveTo(herdAnchoredGuideTarget(penTarget), SLOW_GUIDE_SPEED);
                 }
             }
             case RUSH_TO_GATE_AND_CLOSE -> {
@@ -1417,6 +1437,110 @@ public class ShepherdSpecialGoal extends Goal {
         int topY = world.getTopY() - 1;
         int clampedY = Math.max(world.getBottomY(), Math.min(topY, target.getY()));
         return new BlockPos(target.getX(), clampedY, target.getZ());
+    }
+
+    private void refreshActiveHerd(ServerWorld world) {
+        if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
+            activeHerd.clear();
+            return;
+        }
+
+        Box searchBox = new Box(villager.getBlockPos()).expand(HERD_SELECTION_RANGE, 6.0D, HERD_SELECTION_RANGE);
+        List<AnimalEntity> nearbyAnimals = world.getEntitiesByClass(AnimalEntity.class, searchBox, this::isGatherTargetAnimal);
+        nearbyAnimals.sort(Comparator.comparingDouble(villager::squaredDistanceTo));
+
+        activeHerd.clear();
+        int limit = Math.min(ACTIVE_HERD_LIMIT, nearbyAnimals.size());
+        for (int i = 0; i < limit; i++) {
+            activeHerd.add(nearbyAnimals.get(i));
+        }
+    }
+
+    private boolean isGatherTargetAnimal(AnimalEntity animal) {
+        if (!animal.isAlive() || !animal.canEat()) {
+            return false;
+        }
+        return animal.isInLove() || animal.isBreedingItem(Items.WHEAT.getDefaultStack());
+    }
+
+    private boolean isActiveHerdFollowing() {
+        if (activeHerd.isEmpty()) {
+            return false;
+        }
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            if (animal.squaredDistanceTo(villager) <= HERD_FOLLOW_DISTANCE_SQUARED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private BlockPos herdAnchoredGuideTarget(BlockPos fallbackTarget) {
+        BlockPos herdCentroid = getHerdCentroid();
+        if (herdCentroid == null) {
+            return fallbackTarget;
+        }
+        double midX = (herdCentroid.getX() + fallbackTarget.getX()) / 2.0D;
+        double midY = (herdCentroid.getY() + fallbackTarget.getY()) / 2.0D;
+        double midZ = (herdCentroid.getZ() + fallbackTarget.getZ()) / 2.0D;
+        return new BlockPos((int) Math.round(midX), (int) Math.round(midY), (int) Math.round(midZ));
+    }
+
+    private BlockPos getHerdAnchoredWanderTarget(ServerWorld world) {
+        BlockPos herdCentroid = getHerdCentroid();
+        BlockPos wanderOrigin = herdCentroid != null ? herdCentroid : gatherBannerPos;
+        return randomGatherWanderTarget(world, wanderOrigin);
+    }
+
+    private BlockPos getHerdCentroid() {
+        if (activeHerd.isEmpty()) {
+            return null;
+        }
+
+        double sumX = 0.0D;
+        double sumY = 0.0D;
+        double sumZ = 0.0D;
+        int count = 0;
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            sumX += animal.getX();
+            sumY += animal.getY();
+            sumZ += animal.getZ();
+            count++;
+        }
+
+        if (count == 0) {
+            return null;
+        }
+
+        return BlockPos.ofFloored(sumX / count, sumY / count, sumZ / count);
+    }
+
+    private boolean isHerdInsidePen(ServerWorld world, BlockPos penCenter) {
+        if (activeHerd.isEmpty()) {
+            return false;
+        }
+
+        int insideCount = 0;
+        int totalCount = 0;
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            totalCount++;
+            BlockPos animalPos = animal.getBlockPos();
+            boolean closeToCenter = animalPos.getSquaredDistance(penCenter) <= HERD_PEN_CLOSE_DISTANCE_SQUARED;
+            if (closeToCenter && isInsideFencePen(world, animalPos)) {
+                insideCount++;
+            }
+        }
+
+        return totalCount > 0 && insideCount >= Math.max(1, totalCount / 2);
     }
 
     private long randomGatherSessionDuration() {
