@@ -5,13 +5,8 @@ import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.inventory.Inventory;
-import net.minecraft.inventory.InventoryChangedListener;
-import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -104,45 +99,41 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
-        Inventory inventory = getChestInventory(world, chestPos);
         ChestListener existing = CHEST_LISTENERS.get(villager);
-        if (existing != null && existing.inventory() == inventory) {
+        BlockPos normalizedChestPos = chestPos.toImmutable();
+        if (existing != null && existing.world() == world && existing.chestPos().equals(normalizedChestPos)) {
             return;
         }
-        if (existing != null) {
-            removeChestListener(existing);
-            CHEST_LISTENERS.remove(villager);
-            LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
-        }
-        if (!(inventory instanceof SimpleInventory simpleInventory)) {
-            return;
-        }
-        InventoryChangedListener listener = sender -> {
-            ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
-            if (specialGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                boolean chestChanged = specialGoal.onChestInventoryChanged(serverWorld);
-                if (chestChanged) {
-                    long now = serverWorld.getTime();
-                    long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
-                    if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
-                        specialGoal.requestImmediateCheck();
-                        LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
-                    } else {
-                        specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
-                    }
+        clearChestListener(villager);
+
+        ChestInventoryChangeDispatcher.Subscription subscription = ChestInventoryChangeDispatcher.register(world, normalizedChestPos,
+                (serverWorld, changedPos) -> handleChestInventoryChanged(serverWorld, villager));
+        CHEST_LISTENERS.put(villager, new ChestListener(world, normalizedChestPos, subscription));
+    }
+
+    private void handleChestInventoryChanged(ServerWorld serverWorld, VillagerEntity villager) {
+        ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
+        if (specialGoal != null) {
+            boolean chestChanged = specialGoal.onChestInventoryChanged(serverWorld);
+            if (chestChanged) {
+                long now = serverWorld.getTime();
+                long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+                if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
+                    specialGoal.requestImmediateCheck();
+                    LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
+                } else {
+                    specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
                 }
             }
-            ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                craftingGoal.requestImmediateCraft(serverWorld);
-            }
-            ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-            if (distributionGoal != null) {
-                distributionGoal.requestImmediateDistribution();
-            }
-        };
-        simpleInventory.addListener(listener);
-        CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
+        }
+        ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        if (craftingGoal != null) {
+            craftingGoal.requestImmediateCraft(serverWorld);
+        }
+        ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal != null) {
+            distributionGoal.requestImmediateDistribution();
+        }
     }
 
     private void clearChestListener(VillagerEntity villager) {
@@ -154,17 +145,9 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     }
 
     private void removeChestListener(ChestListener existing) {
-        existing.inventory().removeListener(existing.listener());
+        ChestInventoryChangeDispatcher.unregister(existing.subscription());
     }
 
-    private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
-        }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-    }
-
-    private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
+    private record ChestListener(ServerWorld world, BlockPos chestPos, ChestInventoryChangeDispatcher.Subscription subscription) {
     }
 }
