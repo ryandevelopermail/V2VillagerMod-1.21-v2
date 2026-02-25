@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
@@ -10,11 +11,14 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.WeakHashMap;
 
 public class ShepherdBehavior implements VillagerProfessionBehavior {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdBehavior.class);
     private static final long SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS = 10L;
     private static final long SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final int SPECIAL_GOAL_PRIORITY = 3;
@@ -28,17 +32,28 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        double jobToChestDistance = calculateJobToChestDistance(jobPos, chestPos);
+        double distanceTolerance = getShepherdChestDistanceTolerance();
+
         if (!villager.isAlive()) {
+            LOGGER.info("Shepherd chest pairing skipped because villager {} is not alive", villager.getUuidAsString());
+            logPairingFailureDiagnostics(villager, jobPos, chestPos, jobToChestDistance, distanceTolerance, "villager_dead");
             clearChestListener(villager);
             return;
         }
 
         if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.SHEPHERD, world.getBlockState(jobPos))) {
+            LOGGER.info("Shepherd chest pairing skipped for villager {} because job block at {} is not a loom",
+                    villager.getUuidAsString(), jobPos.toShortString());
+            logPairingFailureDiagnostics(villager, jobPos, chestPos, jobToChestDistance, distanceTolerance, "wrong_job_block");
             clearChestListener(villager);
             return;
         }
 
-        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+        if (jobToChestDistance > distanceTolerance) {
+            LOGGER.info("Shepherd chest pairing skipped for villager {} because distance {} exceeds tolerance {}",
+                    villager.getUuidAsString(), formatDistance(jobToChestDistance), formatDistance(distanceTolerance));
+            logPairingFailureDiagnostics(villager, jobPos, chestPos, jobToChestDistance, distanceTolerance, "distance_exceeded");
             clearChestListener(villager);
             return;
         }
@@ -146,6 +161,29 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
 
     private void removeChestListener(ChestListener existing) {
         ChestInventoryChangeDispatcher.unregister(existing.subscription());
+    }
+
+    private void logPairingFailureDiagnostics(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos,
+                                              double jobToChestDistance, double distanceTolerance, String reason) {
+        LOGGER.info("Shepherd pairing diagnostics [reason={}] villager={} jobPos={} chestPos={} distance={} tolerance={}",
+                reason,
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                chestPos.toShortString(),
+                formatDistance(jobToChestDistance),
+                formatDistance(distanceTolerance));
+    }
+
+    private double calculateJobToChestDistance(BlockPos jobPos, BlockPos chestPos) {
+        return Math.sqrt(jobPos.getSquaredDistance(chestPos));
+    }
+
+    private double getShepherdChestDistanceTolerance() {
+        return Math.max(3.0D, GuardVillagersConfig.shepherdChestPairingDistanceTolerance);
+    }
+
+    private String formatDistance(double value) {
+        return String.format(java.util.Locale.ROOT, "%.3f", value);
     }
 
     private record ChestListener(ServerWorld world, BlockPos chestPos, ChestInventoryChangeDispatcher.Subscription subscription) {
