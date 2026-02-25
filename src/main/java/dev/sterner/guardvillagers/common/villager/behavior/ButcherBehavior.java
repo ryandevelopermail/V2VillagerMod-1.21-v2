@@ -27,12 +27,15 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.SwordItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ButcherBehavior implements VillagerProfessionBehavior {
@@ -156,7 +159,15 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertButchersWithWeapon(ServerWorld world) {
-        for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER)) {
+        Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER));
+        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+        candidates.addAll(world.getEntitiesByClass(
+                VillagerEntity.class,
+                worldBounds,
+                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER
+        ));
+
+        for (VillagerEntity villager : candidates) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;
@@ -202,7 +213,8 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
-        clearSpawnEquipment(guard);
+        clearArmorAndOffhand(guard);
+        guard.equipStack(EquipmentSlot.MAINHAND, weaponStack);
         guard.setHuntOnSpawn();
         guard.setPairedChestPos(chestPos);
         guard.setPairedSmokerPos(jobPos);
@@ -222,12 +234,11 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     }
 
 
-    private static void clearSpawnEquipment(ButcherGuardEntity guard) {
+    private static void clearArmorAndOffhand(ButcherGuardEntity guard) {
         guard.equipStack(EquipmentSlot.HEAD, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.CHEST, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.LEGS, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.FEET, ItemStack.EMPTY);
-        guard.equipStack(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
     }
 
