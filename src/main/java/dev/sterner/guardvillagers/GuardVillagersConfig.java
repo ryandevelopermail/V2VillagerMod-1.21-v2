@@ -75,4 +75,6 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static boolean bellChestRequireNearbyBed = false;
     @Entry
     public static int bellChestBedSearchRadius = 6;
+    @Entry(min=3.0)
+    public static double shepherdChestPairingDistanceTolerance = 3.0D;
 }
