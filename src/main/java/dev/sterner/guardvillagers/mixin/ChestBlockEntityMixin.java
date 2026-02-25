@@ -12,7 +12,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-@Mixin(ChestBlockEntity.class)
+@Mixin(BlockEntity.class)
 public abstract class ChestBlockEntityMixin {
     @Inject(method = {
             "setStack(ILnet/minecraft/item/ItemStack;)V",
@@ -32,6 +32,10 @@ public abstract class ChestBlockEntityMixin {
 
     private void guardvillagers$notifyShepherdListeners() {
         BlockEntity self = (BlockEntity) (Object) this;
+        if (!(self instanceof ChestBlockEntity)) {
+            return;
+        }
+
         World world = self.getWorld();
         if (world instanceof ServerWorld serverWorld) {
             ChestInventoryChangeDispatcher.notifyChestMarkedDirty(serverWorld, self.getPos());
