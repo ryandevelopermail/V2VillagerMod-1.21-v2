@@ -99,6 +99,8 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos cachedNearestPenGatePos;
     private long nearestGroundBannerCacheTick = Long.MIN_VALUE;
     private BlockPos cachedNearestGroundBanner;
+    private int observedChestBannerCount = -1;
+    private int observedChestWheatCount = -1;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -111,14 +113,29 @@ public class ShepherdSpecialGoal extends Goal {
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
         invalidateSpatialSearchCache();
+        observedChestBannerCount = -1;
+        observedChestWheatCount = -1;
     }
 
     public void requestImmediateCheck() {
         nextCheckTime = 0L;
     }
 
-    public void onChestInventoryChanged() {
-        if (taskType == TaskType.BANNER || taskType == TaskType.WHEAT_GATHER) {
+    public void requestCheckNoSoonerThan(long targetTick) {
+        if (nextCheckTime == 0L || nextCheckTime > targetTick) {
+            nextCheckTime = targetTick;
+        }
+    }
+
+    public void onChestInventoryChanged(ServerWorld world) {
+        int currentBannerCount = countBannersInChest(world);
+        int currentWheatCount = countWheatInChest(world);
+        boolean bannerChanged = observedChestBannerCount != currentBannerCount;
+        boolean wheatChanged = observedChestWheatCount != currentWheatCount;
+        observedChestBannerCount = currentBannerCount;
+        observedChestWheatCount = currentWheatCount;
+
+        if (bannerChanged || wheatChanged) {
             invalidateSpatialSearchCache();
         }
     }
@@ -549,6 +566,21 @@ public class ShepherdSpecialGoal extends Goal {
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
             if (!stack.isEmpty() && stack.isOf(Items.SHEARS)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private int countWheatInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(Items.WHEAT)) {
                 count += stack.getCount();
             }
         }
