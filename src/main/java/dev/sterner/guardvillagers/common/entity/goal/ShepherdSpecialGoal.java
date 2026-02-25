@@ -64,6 +64,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
     private static final int GATHER_MAX_SESSION_TICKS = 2200;
     private static final int GATHER_WANDER_REPATH_TICKS = 120;
+    private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -93,6 +94,11 @@ public class ShepherdSpecialGoal extends Goal {
     private long gatherSessionDurationTicks;
     private long nextGatherRepathTick;
     private boolean gatherHalfLogged;
+    private long nearestPenCacheTick = Long.MIN_VALUE;
+    private BlockPos cachedNearestPenTarget;
+    private BlockPos cachedNearestPenGatePos;
+    private long nearestGroundBannerCacheTick = Long.MIN_VALUE;
+    private BlockPos cachedNearestGroundBanner;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -104,10 +110,17 @@ public class ShepherdSpecialGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
+        invalidateSpatialSearchCache();
     }
 
     public void requestImmediateCheck() {
         nextCheckTime = 0L;
+    }
+
+    public void onChestInventoryChanged() {
+        if (taskType == TaskType.BANNER || taskType == TaskType.WHEAT_GATHER) {
+            invalidateSpatialSearchCache();
+        }
     }
 
     @Override
@@ -342,6 +355,7 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
                     if (placedBannerPos != null) {
+                        invalidateSpatialSearchCache();
                         triggerBannerPairing(world, placedBannerPos);
                     }
                     stage = Stage.RETURN_TO_CHEST;
@@ -873,11 +887,21 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
+        long now = world.getTime();
+        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            penGatePos = cachedNearestPenGatePos;
+            return cachedNearestPenTarget;
+        }
+
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
         if (bannerCandidates.isEmpty()) {
+            nearestPenCacheTick = now;
+            cachedNearestPenTarget = null;
+            cachedNearestPenGatePos = null;
+            penGatePos = null;
             return null;
         }
 
@@ -918,6 +942,9 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
 
+        nearestPenCacheTick = now;
+        cachedNearestPenTarget = nearest;
+        cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
         return nearest;
     }
@@ -1230,6 +1257,11 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
+        long now = world.getTime();
+        if (now - nearestGroundBannerCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            return cachedNearestGroundBanner;
+        }
+
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
@@ -1247,6 +1279,8 @@ public class ShepherdSpecialGoal extends Goal {
                 nearest = pos.toImmutable();
             }
         }
+        nearestGroundBannerCacheTick = now;
+        cachedNearestGroundBanner = nearest;
         return nearest;
     }
 
@@ -1355,6 +1389,14 @@ public class ShepherdSpecialGoal extends Goal {
 
     private long randomGatherSessionDuration() {
         return GATHER_MIN_SESSION_TICKS + villager.getRandom().nextInt(GATHER_MAX_SESSION_TICKS - GATHER_MIN_SESSION_TICKS + 1);
+    }
+
+    private void invalidateSpatialSearchCache() {
+        nearestPenCacheTick = Long.MIN_VALUE;
+        cachedNearestPenTarget = null;
+        cachedNearestPenGatePos = null;
+        nearestGroundBannerCacheTick = Long.MIN_VALUE;
+        cachedNearestGroundBanner = null;
     }
 
     private enum Stage {
