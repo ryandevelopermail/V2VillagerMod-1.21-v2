@@ -186,10 +186,6 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask != TaskType.SHEARS && !world.isDay()) {
-            return false;
-        }
-
         if (dayChanged && nextTask == TaskType.SHEARS && nextCheckTime == 0L) {
             nextCheckTime = world.getTime();
         }
@@ -305,6 +301,21 @@ public class ShepherdSpecialGoal extends Goal {
         if (taskType == TaskType.BANNER) {
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
+                Inventory inventory = getChestInventory(world).orElse(villager.getInventory());
+                if (hasShearsInChestOrInventory(inventory)) {
+                    taskType = TaskType.SHEARS;
+                    sheepTargets = findSheepTargets(world);
+                    sheepTargetIndex = 0;
+                    equipShearsFromInventory();
+                    if (sheepTargets.isEmpty()) {
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                        return;
+                    }
+                    stage = Stage.GO_TO_SHEEP;
+                    moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
+                    return;
+                }
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -491,21 +502,20 @@ public class ShepherdSpecialGoal extends Goal {
             if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
                 return TaskType.WHEAT_GATHER;
             }
-            if (hasBannerInInventoryOrHand() && canResolveBannerTask(world)) {
+            if (hasBannerInInventoryOrHand()) {
                 return TaskType.BANNER;
             }
             return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
         }
 
-        // Prioritize explicit special-item triggers over shearing so banner/wheat tasks are not starved,
-        // but only select banner task when a pen target can actually be resolved to preserve shears flow.
+        // Prioritize explicit special-item triggers over shearing so banner/wheat tasks are not starved.
         if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
                 && hasGroundBannerNearby(world)) {
             return TaskType.WHEAT_GATHER;
         }
 
         boolean hasBannerItem = hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
-        if (hasBannerItem && canResolveBannerTask(world)) {
+        if (hasBannerItem) {
             return TaskType.BANNER;
         }
 
@@ -522,9 +532,6 @@ public class ShepherdSpecialGoal extends Goal {
         return false;
     }
 
-    private boolean canResolveBannerTask(ServerWorld world) {
-        return findNearestPenTarget(world) != null;
-    }
 
     private boolean hasShearsInChestOrInventory(Inventory chestInventory) {
         return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))
