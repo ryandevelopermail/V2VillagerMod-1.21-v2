@@ -66,6 +66,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double HERD_PEN_CLOSE_DISTANCE_SQUARED = 25.0D;
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
+    private static final long CHEST_CHANGE_POLL_INTERVAL_TICKS = 20L;
+    private static final long PEN_FALLBACK_LOG_INTERVAL_TICKS = 200L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -104,6 +106,8 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos cachedNearestGroundBanner;
     private int observedChestBannerCount = -1;
     private int observedChestWheatCount = -1;
+    private long nextChestSnapshotCheckTick;
+    private long nextPenFallbackDebugLogTick;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -118,6 +122,7 @@ public class ShepherdSpecialGoal extends Goal {
         invalidateSpatialSearchCache();
         observedChestBannerCount = -1;
         observedChestWheatCount = -1;
+        nextChestSnapshotCheckTick = 0L;
     }
 
     public void requestImmediateCheck() {
@@ -130,7 +135,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
     }
 
-    public void onChestInventoryChanged(ServerWorld world) {
+    public boolean onChestInventoryChanged(ServerWorld world) {
         int currentBannerCount = countBannersInChest(world);
         int currentWheatCount = countWheatInChest(world);
         boolean bannerChanged = observedChestBannerCount != currentBannerCount;
@@ -140,13 +145,21 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (bannerChanged || wheatChanged) {
             invalidateSpatialSearchCache();
+            return true;
         }
+        return false;
     }
 
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             return false;
+        }
+        if (world.getTime() >= nextChestSnapshotCheckTick) {
+            if (onChestInventoryChanged(world)) {
+                requestImmediateCheck();
+            }
+            nextChestSnapshotCheckTick = world.getTime() + CHEST_CHANGE_POLL_INTERVAL_TICKS;
         }
         updateShearsCountdown(world);
         if (jobPos == null || chestPos == null) {
@@ -944,15 +957,21 @@ public class ShepherdSpecialGoal extends Goal {
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
-        if (bannerCandidates.isEmpty()) {
-            nearestPenCacheTick = now;
-            cachedNearestPenTarget = null;
-            cachedNearestPenGatePos = null;
-            penGatePos = null;
-            return null;
+        boolean usingFallbackGateScan = bannerCandidates.isEmpty();
+        List<BlockPos> gateCandidates;
+        if (usingFallbackGateScan) {
+            BlockPos fallbackAnchor = jobPos != null ? jobPos : villagerPos;
+            gateCandidates = collectNearbyGateCandidates(
+                    world,
+                    villagerPos,
+                    List.of(fallbackAnchor),
+                    PEN_BANNER_TO_GATE_SCAN_RADIUS,
+                    minY,
+                    maxY,
+                    PEN_GATE_CHECK_LIMIT);
+        } else {
+            gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         }
-
-        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         BlockPos nearest = null;
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
@@ -993,6 +1012,17 @@ public class ShepherdSpecialGoal extends Goal {
         cachedNearestPenTarget = nearest;
         cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
+
+        if (usingFallbackGateScan && now >= nextPenFallbackDebugLogTick) {
+            LOGGER.debug(
+                    "Shepherd {} fallback pen scan at {} found {} gate candidates, selected target={} gate={}",
+                    villager.getUuidAsString(),
+                    villagerPos.toShortString(),
+                    gateCandidates.size(),
+                    nearest != null ? nearest.toShortString() : "none",
+                    nearestGate != null ? nearestGate.toShortString() : "none");
+            nextPenFallbackDebugLogTick = now + PEN_FALLBACK_LOG_INTERVAL_TICKS;
+        }
         return nearest;
     }
 

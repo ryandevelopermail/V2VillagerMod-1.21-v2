@@ -120,14 +120,16 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         InventoryChangedListener listener = sender -> {
             ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
             if (specialGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                specialGoal.onChestInventoryChanged(serverWorld);
-                long now = serverWorld.getTime();
-                long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
-                if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
-                    specialGoal.requestImmediateCheck();
-                    LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
-                } else {
-                    specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
+                boolean chestChanged = specialGoal.onChestInventoryChanged(serverWorld);
+                if (chestChanged) {
+                    long now = serverWorld.getTime();
+                    long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+                    if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
+                        specialGoal.requestImmediateCheck();
+                        LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
+                    } else {
+                        specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
+                    }
                 }
             }
             ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
