@@ -187,8 +187,8 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        guard.spawnWithArmor = true;
         guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
+        guard.spawnWithArmor = false;
         guard.copyPositionAndRotation(villager);
         guard.headYaw = villager.headYaw;
         guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
@@ -202,7 +202,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
-        guard.equipStack(EquipmentSlot.MAINHAND, weaponStack);
+        clearSpawnEquipment(guard);
         guard.setHuntOnSpawn();
         guard.setPairedChestPos(chestPos);
         guard.setPairedSmokerPos(jobPos);
@@ -219,6 +219,16 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
         villager.discard();
+    }
+
+
+    private static void clearSpawnEquipment(ButcherGuardEntity guard) {
+        guard.equipStack(EquipmentSlot.HEAD, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.CHEST, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.LEGS, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.FEET, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
     }
 
     private static ItemStack takeWeaponFromChest(ServerWorld world, BlockPos chestPos) {
