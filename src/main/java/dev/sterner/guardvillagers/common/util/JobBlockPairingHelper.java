@@ -7,6 +7,7 @@ import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -24,7 +25,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.Registries;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
-import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
@@ -50,6 +50,7 @@ public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
     private static final double NEARBY_VILLAGER_SCAN_RANGE = 8.0D;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+    private static final double SHEPHERD_BANNER_PAIR_RANGE = 500.0D;
     private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
@@ -192,6 +193,13 @@ public final class JobBlockPairingHelper {
             }
         }
 
+        int shepherdPairedCount = 0;
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(SHEPHERD_BANNER_PAIR_RANGE), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.SHEPHERD)) {
+            if (pairShepherdWithBanner(world, villager, bannerPos)) {
+                shepherdPairedCount++;
+            }
+        }
+
         int guardPairedCount = 0;
         for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, new Box(bannerPos).expand(BUTCHER_BANNER_PAIR_RANGE), Entity::isAlive)) {
             if (pairButcherGuardWithBanner(world, guard, bannerPos)) {
@@ -199,7 +207,7 @@ public final class JobBlockPairingHelper {
             }
         }
 
-        LOGGER.info("Banner {} paired with {} Farmer(s) and {} Butcher Guard(s)", bannerPos.toShortString(), pairedCount, guardPairedCount);
+        LOGGER.info("Banner {} paired with {} Farmer(s), {} Shepherd(s), and {} Butcher Guard(s)", bannerPos.toShortString(), pairedCount, shepherdPairedCount, guardPairedCount);
     }
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
@@ -227,7 +235,8 @@ public final class JobBlockPairingHelper {
             craftingTablePos.ifPresent(pos -> VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
         }
 
-        if (villager.getVillagerData().getProfession() == VillagerProfession.FARMER) {
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
             Collection<BlockPos> bannerPositions = findBannersWithinRange(world, jobPos, 300);
             for (BlockPos bannerPos : bannerPositions) {
                 BlockState bannerState = world.getBlockState(bannerPos);
@@ -286,6 +295,35 @@ public final class JobBlockPairingHelper {
 
         playPairingAnimation(world, bannerPos, villager, jobPos);
         FarmerBannerTracker.setBanner(villager, bannerPos);
+        return true;
+    }
+
+    private static boolean pairShepherdWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return false;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            return false;
+        }
+
+        BlockPos jobPos = globalPos.pos();
+        if (villager.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > SHEPHERD_BANNER_PAIR_RANGE * SHEPHERD_BANNER_PAIR_RANGE) {
+            return false;
+        }
+
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.SHEPHERD, world.getBlockState(jobPos))) {
+            return false;
+        }
+
+        if (findNearbyChest(world, jobPos).isEmpty()) {
+            return false;
+        }
+
+        playPairingAnimation(world, bannerPos, villager, jobPos);
+        ShepherdBannerTracker.setBanner(villager, bannerPos);
         return true;
     }
 
