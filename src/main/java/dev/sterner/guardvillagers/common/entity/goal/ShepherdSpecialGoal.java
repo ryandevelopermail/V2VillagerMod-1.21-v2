@@ -488,19 +488,17 @@ public class ShepherdSpecialGoal extends Goal {
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            if (hasShearsInInventoryOrHand()) {
-                return TaskType.SHEARS;
-            }
             if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
                 return TaskType.WHEAT_GATHER;
             }
-            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
+            if (hasBannerInInventoryOrHand()) {
+                return TaskType.BANNER;
+            }
+            return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
         }
 
-        if (hasShearsInChestOrInventory(inventory)) {
-            return TaskType.SHEARS;
-        }
-
+        // Prioritize explicit special-item triggers over shearing so banner/wheat tasks are not starved
+        // when shears are present in the paired chest.
         if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
                 && hasGroundBannerNearby(world)) {
             return TaskType.WHEAT_GATHER;
@@ -510,7 +508,7 @@ public class ShepherdSpecialGoal extends Goal {
             return TaskType.BANNER;
         }
 
-        return null;
+        return hasShearsInChestOrInventory(inventory) ? TaskType.SHEARS : null;
     }
 
     private boolean hasMatchingItem(Inventory inventory, Predicate<ItemStack> matcher) {
@@ -960,12 +958,14 @@ public class ShepherdSpecialGoal extends Goal {
         boolean usingFallbackGateScan = bannerCandidates.isEmpty();
         List<BlockPos> gateCandidates;
         if (usingFallbackGateScan) {
-            BlockPos fallbackAnchor = jobPos != null ? jobPos : villagerPos;
+            List<BlockPos> fallbackAnchors = jobPos != null
+                    ? List.of(villagerPos, jobPos)
+                    : List.of(villagerPos);
             gateCandidates = collectNearbyGateCandidates(
                     world,
                     villagerPos,
-                    List.of(fallbackAnchor),
-                    PEN_BANNER_TO_GATE_SCAN_RADIUS,
+                    fallbackAnchors,
+                    PEN_SCAN_RANGE,
                     minY,
                     maxY,
                     PEN_GATE_CHECK_LIMIT);
