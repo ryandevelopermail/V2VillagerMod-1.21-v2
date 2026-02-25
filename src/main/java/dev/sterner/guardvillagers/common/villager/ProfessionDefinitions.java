@@ -28,7 +28,7 @@ public final class ProfessionDefinitions {
 
     private static final List<ProfessionDefinition> DEFINITIONS = List.of(
             definition(VillagerProfession.ARMORER, Set.of(Blocks.BLAST_FURNACE), ArmorerBehavior::new),
-            definition(VillagerProfession.BUTCHER, Set.of(Blocks.SMOKER), ButcherBehavior::new, ButcherBehavior::tryConvertButchersWithAxe),
+            definition(VillagerProfession.BUTCHER, Set.of(Blocks.SMOKER), ButcherBehavior::new, ButcherBehavior::tryConvertButchersWithWeapon),
             definition(VillagerProfession.CARTOGRAPHER, Set.of(Blocks.CARTOGRAPHY_TABLE), CartographerBehavior::new),
             definition(VillagerProfession.CLERIC, Set.of(Blocks.BREWING_STAND), ClericBehavior::new),
             definition(VillagerProfession.FARMER, Set.of(Blocks.COMPOSTER), FarmerBehavior::new),
