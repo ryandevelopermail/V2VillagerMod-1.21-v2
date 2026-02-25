@@ -109,6 +109,8 @@ public class ShepherdSpecialGoal extends Goal {
     private int observedChestShearsCount = -1;
     private long nextChestSnapshotCheckTick;
     private long nextPenFallbackDebugLogTick;
+    private boolean pendingWheatGather;
+    private long nextWheatBlockedDebugLogTick;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -125,6 +127,8 @@ public class ShepherdSpecialGoal extends Goal {
         observedChestWheatCount = -1;
         observedChestShearsCount = -1;
         nextChestSnapshotCheckTick = 0L;
+        pendingWheatGather = false;
+        nextWheatBlockedDebugLogTick = 0L;
     }
 
     public void requestImmediateCheck() {
@@ -278,6 +282,9 @@ public class ShepherdSpecialGoal extends Goal {
                 carriedItem = takeItemFromChest(world, taskType);
             }
             if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
+                if (pendingWheatGather) {
+                    LOGGER.debug("Shepherd {} is holding a pending wheat gather but cannot start banner placement yet (no banner item available)", villager.getUuidAsString());
+                }
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -326,10 +333,13 @@ public class ShepherdSpecialGoal extends Goal {
                 stage = Stage.DONE;
                 return;
             }
+            pendingWheatGather = false;
             stage = Stage.GO_TO_PEN;
             moveTo(penTarget);
             return;
         }
+
+        pendingWheatGather = false;
 
         gatherBannerPos = resolveGatherBanner(world);
         if (gatherBannerPos == null) {
@@ -504,28 +514,67 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
+        boolean hasWheat = hasWheatInInventoryOrOffhand();
+        boolean hasGroundBanner = hasGroundBannerNearby(world);
+        boolean hasBannerItem = hasBannerInInventoryOrHand();
         if (inventory == null) {
-            if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
+            if (hasWheat && hasGroundBanner) {
+                pendingWheatGather = false;
                 return TaskType.WHEAT_GATHER;
             }
-            if (hasBannerInInventoryOrHand()) {
+            if (hasWheat && !hasGroundBanner) {
+                pendingWheatGather = true;
+                if (hasBannerItem) {
+                    return TaskType.BANNER;
+                }
+                logWheatBlockedByMissingBanner(world, true, false);
+                return null;
+            }
+            if (hasBannerItem) {
                 return TaskType.BANNER;
             }
+            pendingWheatGather = false;
             return hasShearsInInventoryOrHand() ? TaskType.SHEARS : null;
         }
 
+        hasWheat = hasWheat || hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT));
+        hasBannerItem = hasBannerItem || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
+
         // Prioritize explicit special-item triggers over shearing so banner/wheat tasks are not starved.
-        if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
-                && hasGroundBannerNearby(world)) {
+        if (hasWheat && hasGroundBanner) {
+            pendingWheatGather = false;
             return TaskType.WHEAT_GATHER;
         }
 
-        boolean hasBannerItem = hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
-        if (hasBannerItem) {
+        if (hasWheat && !hasGroundBanner) {
+            pendingWheatGather = true;
+            if (hasBannerItem) {
+                return TaskType.BANNER;
+            }
+            logWheatBlockedByMissingBanner(world, false, true);
             return TaskType.BANNER;
         }
 
+        if (hasBannerItem) {
+            pendingWheatGather = false;
+            return TaskType.BANNER;
+        }
+
+        pendingWheatGather = false;
         return hasShearsInChestOrInventory(inventory) ? TaskType.SHEARS : null;
+    }
+
+    private void logWheatBlockedByMissingBanner(ServerWorld world, boolean missingChestInventory, boolean forcingBannerPath) {
+        if (world.getTime() < nextWheatBlockedDebugLogTick) {
+            return;
+        }
+        int wheatInChest = missingChestInventory ? 0 : countWheatInChest(world);
+        LOGGER.debug("Shepherd {} found wheat for gather but no placed banner and no banner item available (wheatInChest={}, wheatInHandsOrInventory={}, forcingBannerPath={})",
+                villager.getUuidAsString(),
+                wheatInChest,
+                hasWheatInInventoryOrOffhand(),
+                forcingBannerPath);
+        nextWheatBlockedDebugLogTick = world.getTime() + PEN_FALLBACK_LOG_INTERVAL_TICKS;
     }
 
     private boolean hasMatchingItem(Inventory inventory, Predicate<ItemStack> matcher) {
