@@ -21,6 +21,7 @@ import java.util.WeakHashMap;
 
 public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final long SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS = 10L;
+    private static final long SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final int SPECIAL_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
@@ -57,6 +58,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             specialGoal.setTargets(jobPos, chestPos);
         }
         specialGoal.requestImmediateCheck();
+        LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, world.getTime());
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -118,12 +120,14 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         InventoryChangedListener listener = sender -> {
             ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
             if (specialGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                specialGoal.onChestInventoryChanged();
+                specialGoal.onChestInventoryChanged(serverWorld);
                 long now = serverWorld.getTime();
                 long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
                 if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
                     specialGoal.requestImmediateCheck();
                     LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
+                } else {
+                    specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
                 }
             }
             ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
