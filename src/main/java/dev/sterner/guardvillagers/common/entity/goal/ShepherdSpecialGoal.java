@@ -1,14 +1,12 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.SheepEntity;
@@ -26,12 +24,10 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
-import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -59,7 +55,6 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
-    private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
@@ -306,7 +301,7 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        gatherBannerPos = findNearestGroundBanner(world);
+        gatherBannerPos = resolveGatherBanner(world);
         if (gatherBannerPos == null) {
             stage = Stage.DONE;
             nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -1159,29 +1154,8 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(FARMER_BANNER_PAIR_RANGE), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)) {
-            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSite.isEmpty()) {
-                continue;
-            }
-
-            GlobalPos globalPos = jobSite.get();
-            if (!globalPos.dimension().equals(world.getRegistryKey())) {
-                continue;
-            }
-
-            BlockPos farmerJobPos = globalPos.pos();
-            if (!world.getBlockState(farmerJobPos).isOf(Blocks.COMPOSTER)) {
-                continue;
-            }
-
-            if (JobBlockPairingHelper.findNearbyChest(world, farmerJobPos).isEmpty()) {
-                continue;
-            }
-
-            JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
-            FarmerBannerTracker.setBanner(villager, bannerPos);
-        }
+        BlockState bannerState = world.getBlockState(bannerPos);
+        JobBlockPairingHelper.handleBannerPlacement(world, bannerPos, bannerState);
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
@@ -1305,7 +1279,16 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean hasGroundBannerNearby(ServerWorld world) {
-        return findNearestGroundBanner(world) != null;
+        return resolveGatherBanner(world) != null;
+    }
+
+    private BlockPos resolveGatherBanner(ServerWorld world) {
+        Optional<BlockPos> trackedBanner = ShepherdBannerTracker.getBanner(villager)
+                .filter(pos -> world.getBlockState(pos).isIn(BlockTags.BANNERS));
+        if (trackedBanner.isPresent()) {
+            return trackedBanner.get();
+        }
+        return findNearestGroundBanner(world);
     }
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
