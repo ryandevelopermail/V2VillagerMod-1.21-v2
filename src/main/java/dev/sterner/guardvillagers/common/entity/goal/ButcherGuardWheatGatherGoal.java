@@ -5,6 +5,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.AbstractBannerBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
@@ -66,7 +67,7 @@ public class ButcherGuardWheatGatherGoal extends Goal {
         if (bannerPos == null) {
             return false;
         }
-        if (!world.getBlockState(bannerPos).isIn(net.minecraft.registry.tag.ItemTags.BANNERS)) {
+        if (!(world.getBlockState(bannerPos).getBlock() instanceof AbstractBannerBlock)) {
             return false;
         }
 
