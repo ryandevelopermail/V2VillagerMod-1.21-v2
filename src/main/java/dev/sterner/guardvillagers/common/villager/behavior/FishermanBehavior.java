@@ -26,12 +26,15 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public class FishermanBehavior implements VillagerProfessionBehavior {
@@ -137,7 +140,15 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertFishermenWithRod(ServerWorld world) {
-        for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN)) {
+        Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN));
+        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+        candidates.addAll(world.getEntitiesByClass(
+                VillagerEntity.class,
+                worldBounds,
+                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
+        ));
+
+        for (VillagerEntity villager : candidates) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;

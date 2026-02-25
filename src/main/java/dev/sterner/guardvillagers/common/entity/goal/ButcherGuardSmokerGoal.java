@@ -127,7 +127,13 @@ public class ButcherGuardSmokerGoal extends Goal {
         if (!smoker.getStack(2).isEmpty() && smoker.getStack(0).isEmpty()) {
             return true;
         }
-        return findBestMeat(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
+        if (findBestMeat(world, chestInventory).isPresent()) {
+            return true;
+        }
+        if (!smoker.getStack(0).isEmpty() && smoker.getStack(1).isEmpty() && findBestFuel(chestInventory).isPresent()) {
+            return true;
+        }
+        return smoker.getStack(0).isEmpty() && findBestFuel(chestInventory).isPresent();
     }
 
     private void transferItems(ServerWorld world) {
