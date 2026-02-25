@@ -106,6 +106,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos cachedNearestGroundBanner;
     private int observedChestBannerCount = -1;
     private int observedChestWheatCount = -1;
+    private int observedChestShearsCount = -1;
     private long nextChestSnapshotCheckTick;
     private long nextPenFallbackDebugLogTick;
 
@@ -122,6 +123,7 @@ public class ShepherdSpecialGoal extends Goal {
         invalidateSpatialSearchCache();
         observedChestBannerCount = -1;
         observedChestWheatCount = -1;
+        observedChestShearsCount = -1;
         nextChestSnapshotCheckTick = 0L;
     }
 
@@ -138,12 +140,15 @@ public class ShepherdSpecialGoal extends Goal {
     public boolean onChestInventoryChanged(ServerWorld world) {
         int currentBannerCount = countBannersInChest(world);
         int currentWheatCount = countWheatInChest(world);
+        int currentShearsCount = countShearsInChest(world);
         boolean bannerChanged = observedChestBannerCount != currentBannerCount;
         boolean wheatChanged = observedChestWheatCount != currentWheatCount;
+        boolean shearsChanged = observedChestShearsCount != currentShearsCount;
         observedChestBannerCount = currentBannerCount;
         observedChestWheatCount = currentWheatCount;
+        observedChestShearsCount = currentShearsCount;
 
-        if (bannerChanged || wheatChanged) {
+        if (bannerChanged || wheatChanged || shearsChanged) {
             invalidateSpatialSearchCache();
             return true;
         }
@@ -177,6 +182,7 @@ public class ShepherdSpecialGoal extends Goal {
             lastBannersInChestCount = 0;
             lastShearCountdownLogStep = 0;
             shearCountdownActive = false;
+            observedChestShearsCount = -1;
         }
 
         TaskType nextTask = findTaskType(world);
