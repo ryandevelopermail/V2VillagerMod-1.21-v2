@@ -26,6 +26,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
 import net.minecraft.village.VillagerProfession;
@@ -33,6 +35,7 @@ import net.minecraft.village.VillagerProfession;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -51,6 +54,10 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
+    private static final int PEN_SEARCH_Y_RANGE = 12;
+    private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
+    private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
+    private static final int PEN_GATE_CHECK_LIMIT = 40;
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final int GATHER_RADIUS = 50;
@@ -866,19 +873,26 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
-        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        BlockPos villagerPos = villager.getBlockPos();
+        int minY = getLocalMinY(world, villagerPos);
+        int maxY = getLocalMaxY(world, villagerPos);
+        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
+        if (bannerCandidates.isEmpty()) {
+            return null;
+        }
+
+        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         BlockPos nearest = null;
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            BlockState state = world.getBlockState(pos);
+        for (BlockPos gatePos : gateCandidates) {
+            BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
                 continue;
             }
 
-            BlockPos insidePos = getPenInterior(world, pos, state);
+            BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null) {
                 continue;
             }
@@ -900,7 +914,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = penCenter.toImmutable();
-                nearestGate = pos.toImmutable();
+                nearestGate = gatePos.toImmutable();
             }
         }
 
@@ -1216,11 +1230,13 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
-        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        BlockPos villagerPos = villager.getBlockPos();
+        int minY = getLocalMinY(world, villagerPos);
+        int maxY = getLocalMaxY(world, villagerPos);
+        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
+        for (BlockPos pos : bannerCandidates) {
             BlockState state = world.getBlockState(pos);
             if (!state.isIn(BlockTags.BANNERS)) {
                 continue;
@@ -1235,17 +1251,18 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenTarget findNearestPenWithBanner(ServerWorld world, BlockPos bannerPos) {
-        BlockPos start = bannerPos.add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = bannerPos.add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        int minY = getLocalMinY(world, bannerPos);
+        int maxY = getLocalMaxY(world, bannerPos);
+        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, bannerPos, List.of(bannerPos), PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         PenTarget nearest = null;
         double nearestDistance = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            BlockState state = world.getBlockState(pos);
+        for (BlockPos gatePos : gateCandidates) {
+            BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
                 continue;
             }
 
-            BlockPos insidePos = getPenInterior(world, pos, state);
+            BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null || !isInsideFencePen(world, insidePos)) {
                 continue;
             }
@@ -1258,10 +1275,73 @@ public class ShepherdSpecialGoal extends Goal {
             double distanceToBanner = center.getSquaredDistance(bannerPos);
             if (distanceToBanner < nearestDistance) {
                 nearestDistance = distanceToBanner;
-                nearest = new PenTarget(center.toImmutable(), pos.toImmutable());
+                nearest = new PenTarget(center.toImmutable(), gatePos.toImmutable());
             }
         }
         return nearest;
+    }
+
+    private List<BlockPos> findBannerCandidatesWithinRange(ServerWorld world, BlockPos center, int range, int minY, int maxY) {
+        int chunkRadius = (int) Math.ceil(range / 16.0D);
+        int centerChunkX = center.getX() >> 4;
+        int centerChunkZ = center.getZ() >> 4;
+        List<BlockPos> banners = new ArrayList<>();
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                Chunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+                for (BlockPos pos : chunk.getBlockEntityPositions()) {
+                    if (pos.getY() < minY || pos.getY() > maxY || !center.isWithinDistance(pos, range)) {
+                        continue;
+                    }
+                    if (!world.getBlockState(pos).isIn(BlockTags.BANNERS)) {
+                        continue;
+                    }
+                    banners.add(pos.toImmutable());
+                }
+            }
+        }
+
+        banners.sort(Comparator.comparingDouble(center::getSquaredDistance));
+        if (banners.size() > PEN_BANNER_CANDIDATE_LIMIT) {
+            return new ArrayList<>(banners.subList(0, PEN_BANNER_CANDIDATE_LIMIT));
+        }
+        return banners;
+    }
+
+    private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
+        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        for (BlockPos bannerPos : bannerCandidates) {
+            int yStart = Math.max(minY, bannerPos.getY() - 3);
+            int yEnd = Math.min(maxY, bannerPos.getY() + 3);
+            for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
+                for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
+                    for (int y = yStart; y <= yEnd; y++) {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                            gateSet.add(pos.toImmutable());
+                        }
+                    }
+                }
+            }
+        }
+
+        List<BlockPos> gates = new ArrayList<>(gateSet);
+        gates.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
+        if (gates.size() > limit) {
+            return new ArrayList<>(gates.subList(0, limit));
+        }
+        return gates;
+    }
+
+    private int getLocalMinY(ServerWorld world, BlockPos center) {
+        return Math.max(world.getBottomY(), center.getY() - PEN_SEARCH_Y_RANGE);
+    }
+
+    private int getLocalMaxY(ServerWorld world, BlockPos center) {
+        return Math.min(world.getTopY() - 1, center.getY() + PEN_SEARCH_Y_RANGE);
     }
 
     private BlockPos randomGatherWanderTarget(ServerWorld world, BlockPos origin) {
