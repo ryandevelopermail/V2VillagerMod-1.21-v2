@@ -944,15 +944,9 @@ public class ShepherdSpecialGoal extends Goal {
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
-        if (bannerCandidates.isEmpty()) {
-            nearestPenCacheTick = now;
-            cachedNearestPenTarget = null;
-            cachedNearestPenGatePos = null;
-            penGatePos = null;
-            return null;
-        }
-
-        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
+        List<BlockPos> gateCandidates = bannerCandidates.isEmpty()
+                ? collectFallbackGateCandidates(world, villagerPos, minY, maxY)
+                : collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         BlockPos nearest = null;
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
@@ -994,6 +988,15 @@ public class ShepherdSpecialGoal extends Goal {
         cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
         return nearest;
+    }
+
+    private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos villagerPos, int minY, int maxY) {
+        List<BlockPos> searchAnchors = new ArrayList<>();
+        searchAnchors.add(villagerPos);
+        if (jobPos != null && !jobPos.equals(villagerPos)) {
+            searchAnchors.add(jobPos);
+        }
+        return collectNearbyGateCandidates(world, villagerPos, searchAnchors, PEN_SCAN_RANGE, minY, maxY, PEN_GATE_CHECK_LIMIT);
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
