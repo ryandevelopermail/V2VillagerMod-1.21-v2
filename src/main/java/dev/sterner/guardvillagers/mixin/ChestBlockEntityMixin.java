@@ -2,7 +2,6 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
 import net.minecraft.block.entity.ChestBlockEntity;
-import net.minecraft.block.entity.LockableContainerBlockEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -13,7 +12,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-@Mixin(LockableContainerBlockEntity.class)
+@Mixin(ChestBlockEntity.class)
 public abstract class ChestBlockEntityMixin {
     @Inject(method = "setStack", at = @At("TAIL"))
     private void guardvillagers$notifyShepherdGoalsOnSetStack(int slot, ItemStack stack, CallbackInfo ci) {
@@ -36,9 +35,7 @@ public abstract class ChestBlockEntityMixin {
     }
 
     private void guardvillagers$notifyShepherdGoalsOnChestMutation() {
-        if (!((Object) this instanceof ChestBlockEntity chest)) {
-            return;
-        }
+        ChestBlockEntity chest = (ChestBlockEntity) (Object) this;
         World world = chest.getWorld();
         if (!(world instanceof ServerWorld serverWorld)) {
             return;
