@@ -49,12 +49,13 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double FAST_GATE_CLOSE_SPEED = 0.9D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
-    private static final int PEN_SCAN_RANGE = 100;
+    private static final int PEN_SCAN_RANGE = 200;
     private static final int PEN_FENCE_RANGE = 16;
     private static final int PEN_SEARCH_Y_RANGE = 12;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
+    private static final int PEN_FALLBACK_GATE_CHECK_LIMIT = 120;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
@@ -257,16 +258,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else if (taskType == TaskType.BANNER) {
-            if (hasBannerInInventoryOrHand()) {
-                carriedItem = getBannerInInventoryOrHand();
-            } else {
-                carriedItem = takeItemFromChest(world, taskType);
-            }
-            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
-                nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                stage = Stage.DONE;
-                return;
-            }
+            carriedItem = hasBannerInInventoryOrHand() ? getBannerInInventoryOrHand() : ItemStack.EMPTY;
         } else {
             if (!equipWheatForGathering(world)) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -292,6 +284,14 @@ public class ShepherdSpecialGoal extends Goal {
         if (taskType == TaskType.BANNER) {
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+                return;
+            }
+            if (!hasBannerInInventoryOrHand()) {
+                carriedItem = takeItemFromChest(world, taskType);
+            }
+            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -484,6 +484,10 @@ public class ShepherdSpecialGoal extends Goal {
             return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
         }
 
+        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
+            return TaskType.BANNER;
+        }
+
         if (hasShearsInChestOrInventory(inventory)) {
             return TaskType.SHEARS;
         }
@@ -491,10 +495,6 @@ public class ShepherdSpecialGoal extends Goal {
         if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
                 && hasGroundBannerNearby(world)) {
             return TaskType.WHEAT_GATHER;
-        }
-
-        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
-            return TaskType.BANNER;
         }
 
         return null;
@@ -944,15 +944,20 @@ public class ShepherdSpecialGoal extends Goal {
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
+
+        List<BlockPos> gateCandidates;
         if (bannerCandidates.isEmpty()) {
+            gateCandidates = collectFallbackGateCandidates(world, villagerPos, PEN_SCAN_RANGE, minY, maxY, PEN_FALLBACK_GATE_CHECK_LIMIT);
+        } else {
+            gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
+        }
+        if (gateCandidates.isEmpty()) {
             nearestPenCacheTick = now;
             cachedNearestPenTarget = null;
             cachedNearestPenGatePos = null;
             penGatePos = null;
             return null;
         }
-
-        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         BlockPos nearest = null;
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
@@ -1402,6 +1407,34 @@ public class ShepherdSpecialGoal extends Goal {
         if (gates.size() > limit) {
             return new ArrayList<>(gates.subList(0, limit));
         }
+        return gates;
+    }
+
+
+    private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos origin, int range, int minY, int maxY, int limit) {
+        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        int yStart = Math.max(minY, origin.getY() - 3);
+        int yEnd = Math.min(maxY, origin.getY() + 3);
+        for (int x = origin.getX() - range; x <= origin.getX() + range; x++) {
+            for (int z = origin.getZ() - range; z <= origin.getZ() + range; z++) {
+                if (!origin.isWithinDistance(new BlockPos(x, origin.getY(), z), range)) {
+                    continue;
+                }
+                for (int y = yStart; y <= yEnd; y++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                        gateSet.add(pos.toImmutable());
+                        if (gateSet.size() >= limit) {
+                            List<BlockPos> gates = new ArrayList<>(gateSet);
+                            gates.sort(Comparator.comparingDouble(origin::getSquaredDistance));
+                            return gates;
+                        }
+                    }
+                }
+            }
+        }
+        List<BlockPos> gates = new ArrayList<>(gateSet);
+        gates.sort(Comparator.comparingDouble(origin::getSquaredDistance));
         return gates;
     }
 
