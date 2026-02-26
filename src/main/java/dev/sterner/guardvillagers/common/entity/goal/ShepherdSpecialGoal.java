@@ -505,17 +505,22 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
+        boolean hasAnyBanner = hasBannerInInventoryOrHand();
         if (inventory == null) {
             if (hasShearsInInventoryOrHand()) {
                 return TaskType.SHEARS;
             }
+            if (hasAnyBanner && findNearestPenTarget(world) != null) {
+                return TaskType.BANNER;
+            }
             if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
                 return TaskType.WHEAT_GATHER;
             }
-            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
+            return null;
         }
 
-        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
+        hasAnyBanner = hasAnyBanner || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
+        if (hasAnyBanner && findNearestPenTarget(world) != null) {
             return TaskType.BANNER;
         }
 
