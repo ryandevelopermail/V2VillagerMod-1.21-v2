@@ -1632,17 +1632,15 @@ public class ShepherdSpecialGoal extends Goal {
                     BlockPos pos = new BlockPos(x, y, z);
                     if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
                         gateSet.add(pos.toImmutable());
-                        if (gateSet.size() >= limit) {
-                            List<BlockPos> gates = new ArrayList<>(gateSet);
-                            gates.sort(Comparator.comparingDouble(origin::getSquaredDistance));
-                            return gates;
-                        }
                     }
                 }
             }
         }
         List<BlockPos> gates = new ArrayList<>(gateSet);
         gates.sort(Comparator.comparingDouble(origin::getSquaredDistance));
+        if (gates.size() > limit) {
+            return new ArrayList<>(gates.subList(0, limit));
+        }
         return gates;
     }
 
