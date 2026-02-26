@@ -1621,8 +1621,8 @@ public class ShepherdSpecialGoal extends Goal {
 
     private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos origin, int range, int minY, int maxY, int limit) {
         LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
-        int yStart = Math.max(minY, origin.getY() - 3);
-        int yEnd = Math.min(maxY, origin.getY() + 3);
+        int yStart = minY;
+        int yEnd = maxY;
         for (int x = origin.getX() - range; x <= origin.getX() + range; x++) {
             for (int z = origin.getZ() - range; z <= origin.getZ() + range; z++) {
                 if (!origin.isWithinDistance(new BlockPos(x, origin.getY(), z), range)) {
