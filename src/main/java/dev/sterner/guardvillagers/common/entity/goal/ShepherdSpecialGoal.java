@@ -55,7 +55,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_SCAN_RANGE = 200;
     private static final int PEN_REGION_MAX_RADIUS = 24;
     private static final int PEN_REGION_MAX_VISITED = 512;
-    private static final int PEN_SEARCH_Y_RANGE = 12;
+    private static final int PEN_SEARCH_Y_RANGE_BELOW = 24;
+    private static final int PEN_SEARCH_Y_RANGE_ABOVE = 160;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
@@ -1645,11 +1646,24 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private int getLocalMinY(ServerWorld world, BlockPos center) {
-        return Math.max(world.getBottomY(), center.getY() - PEN_SEARCH_Y_RANGE);
+        int anchorY = resolvePenSearchAnchorY(center);
+        return Math.max(world.getBottomY(), anchorY - PEN_SEARCH_Y_RANGE_BELOW);
     }
 
     private int getLocalMaxY(ServerWorld world, BlockPos center) {
-        return Math.min(world.getTopY() - 1, center.getY() + PEN_SEARCH_Y_RANGE);
+        int anchorY = resolvePenSearchAnchorY(center);
+        return Math.min(world.getTopY() - 1, anchorY + PEN_SEARCH_Y_RANGE_ABOVE);
+    }
+
+    private int resolvePenSearchAnchorY(BlockPos center) {
+        int anchorY = center.getY();
+        if (jobPos != null) {
+            anchorY = Math.max(anchorY, jobPos.getY());
+        }
+        if (chestPos != null) {
+            anchorY = Math.max(anchorY, chestPos.getY());
+        }
+        return anchorY;
     }
 
     private BlockPos randomGatherWanderTarget(ServerWorld world, BlockPos origin) {
