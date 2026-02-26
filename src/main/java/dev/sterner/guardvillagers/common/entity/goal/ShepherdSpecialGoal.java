@@ -287,17 +287,41 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (taskType == TaskType.BANNER) {
+            boolean hadFreeInventorySlot = hasFreeInventorySlot(villager.getInventory());
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
+                LOGGER.warn(
+                        "shepherd_banner_start_no_pen_target villagerUuid={} chestPos={} jobPos={} hadFreeInventorySlot={}",
+                        villager.getUuidAsString(),
+                        chestPos.toShortString(),
+                        jobPos.toShortString(),
+                        hadFreeInventorySlot
+                );
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
             }
             if (!hasBannerInInventoryOrHand()) {
-                takeItemFromChest(world, taskType);
+                ItemStack extractedBanner = takeItemFromChest(world, taskType);
+                if (extractedBanner.isEmpty()) {
+                    LOGGER.warn(
+                            "shepherd_banner_start_extract_failed villagerUuid={} chestPos={} jobPos={} hadFreeInventorySlot={}",
+                            villager.getUuidAsString(),
+                            chestPos.toShortString(),
+                            jobPos.toShortString(),
+                            hadFreeInventorySlot
+                    );
+                }
             }
             carriedItem = getBannerInInventoryOrHand();
             if (carriedItem.isEmpty()) {
+                LOGGER.warn(
+                        "shepherd_banner_start_no_usable_banner villagerUuid={} chestPos={} jobPos={} hadFreeInventorySlot={}",
+                        villager.getUuidAsString(),
+                        chestPos.toShortString(),
+                        jobPos.toShortString(),
+                        hadFreeInventorySlot
+                );
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -1340,6 +1364,15 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         return remaining;
+    }
+
+    private boolean hasFreeInventorySlot(Inventory inventory) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (inventory.getStack(slot).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void moveTo(BlockPos target) {
