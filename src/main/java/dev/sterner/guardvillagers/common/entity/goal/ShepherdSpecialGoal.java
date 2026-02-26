@@ -174,7 +174,8 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask != TaskType.SHEARS && !world.isDay()) {
+        if (nextTask == TaskType.WHEAT_GATHER && !world.isDay()) {
+            LOGGER.debug("Shepherd {} canStart blocked by day gating for task {}", villager.getUuidAsString(), nextTask);
             return false;
         }
 
