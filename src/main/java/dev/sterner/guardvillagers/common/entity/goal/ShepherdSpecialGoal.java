@@ -950,23 +950,32 @@ public class ShepherdSpecialGoal extends Goal {
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
 
-        List<BlockPos> gateCandidates;
-        if (bannerCandidates.isEmpty()) {
-            gateCandidates = collectFallbackGateCandidates(world, villagerPos, PEN_SCAN_RANGE, minY, maxY, PEN_FALLBACK_GATE_CHECK_LIMIT);
-        } else {
-            gateCandidates = collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
+        List<BlockPos> gateCandidates = bannerCandidates.isEmpty()
+                ? List.of()
+                : collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
+
+        PenTarget nearest = findNearestUnbanneredPen(world, gateCandidates);
+        if (nearest == null) {
+            List<BlockPos> fallbackGateCandidates = collectFallbackGateCandidates(world, villagerPos, PEN_SCAN_RANGE, minY, maxY, PEN_FALLBACK_GATE_CHECK_LIMIT);
+            nearest = findNearestUnbanneredPen(world, fallbackGateCandidates);
         }
+
+        BlockPos nearestCenter = nearest == null ? null : nearest.center();
+        BlockPos nearestGate = nearest == null ? null : nearest.gate();
+        nearestPenCacheTick = now;
+        cachedNearestPenTarget = nearestCenter;
+        cachedNearestPenGatePos = nearestGate;
+        penGatePos = nearestGate;
+        return nearestCenter;
+    }
+
+    private PenTarget findNearestUnbanneredPen(ServerWorld world, List<BlockPos> gateCandidates) {
         if (gateCandidates.isEmpty()) {
-            nearestPenCacheTick = now;
-            cachedNearestPenTarget = null;
-            cachedNearestPenGatePos = null;
-            penGatePos = null;
             return null;
         }
-        BlockPos nearest = null;
-        BlockPos nearestGate = null;
-        double nearestDistance = Double.MAX_VALUE;
 
+        PenTarget nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
@@ -974,27 +983,17 @@ public class ShepherdSpecialGoal extends Goal {
             }
 
             PenRegion region = findValidatedPenRegion(world, gatePos, state);
-            if (region == null) {
+            if (region == null || hasBannerInPen(world, region)) {
                 continue;
             }
+
             BlockPos penCenter = region.center();
-
-            if (hasBannerInPen(world, region)) {
-                continue;
-            }
-
             double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                nearest = penCenter.toImmutable();
-                nearestGate = gatePos.toImmutable();
+                nearest = new PenTarget(penCenter.toImmutable(), gatePos.toImmutable());
             }
         }
-
-        nearestPenCacheTick = now;
-        cachedNearestPenTarget = nearest;
-        cachedNearestPenGatePos = nearestGate;
-        penGatePos = nearestGate;
         return nearest;
     }
 
