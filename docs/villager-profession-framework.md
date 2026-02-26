@@ -152,3 +152,8 @@ Confirm existing non-armorer smith behavior remains unchanged:
 - **Weaponsmith golem-healing behavior remains unchanged** relative to previous baseline expectations.
 - **Toolsmith golem-healing behavior remains unchanged** relative to previous baseline expectations.
 - Verify there is no unintended cross-profession routing where armorer-only chest-gated logic alters weaponsmith/toolsmith behavior.
+
+## Additional QA references
+
+- Shepherd/Butcher trigger checklist: `docs/shepherd-butcher-trigger-qa-checklist.md`
+- Behavior-package harness notes: `src/main/java/dev/sterner/guardvillagers/common/villager/behavior/QA_TEST_HARNESS_NOTES.md`
