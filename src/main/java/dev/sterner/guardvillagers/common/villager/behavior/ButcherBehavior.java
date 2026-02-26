@@ -168,6 +168,9 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         ));
 
         for (VillagerEntity villager : candidates) {
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                continue;
+            }
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;
@@ -188,6 +191,10 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     }
 
     private static void tryConvertWithWeapon(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        if (!villager.isAlive() || villager.getVillagerData().getProfession() != VillagerProfession.BUTCHER) {
+            return;
+        }
+
         ButcherGuardEntity guard = GuardVillagers.BUTCHER_GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
@@ -255,7 +262,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
 
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && (stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem)) {
+            if (!stack.isEmpty() && isConvertibleWeapon(stack)) {
                 ItemStack extracted = stack.split(1);
                 inventory.markDirty();
                 return extracted;
@@ -263,6 +270,10 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         }
 
         return ItemStack.EMPTY;
+    }
+
+    private static boolean isConvertibleWeapon(ItemStack stack) {
+        return stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem;
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
