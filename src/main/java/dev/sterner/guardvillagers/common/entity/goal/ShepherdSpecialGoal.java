@@ -263,7 +263,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else if (taskType == TaskType.BANNER) {
-            carriedItem = hasBannerInInventoryOrHand() ? getBannerInInventoryOrHand() : ItemStack.EMPTY;
+            carriedItem = getBannerInInventoryOrHand();
         } else {
             if (!equipWheatForGathering(world)) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -294,9 +294,10 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
             if (!hasBannerInInventoryOrHand()) {
-                carriedItem = takeItemFromChest(world, taskType);
+                takeItemFromChest(world, taskType);
             }
-            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
+            carriedItem = getBannerInInventoryOrHand();
+            if (carriedItem.isEmpty()) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
                 stage = Stage.DONE;
                 return;
@@ -629,7 +630,26 @@ public class ShepherdSpecialGoal extends Goal {
                 villager.setStackInHand(Hand.MAIN_HAND, extracted);
                 inventory.setStack(slot, stack);
                 inventory.markDirty();
+                villager.getInventory().markDirty();
                 return extracted;
+            }
+
+            if (!wantsShears) {
+                if (villager.getMainHandStack().isEmpty()) {
+                    villager.setStackInHand(Hand.MAIN_HAND, extracted);
+                    inventory.setStack(slot, stack);
+                    inventory.markDirty();
+                    villager.getInventory().markDirty();
+                    return extracted;
+                }
+
+                if (villager.getOffHandStack().isEmpty()) {
+                    villager.setStackInHand(Hand.OFF_HAND, extracted);
+                    inventory.setStack(slot, stack);
+                    inventory.markDirty();
+                    villager.getInventory().markDirty();
+                    return extracted;
+                }
             }
 
             ItemStack remaining = insertStack(villager.getInventory(), extracted);
