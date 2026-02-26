@@ -30,11 +30,14 @@ import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +53,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 200;
-    private static final int PEN_FENCE_RANGE = 16;
+    private static final int PEN_REGION_MAX_RADIUS = 24;
+    private static final int PEN_REGION_MAX_VISITED = 512;
     private static final int PEN_SEARCH_Y_RANGE = 12;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
@@ -969,21 +973,13 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
 
-            BlockPos insidePos = getPenInterior(world, gatePos, state);
-            if (insidePos == null) {
+            PenRegion region = findValidatedPenRegion(world, gatePos, state);
+            if (region == null) {
                 continue;
             }
+            BlockPos penCenter = region.center();
 
-            if (!isInsideFencePen(world, insidePos)) {
-                continue;
-            }
-
-            BlockPos penCenter = getPenCenter(world, insidePos);
-            if (penCenter == null) {
-                continue;
-            }
-
-            if (hasBannerInPen(world, penCenter)) {
+            if (hasBannerInPen(world, region)) {
                 continue;
             }
 
@@ -1003,34 +999,29 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
-        if (state.contains(FenceGateBlock.FACING)) {
-            Direction facing = state.get(FenceGateBlock.FACING);
-            BlockPos front = gatePos.offset(facing);
-            BlockPos back = gatePos.offset(facing.getOpposite());
-            if (isInsideFencePen(world, front)) {
-                return front;
-            }
-            if (isInsideFencePen(world, back)) {
-                return back;
-            }
-        }
-        return null;
+        PenRegion region = findValidatedPenRegion(world, gatePos, state);
+        return region == null ? null : region.anchor();
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
-        BlockPos center = getPenCenter(world, penPos);
-        if (center == null) {
+        PenRegion region = findValidatedPenRegionFromInterior(world, penPos);
+        if (region == null) {
             return false;
         }
-        int scanRange = 2;
-        BlockPos start = center.add(-scanRange, -1, -scanRange);
-        BlockPos end = center.add(scanRange, 1, scanRange);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
+        return hasBannerInPen(world, region);
+    }
+
+    private boolean hasBannerInPen(ServerWorld world, PenRegion region) {
+        for (BlockPos pos : region.cells()) {
             BlockState state = world.getBlockState(pos);
             if (!state.isIn(BlockTags.BANNERS)) {
                 continue;
             }
-            if (isInsideFencePen(world, pos)) {
+            return true;
+        }
+        for (BlockPos pos : region.cells()) {
+            BlockState state = world.getBlockState(pos.up());
+            if (state.isIn(BlockTags.BANNERS)) {
                 return true;
             }
         }
@@ -1038,56 +1029,129 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos getPenCenter(ServerWorld world, BlockPos insidePos) {
-        BlockPos westFence = findFenceInDirection(world, insidePos, Direction.WEST, PEN_FENCE_RANGE);
-        BlockPos eastFence = findFenceInDirection(world, insidePos, Direction.EAST, PEN_FENCE_RANGE);
-        BlockPos northFence = findFenceInDirection(world, insidePos, Direction.NORTH, PEN_FENCE_RANGE);
-        BlockPos southFence = findFenceInDirection(world, insidePos, Direction.SOUTH, PEN_FENCE_RANGE);
-        if (westFence == null || eastFence == null || northFence == null || southFence == null) {
-            return null;
-        }
-
-        int minX = westFence.getX() + 1;
-        int maxX = eastFence.getX() - 1;
-        int minZ = northFence.getZ() + 1;
-        int maxZ = southFence.getZ() - 1;
-        if (minX > maxX || minZ > maxZ) {
-            return null;
-        }
-
-        int centerX = (minX + maxX) / 2;
-        int centerZ = (minZ + maxZ) / 2;
-        return new BlockPos(centerX, insidePos.getY(), centerZ);
-    }
-
-    private BlockPos findFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
-        for (int i = 1; i <= maxDistance; i++) {
-            BlockPos pos = start.offset(direction, i);
-            BlockState state = world.getBlockState(pos);
-            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
-                return pos;
-            }
-        }
-        return null;
+        PenRegion region = findValidatedPenRegionFromInterior(world, insidePos);
+        return region == null ? null : region.center();
     }
 
     private boolean isInsideFencePen(ServerWorld world, BlockPos pos) {
-        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
-            if (!hasFenceInDirection(world, pos, direction, PEN_FENCE_RANGE)) {
-                return false;
-            }
-        }
-        return true;
+        return findValidatedPenRegionFromInterior(world, pos) != null;
     }
 
-    private boolean hasFenceInDirection(ServerWorld world, BlockPos start, Direction direction, int maxDistance) {
-        for (int i = 1; i <= maxDistance; i++) {
-            BlockPos pos = start.offset(direction, i);
-            BlockState state = world.getBlockState(pos);
-            if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
-                return true;
+    private PenRegion findValidatedPenRegion(ServerWorld world, BlockPos gatePos, BlockState state) {
+        if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
+            return null;
+        }
+        Direction facing = state.get(FenceGateBlock.FACING);
+        PenRegion front = floodFillPenRegion(world, gatePos, gatePos.offset(facing));
+        PenRegion back = floodFillPenRegion(world, gatePos, gatePos.offset(facing.getOpposite()));
+        if (front == null) {
+            return back;
+        }
+        if (back == null) {
+            return front;
+        }
+        return front.cells().size() >= back.cells().size() ? front : back;
+    }
+
+    private PenRegion findValidatedPenRegionFromInterior(ServerWorld world, BlockPos insidePos) {
+        return floodFillPenRegion(world, insidePos, insidePos);
+    }
+
+    private PenRegion floodFillPenRegion(ServerWorld world, BlockPos origin, BlockPos start) {
+        if (!isPenInteriorCell(world, start)) {
+            return null;
+        }
+
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        Set<BlockPos> visited = new HashSet<>();
+        queue.add(start.toImmutable());
+        visited.add(start.toImmutable());
+
+        int sumX = 0;
+        int sumZ = 0;
+        boolean touchesFenceBoundary = false;
+        boolean touchesGateBoundary = false;
+
+        while (!queue.isEmpty()) {
+            if (visited.size() > PEN_REGION_MAX_VISITED) {
+                return null;
+            }
+
+            BlockPos current = queue.removeFirst();
+            sumX += current.getX();
+            sumZ += current.getZ();
+
+            for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+                BlockPos neighbor = current.offset(direction);
+                int dx = Math.abs(neighbor.getX() - origin.getX());
+                int dz = Math.abs(neighbor.getZ() - origin.getZ());
+                if (dx > PEN_REGION_MAX_RADIUS || dz > PEN_REGION_MAX_RADIUS) {
+                    return null;
+                }
+
+                BlockState neighborState = world.getBlockState(neighbor);
+                if (isFenceBoundaryBlock(neighborState)) {
+                    touchesFenceBoundary = true;
+                    if (neighborState.getBlock() instanceof FenceGateBlock) {
+                        touchesGateBoundary = true;
+                    }
+                    continue;
+                }
+
+                if (!isPenInteriorCell(world, neighbor)) {
+                    continue;
+                }
+
+                BlockPos immutableNeighbor = neighbor.toImmutable();
+                if (visited.add(immutableNeighbor)) {
+                    queue.addLast(immutableNeighbor);
+                }
             }
         }
-        return false;
+
+        if (!touchesFenceBoundary || !touchesGateBoundary) {
+            return null;
+        }
+
+        BlockPos center = selectRegionCenter(start, visited, sumX, sumZ);
+        return center == null ? null : new PenRegion(start.toImmutable(), center, visited);
+    }
+
+    private BlockPos selectRegionCenter(BlockPos fallback, Set<BlockPos> cells, int sumX, int sumZ) {
+        if (cells.isEmpty()) {
+            return null;
+        }
+
+        double avgX = (double) sumX / (double) cells.size();
+        double avgZ = (double) sumZ / (double) cells.size();
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos pos : cells) {
+            double dx = pos.getX() - avgX;
+            double dz = pos.getZ() - avgZ;
+            double dist = dx * dx + dz * dz;
+            if (dist < bestDistance) {
+                bestDistance = dist;
+                best = pos;
+            }
+        }
+        return best != null ? best : fallback.toImmutable();
+    }
+
+    private boolean isFenceBoundaryBlock(BlockState state) {
+        return state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock;
+    }
+
+    private boolean isPenInteriorCell(ServerWorld world, BlockPos pos) {
+        BlockState feet = world.getBlockState(pos);
+        BlockState head = world.getBlockState(pos.up());
+        if (isFenceBoundaryBlock(feet) || isFenceBoundaryBlock(head)) {
+            return false;
+        }
+        return !feet.blocksMovement() && !head.blocksMovement();
+    }
+
+    private record PenRegion(BlockPos anchor, BlockPos center, Set<BlockPos> cells) {
     }
 
     private BlockPos placeBannerInPen(ServerWorld world, BlockPos centerPos) {
