@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -10,11 +11,14 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-@Mixin(ChestBlockEntity.class)
+@Mixin(BlockEntity.class)
 public abstract class ChestBlockEntityMixin {
-    @Inject(method = "markDirty", at = @At("TAIL"))
+    @Inject(method = "markDirty()V", at = @At("TAIL"))
     private void guardvillagers$notifyShepherdGoalsOnChestMutation(CallbackInfo ci) {
-        ChestBlockEntity chest = (ChestBlockEntity) (Object) this;
+        BlockEntity blockEntity = (BlockEntity) (Object) this;
+        if (!(blockEntity instanceof ChestBlockEntity chest)) {
+            return;
+        }
         World world = chest.getWorld();
         if (!(world instanceof ServerWorld serverWorld)) {
             return;
