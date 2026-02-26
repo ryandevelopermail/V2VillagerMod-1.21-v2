@@ -53,8 +53,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 200;
-    private static final int PEN_REGION_MAX_RADIUS = 64;
-    private static final int PEN_REGION_MAX_VISITED = 4096;
+    private static final int PEN_REGION_MAX_RADIUS = 24;
+    private static final int PEN_REGION_MAX_VISITED = 512;
     private static final int PEN_SEARCH_Y_RANGE = 12;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
@@ -1031,8 +1031,22 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
 
-            PenRegion region = findValidatedPenRegion(world, gatePos, state);
-            if (region == null || hasBannerInPen(world, region)) {
+            PenValidationResult validation = findValidatedPenRegion(world, gatePos, state);
+            if (!validation.isValid()) {
+                LOGGER.debug(
+                        "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details={}",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString(),
+                        validation.reason());
+                continue;
+            }
+
+            PenRegion region = validation.region();
+            if (hasBannerInPen(world, region)) {
+                LOGGER.debug(
+                        "event=pen_candidate_rejected reason=region_already_bannered villagerUuid={} gatePos={}",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString());
                 continue;
             }
 
