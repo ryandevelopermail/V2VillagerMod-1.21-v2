@@ -4,7 +4,6 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
-import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ItemEntity;
@@ -1028,7 +1027,7 @@ public class ShepherdSpecialGoal extends Goal {
         double nearestDistance = Double.MAX_VALUE;
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
-            if (!(state.getBlock() instanceof FenceGateBlock)) {
+            if (!isFenceGateBlock(state)) {
                 LOGGER.debug(
                         "event=pen_candidate_rejected reason=not_gate_block villagerUuid={} gatePos={} block={}",
                         villager.getUuidAsString(),
@@ -1112,7 +1111,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenValidationResult findValidatedPenRegion(ServerWorld world, BlockPos gatePos, BlockState state) {
-        if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
+        if (!isFenceGateBlock(state) || !state.contains(FenceGateBlock.FACING)) {
             LOGGER.debug(
                     "event=pen_candidate_rejected reason=not_gate_block villagerUuid={} gatePos={} block={} hasFacing={}",
                     villager.getUuidAsString(),
@@ -1200,7 +1199,7 @@ public class ShepherdSpecialGoal extends Goal {
                 BlockState neighborState = world.getBlockState(neighbor);
                 if (isFenceBoundaryBlock(neighborState)) {
                     touchesFenceBoundary = true;
-                    if (neighborState.getBlock() instanceof FenceGateBlock) {
+                    if (isFenceGateBlock(neighborState)) {
                         touchesGateBoundary = true;
                     }
                     continue;
@@ -1264,8 +1263,13 @@ public class ShepherdSpecialGoal extends Goal {
         return best != null ? best : fallback.toImmutable();
     }
 
+
+    private boolean isFenceGateBlock(BlockState state) {
+        return state.isIn(BlockTags.FENCE_GATES);
+    }
+
     private boolean isFenceBoundaryBlock(BlockState state) {
-        return state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock;
+        return state.isIn(BlockTags.FENCES) || isFenceGateBlock(state);
     }
 
     private boolean isPenInteriorCell(ServerWorld world, BlockPos pos) {
@@ -1376,7 +1380,7 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
         BlockState state = world.getBlockState(gatePos);
-        if (!(state.getBlock() instanceof FenceGateBlock)) {
+        if (!isFenceGateBlock(state)) {
             return;
         }
 
@@ -1403,7 +1407,7 @@ public class ShepherdSpecialGoal extends Goal {
 
     private void openGate(ServerWorld world, BlockPos pos, boolean open) {
         BlockState state = world.getBlockState(pos);
-        if (!(state.getBlock() instanceof FenceGateBlock)) {
+        if (!isFenceGateBlock(state)) {
             return;
         }
         if (state.get(FenceGateBlock.OPEN) == open) {
@@ -1489,7 +1493,7 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
         BlockState state = world.getBlockState(gatePos);
-        if (!(state.getBlock() instanceof FenceGateBlock)) {
+        if (!isFenceGateBlock(state)) {
             return;
         }
         if (!state.get(FenceGateBlock.OPEN)) {
@@ -1546,7 +1550,7 @@ public class ShepherdSpecialGoal extends Goal {
         double nearestDistance = Double.MAX_VALUE;
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
-            if (!(state.getBlock() instanceof FenceGateBlock)) {
+            if (!isFenceGateBlock(state)) {
                 continue;
             }
 
@@ -1608,7 +1612,7 @@ public class ShepherdSpecialGoal extends Goal {
                 for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
                     for (int y = yStart; y <= yEnd; y++) {
                         BlockPos pos = new BlockPos(x, y, z);
-                        if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                        if (isFenceGateBlock(world.getBlockState(pos))) {
                             gateSet.add(pos.toImmutable());
                         }
                     }
@@ -1636,7 +1640,7 @@ public class ShepherdSpecialGoal extends Goal {
                 }
                 for (int y = yStart; y <= yEnd; y++) {
                     BlockPos pos = new BlockPos(x, y, z);
-                    if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                    if (isFenceGateBlock(world.getBlockState(pos))) {
                         gateSet.add(pos.toImmutable());
                     }
                 }
@@ -1651,24 +1655,35 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private int getLocalMinY(ServerWorld world, BlockPos center) {
-        int anchorY = resolvePenSearchAnchorY(center);
-        return Math.max(world.getBottomY(), anchorY - PEN_SEARCH_Y_RANGE_BELOW);
+        int floorY = resolvePenSearchFloorY(center);
+        return Math.max(world.getBottomY(), floorY - PEN_SEARCH_Y_RANGE_BELOW);
     }
 
     private int getLocalMaxY(ServerWorld world, BlockPos center) {
-        int anchorY = resolvePenSearchAnchorY(center);
-        return Math.min(world.getTopY() - 1, anchorY + PEN_SEARCH_Y_RANGE_ABOVE);
+        int ceilingY = resolvePenSearchCeilingY(center);
+        return Math.min(world.getTopY() - 1, ceilingY + PEN_SEARCH_Y_RANGE_ABOVE);
     }
 
-    private int resolvePenSearchAnchorY(BlockPos center) {
-        int anchorY = center.getY();
+    private int resolvePenSearchFloorY(BlockPos center) {
+        int floorY = center.getY();
         if (jobPos != null) {
-            anchorY = Math.max(anchorY, jobPos.getY());
+            floorY = Math.min(floorY, jobPos.getY());
         }
         if (chestPos != null) {
-            anchorY = Math.max(anchorY, chestPos.getY());
+            floorY = Math.min(floorY, chestPos.getY());
         }
-        return anchorY;
+        return floorY;
+    }
+
+    private int resolvePenSearchCeilingY(BlockPos center) {
+        int ceilingY = center.getY();
+        if (jobPos != null) {
+            ceilingY = Math.max(ceilingY, jobPos.getY());
+        }
+        if (chestPos != null) {
+            ceilingY = Math.max(ceilingY, chestPos.getY());
+        }
+        return ceilingY;
     }
 
     private BlockPos randomGatherWanderTarget(ServerWorld world, BlockPos origin) {
