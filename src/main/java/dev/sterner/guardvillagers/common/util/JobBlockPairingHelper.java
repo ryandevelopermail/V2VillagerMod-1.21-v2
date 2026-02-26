@@ -180,9 +180,21 @@ public final class JobBlockPairingHelper {
     }
 
     public static void handleBannerPlacement(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        handleBannerPlacement(world, bannerPos, bannerState, false);
+    }
+
+    public static void handleBannerPlacementFromShepherd(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
+        handleBannerPlacement(world, bannerPos, bannerState, true);
+    }
+
+    private static void handleBannerPlacement(ServerWorld world, BlockPos bannerPos, BlockState bannerState, boolean placedByShepherd) {
         if (!isBannerOnFence(world, bannerPos, bannerState)) {
             return;
         }
+
+        // Placement feedback should always be visible for valid pen banners, even when no pairing is found.
+        spawnHappyParticles(world, bannerPos);
+        world.playSound(null, bannerPos, SoundEvents.ENTITY_VILLAGER_CELEBRATE, SoundCategory.BLOCKS, 0.75F, 1.0F);
 
         double range = FARMER_BANNER_PAIR_RANGE;
         int pairedCount = 0;
@@ -199,7 +211,9 @@ public final class JobBlockPairingHelper {
             }
         }
 
-        LOGGER.info("Banner {} paired with {} Farmer(s) and {} Butcher Guard(s)", bannerPos.toShortString(), pairedCount, guardPairedCount);
+        int shepherdPairedCount = placedByShepherd ? 1 : 0;
+
+        LOGGER.info("Banner {} paired with {} Farmer(s), {} Butcher Guard(s), and {} Shepherd(s)", bannerPos.toShortString(), pairedCount, guardPairedCount, shepherdPairedCount);
     }
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {

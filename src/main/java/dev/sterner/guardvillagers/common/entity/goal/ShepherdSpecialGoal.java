@@ -1,14 +1,12 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -23,12 +21,9 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
-import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -51,7 +46,6 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
-    private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
@@ -335,7 +329,7 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
                     if (placedBannerPos != null) {
-                        triggerBannerPairing(world, placedBannerPos);
+                        JobBlockPairingHelper.handleBannerPlacementFromShepherd(world, placedBannerPos, world.getBlockState(placedBannerPos));
                     }
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
@@ -1063,32 +1057,6 @@ public class ShepherdSpecialGoal extends Goal {
             return true;
         }
         return false;
-    }
-
-    private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(FARMER_BANNER_PAIR_RANGE), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)) {
-            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSite.isEmpty()) {
-                continue;
-            }
-
-            GlobalPos globalPos = jobSite.get();
-            if (!globalPos.dimension().equals(world.getRegistryKey())) {
-                continue;
-            }
-
-            BlockPos farmerJobPos = globalPos.pos();
-            if (!world.getBlockState(farmerJobPos).isOf(Blocks.COMPOSTER)) {
-                continue;
-            }
-
-            if (JobBlockPairingHelper.findNearbyChest(world, farmerJobPos).isEmpty()) {
-                continue;
-            }
-
-            JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
-            FarmerBannerTracker.setBanner(villager, bannerPos);
-        }
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
