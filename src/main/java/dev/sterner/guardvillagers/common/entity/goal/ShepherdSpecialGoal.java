@@ -1023,16 +1023,41 @@ public class ShepherdSpecialGoal extends Goal {
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
+                LOGGER.debug(
+                        "event=pen_candidate_rejected reason=not_gate_block villagerUuid={} gatePos={} block={}",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString(),
+                        state.getBlock().getTranslationKey());
                 continue;
             }
 
-            PenRegion region = findValidatedPenRegion(world, gatePos, state);
-            if (region == null || hasBannerInPen(world, region)) {
+            PenValidationResult validation = findValidatedPenRegion(world, gatePos, state);
+            if (!validation.isValid()) {
+                LOGGER.debug(
+                        "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details={}",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString(),
+                        validation.reason());
+                continue;
+            }
+
+            PenRegion region = validation.region();
+            if (hasBannerInPen(world, region)) {
+                LOGGER.debug(
+                        "event=pen_candidate_rejected reason=region_already_bannered villagerUuid={} gatePos={}",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString());
                 continue;
             }
 
             BlockPos penCenter = region.center();
             double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
+            LOGGER.debug(
+                    "event=pen_candidate_accepted villagerUuid={} gatePos={} distanceSq={} penCenter={}",
+                    villager.getUuidAsString(),
+                    gatePos.toShortString(),
+                    distance,
+                    penCenter.toShortString());
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = new PenTarget(penCenter.toImmutable(), gatePos.toImmutable());
@@ -1042,8 +1067,8 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
-        PenRegion region = findValidatedPenRegion(world, gatePos, state);
-        return region == null ? null : region.anchor();
+        PenValidationResult validation = findValidatedPenRegion(world, gatePos, state);
+        return validation.isValid() ? validation.region().anchor() : null;
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
@@ -1080,29 +1105,50 @@ public class ShepherdSpecialGoal extends Goal {
         return findValidatedPenRegionFromInterior(world, pos) != null;
     }
 
-    private PenRegion findValidatedPenRegion(ServerWorld world, BlockPos gatePos, BlockState state) {
+    private PenValidationResult findValidatedPenRegion(ServerWorld world, BlockPos gatePos, BlockState state) {
         if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
-            return null;
+            LOGGER.debug(
+                    "event=pen_candidate_rejected reason=not_gate_block villagerUuid={} gatePos={} block={} hasFacing={}",
+                    villager.getUuidAsString(),
+                    gatePos.toShortString(),
+                    state.getBlock().getTranslationKey(),
+                    state.contains(FenceGateBlock.FACING));
+            return PenValidationResult.invalid("not_gate_block");
         }
         Direction facing = state.get(FenceGateBlock.FACING);
-        PenRegion front = floodFillPenRegion(world, gatePos, gatePos.offset(facing));
-        PenRegion back = floodFillPenRegion(world, gatePos, gatePos.offset(facing.getOpposite()));
-        if (front == null) {
+        PenValidationResult front = floodFillPenRegion(world, gatePos, gatePos.offset(facing), gatePos);
+        PenValidationResult back = floodFillPenRegion(world, gatePos, gatePos.offset(facing.getOpposite()), gatePos);
+        if (!front.isValid() && !back.isValid()) {
+            String reason = "front=" + front.reason() + ",back=" + back.reason();
+            LOGGER.warn(
+                    "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details={}",
+                    villager.getUuidAsString(),
+                    gatePos.toShortString(),
+                    reason);
+            return PenValidationResult.invalid(reason);
+        }
+        if (!front.isValid()) {
             return back;
         }
-        if (back == null) {
+        if (!back.isValid()) {
             return front;
         }
-        return front.cells().size() >= back.cells().size() ? front : back;
+        return front.region().cells().size() >= back.region().cells().size() ? front : back;
     }
 
     private PenRegion findValidatedPenRegionFromInterior(ServerWorld world, BlockPos insidePos) {
-        return floodFillPenRegion(world, insidePos, insidePos);
+        return floodFillPenRegion(world, insidePos, insidePos, null).region();
     }
 
-    private PenRegion floodFillPenRegion(ServerWorld world, BlockPos origin, BlockPos start) {
+    private PenValidationResult floodFillPenRegion(ServerWorld world, BlockPos origin, BlockPos start, BlockPos gatePos) {
+        String gateLogPos = gatePos == null ? "n/a" : gatePos.toShortString();
         if (!isPenInteriorCell(world, start)) {
-            return null;
+            LOGGER.debug(
+                    "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=start_not_interior startPos={}",
+                    villager.getUuidAsString(),
+                    gateLogPos,
+                    start.toShortString());
+            return PenValidationResult.invalid("start_not_interior");
         }
 
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
@@ -1117,7 +1163,13 @@ public class ShepherdSpecialGoal extends Goal {
 
         while (!queue.isEmpty()) {
             if (visited.size() > PEN_REGION_MAX_VISITED) {
-                return null;
+                LOGGER.warn(
+                        "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=visited_overflow visitedCount={} maxVisited={}",
+                        villager.getUuidAsString(),
+                        gateLogPos,
+                        visited.size(),
+                        PEN_REGION_MAX_VISITED);
+                return PenValidationResult.invalid("visited_overflow");
             }
 
             BlockPos current = queue.removeFirst();
@@ -1129,7 +1181,14 @@ public class ShepherdSpecialGoal extends Goal {
                 int dx = Math.abs(neighbor.getX() - origin.getX());
                 int dz = Math.abs(neighbor.getZ() - origin.getZ());
                 if (dx > PEN_REGION_MAX_RADIUS || dz > PEN_REGION_MAX_RADIUS) {
-                    return null;
+                    LOGGER.warn(
+                            "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=radius_overflow dx={} dz={} maxRadius={}",
+                            villager.getUuidAsString(),
+                            gateLogPos,
+                            dx,
+                            dz,
+                            PEN_REGION_MAX_RADIUS);
+                    return PenValidationResult.invalid("radius_overflow");
                 }
 
                 BlockState neighborState = world.getBlockState(neighbor);
@@ -1152,12 +1211,30 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
 
-        if (!touchesFenceBoundary || !touchesGateBoundary) {
-            return null;
+        if (!touchesFenceBoundary) {
+            LOGGER.debug(
+                    "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=no_fence_boundary",
+                    villager.getUuidAsString(),
+                    gateLogPos);
+            return PenValidationResult.invalid("no_fence_boundary");
+        }
+        if (!touchesGateBoundary) {
+            LOGGER.debug(
+                    "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=no_gate_boundary",
+                    villager.getUuidAsString(),
+                    gateLogPos);
+            return PenValidationResult.invalid("no_gate_boundary");
         }
 
         BlockPos center = selectRegionCenter(start, visited, sumX, sumZ);
-        return center == null ? null : new PenRegion(start.toImmutable(), center, visited);
+        if (center == null) {
+            LOGGER.debug(
+                    "event=pen_candidate_rejected reason=invalid_region villagerUuid={} gatePos={} details=center_selection_failed",
+                    villager.getUuidAsString(),
+                    gateLogPos);
+            return PenValidationResult.invalid("center_selection_failed");
+        }
+        return PenValidationResult.valid(new PenRegion(start.toImmutable(), center, visited));
     }
 
     private BlockPos selectRegionCenter(BlockPos fallback, Set<BlockPos> cells, int sumX, int sumZ) {
@@ -1192,6 +1269,20 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
         return !feet.blocksMovement() && !head.blocksMovement();
+    }
+
+    private record PenValidationResult(PenRegion region, String reason) {
+        private static PenValidationResult valid(PenRegion region) {
+            return new PenValidationResult(region, "valid");
+        }
+
+        private static PenValidationResult invalid(String reason) {
+            return new PenValidationResult(null, reason);
+        }
+
+        private boolean isValid() {
+            return region != null;
+        }
     }
 
     private record PenRegion(BlockPos anchor, BlockPos center, Set<BlockPos> cells) {
