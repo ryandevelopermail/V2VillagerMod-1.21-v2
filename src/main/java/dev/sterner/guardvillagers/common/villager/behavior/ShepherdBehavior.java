@@ -3,20 +3,22 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
-import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.inventory.Inventory;
-import net.minecraft.inventory.InventoryChangedListener;
-import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ShepherdBehavior implements VillagerProfessionBehavior {
@@ -28,7 +30,8 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ShepherdCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdSpecialGoal> SPECIAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
+    private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
 
     @Override
@@ -104,65 +107,120 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
-        Inventory inventory = getChestInventory(world, chestPos);
-        ChestListener existing = CHEST_LISTENERS.get(villager);
-        if (existing != null && existing.inventory() == inventory) {
+        Set<BlockPos> observedChestPositions = getObservedChestPositions(world, chestPos);
+        if (observedChestPositions.isEmpty()) {
+            clearChestListener(villager);
             return;
         }
+
+        ChestRegistration existing = CHEST_REGISTRATIONS.get(villager);
+        if (existing != null && existing.observedChestPositions().equals(observedChestPositions)) {
+            return;
+        }
+
         if (existing != null) {
             removeChestListener(existing);
-            CHEST_LISTENERS.remove(villager);
+            CHEST_REGISTRATIONS.remove(villager);
             LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
         }
-        if (!(inventory instanceof SimpleInventory simpleInventory)) {
+
+        for (BlockPos observedPos : observedChestPositions) {
+            CHEST_WATCHERS_BY_POS.computeIfAbsent(observedPos, ignored -> new HashSet<>()).add(villager);
+        }
+
+        CHEST_REGISTRATIONS.put(villager, new ChestRegistration(villager, observedChestPositions));
+    }
+
+    public static void onChestInventoryMutated(ServerWorld world, BlockPos chestPos) {
+        Set<VillagerEntity> villagers = CHEST_WATCHERS_BY_POS.get(chestPos);
+        if (villagers == null || villagers.isEmpty()) {
             return;
         }
-        InventoryChangedListener listener = sender -> {
-            ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
-            if (specialGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                specialGoal.onChestInventoryChanged(serverWorld);
-                long now = serverWorld.getTime();
-                long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
-                if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
-                    specialGoal.requestImmediateCheck();
-                    LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
-                } else {
-                    specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
-                }
+
+        Set<VillagerEntity> snapshot = Set.copyOf(villagers);
+        for (VillagerEntity villager : snapshot) {
+            if (!villager.isAlive() || villager.getWorld() != world) {
+                continue;
             }
-            ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                craftingGoal.requestImmediateCraft(serverWorld);
+            triggerChestWakeups(world, villager);
+        }
+    }
+
+    private static void triggerChestWakeups(ServerWorld world, VillagerEntity villager) {
+        ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
+        if (specialGoal != null) {
+            specialGoal.onChestInventoryChanged(world);
+            long now = world.getTime();
+            long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+            if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
+                specialGoal.requestImmediateCheck();
+                LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
+            } else {
+                specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
             }
-            ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-            if (distributionGoal != null) {
-                distributionGoal.requestImmediateDistribution();
-            }
-        };
-        simpleInventory.addListener(listener);
-        CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
+        }
+
+        ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        if (craftingGoal != null) {
+            craftingGoal.requestImmediateCraft(world);
+        }
+
+        ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal != null) {
+            distributionGoal.requestImmediateDistribution();
+        }
     }
 
     private void clearChestListener(VillagerEntity villager) {
-        ChestListener existing = CHEST_LISTENERS.remove(villager);
+        ChestRegistration existing = CHEST_REGISTRATIONS.remove(villager);
         LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
         if (existing != null) {
             removeChestListener(existing);
         }
     }
 
-    private void removeChestListener(ChestListener existing) {
-        existing.inventory().removeListener(existing.listener());
-    }
-
-    private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
+    private void removeChestListener(ChestRegistration existing) {
+        for (BlockPos observedPos : existing.observedChestPositions()) {
+            Set<VillagerEntity> watchers = CHEST_WATCHERS_BY_POS.get(observedPos);
+            if (watchers == null) {
+                continue;
+            }
+            watchers.remove(existing.villager());
+            if (watchers.isEmpty()) {
+                CHEST_WATCHERS_BY_POS.remove(observedPos);
+            }
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
     }
 
-    private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
+    private Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock)) {
+            return Set.of();
+        }
+
+        Set<BlockPos> positions = new HashSet<>();
+        positions.add(chestPos.toImmutable());
+
+        ChestType chestType = state.get(ChestBlock.CHEST_TYPE);
+        if (chestType != ChestType.SINGLE) {
+            Direction facing = state.get(ChestBlock.FACING);
+            Direction offsetDirection = chestType == ChestType.LEFT
+                    ? facing.rotateYClockwise()
+                    : facing.rotateYCounterclockwise();
+            BlockPos otherHalfPos = chestPos.offset(offsetDirection);
+            BlockState otherState = world.getBlockState(otherHalfPos);
+            if (otherState.getBlock() instanceof ChestBlock && otherState.get(ChestBlock.FACING) == facing) {
+                positions.add(otherHalfPos.toImmutable());
+            }
+        }
+
+        return positions;
+    }
+
+    private record ChestRegistration(VillagerEntity villager, Set<BlockPos> observedChestPositions) {
+        private ChestRegistration(VillagerEntity villager, Set<BlockPos> observedChestPositions) {
+            this.villager = villager;
+            this.observedChestPositions = Set.copyOf(observedChestPositions);
+        }
     }
 }
