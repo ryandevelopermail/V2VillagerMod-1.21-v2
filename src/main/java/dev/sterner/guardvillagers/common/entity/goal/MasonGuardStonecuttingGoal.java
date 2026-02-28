@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 public class MasonGuardStonecuttingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 200;
@@ -31,6 +32,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private long nextCheckTime;
     private Stage stage = Stage.IDLE;
     private boolean forceReturnToJob;
+    private String lastCraftedRecipeId;
 
     public MasonGuardStonecuttingGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -123,9 +125,10 @@ public class MasonGuardStonecuttingGoal extends Goal {
                     return;
                 }
 
-                MasonRecipe recipe = craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
+                MasonRecipe recipe = pickRandomRecipe(craftableRecipes);
                 if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
                         && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
+                    this.lastCraftedRecipeId = recipe.recipeId();
                     inventory.markDirty();
                 }
                 stage = Stage.DONE;
@@ -150,9 +153,24 @@ public class MasonGuardStonecuttingGoal extends Goal {
             }
 
             int batchOutputCount = result.getCount() * batchInputCount;
-            recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
+            recipes.add(new MasonRecipe(entry.id().toString(), recipe, result, batchInputCount, batchOutputCount));
         }
         return recipes;
+    }
+
+    private MasonRecipe pickRandomRecipe(List<MasonRecipe> craftableRecipes) {
+        if (craftableRecipes.size() <= 1 || this.lastCraftedRecipeId == null) {
+            return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        List<MasonRecipe> alternatives = craftableRecipes.stream()
+                .filter(recipe -> !this.lastCraftedRecipeId.equals(recipe.recipeId()))
+                .collect(Collectors.toList());
+        if (alternatives.isEmpty()) {
+            return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        return alternatives.get(guard.getRandom().nextInt(alternatives.size()));
     }
 
     private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output) {
@@ -343,6 +361,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
         DONE
     }
 
-    private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output, int batchInputCount, int batchOutputCount) {
+    private record MasonRecipe(String recipeId, StonecuttingRecipe recipe, ItemStack output, int batchInputCount, int batchOutputCount) {
     }
 }
