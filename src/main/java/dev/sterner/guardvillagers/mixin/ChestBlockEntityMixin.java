@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(LootableContainerBlockEntity.class)
 public class ChestBlockEntityMixin {
 
-    @Inject(method = "setStack", at = @At("TAIL"), require = 0)
+    @Inject(method = "setStack(ILnet/minecraft/item/ItemStack;)V", at = @At("TAIL"), require = 0)
     private void guardvillagers$onChestSetStack(int slot, ItemStack stack, CallbackInfo ci) {
         guardvillagers$notifyChestMutation();
     }
@@ -29,7 +29,7 @@ public class ChestBlockEntityMixin {
         guardvillagers$notifyChestMutation();
     }
 
-    @Inject(method = "clear", at = @At("TAIL"), require = 0)
+    @Inject(method = "clear()V", at = @At("TAIL"), require = 0)
     private void guardvillagers$onChestClear(CallbackInfo ci) {
         guardvillagers$notifyChestMutation();
     }
