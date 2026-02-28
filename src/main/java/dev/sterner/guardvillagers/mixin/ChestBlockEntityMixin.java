@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
+import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
 import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.item.ItemStack;
@@ -32,6 +33,7 @@ public class ChestBlockEntityMixin {
     private void guardvillagers$notifyChestMutation() {
         if ((Object) this instanceof ChestBlockEntity chest && chest.getWorld() instanceof ServerWorld serverWorld) {
             ShepherdBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
+            MasonBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
         }
     }
 }
