@@ -58,6 +58,8 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private final Map<DistributionType, Integer> recipientCursorByType = new EnumMap<>(DistributionType.class);
     private Stage stage = Stage.IDLE;
     private ItemStack pendingItem = ItemStack.EMPTY;
+    private int pendingSourceSlot = -1;
+    private net.minecraft.item.Item pendingSourceItem;
     private BlockPos pendingTargetChestPos;
     private DistributionType pendingType = DistributionType.NONE;
     private boolean pendingOverflowTransfer;
@@ -121,6 +123,10 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         if (stage == Stage.MOVE_TO_SOURCE) {
             if (isNear(chestPos)) {
+                if (!extractPendingItemFromSource(world, chestPos)) {
+                    stage = Stage.DONE;
+                    return;
+                }
                 stage = Stage.MOVE_TO_TARGET;
                 moveTo(pendingTargetChestPos);
             } else {
@@ -166,14 +172,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
                 continue;
             }
 
-            ItemStack extracted = stack.split(1);
-            if (extracted.isEmpty()) {
-                continue;
-            }
-
-            source.setStack(slot, stack);
-            source.markDirty();
-            this.pendingItem = extracted;
+            this.pendingItem = stack.copyWithCount(1);
+            this.pendingSourceSlot = slot;
+            this.pendingSourceItem = stack.getItem();
             this.pendingTargetChestPos = selectedRecipient.chestPos();
             this.pendingType = type;
             this.pendingOverflowTransfer = false;
@@ -195,14 +196,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
                 continue;
             }
 
-            ItemStack extracted = stack.split(1);
-            if (extracted.isEmpty()) {
-                continue;
-            }
-
-            source.setStack(slot, stack);
-            source.markDirty();
-            this.pendingItem = extracted;
+            this.pendingItem = stack.copyWithCount(1);
+            this.pendingSourceSlot = slot;
+            this.pendingSourceItem = stack.getItem();
             this.pendingTargetChestPos = librarians.getFirst().chestPos();
             this.pendingType = DistributionType.NONE;
             this.pendingOverflowTransfer = true;
@@ -225,16 +221,6 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem.copy());
         if (remaining.isEmpty()) {
-            if (!pendingOverflowTransfer && pendingType != DistributionType.NONE) {
-                List<RecipientRecord> refreshedRecipients = getPrimaryRecipients(world, pendingType);
-                RecipientRecord selected = refreshedRecipients.stream()
-                        .filter(recipient -> recipient.chestPos().equals(pendingTargetChestPos))
-                        .findFirst()
-                        .orElse(null);
-                if (selected != null) {
-                    advanceRecipientCursor(pendingType, refreshedRecipients, selected);
-                }
-            }
             clearPendingState();
             return;
         }
@@ -263,9 +249,42 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
     private void clearPendingState() {
         this.pendingItem = ItemStack.EMPTY;
+        this.pendingSourceSlot = -1;
+        this.pendingSourceItem = null;
         this.pendingTargetChestPos = null;
         this.pendingType = DistributionType.NONE;
         this.pendingOverflowTransfer = false;
+    }
+
+    private boolean extractPendingItemFromSource(ServerWorld world, BlockPos sourceChestPos) {
+        if (pendingItem.isEmpty() || pendingSourceSlot < 0 || pendingSourceItem == null) {
+            return false;
+        }
+
+        Optional<Inventory> sourceInventory = getChestInventory(world, sourceChestPos);
+        if (sourceInventory.isEmpty()) {
+            return false;
+        }
+
+        Inventory inventory = sourceInventory.get();
+        if (pendingSourceSlot >= inventory.size()) {
+            return false;
+        }
+
+        ItemStack sourceStack = inventory.getStack(pendingSourceSlot);
+        if (sourceStack.isEmpty() || sourceStack.getItem() != pendingSourceItem) {
+            return false;
+        }
+
+        ItemStack extracted = sourceStack.split(1);
+        if (extracted.isEmpty()) {
+            return false;
+        }
+
+        inventory.setStack(pendingSourceSlot, sourceStack);
+        inventory.markDirty();
+        pendingItem = extracted;
+        return true;
     }
 
     private void moveTo(BlockPos target) {
@@ -383,21 +402,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         int cursor = recipientCursorByType.getOrDefault(type, 0);
         int index = Math.floorMod(cursor, recipients.size());
-        return recipients.get(index);
-    }
-
-    private void advanceRecipientCursor(DistributionType type, List<RecipientRecord> recipients, RecipientRecord selected) {
-        if (recipients.isEmpty()) {
-            recipientCursorByType.remove(type);
-            return;
-        }
-
-        int selectedIndex = recipients.indexOf(selected);
-        if (selectedIndex < 0) {
-            selectedIndex = 0;
-        }
-
-        recipientCursorByType.put(type, (selectedIndex + 1) % recipients.size());
+        RecipientRecord selected = recipients.get(index);
+        recipientCursorByType.put(type, (index + 1) % recipients.size());
+        return selected;
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {

@@ -32,10 +32,10 @@ public class MasonMiningStairGoal extends Goal {
     private static final int MINING_DURATION_MAX_TICKS = 3600;
     private static final int BATCH_MIN_STEPS = 20;
     private static final int BATCH_MAX_STEPS = 56;
-    private static final int SESSION_BACKOFF_MIN_TICKS = 20 * 60 * 4;
-    private static final int SESSION_BACKOFF_MAX_TICKS = 20 * 60 * 10;
-    private static final int FAILURE_BACKOFF_MIN_TICKS = 20 * 60 * 2;
-    private static final int FAILURE_BACKOFF_MAX_TICKS = 20 * 60 * 6;
+    private static final int SESSION_BACKOFF_MIN_TICKS = 20 * 60 * 2;
+    private static final int SESSION_BACKOFF_MAX_TICKS = 20 * 60 * 5;
+    private static final int FAILURE_BACKOFF_MIN_TICKS = 20 * 60 * 1;
+    private static final int FAILURE_BACKOFF_MAX_TICKS = 20 * 60 * 3;
     private static final int REQUIRED_STAIR_CLEARANCE = 3;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
@@ -120,7 +120,7 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         this.rejoinStepTarget = stepIndex > 0
-                ? (storedDeepest != null ? storedDeepest : computeStepTarget(stepIndex - 1))
+                ? (storedStart != null ? storedStart : (storedDeepest != null ? storedDeepest : computeStepTarget(stepIndex - 1)))
                 : null;
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
