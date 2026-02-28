@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.common.entity.goal.GuardInteractDoorGoal;
 import dev.sterner.guardvillagers.common.entity.goal.GuardLookAtAndStopMovingWhenBeingTheInteractionTarget;
 import dev.sterner.guardvillagers.common.entity.goal.GuardRunToEatGoal;
 import dev.sterner.guardvillagers.common.entity.goal.KickGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MasonGuardStonecuttingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonMiningStairGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
@@ -124,7 +125,8 @@ public class MasonGuardEntity extends GuardEntity {
         if (GuardVillagersConfig.guardEntitysRunFromPolarBears) {
             this.goalSelector.add(3, new FleeEntityGoal<>(this, PolarBearEntity.class, 12.0F, 1.0D, 1.2D));
         }
-        this.goalSelector.add(2, new MasonMiningStairGoal(this));
+        this.goalSelector.add(2, new MasonGuardStonecuttingGoal(this));
+        this.goalSelector.add(3, new MasonMiningStairGoal(this));
         this.goalSelector.add(3, new WanderAroundPointOfInterestGoal(this, 0.5D, false));
         this.goalSelector.add(3, new IronGolemWanderAroundGoal(this, 0.5D));
         this.goalSelector.add(3, new MoveThroughVillageGoal(this, 0.5D, false, 4, () -> false));
