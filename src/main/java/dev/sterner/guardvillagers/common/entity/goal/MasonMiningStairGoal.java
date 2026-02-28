@@ -32,7 +32,7 @@ public class MasonMiningStairGoal extends Goal {
     private static final int MINING_DURATION_MIN_TICKS = 1200;
     private static final int MINING_DURATION_MAX_TICKS = 3600;
     private static final int MINING_RUN_COOLDOWN_TICKS = 200;
-    private static final int REQUIRED_STAIR_CLEARANCE = 2;
+    private static final int REQUIRED_STAIR_CLEARANCE = 3;
     private static final Set<Block> BREAKABLE_BLOCKS = Set.of(
             Blocks.DIRT,
             Blocks.COARSE_DIRT,
@@ -245,7 +245,13 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private boolean clearCurrentHeadBlock(ServerWorld world) {
-        return clearBlockIfNeeded(world, guard.getBlockPos().up());
+        BlockPos guardFeet = guard.getBlockPos();
+        for (int i = 1; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            if (!clearBlockIfNeeded(world, guardFeet.up(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean hasSafeSupport(ServerWorld world, BlockPos footTarget) {
