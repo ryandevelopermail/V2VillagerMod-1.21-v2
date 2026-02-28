@@ -40,6 +40,7 @@ public class MasonMiningStairGoal extends Goal {
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
+    private BlockPos rejoinStepTarget;
     private BlockPos currentStepTarget;
     private int stepIndex;
     private int noProgressTicks;
@@ -50,8 +51,9 @@ public class MasonMiningStairGoal extends Goal {
     private long nextSessionStartTick;
     private long miningSessionEndTick;
     private int sessionStepTarget;
-    private long cooldownHalfwayLogTick;
-    private long cooldownHalfwayLoggedForStartTick = -1L;
+    private long cooldownQuarterLogTick;
+    private long cooldownThreeQuarterLogTick;
+    private long cooldownProgressLoggedForStartTick = -1L;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -85,12 +87,13 @@ public class MasonMiningStairGoal extends Goal {
 
         long worldTime = world.getTime();
         if (worldTime < guard.getNextMiningStartTick()) {
-            maybeLogCooldownHalfway(worldTime);
+            maybeLogCooldownProgress(worldTime);
             return false;
         }
 
-        this.cooldownHalfwayLogTick = 0L;
-        this.cooldownHalfwayLoggedForStartTick = -1L;
+        this.cooldownQuarterLogTick = 0L;
+        this.cooldownThreeQuarterLogTick = 0L;
+        this.cooldownProgressLoggedForStartTick = -1L;
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
         Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
@@ -107,8 +110,18 @@ public class MasonMiningStairGoal extends Goal {
             this.origin = guard.getBlockPos();
             this.stepIndex = 0;
             guard.setMiningProgress(this.origin, this.stepIndex, this.miningDirection.getId());
+            guard.setMiningPathAnchors(this.origin, null);
         }
 
+        BlockPos storedStart = guard.getMiningStartPos();
+        BlockPos storedDeepest = guard.getMiningLastMinedPos();
+        if (storedStart == null && this.origin != null) {
+            guard.setMiningPathAnchors(this.origin, storedDeepest);
+        }
+
+        this.rejoinStepTarget = stepIndex > 0
+                ? (storedDeepest != null ? storedDeepest : computeStepTarget(stepIndex - 1))
+                : null;
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -119,7 +132,7 @@ public class MasonMiningStairGoal extends Goal {
         int runDurationTicks = MINING_DURATION_MIN_TICKS + guard.getRandom().nextInt(MINING_DURATION_MAX_TICKS - MINING_DURATION_MIN_TICKS + 1);
         this.miningSessionEndTick = worldTime + runDurationTicks;
         this.sessionStepTarget = MathHelper.nextInt(guard.getRandom(), BATCH_MIN_STEPS, BATCH_MAX_STEPS);
-        this.stage = Stage.MINING;
+        this.stage = this.rejoinStepTarget != null ? Stage.REJOIN_LAST_STEP : Stage.MINING;
         return true;
     }
 
@@ -145,15 +158,20 @@ public class MasonMiningStairGoal extends Goal {
     @Override
     public void start() {
         guard.setMiningSessionActive(true);
-        LOGGER.info("Mason guard {} starting mining session: origin={}, stepIndex={}, direction={}, sessionEndTick={}, stepTarget={}, nextEligibleStartTick={}",
+        BlockPos startTarget = this.rejoinStepTarget != null ? this.rejoinStepTarget : this.currentStepTarget;
+        LOGGER.info("Mason guard {} starting mining session: origin={}, startPos={}, deepestPos={}, stepIndex={}, direction={}, sessionEndTick={}, sessionStepTarget={}, startTarget={}, nextEligibleStartTick={}, worldTime={}",
                 guard.getUuidAsString(),
                 origin == null ? "none" : origin.toShortString(),
+                guard.getMiningStartPos() == null ? "none" : guard.getMiningStartPos().toShortString(),
+                guard.getMiningLastMinedPos() == null ? "none" : guard.getMiningLastMinedPos().toShortString(),
                 stepIndex,
                 miningDirection == null ? "none" : miningDirection,
                 miningSessionEndTick,
                 sessionStepTarget,
-                guard.getNextMiningStartTick());
-        guard.getNavigation().startMovingTo(currentStepTarget.getX() + 0.5D, currentStepTarget.getY(), currentStepTarget.getZ() + 0.5D, MOVE_SPEED);
+                startTarget == null ? "none" : startTarget.toShortString(),
+                guard.getNextMiningStartTick(),
+                guard.getWorld().getTime());
+        guard.getNavigation().startMovingTo(startTarget.getX() + 0.5D, startTarget.getY(), startTarget.getZ() + 0.5D, MOVE_SPEED);
     }
 
     @Override
@@ -172,6 +190,11 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         guard.setTarget(null);
+
+        if (stage == Stage.REJOIN_LAST_STEP) {
+            tickRejoinLastStep(world);
+            return;
+        }
 
         if (stage == Stage.MINING) {
             tickMining(world);
@@ -198,6 +221,46 @@ public class MasonMiningStairGoal extends Goal {
             guard.setMiningSessionActive(false);
             clearTemporaryMiningState();
             stage = Stage.DONE;
+        }
+    }
+
+    private void tickRejoinLastStep(ServerWorld world) {
+        if (rejoinStepTarget == null) {
+            this.stage = Stage.MINING;
+            this.noProgressTicks = 0;
+            this.lastDistanceToTarget = Double.MAX_VALUE;
+            return;
+        }
+
+        if (!clearCurrentHeadBlock(world)) {
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
+        if (!ensureStepClear(world, rejoinStepTarget)) {
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
+        guard.getNavigation().startMovingTo(rejoinStepTarget.getX() + 0.5D, rejoinStepTarget.getY(), rejoinStepTarget.getZ() + 0.5D, MOVE_SPEED);
+        double distanceToTarget = guard.squaredDistanceTo(Vec3d.ofBottomCenter(rejoinStepTarget));
+        if (distanceToTarget + 0.01D < lastDistanceToTarget) {
+            noProgressTicks = 0;
+            lastDistanceToTarget = distanceToTarget;
+        } else {
+            noProgressTicks++;
+        }
+
+        if (noProgressTicks >= NO_PROGRESS_LIMIT_TICKS) {
+            beginReturn(ReturnReason.STUCK_30_SECONDS);
+            return;
+        }
+
+        if (distanceToTarget <= TARGET_REACH_SQUARED) {
+            this.rejoinStepTarget = null;
+            this.noProgressTicks = 0;
+            this.lastDistanceToTarget = Double.MAX_VALUE;
+            this.stage = Stage.MINING;
         }
     }
 
@@ -234,6 +297,8 @@ public class MasonMiningStairGoal extends Goal {
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
             stepIndex++;
             guard.setMiningProgress(origin, stepIndex, miningDirection.getId());
+            BlockPos reachedStepPos = currentStepTarget;
+            guard.setMiningPathAnchors(guard.getMiningStartPos() == null ? origin : guard.getMiningStartPos(), reachedStepPos);
             if (stepIndex >= sessionStepTarget) {
                 beginReturn(ReturnReason.BATCH_COMPLETE);
                 return;
@@ -343,7 +408,7 @@ public class MasonMiningStairGoal extends Goal {
 
 
     private void beginReturn(ReturnReason reason) {
-        if (stage != Stage.MINING) {
+        if (stage != Stage.MINING && stage != Stage.REJOIN_LAST_STEP) {
             return;
         }
         this.returnReason = reason;
@@ -351,15 +416,25 @@ public class MasonMiningStairGoal extends Goal {
         long backoffTicks = computeSessionBackoffTicks(reason);
         this.nextSessionStartTick = worldTime + backoffTicks;
         guard.setNextMiningStartTick(this.nextSessionStartTick);
-        this.cooldownHalfwayLogTick = worldTime + Math.max(1L, backoffTicks / 2L);
-        this.cooldownHalfwayLoggedForStartTick = -1L;
+        this.cooldownQuarterLogTick = worldTime + Math.max(1L, backoffTicks / 4L);
+        this.cooldownThreeQuarterLogTick = worldTime + Math.max(1L, (backoffTicks * 3L) / 4L);
+        this.cooldownProgressLoggedForStartTick = -1L;
 
-        LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, backoffTicks={}, nextEligibleStartTick={}",
+        LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}",
                 guard.getUuidAsString(),
                 reason,
                 minedBlockCount,
                 stepIndex,
+                guard.getMiningStartPos() == null ? "none" : guard.getMiningStartPos().toShortString(),
+                guard.getMiningLastMinedPos() == null ? "none" : guard.getMiningLastMinedPos().toShortString(),
                 backoffTicks,
+                this.nextSessionStartTick);
+
+        LOGGER.info("Mason guard {} cooldown started: startTick={}, quarterTick={}, threeQuarterTick={}, nextEligibleStartTick={}",
+                guard.getUuidAsString(),
+                worldTime,
+                this.cooldownQuarterLogTick,
+                this.cooldownThreeQuarterLogTick,
                 this.nextSessionStartTick);
 
         if (reason.resetsMiningProgress) {
@@ -446,26 +521,42 @@ public class MasonMiningStairGoal extends Goal {
         return remaining;
     }
 
-    private void maybeLogCooldownHalfway(long worldTime) {
+    private void maybeLogCooldownProgress(long worldTime) {
         long nextStartTick = guard.getNextMiningStartTick();
-        if (nextStartTick <= 0L || this.cooldownHalfwayLogTick <= 0L) {
-            return;
-        }
-        if (worldTime < this.cooldownHalfwayLogTick) {
-            return;
-        }
-        if (this.cooldownHalfwayLoggedForStartTick == nextStartTick) {
+        if (nextStartTick <= 0L) {
             return;
         }
 
-        long ticksRemaining = Math.max(0L, nextStartTick - worldTime);
-        LOGGER.info("Mason guard {} mining cooldown is halfway complete: nextEligibleStartTick={}, ticksRemaining={} (~{}s)",
-                guard.getUuidAsString(),
-                nextStartTick,
-                ticksRemaining,
-                ticksRemaining / 20L);
+        if (this.cooldownProgressLoggedForStartTick != nextStartTick) {
+            LOGGER.info("Mason guard {} waiting for next mining session: nextEligibleStartTick={}, currentTick={}, ticksRemaining={} (~{}s)",
+                    guard.getUuidAsString(),
+                    nextStartTick,
+                    worldTime,
+                    Math.max(0L, nextStartTick - worldTime),
+                    Math.max(0L, nextStartTick - worldTime) / 20L);
+            this.cooldownProgressLoggedForStartTick = nextStartTick;
+        }
 
-        this.cooldownHalfwayLoggedForStartTick = nextStartTick;
+        if (this.cooldownQuarterLogTick > 0L && worldTime >= this.cooldownQuarterLogTick) {
+            long ticksRemaining = Math.max(0L, nextStartTick - worldTime);
+            LOGGER.info("Mason guard {} mining cooldown reached 25%: nextEligibleStartTick={}, ticksRemaining={} (~{}s)",
+                    guard.getUuidAsString(),
+                    nextStartTick,
+                    ticksRemaining,
+                    ticksRemaining / 20L);
+            this.cooldownQuarterLogTick = 0L;
+        }
+
+        if (this.cooldownThreeQuarterLogTick > 0L && worldTime >= this.cooldownThreeQuarterLogTick) {
+            long ticksRemaining = Math.max(0L, nextStartTick - worldTime);
+            LOGGER.info("Mason guard {} mining cooldown reached 75%: nextEligibleStartTick={}, ticksRemaining={} (~{}s)",
+                    guard.getUuidAsString(),
+                    nextStartTick,
+                    ticksRemaining,
+                    ticksRemaining / 20L);
+            this.cooldownThreeQuarterLogTick = 0L;
+        }
+
     }
 
     private int computeSessionBackoffTicks(ReturnReason reason) {
@@ -480,6 +571,7 @@ public class MasonMiningStairGoal extends Goal {
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
         this.currentStepTarget = null;
+        this.rejoinStepTarget = null;
         this.stepIndex = 0;
         this.miningSessionEndTick = 0L;
         this.sessionStepTarget = 0;
@@ -506,6 +598,7 @@ public class MasonMiningStairGoal extends Goal {
 
     private enum Stage {
         IDLE,
+        REJOIN_LAST_STEP,
         MINING,
         RETURN_TO_CHEST,
         DEPOSIT,
