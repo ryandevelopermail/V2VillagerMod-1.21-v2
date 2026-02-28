@@ -41,6 +41,7 @@ public class MasonMiningStairGoal extends Goal {
     private Direction miningDirection;
     private BlockPos origin;
     private BlockPos rejoinStepTarget;
+    private BlockPos rejoinDeepTarget;
     private BlockPos currentStepTarget;
     private int stepIndex;
     private int noProgressTicks;
@@ -119,9 +120,19 @@ public class MasonMiningStairGoal extends Goal {
             guard.setMiningPathAnchors(this.origin, storedDeepest);
         }
 
-        this.rejoinStepTarget = stepIndex > 0
-                ? (storedStart != null ? storedStart : (storedDeepest != null ? storedDeepest : computeStepTarget(stepIndex - 1)))
-                : null;
+        if (stepIndex > 0) {
+            BlockPos deepestTarget = storedDeepest != null ? storedDeepest : computeStepTarget(stepIndex - 1);
+            if (storedStart != null && !storedStart.equals(deepestTarget)) {
+                this.rejoinStepTarget = storedStart;
+                this.rejoinDeepTarget = deepestTarget;
+            } else {
+                this.rejoinStepTarget = deepestTarget;
+                this.rejoinDeepTarget = null;
+            }
+        } else {
+            this.rejoinStepTarget = null;
+            this.rejoinDeepTarget = null;
+        }
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -257,6 +268,13 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
+            if (rejoinDeepTarget != null && !rejoinDeepTarget.equals(rejoinStepTarget)) {
+                this.rejoinStepTarget = rejoinDeepTarget;
+                this.rejoinDeepTarget = null;
+                this.noProgressTicks = 0;
+                this.lastDistanceToTarget = Double.MAX_VALUE;
+                return;
+            }
             this.rejoinStepTarget = null;
             this.noProgressTicks = 0;
             this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -572,6 +590,7 @@ public class MasonMiningStairGoal extends Goal {
         this.lastDistanceToTarget = Double.MAX_VALUE;
         this.currentStepTarget = null;
         this.rejoinStepTarget = null;
+        this.rejoinDeepTarget = null;
         this.stepIndex = 0;
         this.miningSessionEndTick = 0L;
         this.sessionStepTarget = 0;
