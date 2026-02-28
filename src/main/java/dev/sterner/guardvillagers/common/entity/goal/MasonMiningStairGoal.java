@@ -1,9 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
-import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
@@ -11,6 +9,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShovelItem;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
@@ -22,7 +21,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
-import java.util.Set;
 
 public class MasonMiningStairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
@@ -33,24 +31,6 @@ public class MasonMiningStairGoal extends Goal {
     private static final int MINING_DURATION_MAX_TICKS = 3600;
     private static final int MINING_RUN_COOLDOWN_TICKS = 200;
     private static final int REQUIRED_STAIR_CLEARANCE = 3;
-    private static final Set<Block> BREAKABLE_BLOCKS = Set.of(
-            Blocks.DIRT,
-            Blocks.COARSE_DIRT,
-            Blocks.ROOTED_DIRT,
-            Blocks.GRASS_BLOCK,
-            Blocks.PODZOL,
-            Blocks.MYCELIUM,
-            Blocks.STONE,
-            Blocks.COBBLESTONE,
-            Blocks.ANDESITE,
-            Blocks.DIORITE,
-            Blocks.GRANITE,
-            Blocks.DEEPSLATE,
-            Blocks.COBBLED_DEEPSLATE,
-            Blocks.TUFF,
-            Blocks.CALCITE
-    );
-
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -271,7 +251,7 @@ public class MasonMiningStairGoal extends Goal {
         if (state.getFluidState().isIn(FluidTags.WATER) || state.getFluidState().isIn(FluidTags.LAVA)) {
             return false;
         }
-        if (!canMine(state)) {
+        if (!canMine(world, pos, state)) {
             return false;
         }
 
@@ -294,8 +274,23 @@ public class MasonMiningStairGoal extends Goal {
         }
     }
 
-    private boolean canMine(BlockState state) {
-        return BREAKABLE_BLOCKS.contains(state.getBlock());
+    private boolean canMine(ServerWorld world, BlockPos pos, BlockState state) {
+        if (state.isAir() || state.getHardness(world, pos) < 0.0F) {
+            return false;
+        }
+
+        ItemStack stack = guard.getMainHandStack();
+        if (stack.isEmpty()) {
+            return false;
+        }
+
+        if (stack.getItem() instanceof PickaxeItem) {
+            return state.isIn(BlockTags.PICKAXE_MINEABLE) || stack.isSuitableFor(state);
+        }
+        if (stack.getItem() instanceof ShovelItem) {
+            return state.isIn(BlockTags.SHOVEL_MINEABLE) || stack.isSuitableFor(state);
+        }
+        return false;
     }
 
     private boolean hasUsableMiningTool() {
