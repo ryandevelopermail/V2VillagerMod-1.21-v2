@@ -7,6 +7,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
@@ -35,6 +36,7 @@ public class MasonTableCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private Item lastCraftedOutputItem;
 
     public MasonTableCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -157,13 +159,30 @@ public class MasonTableCraftingGoal extends Goal {
             return;
         }
 
-        Recipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        Recipe recipe = pickRecipeAvoidingLastOutput(craftable);
         if (consumeIngredients(inventory, recipe.requirements)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            this.lastCraftedOutputItem = recipe.output.getItem();
             CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+
+    private Recipe pickRecipeAvoidingLastOutput(List<Recipe> craftableRecipes) {
+        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
+            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        List<Recipe> alternatives = craftableRecipes.stream()
+                .filter(recipe -> recipe.output.getItem() != this.lastCraftedOutputItem)
+                .toList();
+        if (alternatives.isEmpty()) {
+            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        return alternatives.get(villager.getRandom().nextInt(alternatives.size()));
     }
 
     private List<Recipe> getCraftableRecipes(Inventory inventory) {

@@ -5,6 +5,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
@@ -32,7 +33,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private long nextCheckTime;
     private Stage stage = Stage.IDLE;
     private boolean forceReturnToJob;
-    private String lastCraftedRecipeId;
+    private Item lastCraftedOutputItem;
 
     public MasonGuardStonecuttingGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -42,6 +43,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(guard.getWorld() instanceof ServerWorld world) || !guard.isAlive()) {
+            return false;
+        }
+        if (guard.isMiningSessionActive()) {
             return false;
         }
 
@@ -128,7 +132,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 MasonRecipe recipe = pickRandomRecipe(craftableRecipes);
                 if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
                         && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
-                    this.lastCraftedRecipeId = recipe.recipeId();
+                    this.lastCraftedOutputItem = recipe.output().getItem();
                     inventory.markDirty();
                 }
                 stage = Stage.DONE;
@@ -153,18 +157,18 @@ public class MasonGuardStonecuttingGoal extends Goal {
             }
 
             int batchOutputCount = result.getCount() * batchInputCount;
-            recipes.add(new MasonRecipe(entry.id().toString(), recipe, result, batchInputCount, batchOutputCount));
+            recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
         }
         return recipes;
     }
 
     private MasonRecipe pickRandomRecipe(List<MasonRecipe> craftableRecipes) {
-        if (craftableRecipes.size() <= 1 || this.lastCraftedRecipeId == null) {
+        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
             return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
         }
 
         List<MasonRecipe> alternatives = craftableRecipes.stream()
-                .filter(recipe -> !this.lastCraftedRecipeId.equals(recipe.recipeId()))
+                .filter(recipe -> recipe.output().getItem() != this.lastCraftedOutputItem)
                 .collect(Collectors.toList());
         if (alternatives.isEmpty()) {
             return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
@@ -361,6 +365,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
         DONE
     }
 
-    private record MasonRecipe(String recipeId, StonecuttingRecipe recipe, ItemStack output, int batchInputCount, int batchOutputCount) {
+    private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output, int batchInputCount, int batchOutputCount) {
     }
 }
