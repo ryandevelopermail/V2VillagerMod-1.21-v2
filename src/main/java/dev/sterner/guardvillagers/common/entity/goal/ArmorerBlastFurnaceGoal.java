@@ -54,6 +54,10 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
+    public void requestImmediateCheck() {
+        this.nextCheckTime = 0L;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
@@ -136,10 +140,14 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         BlastFurnaceBlockEntity furnace = furnaceOpt.get();
         ItemStack inputStack = furnace.getStack(0);
         ItemStack outputStack = furnace.getStack(2);
+        ItemStack fuelStack = furnace.getStack(1);
         if (!outputStack.isEmpty() && (inputStack.isEmpty() || hasDifferentOreInChest(world, chestInventory, inputStack))) {
             return true;
         }
-        return findBestOre(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
+        if (!inputStack.isEmpty() && fuelStack.isEmpty() && findBestFuel(chestInventory).isPresent()) {
+            return true;
+        }
+        return inputStack.isEmpty() && findBestOre(world, chestInventory).isPresent();
     }
 
     private void transferItems(ServerWorld world) {
@@ -155,18 +163,22 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         if (!outputStack.isEmpty() && (inputStack.isEmpty() || (bestOre.isPresent() && !ItemStack.areItemsAndComponentsEqual(inputStack, bestOre.get())))) {
             extractFurnaceOutput(chestInventory, furnace);
         }
-        ItemStack oreStack = extractBestOre(world, chestInventory);
-        if (!oreStack.isEmpty()) {
-            ItemStack remaining = insertIntoFurnace(furnace, oreStack, 0);
-            if (!remaining.isEmpty()) {
-                insertIntoInventory(chestInventory, remaining);
+        if (furnace.getStack(0).isEmpty()) {
+            ItemStack oreStack = extractBestOre(world, chestInventory);
+            if (!oreStack.isEmpty()) {
+                ItemStack remaining = insertIntoFurnace(furnace, oreStack, 0);
+                if (!remaining.isEmpty()) {
+                    insertIntoInventory(chestInventory, remaining);
+                }
             }
         }
-        ItemStack fuelStack = extractBestFuel(chestInventory);
-        if (!fuelStack.isEmpty()) {
-            ItemStack remaining = insertIntoFurnace(furnace, fuelStack, 1);
-            if (!remaining.isEmpty()) {
-                insertIntoInventory(chestInventory, remaining);
+        if (furnace.getStack(1).isEmpty()) {
+            ItemStack fuelStack = extractBestFuel(chestInventory);
+            if (!fuelStack.isEmpty()) {
+                ItemStack remaining = insertIntoFurnace(furnace, fuelStack, 1);
+                if (!remaining.isEmpty()) {
+                    insertIntoInventory(chestInventory, remaining);
+                }
             }
         }
         chestInventory.markDirty();

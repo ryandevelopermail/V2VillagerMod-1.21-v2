@@ -101,6 +101,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         } else {
             goal.setTargets(jobPos, chestPos);
         }
+        goal.requestImmediateCheck();
 
         updateChestListener(world, villager, chestPos);
 
@@ -153,6 +154,16 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             leatherDistributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         leatherDistributionGoal.requestImmediateDistribution();
+
+        ButcherSmokerGoal smokerGoal = GOALS.get(villager);
+        if (smokerGoal == null) {
+            smokerGoal = new ButcherSmokerGoal(villager, jobPos, chestPos);
+            GOALS.put(villager, smokerGoal);
+            villager.goalSelector.add(SMOKER_GOAL_PRIORITY, smokerGoal);
+        } else {
+            smokerGoal.setTargets(jobPos, chestPos);
+        }
+        smokerGoal.requestImmediateCheck();
 
         updateChestListener(world, villager, chestPos);
         tryConvertWithWeapon(world, villager, jobPos, chestPos);
@@ -290,6 +301,11 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             return;
         }
         InventoryChangedListener listener = sender -> {
+            ButcherSmokerGoal smokerGoal = GOALS.get(villager);
+            if (smokerGoal != null) {
+                smokerGoal.requestImmediateCheck();
+            }
+
             ButcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
             if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
                 craftingGoal.requestImmediateCraft(serverWorld);
