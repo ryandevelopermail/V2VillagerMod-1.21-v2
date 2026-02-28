@@ -47,40 +47,8 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
     }
 
     @Override
-    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (!isInventoryAtLeastFull(inventory, SOURCE_CHEST_FULLNESS_TRIGGER)) {
-            return false;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
-        if (recipients.isEmpty()) {
-            return false;
-        }
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isDistributableItem(stack)) {
-                continue;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    private boolean isInventoryAtLeastFull(Inventory inventory, double fullnessThreshold) {
-        long maxCapacity = 0L;
-        long usedCapacity = 0L;
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            int slotLimit = Math.min(inventory.getMaxCountPerStack(), stack.isEmpty() ? 64 : stack.getMaxCount());
-            maxCapacity += slotLimit;
-            if (!stack.isEmpty()) {
-                usedCapacity += Math.min(stack.getCount(), slotLimit);
-            }
-        }
-
-        return maxCapacity > 0L && (double) usedCapacity / (double) maxCapacity >= fullnessThreshold;
+    protected double getSourceChestFullnessTrigger() {
+        return SOURCE_CHEST_FULLNESS_TRIGGER;
     }
 
     @Override
