@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
 import net.minecraft.block.entity.ChestBlockEntity;
+import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import org.spongepowered.asm.mixin.Mixin;
@@ -10,7 +11,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-@Mixin(ChestBlockEntity.class)
+@Mixin(LootableContainerBlockEntity.class)
 public class ChestBlockEntityMixin {
 
     @Inject(method = "setStack", at = @At("TAIL"), require = 0)
@@ -34,8 +35,7 @@ public class ChestBlockEntityMixin {
     }
 
     private void guardvillagers$notifyChestMutation() {
-        ChestBlockEntity chest = (ChestBlockEntity) (Object) this;
-        if (chest.getWorld() instanceof ServerWorld serverWorld) {
+        if ((Object) this instanceof ChestBlockEntity chest && chest.getWorld() instanceof ServerWorld serverWorld) {
             ShepherdBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
         }
     }
