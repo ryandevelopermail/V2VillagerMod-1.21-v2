@@ -62,6 +62,9 @@ public class MasonMiningStairGoal extends Goal {
         if (!(guard.getWorld() instanceof ServerWorld world) || !guard.isAlive()) {
             return false;
         }
+        if (guard.isMiningSessionActive()) {
+            return false;
+        }
         if (guard.getTarget() != null || guard.isAttacking()) {
             return false;
         }
@@ -135,6 +138,7 @@ public class MasonMiningStairGoal extends Goal {
 
     @Override
     public void start() {
+        guard.setMiningSessionActive(true);
         LOGGER.info("Mason guard {} starting mining session: origin={}, stepIndex={}, direction={}, sessionEndTick={}, stepTarget={}, nextEligibleStartTick={}",
                 guard.getUuidAsString(),
                 origin == null ? "none" : origin.toShortString(),
@@ -149,6 +153,7 @@ public class MasonMiningStairGoal extends Goal {
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        guard.setMiningSessionActive(false);
         clearTemporaryMiningState();
         stage = Stage.DONE;
     }
@@ -170,6 +175,7 @@ public class MasonMiningStairGoal extends Goal {
         if (stage == Stage.RETURN_TO_CHEST) {
             BlockPos chestPos = guard.getPairedChestPos();
             if (chestPos == null) {
+                guard.setMiningSessionActive(false);
                 stage = Stage.DONE;
                 return;
             }
@@ -183,6 +189,7 @@ public class MasonMiningStairGoal extends Goal {
         if (stage == Stage.DEPOSIT) {
             depositMinedMaterials(world);
             logTelemetry();
+            guard.setMiningSessionActive(false);
             clearTemporaryMiningState();
             stage = Stage.DONE;
         }

@@ -44,6 +44,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
         if (!(guard.getWorld() instanceof ServerWorld world) || !guard.isAlive()) {
             return false;
         }
+        if (guard.isMiningSessionActive()) {
+            return false;
+        }
 
         BlockPos jobPos = guard.getPairedJobPos();
         BlockPos chestPos = guard.getPairedChestPos();
