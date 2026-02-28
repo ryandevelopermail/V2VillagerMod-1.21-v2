@@ -49,6 +49,8 @@ public class MasonBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, MasonTableCraftingGoal> TABLE_CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
+    private static final long CHEST_SCAN_COOLDOWN_TICKS = 10L;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -95,7 +97,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         distributionGoal.requestImmediateDistribution();
 
         updateChestListener(world, villager, chestPos);
-        tryConvertWithMiningTool(world, villager, jobPos, chestPos);
+        tryConvertWithMiningTool(world, villager, jobPos, chestPos, "chest paired workflow");
     }
 
     @Override
@@ -156,7 +158,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
                 continue;
             }
 
-            tryConvertWithMiningTool(world, villager, jobPos, chestPos.get());
+            tryConvertWithMiningTool(world, villager, jobPos, chestPos.get(), "candidate scan");
         }
     }
 
@@ -207,8 +209,36 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             }
 
             VillagerConversionCandidateIndex.markCandidate(world, villager);
-            ProfessionDefinitions.runConversionHooks(world);
+            if (!isConversionScanOnCooldown(world, villager)) {
+                Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(net.minecraft.util.math.GlobalPos::pos);
+                if (jobSite.isPresent()) {
+                    BlockPos jobPos = jobSite.get();
+                    Optional<StorageSlotReference> triggerSlot = findMiningToolTriggerSlot(world, jobPos, chestPos);
+                    if (triggerSlot.isPresent()) {
+                        LOGGER.info("Mason {} conversion trigger found at {} slot {} during chest listener scan",
+                                villager.getUuidAsString(),
+                                triggerSlot.get().sourceDescription(),
+                                triggerSlot.get().slot());
+                        ProfessionDefinitions.runConversionHooks(world);
+                    } else {
+                        LOGGER.info("Mason {} conversion trigger missing during chest listener scan around chest {}",
+                                villager.getUuidAsString(),
+                                chestPos.toShortString());
+                    }
+                }
+            }
         }
+    }
+
+    private static boolean isConversionScanOnCooldown(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CONVERSION_SCAN_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return true;
+        }
+        NEXT_CONVERSION_SCAN_TICK.put(villager, now + CHEST_SCAN_COOLDOWN_TICKS);
+        return false;
     }
 
     private void clearChestListener(VillagerEntity villager) {
@@ -231,7 +261,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         }
     }
 
-    private Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
+    private static Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock)) {
             return Set.of();
@@ -263,14 +293,61 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         }
     }
 
-    private static void tryConvertWithMiningTool(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
-        MasonGuardEntity guard = GuardVillagers.MASON_GUARD_VILLAGER.create(world);
-        if (guard == null) {
+    private static void tryConvertWithMiningTool(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String source) {
+        Optional<MiningToolTrigger> trigger = checkMiningToolConversionTrigger(world, villager, jobPos, chestPos, source);
+        if (trigger.isEmpty()) {
             return;
         }
 
-        ItemStack miningTool = takeMiningToolFromChest(world, chestPos);
-        if (miningTool.isEmpty()) {
+        executeMiningToolConversion(world, villager, jobPos, chestPos, trigger.get(), source);
+    }
+
+    private static Optional<MiningToolTrigger> checkMiningToolConversionTrigger(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String source) {
+        if (!villager.isAlive()) {
+            LOGGER.info("Mason {} conversion rejected from {}: villager is not alive", villager.getUuidAsString(), source);
+            return Optional.empty();
+        }
+
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
+            LOGGER.info("Mason {} conversion rejected from {}: job block at {} is no longer mason-compatible",
+                    villager.getUuidAsString(), source, jobPos.toShortString());
+            return Optional.empty();
+        }
+
+        if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            LOGGER.info("Mason {} conversion rejected from {}: chest {} is too far from job site {}",
+                    villager.getUuidAsString(), source, chestPos.toShortString(), jobPos.toShortString());
+            return Optional.empty();
+        }
+
+        Optional<StorageSlotReference> triggerSlot = findMiningToolTriggerSlot(world, jobPos, chestPos);
+        if (triggerSlot.isEmpty()) {
+            LOGGER.info("Mason {} conversion rejected from {}: no mining-tool trigger in paired storage",
+                    villager.getUuidAsString(),
+                    source);
+            return Optional.empty();
+        }
+
+        Optional<MiningToolTrigger> trigger = takeTriggerFromStorage(world, jobPos, chestPos);
+        if (trigger.isPresent()) {
+            LOGGER.info("Mason {} conversion accepted from {} with trigger {} slot {}",
+                    villager.getUuidAsString(),
+                    source,
+                    trigger.get().sourceDescription(),
+                    trigger.get().slot());
+            return trigger;
+        }
+
+        LOGGER.info("Mason {} conversion rejected from {}: trigger disappeared before conversion execution",
+                villager.getUuidAsString(),
+                source);
+        return Optional.empty();
+    }
+
+    private static void executeMiningToolConversion(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, MiningToolTrigger trigger, String source) {
+        MasonGuardEntity guard = GuardVillagers.MASON_GUARD_VILLAGER.create(world);
+        if (guard == null) {
+            LOGGER.warn("Mason {} conversion rejected from {}: unable to create Mason Guard entity", villager.getUuidAsString(), source);
             return;
         }
 
@@ -289,19 +366,21 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
-        guard.equipStack(EquipmentSlot.MAINHAND, miningTool.copy());
-        guard.setExpectedMiningTool(miningTool);
+        guard.equipStack(EquipmentSlot.MAINHAND, trigger.tool().copy());
+        guard.setExpectedMiningTool(trigger.tool());
         guard.setPairedChestPos(chestPos);
         guard.setPairedJobPos(jobPos);
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
-        LOGGER.info("Mason {} converted into Mason Guard {} using tool {} from chest {}",
+        LOGGER.info("Mason {} converted into Mason Guard {} using tool {} from {} slot {} ({})",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),
-                miningTool.getItem(),
-                chestPos.toShortString());
+                trigger.tool().getItem(),
+                trigger.sourceDescription(),
+                trigger.slot(),
+                source);
 
         villager.releaseTicketFor(MemoryModuleType.HOME);
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
@@ -309,29 +388,74 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         villager.discard();
     }
 
-    private static ItemStack takeMiningToolFromChest(ServerWorld world, BlockPos chestPos) {
-        BlockEntity blockEntity = world.getBlockEntity(chestPos);
-        if (!(blockEntity instanceof Inventory inventory)) {
-            return ItemStack.EMPTY;
-        }
-
-        ItemStack pickaxe = extractFirstMatching(inventory, stack -> stack.getItem() instanceof PickaxeItem);
-        if (!pickaxe.isEmpty()) {
-            return pickaxe;
-        }
-
-        return extractFirstMatching(inventory, stack -> stack.getItem() instanceof ShovelItem);
+    private static Optional<StorageSlotReference> findMiningToolTriggerSlot(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
+        return findTriggerInStorage(world, jobPos, chestPos);
     }
 
-    private static ItemStack extractFirstMatching(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && predicate.test(stack)) {
-                ItemStack extracted = stack.split(1);
-                inventory.markDirty();
-                return extracted;
+    private static Optional<MiningToolTrigger> takeTriggerFromStorage(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
+        Optional<StorageSlotReference> reference = findTriggerInStorage(world, jobPos, chestPos);
+        if (reference.isEmpty()) {
+            return Optional.empty();
+        }
+        return extractTriggerFromSlot(reference.get());
+    }
+
+    private static Optional<StorageSlotReference> findTriggerInStorage(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
+        Optional<StorageSlotReference> fromChest = findMiningToolSlot(world.getBlockEntity(chestPos), "paired chest " + chestPos.toShortString());
+        if (fromChest.isPresent()) {
+            return fromChest;
+        }
+
+        Set<BlockPos> pairedChestPositions = getObservedChestPositions(world, chestPos);
+        for (BlockPos pairedChestPos : pairedChestPositions) {
+            if (pairedChestPos.equals(chestPos)) {
+                continue;
+            }
+            Optional<StorageSlotReference> pairedTrigger = findMiningToolSlot(world.getBlockEntity(pairedChestPos), "paired chest " + pairedChestPos.toShortString());
+            if (pairedTrigger.isPresent()) {
+                return pairedTrigger;
             }
         }
-        return ItemStack.EMPTY;
+
+        LOGGER.debug("No mining tool trigger found in paired chest storage for mason job site {} and chest {}",
+                jobPos.toShortString(),
+                chestPos.toShortString());
+        return Optional.empty();
+    }
+
+    private static Optional<StorageSlotReference> findMiningToolSlot(BlockEntity blockEntity, String sourceDescription) {
+        if (!(blockEntity instanceof Inventory inventory)) {
+            return Optional.empty();
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && (stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem)) {
+                return Optional.of(new StorageSlotReference(inventory, sourceDescription, slot));
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    private static Optional<MiningToolTrigger> extractTriggerFromSlot(StorageSlotReference reference) {
+        ItemStack stack = reference.inventory().getStack(reference.slot());
+        if (stack.isEmpty() || (!(stack.getItem() instanceof PickaxeItem) && !(stack.getItem() instanceof ShovelItem))) {
+            return Optional.empty();
+        }
+
+        ItemStack extracted = stack.split(1);
+        reference.inventory().markDirty();
+        LOGGER.info("Mason conversion trigger extracted {} from {} slot {}",
+                extracted.getItem(),
+                reference.sourceDescription(),
+                reference.slot());
+        return Optional.of(new MiningToolTrigger(extracted, reference.sourceDescription(), reference.slot()));
+    }
+
+    private record StorageSlotReference(Inventory inventory, String sourceDescription, int slot) {
+    }
+
+    private record MiningToolTrigger(ItemStack tool, String sourceDescription, int slot) {
     }
 }
