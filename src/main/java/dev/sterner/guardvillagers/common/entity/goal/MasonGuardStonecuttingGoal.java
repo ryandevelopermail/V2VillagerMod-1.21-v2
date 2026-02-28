@@ -26,6 +26,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int QUARTER_STACK_INPUT = 16;
+    private static final int HALF_STACK_INPUT = 32;
+    private static final int FULL_STACK_INPUT = 64;
     private static final Set<Item> MASONRY_OUTPUTS = Set.of(
             Items.STONE_BRICKS,
             Items.CHISELED_STONE_BRICKS,
@@ -132,11 +135,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 }
 
                 MasonRecipe recipe = craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
-                if (canInsertOutput(inventory, recipe.output()) && consumeIngredient(inventory, recipe.recipe())) {
-                    ItemStack remaining = insertStack(inventory, recipe.output().copy());
-                    if (remaining.isEmpty()) {
-                        inventory.markDirty();
-                    }
+                if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
+                        && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
+                    inventory.markDirty();
                 }
                 stage = Stage.DONE;
             }
@@ -153,49 +154,90 @@ public class MasonGuardStonecuttingGoal extends Goal {
             if (result.isEmpty() || !isMasonryItem(result)) {
                 continue;
             }
-            if (canConsumeIngredient(inventory, recipe)) {
-                recipes.add(new MasonRecipe(recipe, result));
+
+            int batchInputCount = resolveBatchInputCount(inventory, recipe, result);
+            if (batchInputCount <= 0) {
+                continue;
             }
+
+            int batchOutputCount = result.getCount() * batchInputCount;
+            recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
         }
         return recipes;
+    }
+
+    private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output) {
+        Ingredient ingredient = getPrimaryIngredient(recipe);
+        if (ingredient == null || ingredient.isEmpty()) {
+            return 0;
+        }
+
+        int availableIngredients = countMatchingItems(inventory, ingredient);
+        if (availableIngredients <= 0) {
+            return 0;
+        }
+
+        if (isWallOutput(output)) {
+            return availableIngredients >= FULL_STACK_INPUT && canInsertOutputCount(inventory, output, output.getCount() * FULL_STACK_INPUT)
+                    ? FULL_STACK_INPUT
+                    : 0;
+        }
+
+        int[] preferredBatchSizes = {FULL_STACK_INPUT, HALF_STACK_INPUT, QUARTER_STACK_INPUT};
+        for (int batchSize : preferredBatchSizes) {
+            if (availableIngredients < batchSize) {
+                continue;
+            }
+            int totalOutput = output.getCount() * batchSize;
+            if (canInsertOutputCount(inventory, output, totalOutput)) {
+                return batchSize;
+            }
+        }
+
+        return 0;
     }
 
     private boolean isMasonryItem(ItemStack stack) {
         return MASONRY_OUTPUTS.contains(stack.getItem());
     }
 
-    private boolean canConsumeIngredient(Inventory inventory, StonecuttingRecipe recipe) {
-        Ingredient ingredient = getPrimaryIngredient(recipe);
-        return ingredient != null && findMatchingSlot(inventory, ingredient) >= 0;
+    private boolean isWallOutput(ItemStack stack) {
+        return stack.isOf(Items.COBBLESTONE_WALL) || stack.isOf(Items.STONE_BRICK_WALL);
     }
 
-    private int findMatchingSlot(Inventory inventory, Ingredient ingredient) {
+    private int countMatchingItems(Inventory inventory, Ingredient ingredient) {
+        int count = 0;
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!stack.isEmpty() && ingredient.test(stack)) {
-                return slot;
+                count += stack.getCount();
             }
         }
-        return -1;
+        return count;
     }
 
-    private boolean consumeIngredient(Inventory inventory, StonecuttingRecipe recipe) {
+    private boolean consumeIngredient(Inventory inventory, StonecuttingRecipe recipe, int amount) {
         Ingredient ingredient = getPrimaryIngredient(recipe);
-        if (ingredient == null || ingredient.isEmpty()) {
+        if (ingredient == null || ingredient.isEmpty() || amount <= 0) {
             return false;
         }
 
-        int slot = findMatchingSlot(inventory, ingredient);
-        if (slot < 0) {
-            return false;
+        int remaining = amount;
+        for (int slot = 0; slot < inventory.size() && remaining > 0; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !ingredient.test(stack)) {
+                continue;
+            }
+
+            int consumed = Math.min(stack.getCount(), remaining);
+            stack.decrement(consumed);
+            remaining -= consumed;
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
         }
 
-        ItemStack stack = inventory.getStack(slot);
-        stack.decrement(1);
-        if (stack.isEmpty()) {
-            inventory.setStack(slot, ItemStack.EMPTY);
-        }
-        return true;
+        return remaining == 0;
     }
 
     private Ingredient getPrimaryIngredient(StonecuttingRecipe recipe) {
@@ -221,6 +263,25 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     private boolean isNear(BlockPos target) {
         return guard.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    private boolean insertOutputCount(Inventory inventory, ItemStack template, int totalCount) {
+        if (totalCount <= 0) {
+            return false;
+        }
+
+        int remaining = totalCount;
+        while (remaining > 0) {
+            int batchCount = Math.min(remaining, template.getMaxCount());
+            ItemStack batch = template.copyWithCount(batchCount);
+            ItemStack batchRemainder = insertStack(inventory, batch);
+            if (!batchRemainder.isEmpty()) {
+                return false;
+            }
+            remaining -= batchCount;
+        }
+
+        return true;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {
@@ -262,6 +323,39 @@ public class MasonGuardStonecuttingGoal extends Goal {
         }
 
         return remaining;
+    }
+
+    private boolean canInsertOutputCount(Inventory inventory, ItemStack template, int totalCount) {
+        if (totalCount <= 0) {
+            return false;
+        }
+
+        int remaining = totalCount;
+        for (int slot = 0; slot < inventory.size() && remaining > 0; slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, template)) {
+                    continue;
+                }
+                remaining -= template.getMaxCount();
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, template)) {
+                continue;
+            }
+            if (!inventory.isValid(slot, template)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            remaining -= space;
+        }
+
+        return remaining <= 0;
     }
 
     private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
@@ -308,6 +402,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
         DONE
     }
 
-    private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output) {
+    private record MasonRecipe(StonecuttingRecipe recipe, ItemStack output, int batchInputCount, int batchOutputCount) {
     }
 }
