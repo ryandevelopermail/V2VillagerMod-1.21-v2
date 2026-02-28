@@ -63,6 +63,12 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private BlockPos pendingTargetChestPos;
     private DistributionType pendingType = DistributionType.NONE;
     private boolean pendingOverflowTransfer;
+    private int pendingExtractCount = 1;
+    private boolean pendingCoalBatchMode;
+    private final List<BlockPos> pendingCoalTargets = new ArrayList<>();
+    private int pendingCoalRecipientCount;
+    private int pendingCoalTargetIndex;
+    private int pendingCoalFailedAttempts;
 
     public MasonGuardChestDistributionGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -150,7 +156,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         if (stage == Stage.EXECUTE_TRANSFER) {
             executePendingTransfer(world);
-            stage = Stage.DONE;
+            if (stage == Stage.EXECUTE_TRANSFER) {
+                stage = Stage.DONE;
+            }
         }
     }
 
@@ -179,9 +187,29 @@ public class MasonGuardChestDistributionGoal extends Goal {
             this.pendingItem = ItemStack.EMPTY;
             this.pendingSourceSlot = slot;
             this.pendingSourceItem = stack.getItem();
-            this.pendingTargetChestPos = selectedRecipient.chestPos();
             this.pendingType = type;
             this.pendingOverflowTransfer = false;
+            this.pendingExtractCount = 1;
+            this.pendingCoalBatchMode = false;
+            this.pendingCoalTargets.clear();
+            this.pendingCoalRecipientCount = 0;
+            this.pendingCoalTargetIndex = 0;
+            this.pendingCoalFailedAttempts = 0;
+
+            if (type == DistributionType.COAL && recipients.size() > 1) {
+                int plannedDrops = Math.min(stack.getCount(), recipients.size());
+                int cursor = recipientCursorByType.getOrDefault(type, 0);
+                for (int i = 0; i < plannedDrops; i++) {
+                    RecipientRecord recipient = recipients.get(Math.floorMod(cursor + i, recipients.size()));
+                    pendingCoalTargets.add(recipient.chestPos());
+                }
+                this.pendingCoalBatchMode = !pendingCoalTargets.isEmpty();
+                this.pendingCoalRecipientCount = recipients.size();
+                this.pendingExtractCount = Math.max(1, pendingCoalTargets.size());
+                this.pendingTargetChestPos = pendingCoalBatchMode ? pendingCoalTargets.getFirst() : selectedRecipient.chestPos();
+            } else {
+                this.pendingTargetChestPos = selectedRecipient.chestPos();
+            }
             return true;
         }
 
@@ -211,6 +239,12 @@ public class MasonGuardChestDistributionGoal extends Goal {
             this.pendingTargetChestPos = selectedLibrarian.chestPos();
             this.pendingType = DistributionType.NONE;
             this.pendingOverflowTransfer = true;
+            this.pendingExtractCount = 1;
+            this.pendingCoalBatchMode = false;
+            this.pendingCoalTargets.clear();
+            this.pendingCoalRecipientCount = 0;
+            this.pendingCoalTargetIndex = 0;
+            this.pendingCoalFailedAttempts = 0;
             return true;
         }
 
@@ -219,6 +253,11 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
     private void executePendingTransfer(ServerWorld world) {
         if (pendingItem.isEmpty() || pendingTargetChestPos == null) {
+            return;
+        }
+
+        if (pendingCoalBatchMode) {
+            executeCoalBatchTransfer(world);
             return;
         }
 
@@ -248,6 +287,51 @@ public class MasonGuardChestDistributionGoal extends Goal {
         returnPendingToSource(world);
     }
 
+    private void executeCoalBatchTransfer(ServerWorld world) {
+        if (pendingCoalTargets.isEmpty()) {
+            returnPendingToSource(world);
+            return;
+        }
+
+        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetChestPos);
+        if (targetInventory.isPresent()) {
+            ItemStack singleCoal = pendingItem.copyWithCount(1);
+            ItemStack remaining = insertStack(targetInventory.get(), singleCoal);
+            if (remaining.isEmpty()) {
+                pendingItem.decrement(1);
+                pendingCoalFailedAttempts = 0;
+                advanceCoalCursor();
+            } else {
+                pendingCoalFailedAttempts++;
+            }
+        } else {
+            pendingCoalFailedAttempts++;
+        }
+
+        if (pendingItem.isEmpty()) {
+            clearPendingState();
+            return;
+        }
+
+        if (pendingCoalFailedAttempts >= pendingCoalTargets.size()) {
+            returnPendingToSource(world);
+            return;
+        }
+
+        pendingCoalTargetIndex = (pendingCoalTargetIndex + 1) % pendingCoalTargets.size();
+        pendingTargetChestPos = pendingCoalTargets.get(pendingCoalTargetIndex);
+        stage = Stage.MOVE_TO_TARGET;
+    }
+
+    private void advanceCoalCursor() {
+        int recipientCount = pendingCoalRecipientCount;
+        if (recipientCount <= 0) {
+            return;
+        }
+        int cursor = recipientCursorByType.getOrDefault(DistributionType.COAL, 0);
+        recipientCursorByType.put(DistributionType.COAL, (cursor + 1) % recipientCount);
+    }
+
     private void returnPendingToSource(ServerWorld world) {
         if (pendingItem.isEmpty()) {
             return;
@@ -273,6 +357,12 @@ public class MasonGuardChestDistributionGoal extends Goal {
         this.pendingTargetChestPos = null;
         this.pendingType = DistributionType.NONE;
         this.pendingOverflowTransfer = false;
+        this.pendingExtractCount = 1;
+        this.pendingCoalBatchMode = false;
+        this.pendingCoalTargets.clear();
+        this.pendingCoalRecipientCount = 0;
+        this.pendingCoalTargetIndex = 0;
+        this.pendingCoalFailedAttempts = 0;
     }
 
     private boolean extractPendingItemFromSource(ServerWorld world, BlockPos sourceChestPos) {
@@ -295,7 +385,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return false;
         }
 
-        ItemStack extracted = sourceStack.split(1);
+        ItemStack extracted = sourceStack.split(Math.max(1, pendingExtractCount));
         if (extracted.isEmpty()) {
             return false;
         }
