@@ -62,6 +62,7 @@ public class MasonCraftingGoal extends Goal {
     private int lastCheckCount;
     private boolean immediateCheckPending;
     private CraftingCheckTrigger pendingTrigger = CraftingCheckTrigger.SCHEDULED;
+    private Item lastCraftedOutputItem;
 
     public MasonCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -189,7 +190,7 @@ public class MasonCraftingGoal extends Goal {
             return;
         }
 
-        MasonRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        MasonRecipe recipe = pickRecipeAvoidingLastOutput(craftable);
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -197,8 +198,25 @@ public class MasonCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            this.lastCraftedOutputItem = recipe.output.getItem();
             CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+
+    private MasonRecipe pickRecipeAvoidingLastOutput(List<MasonRecipe> craftableRecipes) {
+        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
+            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        List<MasonRecipe> alternatives = craftableRecipes.stream()
+                .filter(recipe -> recipe.output.getItem() != this.lastCraftedOutputItem)
+                .toList();
+        if (alternatives.isEmpty()) {
+            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+        }
+
+        return alternatives.get(villager.getRandom().nextInt(alternatives.size()));
     }
 
     private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
