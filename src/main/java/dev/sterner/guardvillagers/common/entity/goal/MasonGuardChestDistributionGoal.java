@@ -69,6 +69,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private int pendingCoalRecipientCount;
     private int pendingCoalTargetIndex;
     private int pendingCoalFailedAttempts;
+    private int lastObservedCoalCount = -1;
 
     public MasonGuardChestDistributionGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -89,11 +90,16 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return false;
         }
 
-        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0) {
+        Inventory source = sourceInventory.get();
+        int currentCoalCount = countCoalItems(source);
+        boolean coalCountIncreased = lastObservedCoalCount >= 0 && currentCoalCount > lastObservedCoalCount;
+        lastObservedCoalCount = currentCoalCount;
+
+        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0 && !coalCountIncreased) {
             return false;
         }
 
-        return preparePendingTransfer(world, sourceInventory.get());
+        return preparePendingTransfer(world, source);
     }
 
     @Override
@@ -534,6 +540,18 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return Optional.empty();
         }
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+    }
+
+
+    private int countCoalItems(Inventory inventory) {
+        int coalCount = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(ItemTags.COALS)) {
+                coalCount += stack.getCount();
+            }
+        }
+        return coalCount;
     }
 
     private double getFullness(Inventory inventory) {
