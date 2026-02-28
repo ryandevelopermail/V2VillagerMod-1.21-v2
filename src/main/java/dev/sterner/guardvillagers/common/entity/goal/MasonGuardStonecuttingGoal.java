@@ -1,14 +1,12 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
-import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
-import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
@@ -20,41 +18,20 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 public class MasonGuardStonecuttingGoal extends Goal {
-    private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
+    private static final int CHECK_INTERVAL_TICKS = 200;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int QUARTER_STACK_INPUT = 16;
     private static final int HALF_STACK_INPUT = 32;
     private static final int FULL_STACK_INPUT = 64;
-    private static final Set<Item> MASONRY_OUTPUTS = Set.of(
-            Items.STONE_BRICKS,
-            Items.CHISELED_STONE_BRICKS,
-            Items.POLISHED_ANDESITE,
-            Items.POLISHED_DIORITE,
-            Items.POLISHED_GRANITE,
-            Items.STONE_SLAB,
-            Items.STONE_BRICK_SLAB,
-            Items.STONE_STAIRS,
-            Items.STONE_BRICK_STAIRS,
-            Items.COBBLESTONE_WALL,
-            Items.STONE_BRICK_WALL,
-            Items.BRICK,
-            Items.BRICKS,
-            Items.TERRACOTTA,
-            Items.QUARTZ_PILLAR,
-            Items.SMOOTH_QUARTZ,
-            Items.QUARTZ_SLAB,
-            Items.QUARTZ_STAIRS,
-            Items.SMOOTH_QUARTZ_SLAB,
-            Items.SMOOTH_QUARTZ_STAIRS
-    );
+    private static final double MAX_JOB_WANDER_DISTANCE_SQUARED = 24.0D * 24.0D;
 
     private final MasonGuardEntity guard;
     private long nextCheckTime;
     private Stage stage = Stage.IDLE;
+    private boolean forceReturnToJob;
 
     public MasonGuardStonecuttingGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -73,12 +50,18 @@ public class MasonGuardStonecuttingGoal extends Goal {
             return false;
         }
 
+        if (guard.squaredDistanceTo(jobPos.getX() + 0.5D, jobPos.getY() + 0.5D, jobPos.getZ() + 0.5D) > MAX_JOB_WANDER_DISTANCE_SQUARED) {
+            this.forceReturnToJob = true;
+            return true;
+        }
+
         if (world.getTime() < nextCheckTime) {
             return false;
         }
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
 
         Optional<Inventory> inventory = getChestInventory(world, chestPos);
+        this.forceReturnToJob = false;
         return inventory.filter(value -> !getCraftableRecipes(world, value).isEmpty()).isPresent();
     }
 
@@ -89,7 +72,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     @Override
     public void start() {
-        this.stage = Stage.GO_TO_STONECUTTER;
+        this.stage = this.forceReturnToJob ? Stage.RETURN_TO_JOB : Stage.GO_TO_STONECUTTER;
         moveTo(guard.getPairedJobPos());
     }
 
@@ -114,6 +97,13 @@ public class MasonGuardStonecuttingGoal extends Goal {
         }
 
         switch (stage) {
+            case RETURN_TO_JOB -> {
+                if (isNear(jobPos)) {
+                    stage = Stage.DONE;
+                } else {
+                    moveTo(jobPos);
+                }
+            }
             case GO_TO_STONECUTTER -> {
                 if (isNear(jobPos)) {
                     stage = Stage.CRAFT;
@@ -151,7 +141,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.craft(new net.minecraft.recipe.input.SingleStackRecipeInput(ItemStack.EMPTY), world.getRegistryManager());
-            if (result.isEmpty() || !isMasonryItem(result)) {
+            if (result.isEmpty()) {
                 continue;
             }
 
@@ -197,12 +187,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return 0;
     }
 
-    private boolean isMasonryItem(ItemStack stack) {
-        return MASONRY_OUTPUTS.contains(stack.getItem());
-    }
 
     private boolean isWallOutput(ItemStack stack) {
-        return stack.isOf(Items.COBBLESTONE_WALL) || stack.isOf(Items.STONE_BRICK_WALL);
+        return stack.isIn(ItemTags.WALLS);
     }
 
     private int countMatchingItems(Inventory inventory, Ingredient ingredient) {
@@ -358,45 +345,10 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return remaining <= 0;
     }
 
-    private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
-        ItemStack remaining = stack.copy();
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            if (remaining.isEmpty()) {
-                return true;
-            }
-
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                if (!inventory.isValid(slot, remaining)) {
-                    continue;
-                }
-                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
-                remaining.decrement(moved);
-                continue;
-            }
-
-            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                continue;
-            }
-
-            if (!inventory.isValid(slot, remaining)) {
-                continue;
-            }
-
-            int space = existing.getMaxCount() - existing.getCount();
-            if (space <= 0) {
-                continue;
-            }
-
-            int moved = Math.min(space, remaining.getCount());
-            remaining.decrement(moved);
-        }
-
-        return remaining.isEmpty();
-    }
 
     private enum Stage {
         IDLE,
+        RETURN_TO_JOB,
         GO_TO_STONECUTTER,
         CRAFT,
         DONE
