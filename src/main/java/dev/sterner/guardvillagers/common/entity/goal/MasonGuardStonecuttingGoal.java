@@ -6,7 +6,6 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
-import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
@@ -167,12 +166,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
             return 0;
         }
 
-        if (isWallOutput(output)) {
-            return availableIngredients >= FULL_STACK_INPUT && canInsertOutputCount(inventory, output, output.getCount() * FULL_STACK_INPUT)
-                    ? FULL_STACK_INPUT
-                    : 0;
-        }
-
         int[] preferredBatchSizes = {FULL_STACK_INPUT, HALF_STACK_INPUT, QUARTER_STACK_INPUT};
         for (int batchSize : preferredBatchSizes) {
             if (availableIngredients < batchSize) {
@@ -187,10 +180,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return 0;
     }
 
-
-    private boolean isWallOutput(ItemStack stack) {
-        return stack.isIn(ItemTags.WALLS);
-    }
 
     private int countMatchingItems(Inventory inventory, Ingredient ingredient) {
         int count = 0;
