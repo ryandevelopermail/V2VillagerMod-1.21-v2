@@ -16,6 +16,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,12 @@ public class MasonMiningStairGoal extends Goal {
     private static final int NO_PROGRESS_LIMIT_TICKS = 600;
     private static final int MINING_DURATION_MIN_TICKS = 1200;
     private static final int MINING_DURATION_MAX_TICKS = 3600;
-    private static final int MINING_RUN_COOLDOWN_TICKS = 200;
+    private static final int BATCH_MIN_STEPS = 20;
+    private static final int BATCH_MAX_STEPS = 56;
+    private static final int SESSION_BACKOFF_MIN_TICKS = 20 * 60 * 4;
+    private static final int SESSION_BACKOFF_MAX_TICKS = 20 * 60 * 10;
+    private static final int FAILURE_BACKOFF_MIN_TICKS = 20 * 60 * 2;
+    private static final int FAILURE_BACKOFF_MAX_TICKS = 20 * 60 * 6;
     private static final int REQUIRED_STAIR_CLEARANCE = 3;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
@@ -41,8 +47,9 @@ public class MasonMiningStairGoal extends Goal {
     private int minedBlockCount;
     private int depositedItemCount;
     private ReturnReason returnReason = ReturnReason.NONE;
-    private long cooldownUntilTick;
+    private long nextSessionStartTick;
     private long miningSessionEndTick;
+    private int sessionStepTarget;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -99,9 +106,10 @@ public class MasonMiningStairGoal extends Goal {
         this.minedBlockCount = 0;
         this.depositedItemCount = 0;
         this.returnReason = ReturnReason.NONE;
-        this.cooldownUntilTick = guard.getNextMiningStartTick();
+        this.nextSessionStartTick = guard.getNextMiningStartTick();
         int runDurationTicks = MINING_DURATION_MIN_TICKS + guard.getRandom().nextInt(MINING_DURATION_MAX_TICKS - MINING_DURATION_MIN_TICKS + 1);
         this.miningSessionEndTick = worldTime + runDurationTicks;
+        this.sessionStepTarget = MathHelper.nextInt(guard.getRandom(), BATCH_MIN_STEPS, BATCH_MAX_STEPS);
         this.stage = Stage.MINING;
         return true;
     }
@@ -127,6 +135,14 @@ public class MasonMiningStairGoal extends Goal {
 
     @Override
     public void start() {
+        LOGGER.info("Mason guard {} starting mining session: origin={}, stepIndex={}, direction={}, sessionEndTick={}, stepTarget={}, nextEligibleStartTick={}",
+                guard.getUuidAsString(),
+                origin == null ? "none" : origin.toShortString(),
+                stepIndex,
+                miningDirection == null ? "none" : miningDirection,
+                miningSessionEndTick,
+                sessionStepTarget,
+                guard.getNextMiningStartTick());
         guard.getNavigation().startMovingTo(currentStepTarget.getX() + 0.5D, currentStepTarget.getY(), currentStepTarget.getZ() + 0.5D, MOVE_SPEED);
     }
 
@@ -205,6 +221,10 @@ public class MasonMiningStairGoal extends Goal {
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
             stepIndex++;
             guard.setMiningProgress(origin, stepIndex, miningDirection.getId());
+            if (stepIndex >= sessionStepTarget) {
+                beginReturn(ReturnReason.BATCH_COMPLETE);
+                return;
+            }
             currentStepTarget = computeStepTarget(stepIndex);
             noProgressTicks = 0;
             lastDistanceToTarget = Double.MAX_VALUE;
@@ -314,8 +334,18 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
         this.returnReason = reason;
-        this.cooldownUntilTick = guard.getWorld().getTime() + MINING_RUN_COOLDOWN_TICKS;
-        guard.setNextMiningStartTick(cooldownUntilTick);
+        long worldTime = guard.getWorld().getTime();
+        long backoffTicks = computeSessionBackoffTicks(reason);
+        this.nextSessionStartTick = worldTime + backoffTicks;
+        guard.setNextMiningStartTick(this.nextSessionStartTick);
+
+        LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, backoffTicks={}, nextEligibleStartTick={}",
+                guard.getUuidAsString(),
+                reason,
+                minedBlockCount,
+                stepIndex,
+                backoffTicks,
+                this.nextSessionStartTick);
 
         if (reason.resetsMiningProgress) {
             guard.clearMiningProgress();
@@ -401,12 +431,21 @@ public class MasonMiningStairGoal extends Goal {
         return remaining;
     }
 
+    private int computeSessionBackoffTicks(ReturnReason reason) {
+        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE;
+        if (isFailureReason) {
+            return MathHelper.nextInt(guard.getRandom(), FAILURE_BACKOFF_MIN_TICKS, FAILURE_BACKOFF_MAX_TICKS);
+        }
+        return MathHelper.nextInt(guard.getRandom(), SESSION_BACKOFF_MIN_TICKS, SESSION_BACKOFF_MAX_TICKS);
+    }
+
     private void clearTemporaryMiningState() {
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
         this.currentStepTarget = null;
         this.stepIndex = 0;
         this.miningSessionEndTick = 0L;
+        this.sessionStepTarget = 0;
     }
 
     private void logTelemetry() {
@@ -419,12 +458,12 @@ public class MasonMiningStairGoal extends Goal {
             default -> "NONE";
         };
 
-        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, cooldownUntilTick={}, mainHand={} ",
+        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, nextEligibleStartTick={}, mainHand={} ",
                 guard.getUuidAsString(),
                 minedBlockCount,
                 depositedItemCount,
                 returnReasonText,
-                cooldownUntilTick,
+                nextSessionStartTick,
                 guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
     }
 
