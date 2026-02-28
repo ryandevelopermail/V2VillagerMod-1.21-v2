@@ -29,11 +29,6 @@ public class ChestBlockEntityMixin {
         guardvillagers$notifyChestMutation();
     }
 
-    @Inject(method = "clear()V", at = @At("TAIL"), require = 0)
-    private void guardvillagers$onChestClear(CallbackInfo ci) {
-        guardvillagers$notifyChestMutation();
-    }
-
     private void guardvillagers$notifyChestMutation() {
         if ((Object) this instanceof ChestBlockEntity chest && chest.getWorld() instanceof ServerWorld serverWorld) {
             ShepherdBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
