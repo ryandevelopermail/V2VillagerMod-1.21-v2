@@ -285,7 +285,9 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (stack.getItem() instanceof PickaxeItem) {
-            return state.isIn(BlockTags.PICKAXE_MINEABLE) || stack.isSuitableFor(state);
+            return state.isIn(BlockTags.PICKAXE_MINEABLE)
+                    || state.isIn(BlockTags.SHOVEL_MINEABLE)
+                    || stack.isSuitableFor(state);
         }
         if (stack.getItem() instanceof ShovelItem) {
             return state.isIn(BlockTags.SHOVEL_MINEABLE) || stack.isSuitableFor(state);
