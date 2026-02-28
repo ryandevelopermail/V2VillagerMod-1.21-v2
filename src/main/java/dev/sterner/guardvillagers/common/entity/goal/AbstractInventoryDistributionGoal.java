@@ -292,6 +292,26 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
+    protected boolean isInventoryAtLeastFull(Inventory inventory, double fullnessThreshold) {
+        long maxCapacity = 0L;
+        long usedCapacity = 0L;
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            int slotLimit = Math.min(inventory.getMaxCountPerStack(), stack.isEmpty() ? 64 : stack.getMaxCount());
+            maxCapacity += slotLimit;
+            if (!stack.isEmpty()) {
+                usedCapacity += Math.min(stack.getCount(), slotLimit);
+            }
+        }
+
+        return maxCapacity > 0L && (double) usedCapacity / (double) maxCapacity >= fullnessThreshold;
+    }
+
+    protected double getSourceChestFullnessTrigger() {
+        return 0.0D;
+    }
+
     protected enum Stage {
         IDLE,
         GO_TO_CHEST,
@@ -303,6 +323,11 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected abstract boolean isDistributableItem(ItemStack stack);
 
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        double fullnessTrigger = getSourceChestFullnessTrigger();
+        if (fullnessTrigger > 0.0D && !isInventoryAtLeastFull(inventory, fullnessTrigger)) {
+            return false;
+        }
+
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
