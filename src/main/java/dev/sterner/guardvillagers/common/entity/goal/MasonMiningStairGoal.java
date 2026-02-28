@@ -50,6 +50,8 @@ public class MasonMiningStairGoal extends Goal {
     private long nextSessionStartTick;
     private long miningSessionEndTick;
     private int sessionStepTarget;
+    private long cooldownHalfwayLogTick;
+    private long cooldownHalfwayLoggedForStartTick = -1L;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -83,8 +85,12 @@ public class MasonMiningStairGoal extends Goal {
 
         long worldTime = world.getTime();
         if (worldTime < guard.getNextMiningStartTick()) {
+            maybeLogCooldownHalfway(worldTime);
             return false;
         }
+
+        this.cooldownHalfwayLogTick = 0L;
+        this.cooldownHalfwayLoggedForStartTick = -1L;
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
         Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
@@ -345,6 +351,8 @@ public class MasonMiningStairGoal extends Goal {
         long backoffTicks = computeSessionBackoffTicks(reason);
         this.nextSessionStartTick = worldTime + backoffTicks;
         guard.setNextMiningStartTick(this.nextSessionStartTick);
+        this.cooldownHalfwayLogTick = worldTime + Math.max(1L, backoffTicks / 2L);
+        this.cooldownHalfwayLoggedForStartTick = -1L;
 
         LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, backoffTicks={}, nextEligibleStartTick={}",
                 guard.getUuidAsString(),
@@ -436,6 +444,28 @@ public class MasonMiningStairGoal extends Goal {
             remaining.decrement(moved);
         }
         return remaining;
+    }
+
+    private void maybeLogCooldownHalfway(long worldTime) {
+        long nextStartTick = guard.getNextMiningStartTick();
+        if (nextStartTick <= 0L || this.cooldownHalfwayLogTick <= 0L) {
+            return;
+        }
+        if (worldTime < this.cooldownHalfwayLogTick) {
+            return;
+        }
+        if (this.cooldownHalfwayLoggedForStartTick == nextStartTick) {
+            return;
+        }
+
+        long ticksRemaining = Math.max(0L, nextStartTick - worldTime);
+        LOGGER.info("Mason guard {} mining cooldown is halfway complete: nextEligibleStartTick={}, ticksRemaining={} (~{}s)",
+                guard.getUuidAsString(),
+                nextStartTick,
+                ticksRemaining,
+                ticksRemaining / 20L);
+
+        this.cooldownHalfwayLoggedForStartTick = nextStartTick;
     }
 
     private int computeSessionBackoffTicks(ReturnReason reason) {
