@@ -29,9 +29,8 @@ public class MasonMiningStairGoal extends Goal {
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 1.8D;
     private static final int NO_PROGRESS_LIMIT_TICKS = 600;
-    private static final int MAX_STEPS_PER_RUN = 24;
-    private static final int MAX_BLOCKS_PER_RUN = 96;
-    private static final int INVENTORY_NEARLY_FULL_SLOTS_THRESHOLD = 2;
+    private static final int MINING_DURATION_MIN_TICKS = 1200;
+    private static final int MINING_DURATION_MAX_TICKS = 3600;
     private static final int MINING_RUN_COOLDOWN_TICKS = 200;
     private static final int REQUIRED_STAIR_CLEARANCE = 2;
     private static final Set<Block> BREAKABLE_BLOCKS = Set.of(
@@ -63,6 +62,7 @@ public class MasonMiningStairGoal extends Goal {
     private int depositedItemCount;
     private ReturnReason returnReason = ReturnReason.NONE;
     private long cooldownUntilTick;
+    private long miningSessionEndTick;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -120,6 +120,8 @@ public class MasonMiningStairGoal extends Goal {
         this.depositedItemCount = 0;
         this.returnReason = ReturnReason.NONE;
         this.cooldownUntilTick = guard.getNextMiningStartTick();
+        int runDurationTicks = MINING_DURATION_MIN_TICKS + guard.getRandom().nextInt(MINING_DURATION_MAX_TICKS - MINING_DURATION_MIN_TICKS + 1);
+        this.miningSessionEndTick = worldTime + runDurationTicks;
         this.stage = Stage.MINING;
         return true;
     }
@@ -191,6 +193,16 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private void tickMining(ServerWorld world) {
+        if (!clearCurrentHeadBlock(world)) {
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
+        if (world.getTime() >= miningSessionEndTick) {
+            beginReturn(ReturnReason.MINING_TIME_LIMIT_REACHED);
+            return;
+        }
+
         if (!ensureStepClear(world, currentStepTarget)) {
             beginReturn(ReturnReason.CANNOT_ADVANCE);
             return;
@@ -207,11 +219,6 @@ public class MasonMiningStairGoal extends Goal {
 
         if (noProgressTicks >= NO_PROGRESS_LIMIT_TICKS) {
             beginReturn(ReturnReason.STUCK_30_SECONDS);
-            return;
-        }
-
-        if (stepIndex >= MAX_STEPS_PER_RUN || minedBlockCount >= MAX_BLOCKS_PER_RUN || isInventoryNearlyFull()) {
-            beginReturn(ReturnReason.BATCH_COMPLETE);
             return;
         }
 
@@ -235,6 +242,10 @@ public class MasonMiningStairGoal extends Goal {
             }
         }
         return true;
+    }
+
+    private boolean clearCurrentHeadBlock(ServerWorld world) {
+        return clearBlockIfNeeded(world, guard.getBlockPos().up());
     }
 
     private boolean hasSafeSupport(ServerWorld world, BlockPos footTarget) {
@@ -294,18 +305,6 @@ public class MasonMiningStairGoal extends Goal {
         return stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem;
     }
 
-    private boolean isInventoryNearlyFull() {
-        int emptySlots = 0;
-        for (int i = 0; i < guard.guardInventory.size(); i++) {
-            if (guard.guardInventory.getStack(i).isEmpty()) {
-                emptySlots++;
-                if (emptySlots >= INVENTORY_NEARLY_FULL_SLOTS_THRESHOLD) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
 
     private void beginReturn(ReturnReason reason) {
         if (stage != Stage.MINING) {
@@ -404,11 +403,13 @@ public class MasonMiningStairGoal extends Goal {
         this.lastDistanceToTarget = Double.MAX_VALUE;
         this.currentStepTarget = null;
         this.stepIndex = 0;
+        this.miningSessionEndTick = 0L;
     }
 
     private void logTelemetry() {
         String returnReasonText = switch (returnReason) {
             case BATCH_COMPLETE -> "BATCH_COMPLETE";
+            case MINING_TIME_LIMIT_REACHED -> "MINING_TIME_LIMIT_REACHED";
             case TOOL_BROKE -> "TOOL_BROKE";
             case CANNOT_ADVANCE -> "CANNOT_ADVANCE";
             case STUCK_30_SECONDS -> "STUCK_30_SECONDS";
@@ -435,6 +436,7 @@ public class MasonMiningStairGoal extends Goal {
     private enum ReturnReason {
         NONE(false),
         BATCH_COMPLETE(false),
+        MINING_TIME_LIMIT_REACHED(false),
         TOOL_BROKE(false),
         CANNOT_ADVANCE(true),
         STUCK_30_SECONDS(true);
