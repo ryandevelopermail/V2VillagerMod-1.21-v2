@@ -28,11 +28,12 @@ public class MasonMiningStairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 1.8D;
-    private static final int NO_PROGRESS_LIMIT = 5;
+    private static final int NO_PROGRESS_LIMIT_TICKS = 600;
     private static final int MAX_STEPS_PER_RUN = 24;
     private static final int MAX_BLOCKS_PER_RUN = 96;
     private static final int INVENTORY_NEARLY_FULL_SLOTS_THRESHOLD = 2;
     private static final int MINING_RUN_COOLDOWN_TICKS = 200;
+    private static final int REQUIRED_STAIR_CLEARANCE = 2;
     private static final Set<Block> BREAKABLE_BLOCKS = Set.of(
             Blocks.DIRT,
             Blocks.COARSE_DIRT,
@@ -96,9 +97,22 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
-        this.miningDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
-        this.origin = guard.getBlockPos();
-        this.stepIndex = 0;
+        Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
+
+        Direction persistedDirection = Direction.byId(guard.getMiningDirectionId());
+        BlockPos persistedOrigin = guard.getMiningOrigin();
+        int persistedStepIndex = guard.getMiningStepIndex();
+        if (persistedOrigin != null && persistedDirection.getAxis().isHorizontal() && persistedStepIndex >= 0) {
+            this.miningDirection = persistedDirection;
+            this.origin = persistedOrigin;
+            this.stepIndex = persistedStepIndex;
+        } else {
+            this.miningDirection = fallbackDirection;
+            this.origin = guard.getBlockPos();
+            this.stepIndex = 0;
+            guard.setMiningProgress(this.origin, this.stepIndex, this.miningDirection.getId());
+        }
+
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -178,7 +192,7 @@ public class MasonMiningStairGoal extends Goal {
 
     private void tickMining(ServerWorld world) {
         if (!ensureStepClear(world, currentStepTarget)) {
-            beginReturn(ReturnReason.STUCK_5_TICKS);
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
             return;
         }
 
@@ -191,8 +205,8 @@ public class MasonMiningStairGoal extends Goal {
             noProgressTicks++;
         }
 
-        if (noProgressTicks >= NO_PROGRESS_LIMIT) {
-            beginReturn(ReturnReason.STUCK_5_TICKS);
+        if (noProgressTicks >= NO_PROGRESS_LIMIT_TICKS) {
+            beginReturn(ReturnReason.STUCK_30_SECONDS);
             return;
         }
 
@@ -203,6 +217,7 @@ public class MasonMiningStairGoal extends Goal {
 
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
             stepIndex++;
+            guard.setMiningProgress(origin, stepIndex, miningDirection.getId());
             currentStepTarget = computeStepTarget(stepIndex);
             noProgressTicks = 0;
             lastDistanceToTarget = Double.MAX_VALUE;
@@ -210,11 +225,25 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private boolean ensureStepClear(ServerWorld world, BlockPos footTarget) {
-        BlockPos headTarget = footTarget.up();
-        if (!clearBlockIfNeeded(world, footTarget)) {
+        if (!hasSafeSupport(world, footTarget)) {
             return false;
         }
-        return clearBlockIfNeeded(world, headTarget);
+
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            if (!clearBlockIfNeeded(world, footTarget.up(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasSafeSupport(ServerWorld world, BlockPos footTarget) {
+        BlockPos supportPos = footTarget.down();
+        BlockState supportState = world.getBlockState(supportPos);
+        if (supportState.isAir() || supportState.getCollisionShape(world, supportPos).isEmpty()) {
+            return false;
+        }
+        return !supportState.getFluidState().isIn(FluidTags.WATER) && !supportState.getFluidState().isIn(FluidTags.LAVA);
     }
 
     private boolean clearBlockIfNeeded(ServerWorld world, BlockPos pos) {
@@ -285,6 +314,13 @@ public class MasonMiningStairGoal extends Goal {
         this.returnReason = reason;
         this.cooldownUntilTick = guard.getWorld().getTime() + MINING_RUN_COOLDOWN_TICKS;
         guard.setNextMiningStartTick(cooldownUntilTick);
+
+        if (reason.resetsMiningProgress) {
+            guard.clearMiningProgress();
+        } else {
+            guard.setMiningProgress(origin, stepIndex, miningDirection.getId());
+        }
+
         this.stage = Stage.RETURN_TO_CHEST;
     }
 
@@ -374,7 +410,8 @@ public class MasonMiningStairGoal extends Goal {
         String returnReasonText = switch (returnReason) {
             case BATCH_COMPLETE -> "BATCH_COMPLETE";
             case TOOL_BROKE -> "TOOL_BROKE";
-            case STUCK_5_TICKS -> "STUCK_5_TICKS";
+            case CANNOT_ADVANCE -> "CANNOT_ADVANCE";
+            case STUCK_30_SECONDS -> "STUCK_30_SECONDS";
             default -> "NONE";
         };
 
@@ -396,9 +433,16 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private enum ReturnReason {
-        NONE,
-        BATCH_COMPLETE,
-        TOOL_BROKE,
-        STUCK_5_TICKS
+        NONE(false),
+        BATCH_COMPLETE(false),
+        TOOL_BROKE(false),
+        CANNOT_ADVANCE(true),
+        STUCK_30_SECONDS(true);
+
+        private final boolean resetsMiningProgress;
+
+        ReturnReason(boolean resetsMiningProgress) {
+            this.resetsMiningProgress = resetsMiningProgress;
+        }
     }
 }

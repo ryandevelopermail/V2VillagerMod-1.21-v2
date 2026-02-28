@@ -43,6 +43,9 @@ public class MasonGuardEntity extends GuardEntity {
     private ItemStack expectedMiningTool = ItemStack.EMPTY;
     private boolean loggedSpawnValidation;
     private long nextMiningStartTick;
+    private BlockPos miningOrigin;
+    private int miningStepIndex;
+    private int miningDirectionId = -1;
 
     public MasonGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -78,6 +81,30 @@ public class MasonGuardEntity extends GuardEntity {
 
     public void setNextMiningStartTick(long nextMiningStartTick) {
         this.nextMiningStartTick = nextMiningStartTick;
+    }
+
+    public BlockPos getMiningOrigin() {
+        return miningOrigin;
+    }
+
+    public int getMiningStepIndex() {
+        return miningStepIndex;
+    }
+
+    public int getMiningDirectionId() {
+        return miningDirectionId;
+    }
+
+    public void setMiningProgress(BlockPos origin, int stepIndex, int directionId) {
+        this.miningOrigin = origin == null ? null : origin.toImmutable();
+        this.miningStepIndex = Math.max(0, stepIndex);
+        this.miningDirectionId = directionId;
+    }
+
+    public void clearMiningProgress() {
+        this.miningOrigin = null;
+        this.miningStepIndex = 0;
+        this.miningDirectionId = -1;
     }
 
     @Override
@@ -157,6 +184,13 @@ public class MasonGuardEntity extends GuardEntity {
             this.expectedMiningTool = ItemStack.EMPTY;
         }
         this.nextMiningStartTick = nbt.contains("MasonNextMiningStartTick") ? nbt.getLong("MasonNextMiningStartTick") : 0L;
+        if (nbt.contains("MasonMiningOriginX")) {
+            this.miningOrigin = new BlockPos(nbt.getInt("MasonMiningOriginX"), nbt.getInt("MasonMiningOriginY"), nbt.getInt("MasonMiningOriginZ"));
+            this.miningStepIndex = Math.max(0, nbt.getInt("MasonMiningStepIndex"));
+            this.miningDirectionId = nbt.contains("MasonMiningDirectionId") ? nbt.getInt("MasonMiningDirectionId") : -1;
+        } else {
+            this.clearMiningProgress();
+        }
     }
 
     @Override
@@ -178,5 +212,12 @@ public class MasonGuardEntity extends GuardEntity {
             nbt.put("MasonExpectedTool", this.expectedMiningTool.encode(this.getRegistryManager(), toolNbt));
         }
         nbt.putLong("MasonNextMiningStartTick", this.nextMiningStartTick);
+        if (this.miningOrigin != null) {
+            nbt.putInt("MasonMiningOriginX", this.miningOrigin.getX());
+            nbt.putInt("MasonMiningOriginY", this.miningOrigin.getY());
+            nbt.putInt("MasonMiningOriginZ", this.miningOrigin.getZ());
+            nbt.putInt("MasonMiningStepIndex", this.miningStepIndex);
+            nbt.putInt("MasonMiningDirectionId", this.miningDirectionId);
+        }
     }
 }
