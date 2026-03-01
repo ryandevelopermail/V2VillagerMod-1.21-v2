@@ -1,15 +1,14 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.SheepEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -25,14 +24,15 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.GlobalPos;
+import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
-import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -51,12 +51,21 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 16;
-    private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
+    private static final int PEN_SEARCH_Y_RANGE = 12;
+    private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
+    private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
+    private static final int PEN_GATE_CHECK_LIMIT = 40;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
     private static final int GATHER_MAX_SESSION_TICKS = 2200;
     private static final int GATHER_WANDER_REPATH_TICKS = 120;
+    private static final int ACTIVE_HERD_LIMIT = 6;
+    private static final double HERD_SELECTION_RANGE = 24.0D;
+    private static final double HERD_FOLLOW_DISTANCE_SQUARED = 81.0D;
+    private static final double HERD_PEN_CLOSE_DISTANCE_SQUARED = 25.0D;
+    private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
+    private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -85,7 +94,16 @@ public class ShepherdSpecialGoal extends Goal {
     private long gatherSessionStartTick;
     private long gatherSessionDurationTicks;
     private long nextGatherRepathTick;
+    private long nextGatherFollowCheckTick;
     private boolean gatherHalfLogged;
+    private final List<AnimalEntity> activeHerd = new ArrayList<>();
+    private long nearestPenCacheTick = Long.MIN_VALUE;
+    private BlockPos cachedNearestPenTarget;
+    private BlockPos cachedNearestPenGatePos;
+    private long nearestGroundBannerCacheTick = Long.MIN_VALUE;
+    private BlockPos cachedNearestGroundBanner;
+    private int observedChestBannerCount = -1;
+    private int observedChestWheatCount = -1;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -97,10 +115,32 @@ public class ShepherdSpecialGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
+        invalidateSpatialSearchCache();
+        observedChestBannerCount = -1;
+        observedChestWheatCount = -1;
     }
 
     public void requestImmediateCheck() {
         nextCheckTime = 0L;
+    }
+
+    public void requestCheckNoSoonerThan(long targetTick) {
+        if (nextCheckTime == 0L || nextCheckTime > targetTick) {
+            nextCheckTime = targetTick;
+        }
+    }
+
+    public void onChestInventoryChanged(ServerWorld world) {
+        int currentBannerCount = countBannersInChest(world);
+        int currentWheatCount = countWheatInChest(world);
+        boolean bannerChanged = observedChestBannerCount != currentBannerCount;
+        boolean wheatChanged = observedChestWheatCount != currentWheatCount;
+        observedChestBannerCount = currentBannerCount;
+        observedChestWheatCount = currentWheatCount;
+
+        if (bannerChanged || wheatChanged) {
+            invalidateSpatialSearchCache();
+        }
     }
 
     @Override
@@ -261,7 +301,7 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
-        gatherBannerPos = findNearestGroundBanner(world);
+        gatherBannerPos = resolveGatherBanner(world);
         if (gatherBannerPos == null) {
             stage = Stage.DONE;
             nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -272,6 +312,9 @@ public class ShepherdSpecialGoal extends Goal {
         gatherSessionDurationTicks = randomGatherSessionDuration();
         gatherHalfLogged = false;
         nextGatherRepathTick = 0L;
+        nextGatherFollowCheckTick = 0L;
+        activeHerd.clear();
+        refreshActiveHerd(world);
         LOGGER.info("Shepherd {} started wheat gather session near banner {} for {} ticks", villager.getUuidAsString(), gatherBannerPos.toShortString(), gatherSessionDurationTicks);
         stage = Stage.GATHER_WANDER;
     }
@@ -288,6 +331,7 @@ public class ShepherdSpecialGoal extends Goal {
         carriedItem = ItemStack.EMPTY;
         openedPenGate = false;
         wasInsidePen = false;
+        activeHerd.clear();
     }
 
     @Override
@@ -335,6 +379,7 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
                     if (placedBannerPos != null) {
+                        invalidateSpatialSearchCache();
                         triggerBannerPairing(world, placedBannerPos);
                     }
                     stage = Stage.RETURN_TO_CHEST;
@@ -349,13 +394,18 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                if (world.getTime() >= nextGatherFollowCheckTick) {
+                    refreshActiveHerd(world);
+                    nextGatherFollowCheckTick = world.getTime() + GATHER_FOLLOW_CHECK_INTERVAL_TICKS;
+                }
+
                 long elapsed = world.getTime() - gatherSessionStartTick;
                 if (!gatherHalfLogged && elapsed >= gatherSessionDurationTicks / 2L) {
                     gatherHalfLogged = true;
                     LOGGER.info("Shepherd {} wheat gather session 50% complete", villager.getUuidAsString());
                 }
 
-                if (elapsed >= gatherSessionDurationTicks) {
+                if (elapsed >= gatherSessionDurationTicks && isActiveHerdFollowing()) {
                     PenTarget penWithBanner = findNearestPenWithBanner(world, gatherBannerPos);
                     if (penWithBanner == null) {
                         stage = Stage.DONE;
@@ -369,7 +419,8 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 if (world.getTime() >= nextGatherRepathTick || villager.getNavigation().isIdle()) {
-                    moveTo(randomGatherWanderTarget(world, gatherBannerPos), SLOW_GUIDE_SPEED);
+                    BlockPos wanderTarget = getHerdAnchoredWanderTarget(world);
+                    moveTo(wanderTarget, SLOW_GUIDE_SPEED);
                     nextGatherRepathTick = world.getTime() + GATHER_WANDER_REPATH_TICKS;
                 }
             }
@@ -380,11 +431,13 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 ensureGateOpen(world, penGatePos);
-                if (isNear(penTarget)) {
+                refreshActiveHerd(world);
+
+                if (isHerdInsidePen(world, penTarget)) {
                     villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
                     stage = Stage.RUSH_TO_GATE_AND_CLOSE;
                 } else {
-                    moveTo(penTarget, SLOW_GUIDE_SPEED);
+                    moveTo(herdAnchoredGuideTarget(penTarget), SLOW_GUIDE_SPEED);
                 }
             }
             case RUSH_TO_GATE_AND_CLOSE -> {
@@ -528,6 +581,21 @@ public class ShepherdSpecialGoal extends Goal {
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
             if (!stack.isEmpty() && stack.isOf(Items.SHEARS)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private int countWheatInChest(ServerWorld world) {
+        Inventory chestInventory = getChestInventory(world).orElse(null);
+        if (chestInventory == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(Items.WHEAT)) {
                 count += stack.getCount();
             }
         }
@@ -866,19 +934,30 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
-        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        long now = world.getTime();
+        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            penGatePos = cachedNearestPenGatePos;
+            return cachedNearestPenTarget;
+        }
+
+        BlockPos villagerPos = villager.getBlockPos();
+        int minY = getLocalMinY(world, villagerPos);
+        int maxY = getLocalMaxY(world, villagerPos);
+        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
+        List<BlockPos> gateCandidates = bannerCandidates.isEmpty()
+                ? collectFallbackGateCandidates(world, villagerPos, minY, maxY)
+                : collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         BlockPos nearest = null;
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            BlockState state = world.getBlockState(pos);
+        for (BlockPos gatePos : gateCandidates) {
+            BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
                 continue;
             }
 
-            BlockPos insidePos = getPenInterior(world, pos, state);
+            BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null) {
                 continue;
             }
@@ -900,12 +979,24 @@ public class ShepherdSpecialGoal extends Goal {
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearest = penCenter.toImmutable();
-                nearestGate = pos.toImmutable();
+                nearestGate = gatePos.toImmutable();
             }
         }
 
+        nearestPenCacheTick = now;
+        cachedNearestPenTarget = nearest;
+        cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
         return nearest;
+    }
+
+    private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos villagerPos, int minY, int maxY) {
+        List<BlockPos> searchAnchors = new ArrayList<>();
+        searchAnchors.add(villagerPos);
+        if (jobPos != null && !jobPos.equals(villagerPos)) {
+            searchAnchors.add(jobPos);
+        }
+        return collectNearbyGateCandidates(world, villagerPos, searchAnchors, PEN_SCAN_RANGE, minY, maxY, PEN_GATE_CHECK_LIMIT);
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
@@ -1066,29 +1157,8 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, new Box(bannerPos).expand(FARMER_BANNER_PAIR_RANGE), villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FARMER)) {
-            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSite.isEmpty()) {
-                continue;
-            }
-
-            GlobalPos globalPos = jobSite.get();
-            if (!globalPos.dimension().equals(world.getRegistryKey())) {
-                continue;
-            }
-
-            BlockPos farmerJobPos = globalPos.pos();
-            if (!world.getBlockState(farmerJobPos).isOf(Blocks.COMPOSTER)) {
-                continue;
-            }
-
-            if (JobBlockPairingHelper.findNearbyChest(world, farmerJobPos).isEmpty()) {
-                continue;
-            }
-
-            JobBlockPairingHelper.playPairingAnimation(world, bannerPos, villager, farmerJobPos);
-            FarmerBannerTracker.setBanner(villager, bannerPos);
-        }
+        BlockState bannerState = world.getBlockState(bannerPos);
+        JobBlockPairingHelper.handleBannerPlacement(world, bannerPos, bannerState);
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
@@ -1212,15 +1282,31 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean hasGroundBannerNearby(ServerWorld world) {
-        return findNearestGroundBanner(world) != null;
+        return resolveGatherBanner(world) != null;
+    }
+
+    private BlockPos resolveGatherBanner(ServerWorld world) {
+        Optional<BlockPos> trackedBanner = ShepherdBannerTracker.getBanner(villager)
+                .filter(pos -> world.getBlockState(pos).isIn(BlockTags.BANNERS));
+        if (trackedBanner.isPresent()) {
+            return trackedBanner.get();
+        }
+        return findNearestGroundBanner(world);
     }
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
-        BlockPos start = villager.getBlockPos().add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = villager.getBlockPos().add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        long now = world.getTime();
+        if (now - nearestGroundBannerCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            return cachedNearestGroundBanner;
+        }
+
+        BlockPos villagerPos = villager.getBlockPos();
+        int minY = getLocalMinY(world, villagerPos);
+        int maxY = getLocalMaxY(world, villagerPos);
+        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
+        for (BlockPos pos : bannerCandidates) {
             BlockState state = world.getBlockState(pos);
             if (!state.isIn(BlockTags.BANNERS)) {
                 continue;
@@ -1231,21 +1317,24 @@ public class ShepherdSpecialGoal extends Goal {
                 nearest = pos.toImmutable();
             }
         }
+        nearestGroundBannerCacheTick = now;
+        cachedNearestGroundBanner = nearest;
         return nearest;
     }
 
     private PenTarget findNearestPenWithBanner(ServerWorld world, BlockPos bannerPos) {
-        BlockPos start = bannerPos.add(-PEN_SCAN_RANGE, -PEN_SCAN_RANGE, -PEN_SCAN_RANGE);
-        BlockPos end = bannerPos.add(PEN_SCAN_RANGE, PEN_SCAN_RANGE, PEN_SCAN_RANGE);
+        int minY = getLocalMinY(world, bannerPos);
+        int maxY = getLocalMaxY(world, bannerPos);
+        List<BlockPos> gateCandidates = collectNearbyGateCandidates(world, bannerPos, List.of(bannerPos), PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
         PenTarget nearest = null;
         double nearestDistance = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            BlockState state = world.getBlockState(pos);
+        for (BlockPos gatePos : gateCandidates) {
+            BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
                 continue;
             }
 
-            BlockPos insidePos = getPenInterior(world, pos, state);
+            BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null || !isInsideFencePen(world, insidePos)) {
                 continue;
             }
@@ -1258,10 +1347,73 @@ public class ShepherdSpecialGoal extends Goal {
             double distanceToBanner = center.getSquaredDistance(bannerPos);
             if (distanceToBanner < nearestDistance) {
                 nearestDistance = distanceToBanner;
-                nearest = new PenTarget(center.toImmutable(), pos.toImmutable());
+                nearest = new PenTarget(center.toImmutable(), gatePos.toImmutable());
             }
         }
         return nearest;
+    }
+
+    private List<BlockPos> findBannerCandidatesWithinRange(ServerWorld world, BlockPos center, int range, int minY, int maxY) {
+        int chunkRadius = (int) Math.ceil(range / 16.0D);
+        int centerChunkX = center.getX() >> 4;
+        int centerChunkZ = center.getZ() >> 4;
+        List<BlockPos> banners = new ArrayList<>();
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                Chunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+                for (BlockPos pos : chunk.getBlockEntityPositions()) {
+                    if (pos.getY() < minY || pos.getY() > maxY || !center.isWithinDistance(pos, range)) {
+                        continue;
+                    }
+                    if (!world.getBlockState(pos).isIn(BlockTags.BANNERS)) {
+                        continue;
+                    }
+                    banners.add(pos.toImmutable());
+                }
+            }
+        }
+
+        banners.sort(Comparator.comparingDouble(center::getSquaredDistance));
+        if (banners.size() > PEN_BANNER_CANDIDATE_LIMIT) {
+            return new ArrayList<>(banners.subList(0, PEN_BANNER_CANDIDATE_LIMIT));
+        }
+        return banners;
+    }
+
+    private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
+        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        for (BlockPos bannerPos : bannerCandidates) {
+            int yStart = Math.max(minY, bannerPos.getY() - 3);
+            int yEnd = Math.min(maxY, bannerPos.getY() + 3);
+            for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
+                for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
+                    for (int y = yStart; y <= yEnd; y++) {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                            gateSet.add(pos.toImmutable());
+                        }
+                    }
+                }
+            }
+        }
+
+        List<BlockPos> gates = new ArrayList<>(gateSet);
+        gates.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
+        if (gates.size() > limit) {
+            return new ArrayList<>(gates.subList(0, limit));
+        }
+        return gates;
+    }
+
+    private int getLocalMinY(ServerWorld world, BlockPos center) {
+        return Math.max(world.getBottomY(), center.getY() - PEN_SEARCH_Y_RANGE);
+    }
+
+    private int getLocalMaxY(ServerWorld world, BlockPos center) {
+        return Math.min(world.getTopY() - 1, center.getY() + PEN_SEARCH_Y_RANGE);
     }
 
     private BlockPos randomGatherWanderTarget(ServerWorld world, BlockPos origin) {
@@ -1273,8 +1425,120 @@ public class ShepherdSpecialGoal extends Goal {
         return new BlockPos(target.getX(), clampedY, target.getZ());
     }
 
+    private void refreshActiveHerd(ServerWorld world) {
+        if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
+            activeHerd.clear();
+            return;
+        }
+
+        Box searchBox = new Box(villager.getBlockPos()).expand(HERD_SELECTION_RANGE, 6.0D, HERD_SELECTION_RANGE);
+        List<AnimalEntity> nearbyAnimals = world.getEntitiesByClass(AnimalEntity.class, searchBox, this::isGatherTargetAnimal);
+        nearbyAnimals.sort(Comparator.comparingDouble(villager::squaredDistanceTo));
+
+        activeHerd.clear();
+        int limit = Math.min(ACTIVE_HERD_LIMIT, nearbyAnimals.size());
+        for (int i = 0; i < limit; i++) {
+            activeHerd.add(nearbyAnimals.get(i));
+        }
+    }
+
+    private boolean isGatherTargetAnimal(AnimalEntity animal) {
+        if (!animal.isAlive() || !animal.canEat()) {
+            return false;
+        }
+        return animal.isInLove() || animal.isBreedingItem(Items.WHEAT.getDefaultStack());
+    }
+
+    private boolean isActiveHerdFollowing() {
+        if (activeHerd.isEmpty()) {
+            return false;
+        }
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            if (animal.squaredDistanceTo(villager) <= HERD_FOLLOW_DISTANCE_SQUARED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private BlockPos herdAnchoredGuideTarget(BlockPos fallbackTarget) {
+        BlockPos herdCentroid = getHerdCentroid();
+        if (herdCentroid == null) {
+            return fallbackTarget;
+        }
+        double midX = (herdCentroid.getX() + fallbackTarget.getX()) / 2.0D;
+        double midY = (herdCentroid.getY() + fallbackTarget.getY()) / 2.0D;
+        double midZ = (herdCentroid.getZ() + fallbackTarget.getZ()) / 2.0D;
+        return new BlockPos((int) Math.round(midX), (int) Math.round(midY), (int) Math.round(midZ));
+    }
+
+    private BlockPos getHerdAnchoredWanderTarget(ServerWorld world) {
+        BlockPos herdCentroid = getHerdCentroid();
+        BlockPos wanderOrigin = herdCentroid != null ? herdCentroid : gatherBannerPos;
+        return randomGatherWanderTarget(world, wanderOrigin);
+    }
+
+    private BlockPos getHerdCentroid() {
+        if (activeHerd.isEmpty()) {
+            return null;
+        }
+
+        double sumX = 0.0D;
+        double sumY = 0.0D;
+        double sumZ = 0.0D;
+        int count = 0;
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            sumX += animal.getX();
+            sumY += animal.getY();
+            sumZ += animal.getZ();
+            count++;
+        }
+
+        if (count == 0) {
+            return null;
+        }
+
+        return BlockPos.ofFloored(sumX / count, sumY / count, sumZ / count);
+    }
+
+    private boolean isHerdInsidePen(ServerWorld world, BlockPos penCenter) {
+        if (activeHerd.isEmpty()) {
+            return false;
+        }
+
+        int insideCount = 0;
+        int totalCount = 0;
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            totalCount++;
+            BlockPos animalPos = animal.getBlockPos();
+            boolean closeToCenter = animalPos.getSquaredDistance(penCenter) <= HERD_PEN_CLOSE_DISTANCE_SQUARED;
+            if (closeToCenter && isInsideFencePen(world, animalPos)) {
+                insideCount++;
+            }
+        }
+
+        return totalCount > 0 && insideCount >= Math.max(1, totalCount / 2);
+    }
+
     private long randomGatherSessionDuration() {
         return GATHER_MIN_SESSION_TICKS + villager.getRandom().nextInt(GATHER_MAX_SESSION_TICKS - GATHER_MIN_SESSION_TICKS + 1);
+    }
+
+    private void invalidateSpatialSearchCache() {
+        nearestPenCacheTick = Long.MIN_VALUE;
+        cachedNearestPenTarget = null;
+        cachedNearestPenGatePos = null;
+        nearestGroundBannerCacheTick = Long.MIN_VALUE;
+        cachedNearestGroundBanner = null;
     }
 
     private enum Stage {

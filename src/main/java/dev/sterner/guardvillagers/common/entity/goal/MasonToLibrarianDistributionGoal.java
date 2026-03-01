@@ -19,6 +19,7 @@ import java.util.Set;
 
 public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
+    private static final double SOURCE_CHEST_FULLNESS_TRIGGER = 0.80D;
     private static final Set<Item> COLLECTED_MATERIALS = Set.of(
             Items.STONE,
             Items.COBBLESTONE,
@@ -46,17 +47,8 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
     }
 
     @Override
-    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isDistributableItem(stack)) {
-                continue;
-            }
-            if (!DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty()) {
-                return true;
-            }
-        }
-        return false;
+    protected double getSourceChestFullnessTrigger() {
+        return SOURCE_CHEST_FULLNESS_TRIGGER;
     }
 
     @Override

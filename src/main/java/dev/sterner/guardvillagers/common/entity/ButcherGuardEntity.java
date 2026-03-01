@@ -39,6 +39,8 @@ import net.minecraft.entity.passive.MerchantEntity;
 import net.minecraft.entity.passive.PolarBearEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.block.BlockState;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
@@ -215,6 +217,7 @@ public class ButcherGuardEntity extends GuardEntity {
     public boolean onKilledOther(ServerWorld world, LivingEntity other) {
         boolean result = super.onKilledOther(world, other);
         if (this.huntSessionActive && other instanceof AnimalEntity) {
+            collectLootNear(other.getBoundingBox().expand(2.0D));
             this.huntTargetsRemaining--;
             if (this.huntTargetsRemaining <= 0) {
                 endHuntSession();
@@ -342,7 +345,10 @@ public class ButcherGuardEntity extends GuardEntity {
     }
 
     private void collectNearbyLoot() {
-        Box searchBox = this.getBoundingBox().expand(LOOT_SCAN_RANGE);
+        collectLootNear(this.getBoundingBox().expand(LOOT_SCAN_RANGE));
+    }
+
+    private void collectLootNear(Box searchBox) {
         List<ItemEntity> items = this.getWorld().getEntitiesByClass(ItemEntity.class, searchBox, entity -> entity.isAlive() && !entity.getStack().isEmpty());
         for (ItemEntity item : items) {
             ItemStack stack = item.getStack();
@@ -387,11 +393,11 @@ public class ButcherGuardEntity extends GuardEntity {
         if (this.pairedChestPos == null) {
             return null;
         }
-        var blockEntity = world.getBlockEntity(this.pairedChestPos);
-        if (blockEntity instanceof Inventory inventory) {
-            return inventory;
+        BlockState state = world.getBlockState(this.pairedChestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
         }
-        return null;
+        return ChestBlock.getInventory(chestBlock, state, world, this.pairedChestPos, true);
     }
 
     private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
