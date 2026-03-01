@@ -50,6 +50,15 @@ public final class VillageGuardStandManager {
     }
 
     public static void handleGuardSpawn(ServerWorld world, GuardEntity guard, @Nullable VillagerEntity sourceVillager) {
+        if (guard.getPairedStandUuid() != null) {
+            Entity pairedStand = world.getEntity(guard.getPairedStandUuid());
+            if (pairedStand instanceof ArmorStandEntity armorStand
+                    && armorStand.isAlive()
+                    && armorStand.getCommandTags().contains(GUARD_STAND_TAG)) {
+                return;
+            }
+        }
+
         Optional<BlockPos> bellPos = findBell(world, guard, sourceVillager);
         if (bellPos.isEmpty()) {
             return;

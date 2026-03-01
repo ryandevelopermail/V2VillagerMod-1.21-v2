@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.handler;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.entity.Entity;
@@ -40,7 +41,7 @@ public final class ArmorStandConversionHandler {
 
         VillagerEntity villager = nearestVillager.get();
         JobBlockPairingHelper.playPairingAnimation(world, placementPos, villager, placementPos);
-        convertVillagerToGuard(world, villager);
+        convertVillagerToGuard(world, villager, placementPos);
     }
 
     private Optional<VillagerEntity> findNearestUnemployedVillager(ServerWorld world, BlockPos placementPos) {
@@ -49,12 +50,21 @@ public final class ArmorStandConversionHandler {
                 .min(Comparator.comparingDouble(v -> v.squaredDistanceTo(Vec3d.ofCenter(placementPos))));
     }
 
+
+    private Optional<ArmorStandEntity> findNearestPlacedArmorStand(ServerWorld world, BlockPos placementPos) {
+        return world.getEntitiesByClass(ArmorStandEntity.class,
+                        new Box(placementPos).expand(JobBlockPlacementConstants.ARMOR_STAND_PLACEMENT_CHECK_RANGE),
+                        Entity::isAlive)
+                .stream()
+                .min(Comparator.comparingDouble(stand -> stand.squaredDistanceTo(Vec3d.ofCenter(placementPos))));
+    }
+
     private static boolean isUnemployedVillager(VillagerEntity villager) {
         VillagerProfession profession = villager.getVillagerData().getProfession();
         return profession == VillagerProfession.NONE && !villager.isBaby();
     }
 
-    private void convertVillagerToGuard(ServerWorld world, VillagerEntity villager) {
+    private void convertVillagerToGuard(ServerWorld world, VillagerEntity villager, BlockPos placementPos) {
         GuardEntity guard = GuardVillagers.GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
@@ -79,6 +89,16 @@ public final class ArmorStandConversionHandler {
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
 
         world.spawnEntityAndPassengers(guard);
+
+        Optional<ArmorStandEntity> placedStand = findNearestPlacedArmorStand(world, placementPos);
+        if (placedStand.isPresent()) {
+            ArmorStandEntity stand = placedStand.get();
+            stand.addCommandTag(VillageGuardStandManager.GUARD_STAND_TAG);
+            guard.setPairedStandUuid(stand.getUuid());
+            GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
+            JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
+        }
+
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
         guardModifierService.applySpecialModifierFromNearbyBlocks(world, guard);
