@@ -909,6 +909,14 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
             return;
         }
 
+        syncStandFromGuard(serverWorld);
+    }
+
+    private void syncStandFromGuard(ServerWorld serverWorld) {
+        if (this.pairedStandUuid == null) {
+            return;
+        }
+
         Entity standEntity = serverWorld.getEntity(this.pairedStandUuid);
         if (standEntity instanceof ArmorStandEntity armorStand
                 && armorStand.isAlive()
