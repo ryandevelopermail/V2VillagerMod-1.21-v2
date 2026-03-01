@@ -176,6 +176,7 @@ public final class VillageGuardStandManager {
                 if (!hasTag) {
                     stand.addCommandTag(GUARD_STAND_TAG);
                 }
+                stand.setShowArms(true);
                 standsByPosition.putIfAbsent(standPos, stand);
             } else if (hasTag) {
                 stand.removeCommandTag(GUARD_STAND_TAG);
@@ -216,6 +217,7 @@ public final class VillageGuardStandManager {
         for (BlockPos position : positions) {
             ArmorStandEntity armorStand = new ArmorStandEntity(world, position.getX() + 0.5D, position.getY(), position.getZ() + 0.5D);
             armorStand.addCommandTag(GUARD_STAND_TAG);
+            armorStand.setShowArms(true);
             world.spawnEntity(armorStand);
             newStands.add(armorStand);
         }

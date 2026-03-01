@@ -95,6 +95,7 @@ public final class ArmorStandConversionHandler {
         if (placedStand.isPresent()) {
             ArmorStandEntity stand = placedStand.get();
             stand.addCommandTag(VillageGuardStandManager.GUARD_STAND_TAG);
+            stand.setShowArms(true);
             guard.setPairedStandUuid(stand.getUuid());
             GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
             JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
