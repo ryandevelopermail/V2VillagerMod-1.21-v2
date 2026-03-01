@@ -11,6 +11,7 @@ import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ArmorItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -268,6 +269,9 @@ public class ArmorerBlastFurnaceGoal extends Goal {
 
     private boolean isBlastable(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
+            return false;
+        }
+        if (stack.getItem() instanceof ArmorItem) {
             return false;
         }
         if (stack.isIn(ORES_TAG)) {
