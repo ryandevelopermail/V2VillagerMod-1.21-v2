@@ -780,20 +780,16 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         super.equipStack(slotIn, stack);
         switch (slotIn) {
             case CHEST:
-                if (this.guardInventory.getStack(1).isEmpty())
-                    this.guardInventory.setStack(1, this.armorItems.get(slotIn.getEntitySlotId()));
+                this.guardInventory.setStack(1, this.armorItems.get(slotIn.getEntitySlotId()));
                 break;
             case FEET:
-                if (this.guardInventory.getStack(3).isEmpty())
-                    this.guardInventory.setStack(3, this.armorItems.get(slotIn.getEntitySlotId()));
+                this.guardInventory.setStack(3, this.armorItems.get(slotIn.getEntitySlotId()));
                 break;
             case HEAD:
-                if (this.guardInventory.getStack(0).isEmpty())
-                    this.guardInventory.setStack(0, this.armorItems.get(slotIn.getEntitySlotId()));
+                this.guardInventory.setStack(0, this.armorItems.get(slotIn.getEntitySlotId()));
                 break;
             case LEGS:
-                if (this.guardInventory.getStack(2).isEmpty())
-                    this.guardInventory.setStack(2, this.armorItems.get(slotIn.getEntitySlotId()));
+                this.guardInventory.setStack(2, this.armorItems.get(slotIn.getEntitySlotId()));
                 break;
             case MAINHAND:
                 this.guardInventory.setStack(5, this.handItems.get(slotIn.getEntitySlotId()));
