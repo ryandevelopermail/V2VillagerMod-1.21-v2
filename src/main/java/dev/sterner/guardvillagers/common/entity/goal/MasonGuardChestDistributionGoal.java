@@ -200,16 +200,15 @@ public class MasonGuardChestDistributionGoal extends Goal {
             this.pendingCoalTargetIndex = 0;
             this.pendingCoalFailedAttempts = 0;
 
-            if (type == DistributionType.COAL && recipients.size() > 1) {
-                int plannedDrops = Math.min(stack.getCount(), recipients.size());
+            if ((type == DistributionType.COAL || type == DistributionType.ORE) && recipients.size() > 1) {
                 int cursor = recipientCursorByType.getOrDefault(type, 0);
-                for (int i = 0; i < plannedDrops; i++) {
+                for (int i = 0; i < recipients.size(); i++) {
                     RecipientRecord recipient = recipients.get(Math.floorMod(cursor + i, recipients.size()));
                     pendingCoalTargets.add(recipient.chestPos());
                 }
                 this.pendingCoalBatchMode = !pendingCoalTargets.isEmpty();
                 this.pendingCoalRecipientCount = recipients.size();
-                this.pendingExtractCount = Math.max(1, pendingCoalTargets.size());
+                this.pendingExtractCount = Math.max(1, stack.getCount());
                 this.pendingTargetChestPos = pendingCoalBatchMode ? pendingCoalTargets.getFirst() : selectedRecipient.chestPos();
             } else {
                 this.pendingTargetChestPos = selectedRecipient.chestPos();
@@ -299,12 +298,12 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetChestPos);
         if (targetInventory.isPresent()) {
-            ItemStack singleCoal = pendingItem.copyWithCount(1);
-            ItemStack remaining = insertStack(targetInventory.get(), singleCoal);
+            ItemStack singleItem = pendingItem.copyWithCount(1);
+            ItemStack remaining = insertStack(targetInventory.get(), singleItem);
             if (remaining.isEmpty()) {
                 pendingItem.decrement(1);
                 pendingCoalFailedAttempts = 0;
-                advanceCoalCursor();
+                advanceBatchCursor();
             } else {
                 pendingCoalFailedAttempts++;
             }
@@ -327,13 +326,13 @@ public class MasonGuardChestDistributionGoal extends Goal {
         stage = Stage.MOVE_TO_TARGET;
     }
 
-    private void advanceCoalCursor() {
+    private void advanceBatchCursor() {
         int recipientCount = pendingCoalRecipientCount;
-        if (recipientCount <= 0) {
+        if (recipientCount <= 0 || pendingType == DistributionType.NONE) {
             return;
         }
-        int cursor = recipientCursorByType.getOrDefault(DistributionType.COAL, 0);
-        recipientCursorByType.put(DistributionType.COAL, (cursor + 1) % recipientCount);
+        int cursor = recipientCursorByType.getOrDefault(pendingType, 0);
+        recipientCursorByType.put(pendingType, (cursor + 1) % recipientCount);
     }
 
     private void returnPendingToSource(ServerWorld world) {
