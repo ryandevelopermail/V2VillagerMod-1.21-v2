@@ -71,6 +71,7 @@ public final class ArmorStandConversionHandler {
         }
 
         guard.setConvertedFromArmorStand(true);
+        guard.setStandCustomizationEnabled(true);
         guard.spawnWithArmor = true;
         guard.initialize(world, world.getLocalDifficulty(villager.getBlockPos()), SpawnReason.CONVERSION, null);
         guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
