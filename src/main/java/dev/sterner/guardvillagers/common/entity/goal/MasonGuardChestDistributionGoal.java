@@ -37,6 +37,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private static final double SOURCE_CHEST_FULLNESS_TRIGGER = 0.80D;
     private static final int DISTRIBUTION_INTERVAL_TICKS = 20;
     private static final Set<String> RAW_ORE_ITEM_PATHS = Set.of("raw_iron", "raw_copper", "raw_gold");
+    private static final Set<String> ADDITIONAL_ORE_ITEM_PATHS = Set.of("ancient_debris");
     private static final Set<net.minecraft.item.Item> LIBRARIAN_COLLECTED_MATERIALS = Set.of(
             net.minecraft.item.Items.STONE,
             net.minecraft.item.Items.COBBLESTONE,
@@ -69,7 +70,6 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private int pendingCoalRecipientCount;
     private int pendingCoalTargetIndex;
     private int pendingCoalFailedAttempts;
-    private int lastObservedCoalCount = -1;
 
     public MasonGuardChestDistributionGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -91,11 +91,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
         }
 
         Inventory source = sourceInventory.get();
-        int currentCoalCount = countCoalItems(source);
-        boolean coalCountIncreased = lastObservedCoalCount >= 0 && currentCoalCount > lastObservedCoalCount;
-        lastObservedCoalCount = currentCoalCount;
+        boolean continuousDistributionDemand = hasContinuousDistributionDemand(world, source);
 
-        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0 && !coalCountIncreased) {
+        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0 && !continuousDistributionDemand) {
             return false;
         }
 
@@ -437,7 +435,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return false;
         }
         String path = Registries.ITEM.getId(stack.getItem()).getPath();
-        return path.endsWith("_ore") || RAW_ORE_ITEM_PATHS.contains(path);
+        return path.endsWith("_ore") || RAW_ORE_ITEM_PATHS.contains(path) || ADDITIONAL_ORE_ITEM_PATHS.contains(path);
     }
 
     private boolean isLibrarianOverflowItem(ItemStack stack) {
@@ -543,15 +541,24 @@ public class MasonGuardChestDistributionGoal extends Goal {
     }
 
 
-    private int countCoalItems(Inventory inventory) {
-        int coalCount = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && stack.isIn(ItemTags.COALS)) {
-                coalCount += stack.getCount();
+    private boolean hasContinuousDistributionDemand(ServerWorld world, Inventory source) {
+        for (int slot = 0; slot < source.size(); slot++) {
+            ItemStack stack = source.getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            DistributionType type = classifyPrimaryDistribution(stack);
+            if (type != DistributionType.COAL && type != DistributionType.ORE) {
+                continue;
+            }
+
+            List<RecipientRecord> recipients = getPrimaryRecipients(world, type);
+            if (!recipients.isEmpty()) {
+                return true;
             }
         }
-        return coalCount;
+        return false;
     }
 
     private double getFullness(Inventory inventory) {
