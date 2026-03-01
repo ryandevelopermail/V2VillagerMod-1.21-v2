@@ -489,6 +489,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
                 }
             }
             this.spawnWithArmor = false;
+            syncStandFromGuard(serverWorld);
         }
         if (!getWorld().isClient) this.tickAngerLogic((ServerWorld) getWorld(), true);
         this.tickHandSwing();
@@ -501,7 +502,7 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         if (!this.getWorld().isClient && this.age % 40 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
             VillageGuardStandManager.validateGuardStandPairing(serverWorld, this);
         }
-        if (!this.getWorld().isClient && this.standCustomizationEnabled && this.age % 20 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+        if (!this.getWorld().isClient && this.standCustomizationEnabled && !this.spawnWithArmor && this.age % 20 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
             syncGuardFromStand(serverWorld);
         }
         super.tick();
