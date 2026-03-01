@@ -46,6 +46,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
                 () -> new ArmorerBlastFurnaceGoal(villager, jobPos, chestPos));
         blastFurnaceGoal.setTargets(jobPos, chestPos);
+        blastFurnaceGoal.requestImmediateCheck();
 
         ArmorerDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new ArmorerDistributionGoal(villager, jobPos, chestPos, null));
@@ -58,6 +59,10 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
+            ArmorerBlastFurnaceGoal blastFurnace = GOALS.get(pairedVillager);
+            if (blastFurnace != null) {
+                blastFurnace.requestImmediateCheck();
+            }
             ArmorerDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
             if (distribution != null) {
                 distribution.requestImmediateDistribution();
@@ -83,7 +88,16 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         distributionGoal.requestImmediateDistribution();
 
+        ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
+                () -> new ArmorerBlastFurnaceGoal(villager, jobPos, chestPos));
+        blastFurnaceGoal.setTargets(jobPos, chestPos);
+        blastFurnaceGoal.requestImmediateCheck();
+
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
+            ArmorerBlastFurnaceGoal blastFurnace = GOALS.get(pairedVillager);
+            if (blastFurnace != null) {
+                blastFurnace.requestImmediateCheck();
+            }
             ArmorerDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
             if (distribution != null) {
                 distribution.requestImmediateDistribution();

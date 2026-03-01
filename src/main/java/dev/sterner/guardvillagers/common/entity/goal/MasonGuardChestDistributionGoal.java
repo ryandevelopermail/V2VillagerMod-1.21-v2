@@ -37,6 +37,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private static final double SOURCE_CHEST_FULLNESS_TRIGGER = 0.80D;
     private static final int DISTRIBUTION_INTERVAL_TICKS = 20;
     private static final Set<String> RAW_ORE_ITEM_PATHS = Set.of("raw_iron", "raw_copper", "raw_gold");
+    private static final Set<String> ADDITIONAL_ORE_ITEM_PATHS = Set.of("ancient_debris");
     private static final Set<net.minecraft.item.Item> LIBRARIAN_COLLECTED_MATERIALS = Set.of(
             net.minecraft.item.Items.STONE,
             net.minecraft.item.Items.COBBLESTONE,
@@ -58,9 +59,17 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private final Map<DistributionType, Integer> recipientCursorByType = new EnumMap<>(DistributionType.class);
     private Stage stage = Stage.IDLE;
     private ItemStack pendingItem = ItemStack.EMPTY;
+    private int pendingSourceSlot = -1;
+    private net.minecraft.item.Item pendingSourceItem;
     private BlockPos pendingTargetChestPos;
     private DistributionType pendingType = DistributionType.NONE;
     private boolean pendingOverflowTransfer;
+    private int pendingExtractCount = 1;
+    private boolean pendingCoalBatchMode;
+    private final List<BlockPos> pendingCoalTargets = new ArrayList<>();
+    private int pendingCoalRecipientCount;
+    private int pendingCoalTargetIndex;
+    private int pendingCoalFailedAttempts;
 
     public MasonGuardChestDistributionGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -81,11 +90,14 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return false;
         }
 
-        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0) {
+        Inventory source = sourceInventory.get();
+        boolean continuousDistributionDemand = hasContinuousDistributionDemand(world, source);
+
+        if (guard.age % DISTRIBUTION_INTERVAL_TICKS != 0 && !continuousDistributionDemand) {
             return false;
         }
 
-        return preparePendingTransfer(world, sourceInventory.get());
+        return preparePendingTransfer(world, source);
     }
 
     @Override
@@ -114,13 +126,17 @@ public class MasonGuardChestDistributionGoal extends Goal {
         }
 
         BlockPos chestPos = guard.getPairedChestPos();
-        if (chestPos == null || pendingItem.isEmpty() || pendingTargetChestPos == null) {
+        if (chestPos == null || pendingTargetChestPos == null || pendingSourceSlot < 0 || pendingSourceItem == null) {
             stage = Stage.DONE;
             return;
         }
 
         if (stage == Stage.MOVE_TO_SOURCE) {
             if (isNear(chestPos)) {
+                if (!extractPendingItemFromSource(world, chestPos)) {
+                    stage = Stage.DONE;
+                    return;
+                }
                 stage = Stage.MOVE_TO_TARGET;
                 moveTo(pendingTargetChestPos);
             } else {
@@ -130,6 +146,10 @@ public class MasonGuardChestDistributionGoal extends Goal {
         }
 
         if (stage == Stage.MOVE_TO_TARGET) {
+            if (pendingItem.isEmpty()) {
+                stage = Stage.DONE;
+                return;
+            }
             if (isNear(pendingTargetChestPos)) {
                 stage = Stage.EXECUTE_TRANSFER;
             } else {
@@ -140,7 +160,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         if (stage == Stage.EXECUTE_TRANSFER) {
             executePendingTransfer(world);
-            stage = Stage.DONE;
+            if (stage == Stage.EXECUTE_TRANSFER) {
+                stage = Stage.DONE;
+            }
         }
     }
 
@@ -166,17 +188,31 @@ public class MasonGuardChestDistributionGoal extends Goal {
                 continue;
             }
 
-            ItemStack extracted = stack.split(1);
-            if (extracted.isEmpty()) {
-                continue;
-            }
-
-            source.setStack(slot, stack);
-            source.markDirty();
-            this.pendingItem = extracted;
-            this.pendingTargetChestPos = selectedRecipient.chestPos();
+            this.pendingItem = ItemStack.EMPTY;
+            this.pendingSourceSlot = slot;
+            this.pendingSourceItem = stack.getItem();
             this.pendingType = type;
             this.pendingOverflowTransfer = false;
+            this.pendingExtractCount = 1;
+            this.pendingCoalBatchMode = false;
+            this.pendingCoalTargets.clear();
+            this.pendingCoalRecipientCount = 0;
+            this.pendingCoalTargetIndex = 0;
+            this.pendingCoalFailedAttempts = 0;
+
+            if ((type == DistributionType.COAL || type == DistributionType.ORE) && recipients.size() > 1) {
+                int cursor = recipientCursorByType.getOrDefault(type, 0);
+                for (int i = 0; i < recipients.size(); i++) {
+                    RecipientRecord recipient = recipients.get(Math.floorMod(cursor + i, recipients.size()));
+                    pendingCoalTargets.add(recipient.chestPos());
+                }
+                this.pendingCoalBatchMode = !pendingCoalTargets.isEmpty();
+                this.pendingCoalRecipientCount = recipients.size();
+                this.pendingExtractCount = Math.max(1, stack.getCount());
+                this.pendingTargetChestPos = pendingCoalBatchMode ? pendingCoalTargets.getFirst() : selectedRecipient.chestPos();
+            } else {
+                this.pendingTargetChestPos = selectedRecipient.chestPos();
+            }
             return true;
         }
 
@@ -195,17 +231,23 @@ public class MasonGuardChestDistributionGoal extends Goal {
                 continue;
             }
 
-            ItemStack extracted = stack.split(1);
-            if (extracted.isEmpty()) {
+            this.pendingItem = ItemStack.EMPTY;
+            this.pendingSourceSlot = slot;
+            this.pendingSourceItem = stack.getItem();
+            RecipientRecord selectedLibrarian = selectRecipient(DistributionType.NONE, librarians);
+            if (selectedLibrarian == null) {
                 continue;
             }
 
-            source.setStack(slot, stack);
-            source.markDirty();
-            this.pendingItem = extracted;
-            this.pendingTargetChestPos = librarians.getFirst().chestPos();
+            this.pendingTargetChestPos = selectedLibrarian.chestPos();
             this.pendingType = DistributionType.NONE;
             this.pendingOverflowTransfer = true;
+            this.pendingExtractCount = 1;
+            this.pendingCoalBatchMode = false;
+            this.pendingCoalTargets.clear();
+            this.pendingCoalRecipientCount = 0;
+            this.pendingCoalTargetIndex = 0;
+            this.pendingCoalFailedAttempts = 0;
             return true;
         }
 
@@ -217,6 +259,11 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return;
         }
 
+        if (pendingCoalBatchMode) {
+            executeCoalBatchTransfer(world);
+            return;
+        }
+
         Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetChestPos);
         if (targetInventory.isEmpty()) {
             returnPendingToSource(world);
@@ -225,15 +272,15 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem.copy());
         if (remaining.isEmpty()) {
-            if (!pendingOverflowTransfer && pendingType != DistributionType.NONE) {
-                List<RecipientRecord> refreshedRecipients = getPrimaryRecipients(world, pendingType);
-                RecipientRecord selected = refreshedRecipients.stream()
-                        .filter(recipient -> recipient.chestPos().equals(pendingTargetChestPos))
-                        .findFirst()
-                        .orElse(null);
-                if (selected != null) {
-                    advanceRecipientCursor(pendingType, refreshedRecipients, selected);
-                }
+            List<RecipientRecord> refreshedRecipients = pendingOverflowTransfer
+                    ? findRecipients(world, VillagerProfession.LIBRARIAN, Blocks.LECTERN)
+                    : getPrimaryRecipients(world, pendingType);
+            RecipientRecord selected = refreshedRecipients.stream()
+                    .filter(recipient -> recipient.chestPos().equals(pendingTargetChestPos))
+                    .findFirst()
+                    .orElse(null);
+            if (selected != null) {
+                advanceRecipientCursor(pendingOverflowTransfer ? DistributionType.NONE : pendingType, refreshedRecipients, selected);
             }
             clearPendingState();
             return;
@@ -241,6 +288,51 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
         pendingItem = remaining;
         returnPendingToSource(world);
+    }
+
+    private void executeCoalBatchTransfer(ServerWorld world) {
+        if (pendingCoalTargets.isEmpty()) {
+            returnPendingToSource(world);
+            return;
+        }
+
+        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetChestPos);
+        if (targetInventory.isPresent()) {
+            ItemStack singleItem = pendingItem.copyWithCount(1);
+            ItemStack remaining = insertStack(targetInventory.get(), singleItem);
+            if (remaining.isEmpty()) {
+                pendingItem.decrement(1);
+                pendingCoalFailedAttempts = 0;
+                advanceBatchCursor();
+            } else {
+                pendingCoalFailedAttempts++;
+            }
+        } else {
+            pendingCoalFailedAttempts++;
+        }
+
+        if (pendingItem.isEmpty()) {
+            clearPendingState();
+            return;
+        }
+
+        if (pendingCoalFailedAttempts >= pendingCoalTargets.size()) {
+            returnPendingToSource(world);
+            return;
+        }
+
+        pendingCoalTargetIndex = (pendingCoalTargetIndex + 1) % pendingCoalTargets.size();
+        pendingTargetChestPos = pendingCoalTargets.get(pendingCoalTargetIndex);
+        stage = Stage.MOVE_TO_TARGET;
+    }
+
+    private void advanceBatchCursor() {
+        int recipientCount = pendingCoalRecipientCount;
+        if (recipientCount <= 0 || pendingType == DistributionType.NONE) {
+            return;
+        }
+        int cursor = recipientCursorByType.getOrDefault(pendingType, 0);
+        recipientCursorByType.put(pendingType, (cursor + 1) % recipientCount);
     }
 
     private void returnPendingToSource(ServerWorld world) {
@@ -263,9 +355,48 @@ public class MasonGuardChestDistributionGoal extends Goal {
 
     private void clearPendingState() {
         this.pendingItem = ItemStack.EMPTY;
+        this.pendingSourceSlot = -1;
+        this.pendingSourceItem = null;
         this.pendingTargetChestPos = null;
         this.pendingType = DistributionType.NONE;
         this.pendingOverflowTransfer = false;
+        this.pendingExtractCount = 1;
+        this.pendingCoalBatchMode = false;
+        this.pendingCoalTargets.clear();
+        this.pendingCoalRecipientCount = 0;
+        this.pendingCoalTargetIndex = 0;
+        this.pendingCoalFailedAttempts = 0;
+    }
+
+    private boolean extractPendingItemFromSource(ServerWorld world, BlockPos sourceChestPos) {
+        if (pendingSourceSlot < 0 || pendingSourceItem == null) {
+            return false;
+        }
+
+        Optional<Inventory> sourceInventory = getChestInventory(world, sourceChestPos);
+        if (sourceInventory.isEmpty()) {
+            return false;
+        }
+
+        Inventory inventory = sourceInventory.get();
+        if (pendingSourceSlot >= inventory.size()) {
+            return false;
+        }
+
+        ItemStack sourceStack = inventory.getStack(pendingSourceSlot);
+        if (sourceStack.isEmpty() || sourceStack.getItem() != pendingSourceItem) {
+            return false;
+        }
+
+        ItemStack extracted = sourceStack.split(Math.max(1, pendingExtractCount));
+        if (extracted.isEmpty()) {
+            return false;
+        }
+
+        inventory.setStack(pendingSourceSlot, sourceStack);
+        inventory.markDirty();
+        pendingItem = extracted;
+        return true;
     }
 
     private void moveTo(BlockPos target) {
@@ -303,7 +434,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return false;
         }
         String path = Registries.ITEM.getId(stack.getItem()).getPath();
-        return path.endsWith("_ore") || RAW_ORE_ITEM_PATHS.contains(path);
+        return path.endsWith("_ore") || RAW_ORE_ITEM_PATHS.contains(path) || ADDITIONAL_ORE_ITEM_PATHS.contains(path);
     }
 
     private boolean isLibrarianOverflowItem(ItemStack stack) {
@@ -406,6 +537,27 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return Optional.empty();
         }
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+    }
+
+
+    private boolean hasContinuousDistributionDemand(ServerWorld world, Inventory source) {
+        for (int slot = 0; slot < source.size(); slot++) {
+            ItemStack stack = source.getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            DistributionType type = classifyPrimaryDistribution(stack);
+            if (type != DistributionType.COAL && type != DistributionType.ORE) {
+                continue;
+            }
+
+            List<RecipientRecord> recipients = getPrimaryRecipients(world, type);
+            if (!recipients.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private double getFullness(Inventory inventory) {

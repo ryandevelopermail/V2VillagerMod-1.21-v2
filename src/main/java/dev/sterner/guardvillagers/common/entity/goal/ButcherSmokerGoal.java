@@ -49,6 +49,10 @@ public class ButcherSmokerGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
+    public void requestImmediateCheck() {
+        this.nextCheckTime = 0L;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
@@ -129,10 +133,20 @@ public class ButcherSmokerGoal extends Goal {
             return false;
         }
         SmokerBlockEntity smoker = smokerOpt.get();
-        if (!smoker.getStack(2).isEmpty() && smoker.getStack(0).isEmpty()) {
+        ItemStack inputStack = smoker.getStack(0);
+        ItemStack fuelStack = smoker.getStack(1);
+        ItemStack outputStack = smoker.getStack(2);
+
+        if (!outputStack.isEmpty() && inputStack.isEmpty()) {
             return true;
         }
-        return findBestMeat(world, chestInventory).isPresent() && findBestFuel(chestInventory).isPresent();
+        if (!inputStack.isEmpty() && fuelStack.isEmpty() && findBestFuel(chestInventory).isPresent()) {
+            return true;
+        }
+        if (inputStack.isEmpty() && findBestMeat(world, chestInventory).isPresent()) {
+            return true;
+        }
+        return false;
     }
 
     private void transferItems(ServerWorld world) {
@@ -145,18 +159,22 @@ public class ButcherSmokerGoal extends Goal {
         if (smoker.getStack(0).isEmpty()) {
             extractSmokerOutput(chestInventory, smoker);
         }
-        ItemStack meatStack = extractBestMeat(world, chestInventory);
-        if (!meatStack.isEmpty()) {
-            ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
-            if (!remaining.isEmpty()) {
-                insertIntoInventory(chestInventory, remaining);
+        if (smoker.getStack(0).isEmpty()) {
+            ItemStack meatStack = extractBestMeat(world, chestInventory);
+            if (!meatStack.isEmpty()) {
+                ItemStack remaining = insertIntoSmoker(smoker, meatStack, 0);
+                if (!remaining.isEmpty()) {
+                    insertIntoInventory(chestInventory, remaining);
+                }
             }
         }
-        ItemStack fuelStack = extractBestFuel(chestInventory);
-        if (!fuelStack.isEmpty()) {
-            ItemStack remaining = insertIntoSmoker(smoker, fuelStack, 1);
-            if (!remaining.isEmpty()) {
-                insertIntoInventory(chestInventory, remaining);
+        if (smoker.getStack(1).isEmpty()) {
+            ItemStack fuelStack = extractBestFuel(chestInventory);
+            if (!fuelStack.isEmpty()) {
+                ItemStack remaining = insertIntoSmoker(smoker, fuelStack, 1);
+                if (!remaining.isEmpty()) {
+                    insertIntoInventory(chestInventory, remaining);
+                }
             }
         }
         chestInventory.markDirty();
