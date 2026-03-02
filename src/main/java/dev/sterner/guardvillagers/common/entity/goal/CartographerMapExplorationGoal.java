@@ -131,6 +131,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 moveTo(explorationWaypoints.get(waypointIndex));
             }
             case GO_TO_TARGET -> {
+                tickActiveMap(world);
                 BlockPos waypoint = explorationWaypoints.get(waypointIndex);
                 if (isNear(waypoint)) {
                     stage = Stage.EXPLORE_MAP;
@@ -140,6 +141,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
             }
             case EXPLORE_MAP -> {
+                tickActiveMap(world);
                 BlockPos waypoint = explorationWaypoints.get(waypointIndex);
                 if (isNear(waypoint)) {
                     if (waypointIndex + 1 < explorationWaypoints.size()) {
@@ -273,6 +275,14 @@ public class CartographerMapExplorationGoal extends Goal {
         explorationWaypoints.add(new BlockPos(westX, y, southZ));
         explorationWaypoints.add(new BlockPos(westX, y, midZ));
         explorationWaypoints.add(new BlockPos(midX, y, midZ));
+    }
+
+    private void tickActiveMap(ServerWorld world) {
+        if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
+            return;
+        }
+        // Ensure map data is populated from villager exploration instead of waiting on player updates.
+        activeMap.inventoryTick(world, villager, 0, true);
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
