@@ -50,7 +50,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
-    private static final int PEN_FENCE_RANGE = 16;
+    private static final int PEN_FENCE_RANGE = 64;
     private static final int PEN_SEARCH_Y_RANGE = 12;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
@@ -292,8 +292,9 @@ public class ShepherdSpecialGoal extends Goal {
         if (taskType == TaskType.BANNER) {
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
-                nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                stage = Stage.DONE;
+                LOGGER.info("Shepherd {} has banner available but no eligible pen was found; returning to chest", villager.getUuidAsString());
+                stage = Stage.RETURN_TO_CHEST;
+                moveTo(chestPos);
                 return;
             }
             stage = Stage.GO_TO_PEN;
