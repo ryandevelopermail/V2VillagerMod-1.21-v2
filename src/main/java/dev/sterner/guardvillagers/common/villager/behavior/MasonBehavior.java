@@ -216,13 +216,13 @@ public class MasonBehavior implements VillagerProfessionBehavior {
                     BlockPos jobPos = jobSite.get();
                     Optional<StorageSlotReference> triggerSlot = findMiningToolTriggerSlot(world, jobPos, chestPos);
                     if (triggerSlot.isPresent()) {
-                        LOGGER.info("Mason {} conversion trigger found at {} slot {} during chest listener scan",
+                        LOGGER.debug("Mason {} conversion trigger found at {} slot {} during chest listener scan",
                                 villager.getUuidAsString(),
                                 triggerSlot.get().sourceDescription(),
                                 triggerSlot.get().slot());
                         tryConvertMasonsWithMiningTool(world);
                     } else {
-                        LOGGER.info("Mason {} conversion trigger missing during chest listener scan around chest {}",
+                        LOGGER.debug("Mason {} conversion trigger missing during chest listener scan around chest {}",
                                 villager.getUuidAsString(),
                                 chestPos.toShortString());
                     }
@@ -304,25 +304,25 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
     private static Optional<MiningToolTrigger> checkMiningToolConversionTrigger(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String source) {
         if (!villager.isAlive()) {
-            LOGGER.info("Mason {} conversion rejected from {}: villager is not alive", villager.getUuidAsString(), source);
+            LOGGER.debug("Mason {} conversion rejected from {}: villager is not alive", villager.getUuidAsString(), source);
             return Optional.empty();
         }
 
         if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.MASON, world.getBlockState(jobPos))) {
-            LOGGER.info("Mason {} conversion rejected from {}: job block at {} is no longer mason-compatible",
+            LOGGER.debug("Mason {} conversion rejected from {}: job block at {} is no longer mason-compatible",
                     villager.getUuidAsString(), source, jobPos.toShortString());
             return Optional.empty();
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
-            LOGGER.info("Mason {} conversion rejected from {}: chest {} is too far from job site {}",
+            LOGGER.debug("Mason {} conversion rejected from {}: chest {} is too far from job site {}",
                     villager.getUuidAsString(), source, chestPos.toShortString(), jobPos.toShortString());
             return Optional.empty();
         }
 
         Optional<StorageSlotReference> triggerSlot = findMiningToolTriggerSlot(world, jobPos, chestPos);
         if (triggerSlot.isEmpty()) {
-            LOGGER.info("Mason {} conversion rejected from {}: no mining-tool trigger in paired storage",
+            LOGGER.debug("Mason {} conversion rejected from {}: no mining-tool trigger in paired storage",
                     villager.getUuidAsString(),
                     source);
             return Optional.empty();
@@ -330,7 +330,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
         Optional<MiningToolTrigger> trigger = takeTriggerFromStorage(world, jobPos, chestPos);
         if (trigger.isPresent()) {
-            LOGGER.info("Mason {} conversion accepted from {} with trigger {} slot {}",
+            LOGGER.debug("Mason {} conversion accepted from {} with trigger {} slot {}",
                     villager.getUuidAsString(),
                     source,
                     trigger.get().sourceDescription(),
@@ -338,7 +338,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             return trigger;
         }
 
-        LOGGER.info("Mason {} conversion rejected from {}: trigger disappeared before conversion execution",
+        LOGGER.debug("Mason {} conversion rejected from {}: trigger disappeared before conversion execution",
                 villager.getUuidAsString(),
                 source);
         return Optional.empty();
@@ -446,7 +446,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
         ItemStack extracted = stack.split(1);
         reference.inventory().markDirty();
-        LOGGER.info("Mason conversion trigger extracted {} from {} slot {}",
+        LOGGER.debug("Mason conversion trigger extracted {} from {} slot {}",
                 extracted.getItem(),
                 reference.sourceDescription(),
                 reference.slot());
