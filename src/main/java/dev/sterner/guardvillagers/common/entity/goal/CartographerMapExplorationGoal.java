@@ -286,17 +286,53 @@ public class CartographerMapExplorationGoal extends Goal {
         }
         // Ensure map data is populated from villager exploration instead of waiting on player updates.
         activeMap.inventoryTick(world, villager, 0, true);
+        forceMapColorUpdate(world);
     }
 
     private void forceCompleteActiveMap(ServerWorld world) {
         if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
             return;
         }
-        try {
-            Method fillExplorationMap = FilledMapItem.class.getMethod("fillExplorationMap", ServerWorld.class, ItemStack.class);
-            fillExplorationMap.invoke(null, world, activeMap);
-        } catch (ReflectiveOperationException ignored) {
-            // Keep normal behavior if runtime method name/signature differs.
+        forceMapColorUpdate(world);
+
+        // Best-effort force-fill for mapping runtimes where exploration ticks still leave gaps.
+        for (Method method : FilledMapItem.class.getDeclaredMethods()) {
+            if (!method.getName().equals("fillExplorationMap")) {
+                continue;
+            }
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length == 2 && params[0].isAssignableFrom(world.getClass()) && params[1] == ItemStack.class) {
+                try {
+                    method.setAccessible(true);
+                    method.invoke(null, world, activeMap);
+                    forceMapColorUpdate(world);
+                    return;
+                } catch (ReflectiveOperationException ignored) {
+                    // Continue trying other signatures.
+                }
+            }
+        }
+    }
+
+    private void forceMapColorUpdate(ServerWorld world) {
+        MapState state = FilledMapItem.getMapState(activeMap, world);
+        if (state == null) {
+            return;
+        }
+        for (Method method : FilledMapItem.class.getDeclaredMethods()) {
+            if (!method.getName().equals("updateColors")) {
+                continue;
+            }
+            Class<?>[] params = method.getParameterTypes();
+            if (params.length == 3 && params[2].isAssignableFrom(state.getClass())) {
+                try {
+                    method.setAccessible(true);
+                    method.invoke(null, world, villager, state);
+                    return;
+                } catch (ReflectiveOperationException ignored) {
+                    // Continue trying other overloads if present.
+                }
+            }
         }
     }
 
