@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.MapColor;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -13,6 +14,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -332,6 +334,7 @@ public class CartographerMapExplorationGoal extends Goal {
             FilledMapItem.fillExplorationMap(world, mapStack);
             forceMapColorUpdate(world, mapStack);
         }
+        populateMapFromWorld(world, mapStack);
         finalizeMapColors(world, mapStack);
     }
 
@@ -374,6 +377,31 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
         filledMapItem.updateColors(world, villager, state);
+        state.markDirty();
+    }
+
+    private void populateMapFromWorld(ServerWorld world, ItemStack mapStack) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return;
+        }
+
+        int scale = state.scale;
+        int sampleStep = 1 << scale;
+        for (int mapX = 0; mapX < 128; mapX++) {
+            for (int mapZ = 0; mapZ < 128; mapZ++) {
+                int worldX = state.centerX + (mapX - 64) * sampleStep;
+                int worldZ = state.centerZ + (mapZ - 64) * sampleStep;
+                int topY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ) - 1;
+                BlockPos samplePos = new BlockPos(worldX, Math.max(world.getBottomY(), topY), worldZ);
+                MapColor mapColor = world.getBlockState(samplePos).getMapColor(world, samplePos);
+                if (mapColor == MapColor.CLEAR) {
+                    continue;
+                }
+                byte packedColor = (byte) (mapColor.id * 4 + 1);
+                state.setColor(mapX, mapZ, packedColor);
+            }
+        }
         state.markDirty();
     }
 
