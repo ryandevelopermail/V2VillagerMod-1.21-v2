@@ -460,7 +460,7 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
-                        nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                        nextCheckTime = resolveNextCheckTimeAfterChestReturn(world);
                     }
                     stage = Stage.DONE;
                 } else {
@@ -474,6 +474,13 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
+        boolean hasBannerAvailable = hasBannerInInventoryOrHand()
+                || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
+
+        if (hasBannerAvailable && findNearestPenTarget(world) != null) {
+            return TaskType.BANNER;
+        }
+
         if (inventory == null) {
             if (hasShearsInInventoryOrHand()) {
                 return TaskType.SHEARS;
@@ -481,7 +488,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
                 return TaskType.WHEAT_GATHER;
             }
-            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
+            return null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
@@ -493,11 +500,17 @@ public class ShepherdSpecialGoal extends Goal {
             return TaskType.WHEAT_GATHER;
         }
 
-        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
-            return TaskType.BANNER;
-        }
-
         return null;
+    }
+
+    private long resolveNextCheckTimeAfterChestReturn(ServerWorld world) {
+        if (taskType == TaskType.BANNER) {
+            boolean hasMoreBanners = hasBannerInInventoryOrHand() || countBannersInChest(world) > 0;
+            if (hasMoreBanners && findNearestPenTarget(world) != null) {
+                return world.getTime() + 20L;
+            }
+        }
+        return world.getTime() + nextRandomCheckInterval();
     }
 
     private boolean hasMatchingItem(Inventory inventory, Predicate<ItemStack> matcher) {
