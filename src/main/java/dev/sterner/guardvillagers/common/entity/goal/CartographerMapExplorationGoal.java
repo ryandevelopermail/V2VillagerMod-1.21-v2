@@ -204,6 +204,12 @@ public class CartographerMapExplorationGoal extends Goal {
             if (!stack.isOf(Items.FILLED_MAP)) {
                 continue;
             }
+            // Defensive post-processing: maps left in the paired chest must always be player-ready,
+            // even when a previous run was interrupted mid-route.
+            if (isMostlyUncolored(stack, world)) {
+                forceCompleteMapStack(world, stack);
+                inventory.markDirty();
+            }
             MapState state = FilledMapItem.getMapState(stack, world);
             if (state == null) {
                 continue;
@@ -303,6 +309,23 @@ public class CartographerMapExplorationGoal extends Goal {
             forceMapColorUpdate(world, mapStack);
         }
         finalizeMapColors(world, mapStack);
+    }
+
+    private boolean isMostlyUncolored(ItemStack mapStack, ServerWorld world) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return true;
+        }
+        int colored = 0;
+        for (byte color : state.colors) {
+            if (color != 0) {
+                colored++;
+                if (colored >= 128) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private void forceMapColorUpdate(ServerWorld world, ItemStack mapStack) {
