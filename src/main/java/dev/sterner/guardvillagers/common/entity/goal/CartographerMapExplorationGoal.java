@@ -14,6 +14,7 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -149,11 +150,13 @@ public class CartographerMapExplorationGoal extends Goal {
                         moveTo(explorationWaypoints.get(waypointIndex));
                     } else {
                         mappedTargets.add(currentTarget.key());
+                        forceCompleteActiveMap(world);
                         stage = Stage.RETURN_TO_CHEST;
                         moveTo(chestPos);
                     }
                 } else if (world.getTime() - mapExploreStartTick >= MAP_EXPLORE_TIMEOUT_TICKS) {
                     mappedTargets.add(currentTarget.key());
+                    forceCompleteActiveMap(world);
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
                 } else {
@@ -283,6 +286,18 @@ public class CartographerMapExplorationGoal extends Goal {
         }
         // Ensure map data is populated from villager exploration instead of waiting on player updates.
         activeMap.inventoryTick(world, villager, 0, true);
+    }
+
+    private void forceCompleteActiveMap(ServerWorld world) {
+        if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
+            return;
+        }
+        try {
+            Method fillExplorationMap = FilledMapItem.class.getMethod("fillExplorationMap", ServerWorld.class, ItemStack.class);
+            fillExplorationMap.invoke(null, world, activeMap);
+        } catch (ReflectiveOperationException ignored) {
+            // Keep normal behavior if runtime method name/signature differs.
+        }
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
