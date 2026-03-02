@@ -257,16 +257,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else if (taskType == TaskType.BANNER) {
-            if (hasBannerInInventoryOrHand()) {
-                carriedItem = getBannerInInventoryOrHand();
-            } else {
-                carriedItem = takeItemFromChest(world, taskType);
-            }
-            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
-                nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                stage = Stage.DONE;
-                return;
-            }
+            carriedItem = ItemStack.EMPTY;
         } else {
             if (!equipWheatForGathering(world)) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -292,11 +283,25 @@ public class ShepherdSpecialGoal extends Goal {
         if (taskType == TaskType.BANNER) {
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
-                LOGGER.info("Shepherd {} has banner available but no eligible pen was found; returning to chest", villager.getUuidAsString());
-                stage = Stage.RETURN_TO_CHEST;
-                moveTo(chestPos);
+                LOGGER.info("Shepherd {} has banner available but no eligible pen was found; delaying pickup", villager.getUuidAsString());
+                nextCheckTime = world.getTime() + 20L;
+                stage = Stage.DONE;
                 return;
             }
+
+            if (hasBannerInInventoryOrHand()) {
+                carriedItem = getBannerInInventoryOrHand();
+            } else {
+                carriedItem = takeItemFromChest(world, taskType);
+            }
+            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
+                LOGGER.info("Shepherd {} found pen {} but no banner remained to carry", villager.getUuidAsString(), penTarget.toShortString());
+                nextCheckTime = world.getTime() + 20L;
+                stage = Stage.DONE;
+                return;
+            }
+
+            LOGGER.info("Shepherd {} starting banner placement run toward pen {}", villager.getUuidAsString(), penTarget.toShortString());
             stage = Stage.GO_TO_PEN;
             moveTo(penTarget);
             return;
