@@ -25,7 +25,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 600;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final int MAP_UPDATE_TICKS = 200;
+    private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
 
     private final VillagerEntity villager;
@@ -39,7 +39,9 @@ public class CartographerMapExplorationGoal extends Goal {
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private MapTarget currentTarget;
     private ItemStack activeMap = ItemStack.EMPTY;
-    private long mapUpdateStartTick;
+    private final List<BlockPos> explorationWaypoints = new ArrayList<>();
+    private int waypointIndex;
+    private long mapExploreStartTick;
 
     public CartographerMapExplorationGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -124,22 +126,36 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
                 activeMap = FilledMapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
                 villager.setStackInHand(Hand.MAIN_HAND, activeMap);
+                prepareExplorationPath(currentTarget);
                 stage = Stage.GO_TO_TARGET;
-                moveTo(currentTarget.toPos(jobPos.getY()));
+                moveTo(explorationWaypoints.get(waypointIndex));
             }
             case GO_TO_TARGET -> {
-                if (isNear(currentTarget.toPos(jobPos.getY()))) {
-                    stage = Stage.WAIT_FOR_UPDATE;
-                    mapUpdateStartTick = world.getTime();
+                BlockPos waypoint = explorationWaypoints.get(waypointIndex);
+                if (isNear(waypoint)) {
+                    stage = Stage.EXPLORE_MAP;
+                    mapExploreStartTick = world.getTime();
                 } else {
-                    moveTo(currentTarget.toPos(jobPos.getY()));
+                    moveTo(waypoint);
                 }
             }
-            case WAIT_FOR_UPDATE -> {
-                if (world.getTime() - mapUpdateStartTick >= MAP_UPDATE_TICKS) {
+            case EXPLORE_MAP -> {
+                BlockPos waypoint = explorationWaypoints.get(waypointIndex);
+                if (isNear(waypoint)) {
+                    if (waypointIndex + 1 < explorationWaypoints.size()) {
+                        waypointIndex++;
+                        moveTo(explorationWaypoints.get(waypointIndex));
+                    } else {
+                        mappedTargets.add(currentTarget.key());
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                    }
+                } else if (world.getTime() - mapExploreStartTick >= MAP_EXPLORE_TIMEOUT_TICKS) {
                     mappedTargets.add(currentTarget.key());
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
+                } else {
+                    moveTo(waypoint);
                 }
             }
             case RETURN_TO_CHEST -> {
@@ -220,6 +236,29 @@ public class CartographerMapExplorationGoal extends Goal {
             int centerZ = mapIndexZ * mapSize + mapSize / 2;
             pendingTargets.add(new MapTarget(centerX, centerZ, key));
         }
+    }
+
+
+    private void prepareExplorationPath(MapTarget target) {
+        explorationWaypoints.clear();
+        waypointIndex = 0;
+
+        int mapSize = getMapSize(mapScale);
+        int y = jobPos.getY();
+        int half = mapSize / 2;
+        int inset = Math.max(16, mapSize / 8);
+
+        int westX = target.centerX() - half + inset;
+        int eastX = target.centerX() + half - inset;
+        int northZ = target.centerZ() - half + inset;
+        int southZ = target.centerZ() + half - inset;
+
+        explorationWaypoints.add(new BlockPos(target.centerX(), y, target.centerZ()));
+        explorationWaypoints.add(new BlockPos(westX, y, northZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, northZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, southZ));
+        explorationWaypoints.add(new BlockPos(westX, y, southZ));
+        explorationWaypoints.add(new BlockPos(target.centerX(), y, target.centerZ()));
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
@@ -312,7 +351,7 @@ public class CartographerMapExplorationGoal extends Goal {
         IDLE,
         ACQUIRE_MAP,
         GO_TO_TARGET,
-        WAIT_FOR_UPDATE,
+        EXPLORE_MAP,
         RETURN_TO_CHEST,
         DONE
     }
