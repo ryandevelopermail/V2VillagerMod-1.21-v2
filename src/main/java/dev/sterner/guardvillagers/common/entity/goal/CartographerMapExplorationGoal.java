@@ -168,6 +168,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null && !activeMap.isEmpty()) {
+                        forceCompleteActiveMap(world);
                         insertStack(inventory, activeMap.copy());
                         inventory.markDirty();
                     }
@@ -294,24 +295,29 @@ public class CartographerMapExplorationGoal extends Goal {
         if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
             return;
         }
-        forceMapColorUpdate(world);
 
-        // Best-effort force-fill for mapping runtimes where exploration ticks still leave gaps.
-        for (Method method : FilledMapItem.class.getDeclaredMethods()) {
-            if (!method.getName().equals("fillExplorationMap") || !Modifier.isStatic(method.getModifiers())) {
-                continue;
-            }
-            Class<?>[] params = method.getParameterTypes();
-            if (params.length == 2 && params[0].isAssignableFrom(world.getClass()) && params[1] == ItemStack.class) {
-                try {
-                    method.setAccessible(true);
-                    method.invoke(null, world, activeMap);
-                    forceMapColorUpdate(world);
-                    return;
-                } catch (ReflectiveOperationException ignored) {
-                    // Continue trying other signatures.
+        // Run multiple completion passes to ensure non-first maps are fully populated too.
+        for (int pass = 0; pass < 4; pass++) {
+            activeMap.inventoryTick(world, villager, 0, true);
+            forceMapColorUpdate(world);
+
+            // Best-effort force-fill for mapping runtimes where exploration ticks still leave gaps.
+            for (Method method : FilledMapItem.class.getDeclaredMethods()) {
+                if (!method.getName().equals("fillExplorationMap") || !Modifier.isStatic(method.getModifiers())) {
+                    continue;
+                }
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length == 2 && params[0].isAssignableFrom(world.getClass()) && params[1] == ItemStack.class) {
+                    try {
+                        method.setAccessible(true);
+                        method.invoke(null, world, activeMap);
+                    } catch (ReflectiveOperationException ignored) {
+                        // Continue trying other signatures.
+                    }
                 }
             }
+
+            forceMapColorUpdate(world);
         }
     }
 
