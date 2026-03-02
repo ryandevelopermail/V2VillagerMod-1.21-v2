@@ -51,7 +51,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
     private static final int PEN_FENCE_RANGE = 64;
-    private static final int PEN_SEARCH_Y_RANGE = 12;
+    private static final int PEN_SEARCH_Y_RANGE = 24;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
@@ -284,7 +284,7 @@ public class ShepherdSpecialGoal extends Goal {
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
                 LOGGER.info("Shepherd {} has banner available but no eligible pen was found; delaying pickup", villager.getUuidAsString());
-                nextCheckTime = world.getTime() + 20L;
+                nextCheckTime = world.getTime() + 100L;
                 stage = Stage.DONE;
                 return;
             }
@@ -296,7 +296,7 @@ public class ShepherdSpecialGoal extends Goal {
             }
             if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
                 LOGGER.info("Shepherd {} found pen {} but no banner remained to carry", villager.getUuidAsString(), penTarget.toShortString());
-                nextCheckTime = world.getTime() + 20L;
+                nextCheckTime = world.getTime() + 100L;
                 stage = Stage.DONE;
                 return;
             }
@@ -1405,8 +1405,8 @@ public class ShepherdSpecialGoal extends Goal {
     private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
         LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
         for (BlockPos bannerPos : bannerCandidates) {
-            int yStart = Math.max(minY, bannerPos.getY() - 3);
-            int yEnd = Math.min(maxY, bannerPos.getY() + 3);
+            int yStart = Math.max(minY, bannerPos.getY() - PEN_SEARCH_Y_RANGE);
+            int yEnd = Math.min(maxY, bannerPos.getY() + PEN_SEARCH_Y_RANGE);
             for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
                 for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
                     for (int y = yStart; y <= yEnd; y++) {
