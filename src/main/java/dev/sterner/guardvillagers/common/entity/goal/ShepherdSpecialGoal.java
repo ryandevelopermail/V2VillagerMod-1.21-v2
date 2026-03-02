@@ -57,7 +57,6 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
-    private static final double SHEAR_GATE_INTERACT_RANGE_SQUARED = 16.0D;
     private static final int SHEAR_STAGE_STUCK_TIMEOUT_TICKS = 240;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
@@ -416,14 +415,12 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
-                if (taskType != TaskType.SHEARS) {
-                    updatePenGateAccess(world, penGatePos);
-                }
+                updatePenGateAccess(world, penGatePos);
 
                 if (taskType == TaskType.SHEARS) {
                     if (penGatePos != null && penTarget.equals(penGatePos)) {
-                        if (!ensureShearGateOpen(world, penGatePos)) {
-                            moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                        if (!isNear(penGatePos)) {
+                            moveTo(penGatePos);
                             return;
                         }
                         penTarget = currentShearPenCenter;
@@ -507,8 +504,9 @@ public class ShepherdSpecialGoal extends Goal {
                     }
                 }
 
-                if (penGatePos != null && !ensureShearGateClosed(world, penGatePos)) {
-                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                updatePenGateAccess(world, penGatePos);
+                if (penGatePos != null && isInsideFencePen(world, villager.getBlockPos())) {
+                    moveTo(penTarget == null ? penGatePos : penTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
 
@@ -590,9 +588,7 @@ public class ShepherdSpecialGoal extends Goal {
                 }
             }
             case RETURN_TO_CHEST -> {
-                if (taskType != TaskType.SHEARS) {
-                    updatePenGateAccess(world, penGatePos);
-                }
+                updatePenGateAccess(world, penGatePos);
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
@@ -1558,52 +1554,6 @@ public class ShepherdSpecialGoal extends Goal {
 
         shearStageStartTick = world.getTime();
         lastShearObservedStage = stage;
-    }
-
-    private boolean isWithinRangeSquared(BlockPos pos, double rangeSquared) {
-        return villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= rangeSquared;
-    }
-
-    private boolean ensureShearGateOpen(ServerWorld world, BlockPos gatePos) {
-        if (gatePos == null) {
-            return false;
-        }
-        BlockState state = world.getBlockState(gatePos);
-        if (!(state.getBlock() instanceof FenceGateBlock)) {
-            return false;
-        }
-        if (!isWithinRangeSquared(gatePos, SHEAR_GATE_INTERACT_RANGE_SQUARED)) {
-            return false;
-        }
-        if (!state.get(FenceGateBlock.OPEN)) {
-            openGate(world, gatePos, true);
-        }
-        openedPenGate = true;
-        wasInsidePen = true;
-        return true;
-    }
-
-    private boolean ensureShearGateClosed(ServerWorld world, BlockPos gatePos) {
-        if (gatePos == null) {
-            return true;
-        }
-        BlockState state = world.getBlockState(gatePos);
-        if (!(state.getBlock() instanceof FenceGateBlock)) {
-            return true;
-        }
-        if (!isWithinRangeSquared(gatePos, SHEAR_GATE_INTERACT_RANGE_SQUARED)) {
-            return false;
-        }
-        if (state.get(FenceGateBlock.OPEN)) {
-            openGate(world, gatePos, false);
-            state = world.getBlockState(gatePos);
-        }
-        boolean closed = !state.get(FenceGateBlock.OPEN);
-        if (closed) {
-            openedPenGate = false;
-            wasInsidePen = false;
-        }
-        return closed;
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
