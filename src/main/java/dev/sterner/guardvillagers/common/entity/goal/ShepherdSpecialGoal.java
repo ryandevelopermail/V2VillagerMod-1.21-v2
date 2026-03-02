@@ -282,6 +282,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (taskType == TaskType.BANNER) {
+            LOGGER.info("Shepherd {} banner workflow kickoff (gate-first-v2)", villager.getUuidAsString());
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
                 LOGGER.info("Shepherd {} has banner available but no eligible pen was found; delaying pickup", villager.getUuidAsString());
@@ -974,10 +975,6 @@ public class ShepherdSpecialGoal extends Goal {
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
-        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
-            penGatePos = cachedNearestPenGatePos;
-            return cachedNearestPenTarget;
-        }
 
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
