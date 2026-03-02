@@ -29,6 +29,7 @@ import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -50,8 +51,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int SHEEP_SCAN_RANGE = 50;
     private static final int PEN_SCAN_RANGE = 100;
-    private static final int PEN_FENCE_RANGE = 16;
-    private static final int PEN_SEARCH_Y_RANGE = 12;
+    private static final int PEN_FENCE_RANGE = 64;
+    private static final int PEN_SEARCH_Y_RANGE = 24;
     private static final int PEN_BANNER_TO_GATE_SCAN_RADIUS = 24;
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
@@ -173,7 +174,7 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask != TaskType.SHEARS && !world.isDay()) {
+        if (nextTask == TaskType.WHEAT_GATHER && !world.isDay()) {
             return false;
         }
 
@@ -257,16 +258,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
         } else if (taskType == TaskType.BANNER) {
-            if (hasBannerInInventoryOrHand()) {
-                carriedItem = getBannerInInventoryOrHand();
-            } else {
-                carriedItem = takeItemFromChest(world, taskType);
-            }
-            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
-                nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                stage = Stage.DONE;
-                return;
-            }
+            carriedItem = ItemStack.EMPTY;
         } else {
             if (!equipWheatForGathering(world)) {
                 nextCheckTime = world.getTime() + nextRandomCheckInterval();
@@ -290,12 +282,28 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (taskType == TaskType.BANNER) {
+            LOGGER.info("Shepherd {} banner workflow kickoff (gate-first-v2)", villager.getUuidAsString());
             penTarget = findNearestPenTarget(world);
             if (penTarget == null) {
-                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                LOGGER.info("Shepherd {} has banner available but no eligible pen was found; delaying pickup", villager.getUuidAsString());
+                nextCheckTime = world.getTime() + 100L;
                 stage = Stage.DONE;
                 return;
             }
+
+            if (hasBannerInInventoryOrHand()) {
+                carriedItem = getBannerInInventoryOrHand();
+            } else {
+                carriedItem = takeItemFromChest(world, taskType);
+            }
+            if (carriedItem.isEmpty() && !hasBannerInInventoryOrHand()) {
+                LOGGER.info("Shepherd {} found pen {} but no banner remained to carry", villager.getUuidAsString(), penTarget.toShortString());
+                nextCheckTime = world.getTime() + 100L;
+                stage = Stage.DONE;
+                return;
+            }
+
+            LOGGER.info("Shepherd {} starting banner placement run toward gate {}", villager.getUuidAsString(), penTarget.toShortString());
             stage = Stage.GO_TO_PEN;
             moveTo(penTarget);
             return;
@@ -375,6 +383,20 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 updatePenGateAccess(world, penGatePos);
+
+                if (penGatePos != null && penTarget.equals(penGatePos) && isNear(penGatePos)) {
+                    BlockState gateState = world.getBlockState(penGatePos);
+                    BlockPos insidePos = getPenInterior(world, penGatePos, gateState);
+                    BlockPos center = insidePos == null ? null : getPenCenter(world, insidePos);
+                    if (center == null || hasBannerInPen(world, center)) {
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                        return;
+                    }
+                    penTarget = center.toImmutable();
+                    moveTo(penTarget);
+                    return;
+                }
 
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
@@ -460,7 +482,7 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
-                        nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                        nextCheckTime = resolveNextCheckTimeAfterChestReturn(world);
                     }
                     stage = Stage.DONE;
                 } else {
@@ -474,6 +496,13 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
+        boolean hasBannerAvailable = hasBannerInInventoryOrHand()
+                || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
+
+        if (hasBannerAvailable) {
+            return TaskType.BANNER;
+        }
+
         if (inventory == null) {
             if (hasShearsInInventoryOrHand()) {
                 return TaskType.SHEARS;
@@ -481,7 +510,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (hasWheatInInventoryOrOffhand() && hasGroundBannerNearby(world)) {
                 return TaskType.WHEAT_GATHER;
             }
-            return hasBannerInInventoryOrHand() ? TaskType.BANNER : null;
+            return null;
         }
 
         if (hasShearsInChestOrInventory(inventory)) {
@@ -493,11 +522,17 @@ public class ShepherdSpecialGoal extends Goal {
             return TaskType.WHEAT_GATHER;
         }
 
-        if (hasBannerInInventoryOrHand() || hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS))) {
-            return TaskType.BANNER;
-        }
-
         return null;
+    }
+
+    private long resolveNextCheckTimeAfterChestReturn(ServerWorld world) {
+        if (taskType == TaskType.BANNER) {
+            boolean hasMoreBanners = hasBannerInInventoryOrHand() || countBannersInChest(world) > 0;
+            if (hasMoreBanners && findNearestPenTarget(world) != null) {
+                return world.getTime() + 20L;
+            }
+        }
+        return world.getTime() + nextRandomCheckInterval();
     }
 
     private boolean hasMatchingItem(Inventory inventory, Predicate<ItemStack> matcher) {
@@ -933,61 +968,75 @@ public class ShepherdSpecialGoal extends Goal {
         };
     }
 
+
+    private void logGateCandidate(BlockPos gatePos, String reason) {
+        LOGGER.info("Shepherd {} gate candidate {} rejected: {}", villager.getUuidAsString(), gatePos.toShortString(), reason);
+    }
+
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
-        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
-            penGatePos = cachedNearestPenGatePos;
-            return cachedNearestPenTarget;
-        }
 
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
-        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
-        List<BlockPos> gateCandidates = bannerCandidates.isEmpty()
-                ? collectFallbackGateCandidates(world, villagerPos, minY, maxY)
-                : collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
-        BlockPos nearest = null;
+        List<BlockPos> gateCandidates = collectFallbackGateCandidates(world, villagerPos, minY, maxY);
+        LOGGER.info("Shepherd {} evaluating {} gate candidate(s) within {} blocks", villager.getUuidAsString(), gateCandidates.size(), PEN_SCAN_RANGE);
+
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
+                logGateCandidate(gatePos, "not a fence gate block state at evaluation time");
                 continue;
             }
 
             BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null) {
+                logGateCandidate(gatePos, "could not resolve enclosed interior from either gate side");
                 continue;
             }
 
             if (!isInsideFencePen(world, insidePos)) {
+                logGateCandidate(gatePos, "interior candidate " + insidePos.toShortString() + " is not fully enclosed by fence");
                 continue;
             }
 
             BlockPos penCenter = getPenCenter(world, insidePos);
             if (penCenter == null) {
+                logGateCandidate(gatePos, "failed to compute pen center from interior " + insidePos.toShortString());
                 continue;
             }
 
             if (hasBannerInPen(world, penCenter)) {
+                logGateCandidate(gatePos, "pen already contains banner near center " + penCenter.toShortString());
                 continue;
             }
 
-            double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
+            double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+            LOGGER.info("Shepherd {} gate candidate {} accepted (center {}, distanceSq={})",
+                    villager.getUuidAsString(),
+                    gatePos.toShortString(),
+                    penCenter.toShortString(),
+                    String.format("%.2f", distance));
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                nearest = penCenter.toImmutable();
                 nearestGate = gatePos.toImmutable();
             }
         }
 
+        if (nearestGate == null) {
+            LOGGER.info("Shepherd {} found no valid gate candidates after evaluating {} gate(s)", villager.getUuidAsString(), gateCandidates.size());
+        } else {
+            LOGGER.info("Shepherd {} selected gate {} as nearest valid pen entry", villager.getUuidAsString(), nearestGate.toShortString());
+        }
+
         nearestPenCacheTick = now;
-        cachedNearestPenTarget = nearest;
+        cachedNearestPenTarget = nearestGate;
         cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
-        return nearest;
+        return nearestGate;
     }
 
     private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos villagerPos, int minY, int maxY) {
@@ -996,22 +1045,77 @@ public class ShepherdSpecialGoal extends Goal {
         if (jobPos != null && !jobPos.equals(villagerPos)) {
             searchAnchors.add(jobPos);
         }
+        if (chestPos != null && !chestPos.equals(villagerPos) && !chestPos.equals(jobPos)) {
+            searchAnchors.add(chestPos);
+        }
         return collectNearbyGateCandidates(world, villagerPos, searchAnchors, PEN_SCAN_RANGE, minY, maxY, PEN_GATE_CHECK_LIMIT);
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
-        if (state.contains(FenceGateBlock.FACING)) {
-            Direction facing = state.get(FenceGateBlock.FACING);
-            BlockPos front = gatePos.offset(facing);
-            BlockPos back = gatePos.offset(facing.getOpposite());
-            if (isInsideFencePen(world, front)) {
-                return front;
+        if (!state.contains(FenceGateBlock.FACING)) {
+            return null;
+        }
+
+        Direction facing = state.get(FenceGateBlock.FACING);
+        BlockPos front = gatePos.offset(facing);
+        BlockPos back = gatePos.offset(facing.getOpposite());
+
+        BlockPos frontInterior = findInteriorFromGateSide(world, front, gatePos);
+        if (frontInterior != null) {
+            return frontInterior;
+        }
+
+        return findInteriorFromGateSide(world, back, gatePos);
+    }
+
+    private BlockPos findInteriorFromGateSide(ServerWorld world, BlockPos startPos, BlockPos gatePos) {
+        if (isInsideFencePen(world, startPos)) {
+            return startPos.toImmutable();
+        }
+
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        LinkedHashSet<BlockPos> visited = new LinkedHashSet<>();
+        queue.add(startPos.toImmutable());
+        visited.add(startPos.toImmutable());
+
+        int maxNodes = 256;
+        int maxDistance = 8;
+
+        while (!queue.isEmpty() && visited.size() <= maxNodes) {
+            BlockPos current = queue.poll();
+            if (current == null) {
+                continue;
             }
-            if (isInsideFencePen(world, back)) {
-                return back;
+
+            if (isInsideFencePen(world, current)) {
+                return current.toImmutable();
+            }
+
+            for (Direction direction : Direction.Type.HORIZONTAL) {
+                BlockPos next = current.offset(direction);
+                if (visited.contains(next)) {
+                    continue;
+                }
+                if (!gatePos.isWithinDistance(next, maxDistance)) {
+                    continue;
+                }
+                if (!isPenWalkable(world, next)) {
+                    continue;
+                }
+                visited.add(next.toImmutable());
+                queue.add(next.toImmutable());
             }
         }
+
         return null;
+    }
+
+    private boolean isPenWalkable(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+            return false;
+        }
+        return state.isAir();
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
@@ -1386,8 +1490,8 @@ public class ShepherdSpecialGoal extends Goal {
     private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
         LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
         for (BlockPos bannerPos : bannerCandidates) {
-            int yStart = Math.max(minY, bannerPos.getY() - 3);
-            int yEnd = Math.min(maxY, bannerPos.getY() + 3);
+            int yStart = Math.max(minY, bannerPos.getY() - PEN_SEARCH_Y_RANGE);
+            int yEnd = Math.min(maxY, bannerPos.getY() + PEN_SEARCH_Y_RANGE);
             for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
                 for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
                     for (int y = yStart; y <= yEnd; y++) {
