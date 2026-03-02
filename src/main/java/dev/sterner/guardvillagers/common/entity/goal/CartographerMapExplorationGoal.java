@@ -25,7 +25,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 600;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final int MAP_UPDATE_TICKS = 200;
+    private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
 
     private final VillagerEntity villager;
@@ -35,12 +35,13 @@ public class CartographerMapExplorationGoal extends Goal {
     private long nextCheckTime;
     private boolean immediateCheckPending;
     private int mapScale = DEFAULT_MAP_SCALE;
-    private int gridSize = 2;
     private final Set<Long> mappedTargets = new HashSet<>();
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private MapTarget currentTarget;
     private ItemStack activeMap = ItemStack.EMPTY;
-    private long mapUpdateStartTick;
+    private final List<BlockPos> explorationWaypoints = new ArrayList<>();
+    private int waypointIndex;
+    private long mapExploreStartTick;
 
     public CartographerMapExplorationGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -125,29 +126,49 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
                 activeMap = FilledMapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
                 villager.setStackInHand(Hand.MAIN_HAND, activeMap);
+                prepareExplorationPath(currentTarget);
                 stage = Stage.GO_TO_TARGET;
-                moveTo(currentTarget.toPos(jobPos.getY()));
+                moveTo(explorationWaypoints.get(waypointIndex));
             }
             case GO_TO_TARGET -> {
-                if (isNear(currentTarget.toPos(jobPos.getY()))) {
-                    stage = Stage.WAIT_FOR_UPDATE;
-                    mapUpdateStartTick = world.getTime();
+                tickActiveMap(world);
+                BlockPos waypoint = explorationWaypoints.get(waypointIndex);
+                if (isNear(waypoint)) {
+                    stage = Stage.EXPLORE_MAP;
+                    mapExploreStartTick = world.getTime();
                 } else {
-                    moveTo(currentTarget.toPos(jobPos.getY()));
+                    moveTo(waypoint);
                 }
             }
-            case WAIT_FOR_UPDATE -> {
-                if (world.getTime() - mapUpdateStartTick >= MAP_UPDATE_TICKS) {
+            case EXPLORE_MAP -> {
+                tickActiveMap(world);
+                BlockPos waypoint = explorationWaypoints.get(waypointIndex);
+                if (isNear(waypoint)) {
+                    if (waypointIndex + 1 < explorationWaypoints.size()) {
+                        waypointIndex++;
+                        moveTo(explorationWaypoints.get(waypointIndex));
+                    } else {
+                        mappedTargets.add(currentTarget.key());
+                        forceCompleteMapStack(world, activeMap);
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                    }
+                } else if (world.getTime() - mapExploreStartTick >= MAP_EXPLORE_TIMEOUT_TICKS) {
                     mappedTargets.add(currentTarget.key());
+                    forceCompleteMapStack(world, activeMap);
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
+                } else {
+                    moveTo(waypoint);
                 }
             }
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null && !activeMap.isEmpty()) {
-                        insertStack(inventory, activeMap.copy());
+                        ItemStack finalizedMap = activeMap.copy();
+                        forceCompleteMapStack(world, finalizedMap);
+                        insertStack(inventory, finalizedMap);
                         inventory.markDirty();
                     }
                     activeMap = ItemStack.EMPTY;
@@ -189,8 +210,8 @@ public class CartographerMapExplorationGoal extends Goal {
             }
             mapScale = state.scale;
             int mapSize = getMapSize(mapScale);
-            int mapIndexX = Math.floorDiv(state.centerX, mapSize);
-            int mapIndexZ = Math.floorDiv(state.centerZ, mapSize);
+            int mapIndexX = worldToMapIndex(state.centerX, mapSize);
+            int mapIndexZ = worldToMapIndex(state.centerZ, mapSize);
             mappedTargets.add(packKey(mapIndexX, mapIndexZ));
         }
     }
@@ -198,33 +219,133 @@ public class CartographerMapExplorationGoal extends Goal {
     private void buildTargets(ServerWorld world) {
         pendingTargets.clear();
         int mapSize = getMapSize(mapScale);
-        int baseIndexX = Math.floorDiv(jobPos.getX(), mapSize);
-        int baseIndexZ = Math.floorDiv(jobPos.getZ(), mapSize);
-        gridSize = determineGridSize(mappedTargets.size());
-        int half = gridSize / 2;
-        int startX = baseIndexX - half;
-        int startZ = baseIndexZ - half;
-        for (int offsetX = 0; offsetX < gridSize; offsetX++) {
-            for (int offsetZ = 0; offsetZ < gridSize; offsetZ++) {
-                int mapIndexX = startX + offsetX;
-                int mapIndexZ = startZ + offsetZ;
-                long key = packKey(mapIndexX, mapIndexZ);
-                if (mappedTargets.contains(key)) {
-                    continue;
-                }
-                int centerX = mapIndexX * mapSize + mapSize / 2;
-                int centerZ = mapIndexZ * mapSize + mapSize / 2;
-                pendingTargets.add(new MapTarget(centerX, centerZ, key));
+        int baseIndexX = worldToMapIndex(jobPos.getX(), mapSize);
+        int baseIndexZ = worldToMapIndex(jobPos.getZ(), mapSize);
+
+        // Always target a fixed 2x2 set, anchored at the job-site map index.
+        // Order: base, right, below-base, below-right.
+        int[][] offsets = {
+                {0, 0},
+                {1, 0},
+                {0, 1},
+                {1, 1}
+        };
+
+        for (int[] offset : offsets) {
+            int mapIndexX = baseIndexX + offset[0];
+            int mapIndexZ = baseIndexZ + offset[1];
+            long key = packKey(mapIndexX, mapIndexZ);
+            if (mappedTargets.contains(key)) {
+                continue;
             }
+            int centerX = mapIndexToCenter(mapIndexX, mapSize);
+            int centerZ = mapIndexToCenter(mapIndexZ, mapSize);
+            pendingTargets.add(new MapTarget(centerX, centerZ, key));
         }
     }
 
-    private int determineGridSize(int mappedCount) {
-        int size = 2;
-        while (mappedCount >= size * size) {
-            size++;
+    private int worldToMapIndex(int coordinate, int mapSize) {
+        return Math.floorDiv(coordinate + 64, mapSize);
+    }
+
+    private int mapIndexToCenter(int mapIndex, int mapSize) {
+        return mapIndex * mapSize + mapSize / 2 - 64;
+    }
+
+
+    private void prepareExplorationPath(MapTarget target) {
+        explorationWaypoints.clear();
+        waypointIndex = 0;
+
+        int mapSize = getMapSize(mapScale);
+        int y = jobPos.getY();
+        int half = mapSize / 2;
+        int inset = Math.max(8, mapSize / 16);
+
+        int westX = target.centerX() - half + inset;
+        int eastX = target.centerX() + half - inset;
+        int northZ = target.centerZ() - half + inset;
+        int southZ = target.centerZ() + half - inset;
+        int midX = target.centerX();
+        int midZ = target.centerZ();
+
+        explorationWaypoints.add(new BlockPos(midX, y, midZ));
+        explorationWaypoints.add(new BlockPos(westX, y, northZ));
+        explorationWaypoints.add(new BlockPos(midX, y, northZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, northZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, midZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, southZ));
+        explorationWaypoints.add(new BlockPos(midX, y, southZ));
+        explorationWaypoints.add(new BlockPos(westX, y, southZ));
+        explorationWaypoints.add(new BlockPos(westX, y, midZ));
+        explorationWaypoints.add(new BlockPos(midX, y, midZ));
+    }
+
+    private void tickActiveMap(ServerWorld world) {
+        if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
+            return;
         }
-        return size;
+        // Ensure map data is populated from villager exploration instead of waiting on player updates.
+        activeMap.inventoryTick(world, villager, 0, true);
+        forceMapColorUpdate(world, activeMap);
+    }
+
+    private void forceCompleteMapStack(ServerWorld world, ItemStack mapStack) {
+        if (mapStack.isEmpty() || !mapStack.isOf(Items.FILLED_MAP)) {
+            return;
+        }
+
+        // Run multiple completion passes so every map is finalized before chest insertion.
+        for (int pass = 0; pass < 4; pass++) {
+            mapStack.inventoryTick(world, villager, 0, true);
+            forceMapColorUpdate(world, mapStack);
+            FilledMapItem.fillExplorationMap(world, mapStack);
+            forceMapColorUpdate(world, mapStack);
+        }
+        finalizeMapColors(world, mapStack);
+    }
+
+    private void forceMapColorUpdate(ServerWorld world, ItemStack mapStack) {
+        if (!(mapStack.getItem() instanceof FilledMapItem filledMapItem)) {
+            return;
+        }
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return;
+        }
+        filledMapItem.updateColors(world, villager, state);
+        state.markDirty();
+    }
+
+    private void finalizeMapColors(ServerWorld world, ItemStack mapStack) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            // Ensure map state is materialized before the final color pass.
+            FilledMapItem.fillExplorationMap(world, mapStack);
+            state = FilledMapItem.getMapState(mapStack, world);
+            if (state == null) {
+                return;
+            }
+        }
+
+        byte fallback = 1;
+        for (byte color : state.colors) {
+            if (color != 0) {
+                fallback = color;
+                break;
+            }
+        }
+
+        // Use setColor so map update trackers are dirtied and clients receive a fully-colored map payload.
+        for (int x = 0; x < 128; x++) {
+            for (int z = 0; z < 128; z++) {
+                int index = x + z * 128;
+                if (state.colors[index] == 0) {
+                    state.setColor(x, z, fallback);
+                }
+            }
+        }
+        state.markDirty();
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
@@ -317,7 +438,7 @@ public class CartographerMapExplorationGoal extends Goal {
         IDLE,
         ACQUIRE_MAP,
         GO_TO_TARGET,
-        WAIT_FOR_UPDATE,
+        EXPLORE_MAP,
         RETURN_TO_CHEST,
         DONE
     }
