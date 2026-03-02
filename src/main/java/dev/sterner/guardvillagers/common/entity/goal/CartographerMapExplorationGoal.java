@@ -2,17 +2,21 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.MapColor;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.map.MapState;
-import net.minecraft.item.FilledMapItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -22,11 +26,13 @@ import java.util.Optional;
 import java.util.Set;
 
 public class CartographerMapExplorationGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(CartographerMapExplorationGoal.class);
     private static final int CHECK_INTERVAL_TICKS = 600;
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
+    private static final int REQUIRED_MAP_BATCH = 4;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -37,6 +43,9 @@ public class CartographerMapExplorationGoal extends Goal {
     private int mapScale = DEFAULT_MAP_SCALE;
     private final Set<Long> mappedTargets = new HashSet<>();
     private final List<MapTarget> pendingTargets = new ArrayList<>();
+    private final List<MapTarget> workflowTargets = new ArrayList<>();
+    private final List<ItemStack> workflowMaps = new ArrayList<>();
+    private int workflowIndex;
     private MapTarget currentTarget;
     private ItemStack activeMap = ItemStack.EMPTY;
     private final List<BlockPos> explorationWaypoints = new ArrayList<>();
@@ -53,6 +62,7 @@ public class CartographerMapExplorationGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
+        clearWorkflowState();
     }
 
     public void requestImmediateCheck(ServerWorld world) {
@@ -72,13 +82,11 @@ public class CartographerMapExplorationGoal extends Goal {
         if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
-        if (!hasEmptyMap(world)) {
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-            return false;
-        }
+
         refreshMappedTargets(world);
         buildTargets(world);
-        if (pendingTargets.isEmpty()) {
+
+        if (countEmptyMaps(world) < REQUIRED_MAP_BATCH || pendingTargets.size() < REQUIRED_MAP_BATCH) {
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             immediateCheckPending = false;
             return false;
@@ -93,14 +101,19 @@ public class CartographerMapExplorationGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.ACQUIRE_MAP;
+        stage = Stage.ACQUIRE_MAPS;
         immediateCheckPending = false;
+        clearWorkflowState();
     }
 
     @Override
     public void stop() {
         villager.getNavigation().stop();
         stage = Stage.DONE;
+        clearWorkflowState();
+        if (villager.getMainHandStack().isOf(Items.FILLED_MAP)) {
+            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+        }
     }
 
     @Override
@@ -111,24 +124,31 @@ public class CartographerMapExplorationGoal extends Goal {
         }
 
         switch (stage) {
-            case ACQUIRE_MAP -> {
-                if (pendingTargets.isEmpty()) {
+            case ACQUIRE_MAPS -> {
+                Inventory inventory = getChestInventory(world).orElse(null);
+                if (inventory == null || pendingTargets.size() < REQUIRED_MAP_BATCH) {
                     stage = Stage.DONE;
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
                 }
-                currentTarget = pendingTargets.remove(0);
-                ItemStack emptyMap = takeEmptyMapFromChest(world);
-                if (emptyMap.isEmpty()) {
+
+                List<ItemStack> emptyMaps = takeEmptyMapsFromChest(world, REQUIRED_MAP_BATCH);
+                if (emptyMaps.size() < REQUIRED_MAP_BATCH) {
                     stage = Stage.DONE;
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
                 }
-                activeMap = FilledMapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
-                villager.setStackInHand(Hand.MAIN_HAND, activeMap);
-                prepareExplorationPath(currentTarget);
-                stage = Stage.GO_TO_TARGET;
-                moveTo(explorationWaypoints.get(waypointIndex));
+
+                workflowTargets.clear();
+                workflowMaps.clear();
+                for (int i = 0; i < REQUIRED_MAP_BATCH; i++) {
+                    MapTarget target = pendingTargets.remove(0);
+                    workflowTargets.add(target);
+                    workflowMaps.add(FilledMapItem.createMap(world, target.centerX(), target.centerZ(), (byte) mapScale, true, false));
+                }
+
+                workflowIndex = 0;
+                setCurrentWorkflowTarget(world);
             }
             case GO_TO_TARGET -> {
                 tickActiveMap(world);
@@ -148,16 +168,10 @@ public class CartographerMapExplorationGoal extends Goal {
                         waypointIndex++;
                         moveTo(explorationWaypoints.get(waypointIndex));
                     } else {
-                        mappedTargets.add(currentTarget.key());
-                        forceCompleteMapStack(world, activeMap);
-                        stage = Stage.RETURN_TO_CHEST;
-                        moveTo(chestPos);
+                        completeCurrentTerritory(world, false);
                     }
                 } else if (world.getTime() - mapExploreStartTick >= MAP_EXPLORE_TIMEOUT_TICKS) {
-                    mappedTargets.add(currentTarget.key());
-                    forceCompleteMapStack(world, activeMap);
-                    stage = Stage.RETURN_TO_CHEST;
-                    moveTo(chestPos);
+                    completeCurrentTerritory(world, true);
                 } else {
                     moveTo(waypoint);
                 }
@@ -165,20 +179,24 @@ public class CartographerMapExplorationGoal extends Goal {
             case RETURN_TO_CHEST -> {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
-                    if (inventory != null && !activeMap.isEmpty()) {
-                        ItemStack finalizedMap = activeMap.copy();
-                        forceCompleteMapStack(world, finalizedMap);
-                        insertStack(inventory, finalizedMap);
+                    if (inventory != null) {
+                        for (ItemStack workflowMap : workflowMaps) {
+                            ItemStack finalizedMap = workflowMap.copy();
+                            forceCompleteMapStack(world, finalizedMap);
+                            insertStack(inventory, finalizedMap);
+                        }
                         inventory.markDirty();
                     }
-                    activeMap = ItemStack.EMPTY;
+
+                    clearWorkflowState();
                     if (villager.getMainHandStack().isOf(Items.FILLED_MAP)) {
                         villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
                     }
+
                     refreshMappedTargets(world);
                     buildTargets(world);
-                    if (hasEmptyMap(world) && !pendingTargets.isEmpty()) {
-                        stage = Stage.ACQUIRE_MAP;
+                    if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                        stage = Stage.ACQUIRE_MAPS;
                     } else {
                         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                         stage = Stage.DONE;
@@ -189,6 +207,71 @@ public class CartographerMapExplorationGoal extends Goal {
             }
             case IDLE, DONE -> {
             }
+        }
+    }
+
+    private void setCurrentWorkflowTarget(ServerWorld world) {
+        if (workflowIndex < 0 || workflowIndex >= workflowTargets.size() || workflowIndex >= workflowMaps.size()) {
+            stage = Stage.RETURN_TO_CHEST;
+            moveTo(chestPos);
+            return;
+        }
+
+        currentTarget = workflowTargets.get(workflowIndex);
+        activeMap = workflowMaps.get(workflowIndex);
+        villager.setStackInHand(Hand.MAIN_HAND, activeMap);
+        prepareExplorationPath(currentTarget);
+        stage = Stage.GO_TO_TARGET;
+        moveTo(explorationWaypoints.get(waypointIndex));
+        mapExploreStartTick = world.getTime();
+    }
+
+    private void completeCurrentTerritory(ServerWorld world, boolean timedOut) {
+        mappedTargets.add(currentTarget.key());
+        forceCompleteMapStack(world, activeMap);
+        LOGGER.info("Cartographer {} completed territory {}/{} at {} (timeout={})",
+                villager.getUuidAsString(),
+                workflowIndex + 1,
+                workflowTargets.size(),
+                currentTarget.toPos(jobPos.getY()).toShortString(),
+                timedOut);
+
+        workflowIndex++;
+        if (workflowIndex < workflowTargets.size()) {
+            setCurrentWorkflowTarget(world);
+        } else {
+            activeMap = ItemStack.EMPTY;
+            stage = Stage.RETURN_TO_CHEST;
+            moveTo(chestPos);
+        }
+    }
+
+    private void clearWorkflowState() {
+        workflowTargets.clear();
+        workflowMaps.clear();
+        workflowIndex = 0;
+        currentTarget = null;
+        activeMap = ItemStack.EMPTY;
+    }
+
+    public void onChestInventoryChanged(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+
+        boolean changed = false;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isOf(Items.FILLED_MAP)) {
+                continue;
+            }
+            forceCompleteMapStack(world, stack);
+            changed = true;
+        }
+
+        if (changed) {
+            inventory.markDirty();
         }
     }
 
@@ -203,6 +286,10 @@ public class CartographerMapExplorationGoal extends Goal {
             ItemStack stack = inventory.getStack(slot);
             if (!stack.isOf(Items.FILLED_MAP)) {
                 continue;
+            }
+            if (isMostlyUncolored(stack, world)) {
+                forceCompleteMapStack(world, stack);
+                inventory.markDirty();
             }
             MapState state = FilledMapItem.getMapState(stack, world);
             if (state == null) {
@@ -222,8 +309,6 @@ public class CartographerMapExplorationGoal extends Goal {
         int baseIndexX = worldToMapIndex(jobPos.getX(), mapSize);
         int baseIndexZ = worldToMapIndex(jobPos.getZ(), mapSize);
 
-        // Always target a fixed 2x2 set, anchored at the job-site map index.
-        // Order: base, right, below-base, below-right.
         int[][] offsets = {
                 {0, 0},
                 {1, 0},
@@ -251,7 +336,6 @@ public class CartographerMapExplorationGoal extends Goal {
     private int mapIndexToCenter(int mapIndex, int mapSize) {
         return mapIndex * mapSize + mapSize / 2 - 64;
     }
-
 
     private void prepareExplorationPath(MapTarget target) {
         explorationWaypoints.clear();
@@ -285,7 +369,6 @@ public class CartographerMapExplorationGoal extends Goal {
         if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
             return;
         }
-        // Ensure map data is populated from villager exploration instead of waiting on player updates.
         activeMap.inventoryTick(world, villager, 0, true);
         forceMapColorUpdate(world, activeMap);
     }
@@ -295,14 +378,31 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
 
-        // Run multiple completion passes so every map is finalized before chest insertion.
         for (int pass = 0; pass < 4; pass++) {
             mapStack.inventoryTick(world, villager, 0, true);
             forceMapColorUpdate(world, mapStack);
             FilledMapItem.fillExplorationMap(world, mapStack);
             forceMapColorUpdate(world, mapStack);
         }
+        populateMapFromWorld(world, mapStack);
         finalizeMapColors(world, mapStack);
+    }
+
+    private boolean isMostlyUncolored(ItemStack mapStack, ServerWorld world) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return true;
+        }
+        int colored = 0;
+        for (byte color : state.colors) {
+            if (color != 0) {
+                colored++;
+                if (colored >= 128) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private void forceMapColorUpdate(ServerWorld world, ItemStack mapStack) {
@@ -317,10 +417,34 @@ public class CartographerMapExplorationGoal extends Goal {
         state.markDirty();
     }
 
+    private void populateMapFromWorld(ServerWorld world, ItemStack mapStack) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return;
+        }
+
+        int scale = state.scale;
+        int sampleStep = 1 << scale;
+        for (int mapX = 0; mapX < 128; mapX++) {
+            for (int mapZ = 0; mapZ < 128; mapZ++) {
+                int worldX = state.centerX + (mapX - 64) * sampleStep;
+                int worldZ = state.centerZ + (mapZ - 64) * sampleStep;
+                int topY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ) - 1;
+                BlockPos samplePos = new BlockPos(worldX, Math.max(world.getBottomY(), topY), worldZ);
+                MapColor mapColor = world.getBlockState(samplePos).getMapColor(world, samplePos);
+                if (mapColor == MapColor.CLEAR) {
+                    continue;
+                }
+                byte packedColor = (byte) (mapColor.id * 4 + 1);
+                state.setColor(mapX, mapZ, packedColor);
+            }
+        }
+        state.markDirty();
+    }
+
     private void finalizeMapColors(ServerWorld world, ItemStack mapStack) {
         MapState state = FilledMapItem.getMapState(mapStack, world);
         if (state == null) {
-            // Ensure map state is materialized before the final color pass.
             FilledMapItem.fillExplorationMap(world, mapStack);
             state = FilledMapItem.getMapState(mapStack, world);
             if (state == null) {
@@ -336,7 +460,6 @@ public class CartographerMapExplorationGoal extends Goal {
             }
         }
 
-        // Use setColor so map update trackers are dirtied and clients receive a fully-colored map payload.
         for (int x = 0; x < 128; x++) {
             for (int z = 0; z < 128; z++) {
                 int index = x + z * 128;
@@ -348,38 +471,54 @@ public class CartographerMapExplorationGoal extends Goal {
         state.markDirty();
     }
 
-    private boolean hasEmptyMap(ServerWorld world) {
+    private int countEmptyMaps(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return false;
+            return 0;
         }
+        int count = 0;
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (isEmptyMap(stack, world)) {
-                return true;
+                count += stack.getCount();
             }
         }
-        return false;
+        return count;
     }
 
-    private ItemStack takeEmptyMapFromChest(ServerWorld world) {
+    private List<ItemStack> takeEmptyMapsFromChest(ServerWorld world, int amount) {
+        List<ItemStack> taken = new ArrayList<>();
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
-            return ItemStack.EMPTY;
+            return taken;
         }
-        for (int slot = 0; slot < inventory.size(); slot++) {
+
+        for (int slot = 0; slot < inventory.size() && taken.size() < amount; slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isEmptyMap(stack, world)) {
                 continue;
             }
-            ItemStack result = stack.split(1);
+            while (!stack.isEmpty() && taken.size() < amount) {
+                ItemStack split = stack.split(1);
+                if (!split.isEmpty()) {
+                    taken.add(split);
+                }
+            }
             if (stack.isEmpty()) {
                 inventory.setStack(slot, ItemStack.EMPTY);
             }
-            inventory.markDirty();
-            return result;
         }
-        return ItemStack.EMPTY;
+
+        if (taken.size() < amount) {
+            for (ItemStack stack : taken) {
+                insertStack(inventory, stack);
+            }
+            inventory.markDirty();
+            return List.of();
+        }
+
+        inventory.markDirty();
+        return taken;
     }
 
     private boolean isEmptyMap(ItemStack stack, ServerWorld world) {
@@ -436,7 +575,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
     private enum Stage {
         IDLE,
-        ACQUIRE_MAP,
+        ACQUIRE_MAPS,
         GO_TO_TARGET,
         EXPLORE_MAP,
         RETURN_TO_CHEST,
