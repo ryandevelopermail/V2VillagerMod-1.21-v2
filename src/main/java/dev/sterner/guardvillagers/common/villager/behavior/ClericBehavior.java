@@ -31,6 +31,8 @@ public class ClericBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericBrewingGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CHEST_MUTATION_RECHECK_TICK = new WeakHashMap<>();
+    private static final long CHEST_MUTATION_RECHECK_COOLDOWN_TICKS = 10L;
     private static final Map<VillagerEntity, ClericCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ClericDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     public static Set<ClericBrewingGoal.PotionTarget> getReachableRecipes(VillagerEntity villager,
@@ -152,6 +154,9 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             return;
         }
         InventoryChangedListener listener = sender -> {
+            if (!shouldProcessChestMutation(world, villager)) {
+                return;
+            }
             ClericBrewingGoal goal = GOALS.get(villager);
             if (goal != null) {
                 goal.requestImmediateBrew();
@@ -171,6 +176,16 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             return null;
         }
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private static boolean shouldProcessChestMutation(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CHEST_MUTATION_RECHECK_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return false;
+        }
+        NEXT_CHEST_MUTATION_RECHECK_TICK.put(villager, now + CHEST_MUTATION_RECHECK_COOLDOWN_TICKS);
+        return true;
     }
 
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {

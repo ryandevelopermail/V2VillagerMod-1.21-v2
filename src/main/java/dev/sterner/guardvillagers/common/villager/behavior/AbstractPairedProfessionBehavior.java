@@ -12,10 +12,13 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.function.Supplier;
 
 public abstract class AbstractPairedProfessionBehavior implements VillagerProfessionBehavior {
     protected static final double CHEST_PAIR_RANGE = 3.0D;
+    protected static final long CHEST_MUTATION_RECHECK_COOLDOWN_TICKS = 10L;
+    private static final Map<VillagerEntity, Long> NEXT_CHEST_MUTATION_RECHECK_TICK = new WeakHashMap<>();
 
     protected boolean checkPairingPreconditions(ServerWorld world,
                                                 VillagerEntity villager,
@@ -61,7 +64,13 @@ public abstract class AbstractPairedProfessionBehavior implements VillagerProfes
             return;
         }
 
-        InventoryChangedListener listener = listenerFactory.create(world, villager);
+        InventoryChangedListener innerListener = listenerFactory.create(world, villager);
+        InventoryChangedListener listener = sender -> {
+            if (!shouldProcessChestMutation(world, villager)) {
+                return;
+            }
+            innerListener.onInventoryChanged(sender);
+        };
         simpleInventory.addListener(listener);
         listenerMap.put(villager, new ChestListenerRegistration(simpleInventory, listener));
     }
@@ -79,6 +88,16 @@ public abstract class AbstractPairedProfessionBehavior implements VillagerProfes
             return null;
         }
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    protected boolean shouldProcessChestMutation(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CHEST_MUTATION_RECHECK_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return false;
+        }
+        NEXT_CHEST_MUTATION_RECHECK_TICK.put(villager, now + CHEST_MUTATION_RECHECK_COOLDOWN_TICKS);
+        return true;
     }
 
     @FunctionalInterface

@@ -32,6 +32,8 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ArmorerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CHEST_MUTATION_RECHECK_TICK = new WeakHashMap<>();
+    private static final long CHEST_MUTATION_RECHECK_COOLDOWN_TICKS = 10L;
 
     public static BlockPos getPairedChestPos(VillagerEntity villager) {
         return PAIRED_CHESTS.get(villager);
@@ -101,6 +103,9 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
             }
+            if (!shouldProcessChestMutation(world, villager)) {
+                continue;
+            }
             ArmorerBlastFurnaceGoal blastFurnace = GOALS.get(villager);
             if (blastFurnace != null) {
                 blastFurnace.requestImmediateCheck();
@@ -114,6 +119,16 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
                 distribution.requestImmediateDistribution();
             }
         }
+    }
+
+    private static boolean shouldProcessChestMutation(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CHEST_MUTATION_RECHECK_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return false;
+        }
+        NEXT_CHEST_MUTATION_RECHECK_TICK.put(villager, now + CHEST_MUTATION_RECHECK_COOLDOWN_TICKS);
+        return true;
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
