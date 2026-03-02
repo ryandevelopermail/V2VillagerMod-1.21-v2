@@ -35,7 +35,6 @@ public class CartographerMapExplorationGoal extends Goal {
     private long nextCheckTime;
     private boolean immediateCheckPending;
     private int mapScale = DEFAULT_MAP_SCALE;
-    private int gridSize = 2;
     private final Set<Long> mappedTargets = new HashSet<>();
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private MapTarget currentTarget;
@@ -200,31 +199,27 @@ public class CartographerMapExplorationGoal extends Goal {
         int mapSize = getMapSize(mapScale);
         int baseIndexX = Math.floorDiv(jobPos.getX(), mapSize);
         int baseIndexZ = Math.floorDiv(jobPos.getZ(), mapSize);
-        gridSize = determineGridSize(mappedTargets.size());
-        int half = gridSize / 2;
-        int startX = baseIndexX - half;
-        int startZ = baseIndexZ - half;
-        for (int offsetX = 0; offsetX < gridSize; offsetX++) {
-            for (int offsetZ = 0; offsetZ < gridSize; offsetZ++) {
-                int mapIndexX = startX + offsetX;
-                int mapIndexZ = startZ + offsetZ;
-                long key = packKey(mapIndexX, mapIndexZ);
-                if (mappedTargets.contains(key)) {
-                    continue;
-                }
-                int centerX = mapIndexX * mapSize + mapSize / 2;
-                int centerZ = mapIndexZ * mapSize + mapSize / 2;
-                pendingTargets.add(new MapTarget(centerX, centerZ, key));
-            }
-        }
-    }
 
-    private int determineGridSize(int mappedCount) {
-        int size = 2;
-        while (mappedCount >= size * size) {
-            size++;
+        // Always target a fixed 2x2 set, anchored at the job-site map index.
+        // Order: base, right, below-base, below-right.
+        int[][] offsets = {
+                {0, 0},
+                {1, 0},
+                {0, 1},
+                {1, 1}
+        };
+
+        for (int[] offset : offsets) {
+            int mapIndexX = baseIndexX + offset[0];
+            int mapIndexZ = baseIndexZ + offset[1];
+            long key = packKey(mapIndexX, mapIndexZ);
+            if (mappedTargets.contains(key)) {
+                continue;
+            }
+            int centerX = mapIndexX * mapSize + mapSize / 2;
+            int centerZ = mapIndexZ * mapSize + mapSize / 2;
+            pendingTargets.add(new MapTarget(centerX, centerZ, key));
         }
-        return size;
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
