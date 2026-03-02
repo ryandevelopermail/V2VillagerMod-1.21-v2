@@ -14,8 +14,6 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -296,51 +294,25 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
 
-        // Run multiple completion passes to ensure non-first maps are fully populated too.
+        // Run multiple completion passes so every map is finalized before chest insertion.
         for (int pass = 0; pass < 4; pass++) {
             activeMap.inventoryTick(world, villager, 0, true);
             forceMapColorUpdate(world);
-
-            // Best-effort force-fill for mapping runtimes where exploration ticks still leave gaps.
-            for (Method method : FilledMapItem.class.getDeclaredMethods()) {
-                if (!method.getName().equals("fillExplorationMap") || !Modifier.isStatic(method.getModifiers())) {
-                    continue;
-                }
-                Class<?>[] params = method.getParameterTypes();
-                if (params.length == 2 && params[0].isAssignableFrom(world.getClass()) && params[1] == ItemStack.class) {
-                    try {
-                        method.setAccessible(true);
-                        method.invoke(null, world, activeMap);
-                    } catch (ReflectiveOperationException ignored) {
-                        // Continue trying other signatures.
-                    }
-                }
-            }
-
+            FilledMapItem.fillExplorationMap(world, activeMap);
             forceMapColorUpdate(world);
         }
     }
 
     private void forceMapColorUpdate(ServerWorld world) {
+        if (!(activeMap.getItem() instanceof FilledMapItem filledMapItem)) {
+            return;
+        }
         MapState state = FilledMapItem.getMapState(activeMap, world);
         if (state == null) {
             return;
         }
-        for (Method method : FilledMapItem.class.getDeclaredMethods()) {
-            if (!method.getName().equals("updateColors") || !Modifier.isStatic(method.getModifiers())) {
-                continue;
-            }
-            Class<?>[] params = method.getParameterTypes();
-            if (params.length == 3 && params[2].isAssignableFrom(state.getClass())) {
-                try {
-                    method.setAccessible(true);
-                    method.invoke(null, world, villager, state);
-                    return;
-                } catch (ReflectiveOperationException ignored) {
-                    // Continue trying other overloads if present.
-                }
-            }
-        }
+        filledMapItem.updateColors(world, villager, state);
+        state.markDirty();
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
