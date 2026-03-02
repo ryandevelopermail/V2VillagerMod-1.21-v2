@@ -192,6 +192,30 @@ public class CartographerMapExplorationGoal extends Goal {
         }
     }
 
+    public void onChestInventoryChanged(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+
+        boolean changed = false;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isOf(Items.FILLED_MAP)) {
+                continue;
+            }
+            if (isCompletelyBlank(stack, world)) {
+                continue;
+            }
+            forceCompleteMapStack(world, stack);
+            changed = true;
+        }
+
+        if (changed) {
+            inventory.markDirty();
+        }
+    }
+
     private void refreshMappedTargets(ServerWorld world) {
         mappedTargets.clear();
         mapScale = DEFAULT_MAP_SCALE;
@@ -309,6 +333,19 @@ public class CartographerMapExplorationGoal extends Goal {
             forceMapColorUpdate(world, mapStack);
         }
         finalizeMapColors(world, mapStack);
+    }
+
+    private boolean isCompletelyBlank(ItemStack mapStack, ServerWorld world) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
+        if (state == null) {
+            return true;
+        }
+        for (byte color : state.colors) {
+            if (color != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private boolean isMostlyUncolored(ItemStack mapStack, ServerWorld world) {
