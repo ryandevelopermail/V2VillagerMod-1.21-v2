@@ -423,6 +423,8 @@ public class ShepherdSpecialGoal extends Goal {
                             moveTo(penGatePos);
                             return;
                         }
+                        forceGateState(world, penGatePos, true);
+                        openedPenGate = true;
                         penTarget = currentShearPenCenter;
                         if (penTarget == null) {
                             stage = Stage.LEAVE_SHEAR_PEN;
@@ -504,10 +506,18 @@ public class ShepherdSpecialGoal extends Goal {
                     }
                 }
 
-                updatePenGateAccess(world, penGatePos);
-                if (penGatePos != null && isInsideFencePen(world, villager.getBlockPos())) {
-                    moveTo(penTarget == null ? penGatePos : penTarget, FAST_GATE_CLOSE_SPEED);
+                if (penGatePos != null) {
+                    forceGateState(world, penGatePos, true);
+                }
+                if (isInsideFencePen(world, villager.getBlockPos())) {
+                    moveTo(penTarget == null ? (penGatePos == null ? chestPos : penGatePos) : penTarget, FAST_GATE_CLOSE_SPEED);
                     return;
+                }
+
+                if (penGatePos != null) {
+                    forceGateState(world, penGatePos, false);
+                    openedPenGate = false;
+                    wasInsidePen = false;
                 }
 
                 shearPenIndex++;
@@ -917,7 +927,8 @@ public class ShepherdSpecialGoal extends Goal {
         BlockPos back = penGatePos.offset(facing.getOpposite());
         boolean frontIsInside = front.equals(insidePos) || isInsideFencePen(world, front);
         BlockPos outside = frontIsInside ? back : front;
-        return outside.toImmutable();
+        BlockPos fartherOutside = outside.offset(frontIsInside ? facing.getOpposite() : facing);
+        return fartherOutside.toImmutable();
     }
 
     private BlockPos resolveGateForPen(ServerWorld world, BlockPos penCenter, BlockPos preferredGate) {
@@ -1554,6 +1565,16 @@ public class ShepherdSpecialGoal extends Goal {
 
         shearStageStartTick = world.getTime();
         lastShearObservedStage = stage;
+    }
+
+    private void forceGateState(ServerWorld world, BlockPos pos, boolean open) {
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        if (state.get(FenceGateBlock.OPEN) != open) {
+            world.setBlockState(pos, state.with(FenceGateBlock.OPEN, open), 2);
+        }
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
