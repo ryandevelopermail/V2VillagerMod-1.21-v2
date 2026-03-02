@@ -967,6 +967,11 @@ public class ShepherdSpecialGoal extends Goal {
         };
     }
 
+
+    private void logGateCandidate(BlockPos gatePos, String reason) {
+        LOGGER.info("Shepherd {} gate candidate {} rejected: {}", villager.getUuidAsString(), gatePos.toShortString(), reason);
+    }
+
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
         if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
@@ -978,30 +983,56 @@ public class ShepherdSpecialGoal extends Goal {
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> gateCandidates = collectFallbackGateCandidates(world, villagerPos, minY, maxY);
+        LOGGER.info("Shepherd {} evaluating {} gate candidate(s) within {} blocks", villager.getUuidAsString(), gateCandidates.size(), PEN_SCAN_RANGE);
+
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
+                logGateCandidate(gatePos, "not a fence gate block state at evaluation time");
                 continue;
             }
 
             BlockPos insidePos = getPenInterior(world, gatePos, state);
-            if (insidePos == null || !isInsideFencePen(world, insidePos)) {
+            if (insidePos == null) {
+                logGateCandidate(gatePos, "could not resolve enclosed interior from either gate side");
+                continue;
+            }
+
+            if (!isInsideFencePen(world, insidePos)) {
+                logGateCandidate(gatePos, "interior candidate " + insidePos.toShortString() + " is not fully enclosed by fence");
                 continue;
             }
 
             BlockPos penCenter = getPenCenter(world, insidePos);
-            if (penCenter == null || hasBannerInPen(world, penCenter)) {
+            if (penCenter == null) {
+                logGateCandidate(gatePos, "failed to compute pen center from interior " + insidePos.toShortString());
+                continue;
+            }
+
+            if (hasBannerInPen(world, penCenter)) {
+                logGateCandidate(gatePos, "pen already contains banner near center " + penCenter.toShortString());
                 continue;
             }
 
             double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
+            LOGGER.info("Shepherd {} gate candidate {} accepted (center {}, distanceSq={})",
+                    villager.getUuidAsString(),
+                    gatePos.toShortString(),
+                    penCenter.toShortString(),
+                    String.format("%.2f", distance));
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearestGate = gatePos.toImmutable();
             }
+        }
+
+        if (nearestGate == null) {
+            LOGGER.info("Shepherd {} found no valid gate candidates after evaluating {} gate(s)", villager.getUuidAsString(), gateCandidates.size());
+        } else {
+            LOGGER.info("Shepherd {} selected gate {} as nearest valid pen entry", villager.getUuidAsString(), nearestGate.toShortString());
         }
 
         nearestPenCacheTick = now;
