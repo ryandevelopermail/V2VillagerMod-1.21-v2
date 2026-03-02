@@ -204,8 +204,8 @@ public class CartographerMapExplorationGoal extends Goal {
             }
             mapScale = state.scale;
             int mapSize = getMapSize(mapScale);
-            int mapIndexX = Math.floorDiv(state.centerX, mapSize);
-            int mapIndexZ = Math.floorDiv(state.centerZ, mapSize);
+            int mapIndexX = worldToMapIndex(state.centerX, mapSize);
+            int mapIndexZ = worldToMapIndex(state.centerZ, mapSize);
             mappedTargets.add(packKey(mapIndexX, mapIndexZ));
         }
     }
@@ -213,8 +213,8 @@ public class CartographerMapExplorationGoal extends Goal {
     private void buildTargets(ServerWorld world) {
         pendingTargets.clear();
         int mapSize = getMapSize(mapScale);
-        int baseIndexX = Math.floorDiv(jobPos.getX(), mapSize);
-        int baseIndexZ = Math.floorDiv(jobPos.getZ(), mapSize);
+        int baseIndexX = worldToMapIndex(jobPos.getX(), mapSize);
+        int baseIndexZ = worldToMapIndex(jobPos.getZ(), mapSize);
 
         // Always target a fixed 2x2 set, anchored at the job-site map index.
         // Order: base, right, below-base, below-right.
@@ -232,10 +232,18 @@ public class CartographerMapExplorationGoal extends Goal {
             if (mappedTargets.contains(key)) {
                 continue;
             }
-            int centerX = mapIndexX * mapSize + mapSize / 2;
-            int centerZ = mapIndexZ * mapSize + mapSize / 2;
+            int centerX = mapIndexToCenter(mapIndexX, mapSize);
+            int centerZ = mapIndexToCenter(mapIndexZ, mapSize);
             pendingTargets.add(new MapTarget(centerX, centerZ, key));
         }
+    }
+
+    private int worldToMapIndex(int coordinate, int mapSize) {
+        return Math.floorDiv(coordinate + 64, mapSize);
+    }
+
+    private int mapIndexToCenter(int mapIndex, int mapSize) {
+        return mapIndex * mapSize + mapSize / 2 - 64;
     }
 
 
