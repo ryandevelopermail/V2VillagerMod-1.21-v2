@@ -86,6 +86,9 @@ public class ShepherdSpecialGoal extends Goal {
     private TaskType taskType;
     private List<SheepEntity> sheepTargets = new ArrayList<>();
     private int sheepTargetIndex;
+    private final List<PenTarget> shearPenTargets = new ArrayList<>();
+    private int shearPenIndex;
+    private BlockPos currentShearPenCenter;
     private BlockPos penTarget;
     private BlockPos penGatePos;
     private ItemStack carriedItem = ItemStack.EMPTY;
@@ -268,16 +271,24 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         if (taskType == TaskType.SHEARS) {
-            sheepTargets = findSheepTargets(world);
-            sheepTargetIndex = 0;
+            if (!hasShearsInInventoryOrHand()) {
+                takeItemFromChest(world, taskType);
+            }
             equipShearsFromInventory();
-            if (sheepTargets.isEmpty()) {
+
+            shearPenTargets.clear();
+            shearPenTargets.addAll(findShearPensWithBanners(world));
+            shearPenIndex = 0;
+            currentShearPenCenter = null;
+
+            if (!prepareCurrentShearPen(world)) {
                 stage = Stage.RETURN_TO_CHEST;
                 moveTo(chestPos);
                 return;
             }
-            stage = Stage.GO_TO_SHEEP;
-            moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
+
+            stage = Stage.GO_TO_PEN;
+            moveTo(penTarget);
             return;
         }
 
@@ -334,6 +345,9 @@ public class ShepherdSpecialGoal extends Goal {
         taskType = null;
         sheepTargets = new ArrayList<>();
         sheepTargetIndex = 0;
+        shearPenTargets.clear();
+        shearPenIndex = 0;
+        currentShearPenCenter = null;
         penTarget = null;
         penGatePos = null;
         carriedItem = ItemStack.EMPTY;
@@ -355,8 +369,9 @@ public class ShepherdSpecialGoal extends Goal {
             case GO_TO_SHEEP -> {
                 SheepEntity targetEntity = getSheepTarget();
                 if (targetEntity == null) {
-                    stage = Stage.RETURN_TO_CHEST;
-                    moveTo(chestPos);
+                    stage = Stage.LEAVE_SHEAR_PEN;
+                    penTarget = resolveShearPenExit(world);
+                    moveTo(penTarget == null ? chestPos : penTarget);
                     return;
                 }
 
@@ -367,9 +382,9 @@ public class ShepherdSpecialGoal extends Goal {
                     if (nextTarget != null) {
                         moveTo(nextTarget.getBlockPos());
                     } else {
-                        scheduleNextShearCheck(world, "after shearing run");
-                        stage = Stage.RETURN_TO_CHEST;
-                        moveTo(chestPos);
+                        stage = Stage.LEAVE_SHEAR_PEN;
+                        penTarget = resolveShearPenExit(world);
+                        moveTo(penTarget == null ? chestPos : penTarget);
                     }
                 } else {
                     moveTo(targetEntity.getBlockPos());
@@ -383,6 +398,35 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 updatePenGateAccess(world, penGatePos);
+
+                if (taskType == TaskType.SHEARS) {
+                    if (penGatePos != null && penTarget.equals(penGatePos) && isNear(penGatePos)) {
+                        penTarget = currentShearPenCenter;
+                        if (penTarget == null) {
+                            stage = Stage.LEAVE_SHEAR_PEN;
+                            penTarget = resolveShearPenExit(world);
+                            moveTo(penTarget == null ? chestPos : penTarget);
+                            return;
+                        }
+                    }
+
+                    if (penTarget != null && isNear(penTarget)) {
+                        sheepTargets = findSheepTargets(world, currentShearPenCenter);
+                        sheepTargetIndex = 0;
+                        if (sheepTargets.isEmpty()) {
+                            stage = Stage.LEAVE_SHEAR_PEN;
+                            penTarget = resolveShearPenExit(world);
+                            moveTo(penTarget == null ? chestPos : penTarget);
+                        } else {
+                            stage = Stage.GO_TO_SHEEP;
+                            moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
+                        }
+                        return;
+                    }
+
+                    moveTo(penTarget);
+                    return;
+                }
 
                 if (penGatePos != null && penTarget.equals(penGatePos) && isNear(penGatePos)) {
                     BlockState gateState = world.getBlockState(penGatePos);
@@ -408,6 +452,22 @@ public class ShepherdSpecialGoal extends Goal {
                     moveTo(chestPos);
                 } else {
                     moveTo(penTarget);
+                }
+            }
+            case LEAVE_SHEAR_PEN -> {
+                updatePenGateAccess(world, penGatePos);
+                if (penTarget == null || isNear(penTarget)) {
+                    shearPenIndex++;
+                    if (prepareCurrentShearPen(world)) {
+                        stage = Stage.GO_TO_PEN;
+                        moveTo(penTarget);
+                    } else {
+                        scheduleNextShearCheck(world, "after shearing run");
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                    }
+                } else {
+                    moveTo(penTarget, FAST_GATE_CLOSE_SPEED);
                 }
             }
             case GATHER_WANDER -> {
@@ -763,8 +823,75 @@ public class ShepherdSpecialGoal extends Goal {
         chestInventory.markDirty();
     }
 
-    private List<SheepEntity> findSheepTargets(ServerWorld world) {
-        List<SheepEntity> sheep = world.getEntitiesByClass(SheepEntity.class, new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE), SheepEntity::isAlive);
+    private boolean prepareCurrentShearPen(ServerWorld world) {
+        while (shearPenIndex < shearPenTargets.size()) {
+            PenTarget target = shearPenTargets.get(shearPenIndex);
+            if (target == null) {
+                shearPenIndex++;
+                continue;
+            }
+            currentShearPenCenter = target.center();
+            penGatePos = target.gate();
+            penTarget = penGatePos;
+            openedPenGate = false;
+            wasInsidePen = false;
+            return penTarget != null;
+        }
+        currentShearPenCenter = null;
+        penGatePos = null;
+        penTarget = null;
+        return false;
+    }
+
+    private BlockPos resolveShearPenExit(ServerWorld world) {
+        if (penGatePos == null) {
+            return null;
+        }
+        BlockState gateState = world.getBlockState(penGatePos);
+        if (!(gateState.getBlock() instanceof FenceGateBlock)) {
+            return penGatePos;
+        }
+        BlockPos insidePos = getPenInterior(world, penGatePos, gateState);
+        if (insidePos == null) {
+            return penGatePos;
+        }
+        Direction facing = gateState.get(FenceGateBlock.FACING);
+        BlockPos front = penGatePos.offset(facing);
+        BlockPos back = penGatePos.offset(facing.getOpposite());
+        boolean frontIsInside = front.equals(insidePos) || isInsideFencePen(world, front);
+        BlockPos outside = frontIsInside ? back : front;
+        return outside.toImmutable();
+    }
+
+    private List<PenTarget> findShearPensWithBanners(ServerWorld world) {
+        BlockPos villagerPos = villager.getBlockPos();
+        int minY = getLocalMinY(world, villagerPos);
+        int maxY = getLocalMaxY(world, villagerPos);
+        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
+        List<PenTarget> pens = new ArrayList<>();
+        for (BlockPos bannerPos : bannerCandidates) {
+            PenTarget pen = findNearestPenWithBanner(world, bannerPos);
+            if (pen == null) {
+                continue;
+            }
+            boolean duplicate = pens.stream().anyMatch(existing -> existing.gate().equals(pen.gate()) || existing.center().equals(pen.center()));
+            if (!duplicate) {
+                pens.add(pen);
+            }
+        }
+        pens.sort(Comparator.comparingDouble(pen -> villagerPos.getSquaredDistance(pen.gate())));
+        return pens;
+    }
+
+    private List<SheepEntity> findSheepTargets(ServerWorld world, BlockPos penCenter) {
+        if (penCenter == null) {
+            return List.of();
+        }
+        Box box = new Box(penCenter).expand(16.0D, 6.0D, 16.0D);
+        List<SheepEntity> sheep = world.getEntitiesByClass(
+                SheepEntity.class,
+                box,
+                entity -> entity.isAlive() && entity.isShearable() && isInsideFencePen(world, entity.getBlockPos()));
         sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
         return new ArrayList<>(sheep);
     }
@@ -1649,6 +1776,7 @@ public class ShepherdSpecialGoal extends Goal {
         IDLE,
         GO_TO_SHEEP,
         GO_TO_PEN,
+        LEAVE_SHEAR_PEN,
         GATHER_WANDER,
         GUIDE_TO_PEN_CENTER,
         RUSH_TO_GATE_AND_CLOSE,
