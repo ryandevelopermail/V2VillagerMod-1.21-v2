@@ -319,7 +319,12 @@ public class CartographerMapExplorationGoal extends Goal {
     private void finalizeMapColors(ServerWorld world) {
         MapState state = FilledMapItem.getMapState(activeMap, world);
         if (state == null) {
-            return;
+            // Ensure map state is materialized before the final color pass.
+            FilledMapItem.fillExplorationMap(world, activeMap);
+            state = FilledMapItem.getMapState(activeMap, world);
+            if (state == null) {
+                return;
+            }
         }
 
         byte fallback = 1;
@@ -330,12 +335,10 @@ public class CartographerMapExplorationGoal extends Goal {
             }
         }
 
-        for (int x = 0; x < 128; x++) {
-            for (int z = 0; z < 128; z++) {
-                int index = x + z * 128;
-                if (state.colors[index] == 0) {
-                    state.setColor(x, z, fallback);
-                }
+        // Direct array write to guarantee every blank pixel is filled for this map state.
+        for (int i = 0; i < state.colors.length; i++) {
+            if (state.colors[i] == 0) {
+                state.colors[i] = fallback;
             }
         }
         state.markDirty();
