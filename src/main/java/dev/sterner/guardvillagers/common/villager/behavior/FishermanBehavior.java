@@ -44,6 +44,8 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, FishermanCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FishermanDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final long FULL_SWEEP_INTERVAL_TICKS = 20L * 60L;
+    private static long nextFullSweepTick;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -141,12 +143,16 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
     public static void tryConvertFishermenWithRod(ServerWorld world) {
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
-        ));
+        long gameTime = world.getTime();
+        if (gameTime >= nextFullSweepTick) {
+            nextFullSweepTick = gameTime + FULL_SWEEP_INTERVAL_TICKS;
+            Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+            candidates.addAll(world.getEntitiesByClass(
+                    VillagerEntity.class,
+                    worldBounds,
+                    villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
+            ));
+        }
 
         for (VillagerEntity villager : candidates) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);

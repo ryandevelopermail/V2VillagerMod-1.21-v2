@@ -49,6 +49,8 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ButcherMeatDistributionGoal> MEAT_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherToLeatherworkerDistributionGoal> LEATHER_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final long FULL_SWEEP_INTERVAL_TICKS = 20L * 60L;
+    private static long nextFullSweepTick;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -171,12 +173,16 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
 
     public static void tryConvertButchersWithWeapon(ServerWorld world) {
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER
-        ));
+        long gameTime = world.getTime();
+        if (gameTime >= nextFullSweepTick) {
+            nextFullSweepTick = gameTime + FULL_SWEEP_INTERVAL_TICKS;
+            Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+            candidates.addAll(world.getEntitiesByClass(
+                    VillagerEntity.class,
+                    worldBounds,
+                    villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER
+            ));
+        }
 
         for (VillagerEntity villager : candidates) {
             if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
