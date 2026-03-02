@@ -58,6 +58,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_GATE_CHECK_LIMIT = 40;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
     private static final double SHEAR_GATE_INTERACT_RANGE_SQUARED = 16.0D;
+    private static final int SHEAR_STAGE_STUCK_TIMEOUT_TICKS = 240;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
     private static final int GATHER_MAX_SESSION_TICKS = 2200;
@@ -90,6 +91,8 @@ public class ShepherdSpecialGoal extends Goal {
     private final List<PenTarget> shearPenTargets = new ArrayList<>();
     private int shearPenIndex;
     private BlockPos currentShearPenCenter;
+    private long shearStageStartTick;
+    private Stage lastShearObservedStage = Stage.IDLE;
     private boolean shearExitReached;
     private BlockPos shearExitPos;
     private BlockPos penTarget;
@@ -283,6 +286,8 @@ public class ShepherdSpecialGoal extends Goal {
             shearPenTargets.addAll(findShearPensWithBanners(world));
             shearPenIndex = 0;
             currentShearPenCenter = null;
+            shearStageStartTick = world.getTime();
+            lastShearObservedStage = Stage.IDLE;
             shearExitReached = false;
             shearExitPos = null;
 
@@ -353,6 +358,8 @@ public class ShepherdSpecialGoal extends Goal {
         shearPenTargets.clear();
         shearPenIndex = 0;
         currentShearPenCenter = null;
+        shearStageStartTick = 0L;
+        lastShearObservedStage = Stage.IDLE;
         shearExitReached = false;
         shearExitPos = null;
         penTarget = null;
@@ -371,6 +378,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         updateShearsCountdown(world);
+        monitorShearStageProgress(world);
 
         switch (stage) {
             case GO_TO_SHEEP -> {
@@ -429,7 +437,8 @@ public class ShepherdSpecialGoal extends Goal {
                         }
                     }
 
-                    if (penTarget != null && isNear(penTarget)) {
+                    boolean insideCurrentPen = currentShearPenCenter != null && isInsideFencePen(world, villager.getBlockPos());
+                    if ((penTarget != null && isNear(penTarget)) || insideCurrentPen) {
                         sheepTargets = findSheepTargets(world, currentShearPenCenter);
                         sheepTargetIndex = 0;
                         if (sheepTargets.isEmpty()) {
@@ -485,8 +494,10 @@ public class ShepherdSpecialGoal extends Goal {
                         shearExitPos = resolveShearPenExit(world);
                     }
                     penTarget = shearExitPos == null ? penGatePos : shearExitPos;
-                    if (penTarget == null) {
+                    boolean isOutsidePen = !isInsideFencePen(world, villager.getBlockPos());
+                    if (penTarget == null || isOutsidePen) {
                         shearExitReached = true;
+                        penTarget = penGatePos;
                     } else if (isNear(penTarget)) {
                         shearExitReached = true;
                         penTarget = penGatePos;
@@ -1483,6 +1494,70 @@ public class ShepherdSpecialGoal extends Goal {
     private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
         BlockState bannerState = world.getBlockState(bannerPos);
         JobBlockPairingHelper.handleBannerPlacement(world, bannerPos, bannerState);
+    }
+
+    private void monitorShearStageProgress(ServerWorld world) {
+        if (taskType != TaskType.SHEARS) {
+            return;
+        }
+        if (stage != lastShearObservedStage) {
+            lastShearObservedStage = stage;
+            shearStageStartTick = world.getTime();
+            return;
+        }
+        if (stage != Stage.GO_TO_PEN && stage != Stage.GO_TO_SHEEP && stage != Stage.LEAVE_SHEAR_PEN) {
+            return;
+        }
+        if (world.getTime() - shearStageStartTick < SHEAR_STAGE_STUCK_TIMEOUT_TICKS) {
+            return;
+        }
+
+        if (stage == Stage.GO_TO_PEN) {
+            if (currentShearPenCenter != null && isInsideFencePen(world, villager.getBlockPos())) {
+                sheepTargets = findSheepTargets(world, currentShearPenCenter);
+                sheepTargetIndex = 0;
+                if (!sheepTargets.isEmpty()) {
+                    stage = Stage.GO_TO_SHEEP;
+                    moveTo(sheepTargets.get(0).getBlockPos());
+                } else {
+                    stage = Stage.LEAVE_SHEAR_PEN;
+                    shearExitReached = false;
+                    shearExitPos = resolveShearPenExit(world);
+                    penTarget = shearExitPos == null ? penGatePos : shearExitPos;
+                }
+            } else {
+                penGatePos = resolveGateForPen(world, currentShearPenCenter, penGatePos);
+                penTarget = penGatePos;
+                if (penTarget != null) {
+                    moveTo(penTarget, FAST_GATE_CLOSE_SPEED);
+                } else {
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                }
+            }
+        } else if (stage == Stage.GO_TO_SHEEP) {
+            sheepTargets = findSheepTargets(world, currentShearPenCenter);
+            sheepTargetIndex = 0;
+            if (!sheepTargets.isEmpty()) {
+                moveTo(sheepTargets.get(0).getBlockPos());
+            } else {
+                stage = Stage.LEAVE_SHEAR_PEN;
+                shearExitReached = false;
+                shearExitPos = resolveShearPenExit(world);
+                penTarget = shearExitPos == null ? penGatePos : shearExitPos;
+            }
+        } else if (stage == Stage.LEAVE_SHEAR_PEN) {
+            if (!isInsideFencePen(world, villager.getBlockPos())) {
+                shearExitReached = true;
+                penTarget = penGatePos;
+            }
+            if (penGatePos != null) {
+                moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+            }
+        }
+
+        shearStageStartTick = world.getTime();
+        lastShearObservedStage = stage;
     }
 
     private boolean isWithinRangeSquared(BlockPos pos, double rangeSquared) {
