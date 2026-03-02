@@ -149,13 +149,13 @@ public class CartographerMapExplorationGoal extends Goal {
                         moveTo(explorationWaypoints.get(waypointIndex));
                     } else {
                         mappedTargets.add(currentTarget.key());
-                        forceCompleteActiveMap(world);
+                        forceCompleteMapStack(world, activeMap);
                         stage = Stage.RETURN_TO_CHEST;
                         moveTo(chestPos);
                     }
                 } else if (world.getTime() - mapExploreStartTick >= MAP_EXPLORE_TIMEOUT_TICKS) {
                     mappedTargets.add(currentTarget.key());
-                    forceCompleteActiveMap(world);
+                    forceCompleteMapStack(world, activeMap);
                     stage = Stage.RETURN_TO_CHEST;
                     moveTo(chestPos);
                 } else {
@@ -166,8 +166,9 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null && !activeMap.isEmpty()) {
-                        forceCompleteActiveMap(world);
-                        insertStack(inventory, activeMap.copy());
+                        ItemStack finalizedMap = activeMap.copy();
+                        forceCompleteMapStack(world, finalizedMap);
+                        insertStack(inventory, finalizedMap);
                         inventory.markDirty();
                     }
                     activeMap = ItemStack.EMPTY;
@@ -286,29 +287,29 @@ public class CartographerMapExplorationGoal extends Goal {
         }
         // Ensure map data is populated from villager exploration instead of waiting on player updates.
         activeMap.inventoryTick(world, villager, 0, true);
-        forceMapColorUpdate(world);
+        forceMapColorUpdate(world, activeMap);
     }
 
-    private void forceCompleteActiveMap(ServerWorld world) {
-        if (activeMap.isEmpty() || !activeMap.isOf(Items.FILLED_MAP)) {
+    private void forceCompleteMapStack(ServerWorld world, ItemStack mapStack) {
+        if (mapStack.isEmpty() || !mapStack.isOf(Items.FILLED_MAP)) {
             return;
         }
 
         // Run multiple completion passes so every map is finalized before chest insertion.
         for (int pass = 0; pass < 4; pass++) {
-            activeMap.inventoryTick(world, villager, 0, true);
-            forceMapColorUpdate(world);
-            FilledMapItem.fillExplorationMap(world, activeMap);
-            forceMapColorUpdate(world);
+            mapStack.inventoryTick(world, villager, 0, true);
+            forceMapColorUpdate(world, mapStack);
+            FilledMapItem.fillExplorationMap(world, mapStack);
+            forceMapColorUpdate(world, mapStack);
         }
-        finalizeMapColors(world);
+        finalizeMapColors(world, mapStack);
     }
 
-    private void forceMapColorUpdate(ServerWorld world) {
-        if (!(activeMap.getItem() instanceof FilledMapItem filledMapItem)) {
+    private void forceMapColorUpdate(ServerWorld world, ItemStack mapStack) {
+        if (!(mapStack.getItem() instanceof FilledMapItem filledMapItem)) {
             return;
         }
-        MapState state = FilledMapItem.getMapState(activeMap, world);
+        MapState state = FilledMapItem.getMapState(mapStack, world);
         if (state == null) {
             return;
         }
@@ -316,12 +317,12 @@ public class CartographerMapExplorationGoal extends Goal {
         state.markDirty();
     }
 
-    private void finalizeMapColors(ServerWorld world) {
-        MapState state = FilledMapItem.getMapState(activeMap, world);
+    private void finalizeMapColors(ServerWorld world, ItemStack mapStack) {
+        MapState state = FilledMapItem.getMapState(mapStack, world);
         if (state == null) {
             // Ensure map state is materialized before the final color pass.
-            FilledMapItem.fillExplorationMap(world, activeMap);
-            state = FilledMapItem.getMapState(activeMap, world);
+            FilledMapItem.fillExplorationMap(world, mapStack);
+            state = FilledMapItem.getMapState(mapStack, world);
             if (state == null) {
                 return;
             }
