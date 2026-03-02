@@ -15,6 +15,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -297,7 +298,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
         // Best-effort force-fill for mapping runtimes where exploration ticks still leave gaps.
         for (Method method : FilledMapItem.class.getDeclaredMethods()) {
-            if (!method.getName().equals("fillExplorationMap")) {
+            if (!method.getName().equals("fillExplorationMap") || !Modifier.isStatic(method.getModifiers())) {
                 continue;
             }
             Class<?>[] params = method.getParameterTypes();
@@ -320,7 +321,7 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
         for (Method method : FilledMapItem.class.getDeclaredMethods()) {
-            if (!method.getName().equals("updateColors")) {
+            if (!method.getName().equals("updateColors") || !Modifier.isStatic(method.getModifiers())) {
                 continue;
             }
             Class<?>[] params = method.getParameterTypes();
