@@ -301,6 +301,7 @@ public class CartographerMapExplorationGoal extends Goal {
             FilledMapItem.fillExplorationMap(world, activeMap);
             forceMapColorUpdate(world);
         }
+        finalizeMapColors(world);
     }
 
     private void forceMapColorUpdate(ServerWorld world) {
@@ -312,6 +313,31 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
         filledMapItem.updateColors(world, villager, state);
+        state.markDirty();
+    }
+
+    private void finalizeMapColors(ServerWorld world) {
+        MapState state = FilledMapItem.getMapState(activeMap, world);
+        if (state == null) {
+            return;
+        }
+
+        byte fallback = 1;
+        for (byte color : state.colors) {
+            if (color != 0) {
+                fallback = color;
+                break;
+            }
+        }
+
+        for (int x = 0; x < 128; x++) {
+            for (int z = 0; z < 128; z++) {
+                int index = x + z * 128;
+                if (state.colors[index] == 0) {
+                    state.setColor(x, z, fallback);
+                }
+            }
+        }
         state.markDirty();
     }
 
