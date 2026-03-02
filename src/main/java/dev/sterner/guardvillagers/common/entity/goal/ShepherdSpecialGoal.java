@@ -29,6 +29,7 @@ import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -1019,18 +1020,70 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos getPenInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
-        if (state.contains(FenceGateBlock.FACING)) {
-            Direction facing = state.get(FenceGateBlock.FACING);
-            BlockPos front = gatePos.offset(facing);
-            BlockPos back = gatePos.offset(facing.getOpposite());
-            if (isInsideFencePen(world, front)) {
-                return front;
+        if (!state.contains(FenceGateBlock.FACING)) {
+            return null;
+        }
+
+        Direction facing = state.get(FenceGateBlock.FACING);
+        BlockPos front = gatePos.offset(facing);
+        BlockPos back = gatePos.offset(facing.getOpposite());
+
+        BlockPos frontInterior = findInteriorFromGateSide(world, front, gatePos);
+        if (frontInterior != null) {
+            return frontInterior;
+        }
+
+        return findInteriorFromGateSide(world, back, gatePos);
+    }
+
+    private BlockPos findInteriorFromGateSide(ServerWorld world, BlockPos startPos, BlockPos gatePos) {
+        if (isInsideFencePen(world, startPos)) {
+            return startPos.toImmutable();
+        }
+
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        LinkedHashSet<BlockPos> visited = new LinkedHashSet<>();
+        queue.add(startPos.toImmutable());
+        visited.add(startPos.toImmutable());
+
+        int maxNodes = 256;
+        int maxDistance = 8;
+
+        while (!queue.isEmpty() && visited.size() <= maxNodes) {
+            BlockPos current = queue.poll();
+            if (current == null) {
+                continue;
             }
-            if (isInsideFencePen(world, back)) {
-                return back;
+
+            if (isInsideFencePen(world, current)) {
+                return current.toImmutable();
+            }
+
+            for (Direction direction : Direction.Type.HORIZONTAL) {
+                BlockPos next = current.offset(direction);
+                if (visited.contains(next)) {
+                    continue;
+                }
+                if (!gatePos.isWithinDistance(next, maxDistance)) {
+                    continue;
+                }
+                if (!isPenWalkable(world, next)) {
+                    continue;
+                }
+                visited.add(next.toImmutable());
+                queue.add(next.toImmutable());
             }
         }
+
         return null;
+    }
+
+    private boolean isPenWalkable(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (state.getBlock() instanceof FenceBlock || state.getBlock() instanceof FenceGateBlock) {
+            return false;
+        }
+        return state.isAir();
     }
 
     private boolean hasBannerInPen(ServerWorld world, BlockPos penPos) {
