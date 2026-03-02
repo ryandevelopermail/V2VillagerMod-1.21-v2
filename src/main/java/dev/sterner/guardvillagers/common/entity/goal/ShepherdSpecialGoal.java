@@ -408,7 +408,9 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
-                updatePenGateAccess(world, penGatePos);
+                if (taskType != TaskType.SHEARS) {
+                    updatePenGateAccess(world, penGatePos);
+                }
 
                 if (taskType == TaskType.SHEARS) {
                     if (penGatePos != null && penTarget.equals(penGatePos)) {
@@ -577,7 +579,9 @@ public class ShepherdSpecialGoal extends Goal {
                 }
             }
             case RETURN_TO_CHEST -> {
-                updatePenGateAccess(world, penGatePos);
+                if (taskType != TaskType.SHEARS) {
+                    updatePenGateAccess(world, penGatePos);
+                }
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType != TaskType.SHEARS) {
@@ -1517,10 +1521,14 @@ public class ShepherdSpecialGoal extends Goal {
         }
         if (state.get(FenceGateBlock.OPEN)) {
             openGate(world, gatePos, false);
+            state = world.getBlockState(gatePos);
         }
-        openedPenGate = false;
-        wasInsidePen = false;
-        return true;
+        boolean closed = !state.get(FenceGateBlock.OPEN);
+        if (closed) {
+            openedPenGate = false;
+            wasInsidePen = false;
+        }
+        return closed;
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
