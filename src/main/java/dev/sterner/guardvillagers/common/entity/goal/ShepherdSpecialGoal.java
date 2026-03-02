@@ -302,7 +302,7 @@ public class ShepherdSpecialGoal extends Goal {
                 return;
             }
 
-            LOGGER.info("Shepherd {} starting banner placement run toward pen {}", villager.getUuidAsString(), penTarget.toShortString());
+            LOGGER.info("Shepherd {} starting banner placement run toward gate {}", villager.getUuidAsString(), penTarget.toShortString());
             stage = Stage.GO_TO_PEN;
             moveTo(penTarget);
             return;
@@ -382,6 +382,20 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 updatePenGateAccess(world, penGatePos);
+
+                if (penGatePos != null && penTarget.equals(penGatePos) && isNear(penGatePos)) {
+                    BlockState gateState = world.getBlockState(penGatePos);
+                    BlockPos insidePos = getPenInterior(world, penGatePos, gateState);
+                    BlockPos center = insidePos == null ? null : getPenCenter(world, insidePos);
+                    if (center == null || hasBannerInPen(world, center)) {
+                        stage = Stage.RETURN_TO_CHEST;
+                        moveTo(chestPos);
+                        return;
+                    }
+                    penTarget = center.toImmutable();
+                    moveTo(penTarget);
+                    return;
+                }
 
                 if (isNear(penTarget)) {
                     BlockPos placedBannerPos = placeBannerInPen(world, penTarget);
@@ -963,11 +977,7 @@ public class ShepherdSpecialGoal extends Goal {
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
-        List<BlockPos> bannerCandidates = findBannerCandidatesWithinRange(world, villagerPos, PEN_SCAN_RANGE, minY, maxY);
-        List<BlockPos> gateCandidates = bannerCandidates.isEmpty()
-                ? collectFallbackGateCandidates(world, villagerPos, minY, maxY)
-                : collectNearbyGateCandidates(world, villagerPos, bannerCandidates, PEN_BANNER_TO_GATE_SCAN_RADIUS, minY, maxY, PEN_GATE_CHECK_LIMIT);
-        BlockPos nearest = null;
+        List<BlockPos> gateCandidates = collectFallbackGateCandidates(world, villagerPos, minY, maxY);
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
 
@@ -978,36 +988,27 @@ public class ShepherdSpecialGoal extends Goal {
             }
 
             BlockPos insidePos = getPenInterior(world, gatePos, state);
-            if (insidePos == null) {
-                continue;
-            }
-
-            if (!isInsideFencePen(world, insidePos)) {
+            if (insidePos == null || !isInsideFencePen(world, insidePos)) {
                 continue;
             }
 
             BlockPos penCenter = getPenCenter(world, insidePos);
-            if (penCenter == null) {
+            if (penCenter == null || hasBannerInPen(world, penCenter)) {
                 continue;
             }
 
-            if (hasBannerInPen(world, penCenter)) {
-                continue;
-            }
-
-            double distance = villager.squaredDistanceTo(penCenter.getX() + 0.5D, penCenter.getY() + 0.5D, penCenter.getZ() + 0.5D);
+            double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                nearest = penCenter.toImmutable();
                 nearestGate = gatePos.toImmutable();
             }
         }
 
         nearestPenCacheTick = now;
-        cachedNearestPenTarget = nearest;
+        cachedNearestPenTarget = nearestGate;
         cachedNearestPenGatePos = nearestGate;
         penGatePos = nearestGate;
-        return nearest;
+        return nearestGate;
     }
 
     private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos villagerPos, int minY, int maxY) {
@@ -1015,6 +1016,9 @@ public class ShepherdSpecialGoal extends Goal {
         searchAnchors.add(villagerPos);
         if (jobPos != null && !jobPos.equals(villagerPos)) {
             searchAnchors.add(jobPos);
+        }
+        if (chestPos != null && !chestPos.equals(villagerPos) && !chestPos.equals(jobPos)) {
+            searchAnchors.add(chestPos);
         }
         return collectNearbyGateCandidates(world, villagerPos, searchAnchors, PEN_SCAN_RANGE, minY, maxY, PEN_GATE_CHECK_LIMIT);
     }
