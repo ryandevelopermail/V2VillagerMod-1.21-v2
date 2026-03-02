@@ -254,19 +254,25 @@ public class CartographerMapExplorationGoal extends Goal {
         int mapSize = getMapSize(mapScale);
         int y = jobPos.getY();
         int half = mapSize / 2;
-        int inset = Math.max(16, mapSize / 8);
+        int inset = Math.max(8, mapSize / 16);
 
         int westX = target.centerX() - half + inset;
         int eastX = target.centerX() + half - inset;
         int northZ = target.centerZ() - half + inset;
         int southZ = target.centerZ() + half - inset;
+        int midX = target.centerX();
+        int midZ = target.centerZ();
 
-        explorationWaypoints.add(new BlockPos(target.centerX(), y, target.centerZ()));
+        explorationWaypoints.add(new BlockPos(midX, y, midZ));
         explorationWaypoints.add(new BlockPos(westX, y, northZ));
+        explorationWaypoints.add(new BlockPos(midX, y, northZ));
         explorationWaypoints.add(new BlockPos(eastX, y, northZ));
+        explorationWaypoints.add(new BlockPos(eastX, y, midZ));
         explorationWaypoints.add(new BlockPos(eastX, y, southZ));
+        explorationWaypoints.add(new BlockPos(midX, y, southZ));
         explorationWaypoints.add(new BlockPos(westX, y, southZ));
-        explorationWaypoints.add(new BlockPos(target.centerX(), y, target.centerZ()));
+        explorationWaypoints.add(new BlockPos(westX, y, midZ));
+        explorationWaypoints.add(new BlockPos(midX, y, midZ));
     }
 
     private boolean hasEmptyMap(ServerWorld world) {
