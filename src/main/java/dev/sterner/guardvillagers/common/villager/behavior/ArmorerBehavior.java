@@ -103,7 +103,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
             }
-            if (!shouldProcessChestMutation(world, villager)) {
+            if (!shouldProcessChestMutationForWatcher(world, villager)) {
                 continue;
             }
             ArmorerBlastFurnaceGoal blastFurnace = GOALS.get(villager);
@@ -121,7 +121,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 
-    private static boolean shouldProcessChestMutation(ServerWorld world, VillagerEntity villager) {
+    private static boolean shouldProcessChestMutationForWatcher(ServerWorld world, VillagerEntity villager) {
         long now = world.getTime();
         long nextAllowedTick = NEXT_CHEST_MUTATION_RECHECK_TICK.getOrDefault(villager, 0L);
         if (now < nextAllowedTick) {
