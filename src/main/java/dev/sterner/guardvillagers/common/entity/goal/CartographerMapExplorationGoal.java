@@ -128,9 +128,12 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
                 activeMap = FilledMapItem.createMap(world, currentTarget.centerX(), currentTarget.centerZ(), (byte) mapScale, true, false);
                 villager.setStackInHand(Hand.MAIN_HAND, activeMap);
-                prepareExplorationPath(currentTarget);
-                stage = Stage.GO_TO_TARGET;
-                moveTo(explorationWaypoints.get(waypointIndex));
+                // Hard guarantee: fully materialize and color the map immediately,
+                // instead of relying on movement/exploration ticks to populate data.
+                forceCompleteMapStack(world, activeMap);
+                mappedTargets.add(currentTarget.key());
+                stage = Stage.RETURN_TO_CHEST;
+                moveTo(chestPos);
             }
             case GO_TO_TARGET -> {
                 tickActiveMap(world);
@@ -204,9 +207,6 @@ public class CartographerMapExplorationGoal extends Goal {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!stack.isOf(Items.FILLED_MAP)) {
-                continue;
-            }
-            if (isCompletelyBlank(stack, world)) {
                 continue;
             }
             forceCompleteMapStack(world, stack);
@@ -336,19 +336,6 @@ public class CartographerMapExplorationGoal extends Goal {
         }
         populateMapFromWorld(world, mapStack);
         finalizeMapColors(world, mapStack);
-    }
-
-    private boolean isCompletelyBlank(ItemStack mapStack, ServerWorld world) {
-        MapState state = FilledMapItem.getMapState(mapStack, world);
-        if (state == null) {
-            return true;
-        }
-        for (byte color : state.colors) {
-            if (color != 0) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private boolean isMostlyUncolored(ItemStack mapStack, ServerWorld world) {
