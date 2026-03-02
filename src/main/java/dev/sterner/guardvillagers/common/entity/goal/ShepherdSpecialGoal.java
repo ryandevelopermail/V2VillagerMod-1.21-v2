@@ -173,7 +173,7 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask != TaskType.SHEARS && !world.isDay()) {
+        if (nextTask == TaskType.WHEAT_GATHER && !world.isDay()) {
             return false;
         }
 
@@ -477,7 +477,7 @@ public class ShepherdSpecialGoal extends Goal {
         boolean hasBannerAvailable = hasBannerInInventoryOrHand()
                 || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
 
-        if (hasBannerAvailable && findNearestPenTarget(world) != null) {
+        if (hasBannerAvailable) {
             return TaskType.BANNER;
         }
 
