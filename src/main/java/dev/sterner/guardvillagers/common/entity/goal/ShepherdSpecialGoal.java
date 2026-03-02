@@ -57,6 +57,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int PEN_BANNER_CANDIDATE_LIMIT = 32;
     private static final int PEN_GATE_CHECK_LIMIT = 40;
     private static final double GATE_INTERACT_RANGE_SQUARED = 9.0D;
+    private static final double SHEAR_GATE_INTERACT_RANGE_SQUARED = 16.0D;
     private static final int GATHER_RADIUS = 50;
     private static final int GATHER_MIN_SESSION_TICKS = 1200;
     private static final int GATHER_MAX_SESSION_TICKS = 2200;
@@ -410,7 +411,11 @@ public class ShepherdSpecialGoal extends Goal {
                 updatePenGateAccess(world, penGatePos);
 
                 if (taskType == TaskType.SHEARS) {
-                    if (penGatePos != null && penTarget.equals(penGatePos) && isNear(penGatePos)) {
+                    if (penGatePos != null && penTarget.equals(penGatePos)) {
+                        if (!ensureShearGateOpen(world, penGatePos)) {
+                            moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                            return;
+                        }
                         penTarget = currentShearPenCenter;
                         if (penTarget == null) {
                             stage = Stage.LEAVE_SHEAR_PEN;
@@ -489,15 +494,9 @@ public class ShepherdSpecialGoal extends Goal {
                     }
                 }
 
-                if (penGatePos != null) {
-                    if (isNear(penGatePos)) {
-                        openGate(world, penGatePos, false);
-                        openedPenGate = false;
-                        wasInsidePen = false;
-                    } else {
-                        moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
-                        return;
-                    }
+                if (penGatePos != null && !ensureShearGateClosed(world, penGatePos)) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
                 }
 
                 shearPenIndex++;
@@ -920,7 +919,7 @@ public class ShepherdSpecialGoal extends Goal {
             if (preferredState.getBlock() instanceof FenceGateBlock) {
                 BlockPos preferredInterior = getPenInterior(world, preferredGate, preferredState);
                 BlockPos preferredCenter = preferredInterior == null ? null : getPenCenter(world, preferredInterior);
-                if (preferredCenter != null && preferredCenter.getSquaredDistance(penCenter) <= 25.0D) {
+                if (preferredCenter != null && preferredCenter.getSquaredDistance(penCenter) <= 36.0D) {
                     return preferredGate.toImmutable();
                 }
             }
@@ -941,10 +940,10 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
             BlockPos center = getPenCenter(world, insidePos);
-            if (center == null || center.getSquaredDistance(penCenter) > 25.0D) {
+            if (center == null || center.getSquaredDistance(penCenter) > 36.0D) {
                 continue;
             }
-            double distance = villager.getBlockPos().getSquaredDistance(gatePos);
+            double distance = center.getSquaredDistance(penCenter);
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestGate = gatePos.toImmutable();
@@ -1480,6 +1479,48 @@ public class ShepherdSpecialGoal extends Goal {
     private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
         BlockState bannerState = world.getBlockState(bannerPos);
         JobBlockPairingHelper.handleBannerPlacement(world, bannerPos, bannerState);
+    }
+
+    private boolean isWithinRangeSquared(BlockPos pos, double rangeSquared) {
+        return villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= rangeSquared;
+    }
+
+    private boolean ensureShearGateOpen(ServerWorld world, BlockPos gatePos) {
+        if (gatePos == null) {
+            return false;
+        }
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return false;
+        }
+        if (!isWithinRangeSquared(gatePos, SHEAR_GATE_INTERACT_RANGE_SQUARED)) {
+            return false;
+        }
+        if (!state.get(FenceGateBlock.OPEN)) {
+            openGate(world, gatePos, true);
+        }
+        openedPenGate = true;
+        wasInsidePen = true;
+        return true;
+    }
+
+    private boolean ensureShearGateClosed(ServerWorld world, BlockPos gatePos) {
+        if (gatePos == null) {
+            return true;
+        }
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return true;
+        }
+        if (!isWithinRangeSquared(gatePos, SHEAR_GATE_INTERACT_RANGE_SQUARED)) {
+            return false;
+        }
+        if (state.get(FenceGateBlock.OPEN)) {
+            openGate(world, gatePos, false);
+        }
+        openedPenGate = false;
+        wasInsidePen = false;
+        return true;
     }
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
