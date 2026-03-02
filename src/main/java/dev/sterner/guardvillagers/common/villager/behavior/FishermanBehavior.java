@@ -25,12 +25,15 @@ import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.world.World;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -45,7 +48,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, FishermanDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
     private static final long FULL_SWEEP_INTERVAL_TICKS = 20L * 60L;
-    private static long nextFullSweepTick;
+    private static final Map<RegistryKey<World>, Long> NEXT_FULL_SWEEP_TICK_BY_WORLD = new HashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CONVERSION_RECHECK_TICK = new WeakHashMap<>();
+    private static final long CONVERSION_RECHECK_COOLDOWN_TICKS = 10L;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -144,8 +149,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     public static void tryConvertFishermenWithRod(ServerWorld world) {
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN));
         long gameTime = world.getTime();
+        long nextFullSweepTick = NEXT_FULL_SWEEP_TICK_BY_WORLD.getOrDefault(world.getRegistryKey(), 0L);
         if (gameTime >= nextFullSweepTick) {
-            nextFullSweepTick = gameTime + FULL_SWEEP_INTERVAL_TICKS;
+            NEXT_FULL_SWEEP_TICK_BY_WORLD.put(world.getRegistryKey(), gameTime + FULL_SWEEP_INTERVAL_TICKS);
             Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
             candidates.addAll(world.getEntitiesByClass(
                     VillagerEntity.class,
@@ -267,7 +273,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             }
             if (villager.getWorld() instanceof ServerWorld serverWorld) {
                 VillagerConversionCandidateIndex.markCandidate(serverWorld, villager);
-                ProfessionDefinitions.runConversionHooks(serverWorld);
+                if (shouldRecheckConversionNow(serverWorld, villager)) {
+                    tryConvertFishermenWithRod(serverWorld);
+                }
             }
         };
         simpleInventory.addListener(listener);
@@ -291,6 +299,17 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return null;
         }
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+
+    private static boolean shouldRecheckConversionNow(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CONVERSION_RECHECK_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return false;
+        }
+        NEXT_CONVERSION_RECHECK_TICK.put(villager, now + CONVERSION_RECHECK_COOLDOWN_TICKS);
+        return true;
     }
 
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {

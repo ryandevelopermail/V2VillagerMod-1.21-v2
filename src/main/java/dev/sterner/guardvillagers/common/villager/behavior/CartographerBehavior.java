@@ -30,6 +30,8 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, CartographerToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CHEST_MUTATION_RECHECK_TICK = new WeakHashMap<>();
+    private static final long CHEST_MUTATION_RECHECK_COOLDOWN_TICKS = 10L;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -146,6 +148,9 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             return;
         }
         InventoryChangedListener listener = sender -> {
+            if (!shouldProcessChestMutation(world, villager)) {
+                return;
+            }
             CartographerMapExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
             if (explorationGoal != null) {
                 explorationGoal.requestImmediateCheck(world);
@@ -180,6 +185,17 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             return null;
         }
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+
+    private static boolean shouldProcessChestMutation(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CHEST_MUTATION_RECHECK_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return false;
+        }
+        NEXT_CHEST_MUTATION_RECHECK_TICK.put(villager, now + CHEST_MUTATION_RECHECK_COOLDOWN_TICKS);
+        return true;
     }
 
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {

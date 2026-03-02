@@ -220,7 +220,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
                                 villager.getUuidAsString(),
                                 triggerSlot.get().sourceDescription(),
                                 triggerSlot.get().slot());
-                        ProfessionDefinitions.runConversionHooks(world);
+                        tryConvertMasonsWithMiningTool(world);
                     } else {
                         LOGGER.info("Mason {} conversion trigger missing during chest listener scan around chest {}",
                                 villager.getUuidAsString(),
