@@ -105,9 +105,9 @@ public final class ArmorStandConversionHandler {
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
         guardModifierService.applySpecialModifierFromNearbyBlocks(world, guard);
 
-        villager.releaseTicketFor(MemoryModuleType.HOME);
-        villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
+        villager.getBrain().forget(MemoryModuleType.HOME);
+        villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+        villager.getBrain().forget(MemoryModuleType.MEETING_POINT);
         villager.discard();
     }
 }

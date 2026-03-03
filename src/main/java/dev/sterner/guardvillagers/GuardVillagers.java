@@ -319,9 +319,9 @@ public class GuardVillagers implements ModInitializer {
         if (world instanceof ServerWorld serverWorld) {
             VillageGuardStandManager.handleGuardSpawn(serverWorld, guard, villagerEntity);
         }
-        villagerEntity.releaseTicketFor(MemoryModuleType.HOME);
-        villagerEntity.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villagerEntity.releaseTicketFor(MemoryModuleType.MEETING_POINT);
+        villagerEntity.getBrain().forget(MemoryModuleType.HOME);
+        villagerEntity.getBrain().forget(MemoryModuleType.JOB_SITE);
+        villagerEntity.getBrain().forget(MemoryModuleType.MEETING_POINT);
         villagerEntity.discard();
     }
 

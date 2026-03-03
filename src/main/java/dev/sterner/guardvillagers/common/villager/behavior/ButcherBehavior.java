@@ -27,15 +27,12 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.SwordItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ButcherBehavior implements VillagerProfessionBehavior {
@@ -170,15 +167,7 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertButchersWithWeapon(ServerWorld world) {
-        Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER
-        ));
-
-        for (VillagerEntity villager : candidates) {
+        for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER)) {
             if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
                 continue;
             }
@@ -245,9 +234,9 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
                 guard.getUuidAsString(),
                 chestPos.toShortString());
 
-        villager.releaseTicketFor(MemoryModuleType.HOME);
-        villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
+        villager.getBrain().forget(MemoryModuleType.HOME);
+        villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+        villager.getBrain().forget(MemoryModuleType.MEETING_POINT);
         villager.discard();
     }
 
