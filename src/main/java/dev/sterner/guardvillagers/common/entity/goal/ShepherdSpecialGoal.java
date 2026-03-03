@@ -380,8 +380,8 @@ public class ShepherdSpecialGoal extends Goal {
             case GO_TO_SHEEP -> {
                 SheepEntity targetEntity = getSheepTarget();
                 if (targetEntity == null) {
-                    stage = Stage.RETURN_TO_CHEST;
-                    moveTo(chestPos);
+                    stage = Stage.SHEARS_EXIT_PEN;
+                    moveTo(penGatePos == null ? chestPos : penGatePos);
                     return;
                 }
 
@@ -392,8 +392,8 @@ public class ShepherdSpecialGoal extends Goal {
                     if (nextTarget != null) {
                         moveTo(nextTarget.getBlockPos());
                     } else {
-                        stage = Stage.RETURN_TO_CHEST;
-                        moveTo(chestPos);
+                        stage = Stage.SHEARS_EXIT_PEN;
+                        moveTo(penGatePos == null ? chestPos : penGatePos);
                     }
                 } else {
                     moveTo(targetEntity.getBlockPos());
@@ -427,8 +427,8 @@ public class ShepherdSpecialGoal extends Goal {
                         sheepTargets = findSheepTargets(world, currentShearPenCenter);
                         sheepTargetIndex = 0;
                         if (sheepTargets.isEmpty()) {
-                            stage = Stage.RETURN_TO_CHEST;
-                            moveTo(chestPos);
+                            stage = Stage.SHEARS_EXIT_PEN;
+                            moveTo(penGatePos == null ? chestPos : penGatePos);
                         } else {
                             stage = Stage.GO_TO_SHEEP;
                             moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
@@ -465,6 +465,34 @@ public class ShepherdSpecialGoal extends Goal {
                 } else {
                     moveTo(penTarget);
                 }
+            }
+            case SHEARS_EXIT_PEN -> {
+                if (taskType != TaskType.SHEARS || penGatePos == null) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    moveTo(chestPos);
+                    return;
+                }
+
+                updatePenGateAccess(world, penGatePos);
+                boolean isInsidePen = isInsideFencePen(world, villager.getBlockPos());
+
+                if (isInsidePen) {
+                    openGate(world, penGatePos, true);
+                    BlockPos outsideTarget = resolveOutsideGateTarget(world, penGatePos);
+                    moveTo(outsideTarget == null ? penGatePos : outsideTarget, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                if (!isNear(penGatePos)) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                openGate(world, penGatePos, false);
+                openedPenGate = false;
+                wasInsidePen = false;
+                stage = Stage.RETURN_TO_CHEST;
+                moveTo(chestPos);
             }
             case GATHER_WANDER -> {
                 if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
@@ -1539,6 +1567,25 @@ public class ShepherdSpecialGoal extends Goal {
         return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
     }
 
+    private BlockPos resolveOutsideGateTarget(ServerWorld world, BlockPos gatePos) {
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
+            return gatePos;
+        }
+        Direction facing = state.get(FenceGateBlock.FACING);
+        BlockPos front = gatePos.offset(facing);
+        BlockPos back = gatePos.offset(facing.getOpposite());
+        boolean frontInside = isInsideFencePen(world, front);
+        boolean backInside = isInsideFencePen(world, back);
+        if (frontInside && !backInside) {
+            return back.toImmutable();
+        }
+        if (backInside && !frontInside) {
+            return front.toImmutable();
+        }
+        return gatePos;
+    }
+
     private void ensureGateOpen(ServerWorld world, BlockPos gatePos) {
         if (gatePos == null) {
             return;
@@ -1816,6 +1863,7 @@ public class ShepherdSpecialGoal extends Goal {
         IDLE,
         GO_TO_SHEEP,
         GO_TO_PEN,
+        SHEARS_EXIT_PEN,
         GATHER_WANDER,
         GUIDE_TO_PEN_CENTER,
         RUSH_TO_GATE_AND_CLOSE,
