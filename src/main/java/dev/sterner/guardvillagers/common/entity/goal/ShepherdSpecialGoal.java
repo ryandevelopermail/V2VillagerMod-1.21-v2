@@ -649,7 +649,7 @@ public class ShepherdSpecialGoal extends Goal {
                 moveTo(chestPos);
             }
             case GATHER_CIRCLE -> {
-                if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
+                if (gatherBannerPos == null || !isHoldingGatherWheat()) {
                     stage = Stage.DONE;
                     return;
                 }
@@ -712,7 +712,7 @@ public class ShepherdSpecialGoal extends Goal {
 
                 ensureGateOpen(world, penGatePos);
                 if (isNear(gatherBannerPos)) {
-                    villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
+                    clearGatherWheatHands();
                     gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
                     stage = Stage.GATHER_EXIT_AND_CLOSE;
                 } else {
@@ -965,7 +965,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private boolean equipWheatForGathering(ServerWorld world) {
-        if (villager.getOffHandStack().isOf(Items.WHEAT)) {
+        if (isHoldingGatherWheat()) {
             return true;
         }
 
@@ -976,7 +976,7 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
             ItemStack extracted = stack.split(1);
-            villager.setStackInHand(Hand.OFF_HAND, extracted);
+            villager.setStackInHand(Hand.MAIN_HAND, extracted);
             if (stack.isEmpty()) {
                 inventory.setStack(slot, ItemStack.EMPTY);
             }
@@ -994,12 +994,26 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
             ItemStack extracted = stack.split(1);
-            villager.setStackInHand(Hand.OFF_HAND, extracted);
+            villager.setStackInHand(Hand.MAIN_HAND, extracted);
             chestInventory.setStack(slot, stack);
             chestInventory.markDirty();
             return true;
         }
         return false;
+    }
+
+
+    private boolean isHoldingGatherWheat() {
+        return villager.getMainHandStack().isOf(Items.WHEAT) || villager.getOffHandStack().isOf(Items.WHEAT);
+    }
+
+    private void clearGatherWheatHands() {
+        if (villager.getOffHandStack().isOf(Items.WHEAT)) {
+            villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
+        }
+        if (villager.getMainHandStack().isOf(Items.WHEAT)) {
+            villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+        }
     }
 
     private int countSheepNearby(ServerWorld world) {
@@ -2044,7 +2058,7 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void refreshActiveHerd(ServerWorld world) {
-        if (gatherBannerPos == null || !villager.getOffHandStack().isOf(Items.WHEAT)) {
+        if (gatherBannerPos == null || !isHoldingGatherWheat()) {
             activeHerd.clear();
             return;
         }
