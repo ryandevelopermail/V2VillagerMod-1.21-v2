@@ -443,8 +443,8 @@ public class ShepherdSpecialGoal extends Goal {
                                 penGatePos.toShortString(),
                                 currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
                         penTarget = currentShearPenCenter;
-                        shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos);
-                        shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos);
+                        shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos, currentShearPenCenter);
+                        shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos, currentShearPenCenter);
                         shearsGateCloseDistanceSquared = calculateGateCloseDistanceSquared(penGatePos, currentShearPenCenter);
                         shearsGateClosedAfterEntry = false;
                         if (shearsGateInsideTarget != null) {
@@ -535,7 +535,9 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
                 boolean isInsidePen = isInsideSpecificPen(world, villager.getBlockPos(), currentShearPenCenter);
-                BlockPos outsideTarget = shearsGateOutsideTarget == null ? resolveOutsideGateTarget(world, penGatePos) : shearsGateOutsideTarget;
+                BlockPos outsideTarget = shearsGateOutsideTarget == null
+                        ? resolveOutsideGateTarget(world, penGatePos, currentShearPenCenter)
+                        : shearsGateOutsideTarget;
 
                 if (isInsidePen) {
                     BlockState gateState = world.getBlockState(penGatePos);
@@ -1698,7 +1700,7 @@ public class ShepherdSpecialGoal extends Goal {
         return closeDistance * closeDistance;
     }
 
-    private BlockPos resolveInsideGateTarget(ServerWorld world, BlockPos gatePos) {
+    private BlockPos resolveInsideGateTarget(ServerWorld world, BlockPos gatePos, BlockPos expectedPenCenter) {
         BlockState state = world.getBlockState(gatePos);
         if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
             return gatePos;
@@ -1706,8 +1708,8 @@ public class ShepherdSpecialGoal extends Goal {
         Direction facing = state.get(FenceGateBlock.FACING);
         BlockPos front = gatePos.offset(facing);
         BlockPos back = gatePos.offset(facing.getOpposite());
-        boolean frontInside = isInsideFencePen(world, front);
-        boolean backInside = isInsideFencePen(world, back);
+        boolean frontInside = isInsideSpecificPen(world, front, expectedPenCenter);
+        boolean backInside = isInsideSpecificPen(world, back, expectedPenCenter);
         if (frontInside && !backInside) {
             return front.toImmutable();
         }
@@ -1717,7 +1719,7 @@ public class ShepherdSpecialGoal extends Goal {
         return gatePos;
     }
 
-    private BlockPos resolveOutsideGateTarget(ServerWorld world, BlockPos gatePos) {
+    private BlockPos resolveOutsideGateTarget(ServerWorld world, BlockPos gatePos, BlockPos expectedPenCenter) {
         BlockState state = world.getBlockState(gatePos);
         if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
             return gatePos;
@@ -1725,8 +1727,8 @@ public class ShepherdSpecialGoal extends Goal {
         Direction facing = state.get(FenceGateBlock.FACING);
         BlockPos front = gatePos.offset(facing);
         BlockPos back = gatePos.offset(facing.getOpposite());
-        boolean frontInside = isInsideFencePen(world, front);
-        boolean backInside = isInsideFencePen(world, back);
+        boolean frontInside = isInsideSpecificPen(world, front, expectedPenCenter);
+        boolean backInside = isInsideSpecificPen(world, back, expectedPenCenter);
         if (frontInside && !backInside) {
             return back.toImmutable();
         }
