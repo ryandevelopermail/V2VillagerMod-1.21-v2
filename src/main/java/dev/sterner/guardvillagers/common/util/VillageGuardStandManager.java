@@ -50,6 +50,15 @@ public final class VillageGuardStandManager {
     }
 
     public static void handleGuardSpawn(ServerWorld world, GuardEntity guard, @Nullable VillagerEntity sourceVillager) {
+        if (guard.getPairedStandUuid() != null) {
+            Entity pairedStand = world.getEntity(guard.getPairedStandUuid());
+            if (pairedStand instanceof ArmorStandEntity armorStand
+                    && armorStand.isAlive()
+                    && armorStand.getCommandTags().contains(GUARD_STAND_TAG)) {
+                return;
+            }
+        }
+
         Optional<BlockPos> bellPos = findBell(world, guard, sourceVillager);
         if (bellPos.isEmpty()) {
             return;
@@ -167,6 +176,7 @@ public final class VillageGuardStandManager {
                 if (!hasTag) {
                     stand.addCommandTag(GUARD_STAND_TAG);
                 }
+                stand.setShowArms(true);
                 standsByPosition.putIfAbsent(standPos, stand);
             } else if (hasTag) {
                 stand.removeCommandTag(GUARD_STAND_TAG);
@@ -207,6 +217,7 @@ public final class VillageGuardStandManager {
         for (BlockPos position : positions) {
             ArmorStandEntity armorStand = new ArmorStandEntity(world, position.getX() + 0.5D, position.getY(), position.getZ() + 0.5D);
             armorStand.addCommandTag(GUARD_STAND_TAG);
+            armorStand.setShowArms(true);
             world.spawnEntity(armorStand);
             newStands.add(armorStand);
         }
@@ -290,15 +301,7 @@ public final class VillageGuardStandManager {
 
     private static void assignGuardToStand(ServerWorld world, GuardEntity guard, ArmorStandEntity stand) {
         guard.setPairedStandUuid(stand.getUuid());
-        if (guard.isStandCustomizationEnabled()) {
-            if (GuardStandEquipmentSync.hasEquipment(stand)) {
-                GuardStandEquipmentSync.syncGuardFromStand(guard, stand);
-            } else {
-                GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
-            }
-        } else {
-            GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
-        }
+        GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
         JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
     }
 
