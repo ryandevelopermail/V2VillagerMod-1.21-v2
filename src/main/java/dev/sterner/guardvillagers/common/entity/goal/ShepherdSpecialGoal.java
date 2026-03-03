@@ -649,10 +649,12 @@ public class ShepherdSpecialGoal extends Goal {
                 moveTo(chestPos);
             }
             case GATHER_CIRCLE -> {
-                if (gatherBannerPos == null || !isHoldingGatherWheat()) {
+                if (gatherBannerPos == null || !ensureGatherWheatDisplayed(world)) {
                     stage = Stage.DONE;
                     return;
                 }
+
+                forceNearbySheepFocusOnShepherd(world);
 
                 if (world.getTime() >= nextGatherFollowCheckTick) {
                     refreshActiveHerd(world);
@@ -694,8 +696,13 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                if (!ensureGatherWheatDisplayed(world)) {
+                    stage = Stage.DONE;
+                    return;
+                }
                 ensureGateOpen(world, penGatePos);
                 refreshActiveHerd(world);
+                forceNearbySheepFocusOnShepherd(world);
 
                 if (isNear(penGatePos)) {
                     stage = Stage.GATHER_MOVE_TO_BANNER;
@@ -710,7 +717,12 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
+                if (!ensureGatherWheatDisplayed(world)) {
+                    stage = Stage.DONE;
+                    return;
+                }
                 ensureGateOpen(world, penGatePos);
+                forceNearbySheepFocusOnShepherd(world);
                 if (isNear(gatherBannerPos)) {
                     clearGatherWheatHands();
                     gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
@@ -1007,12 +1019,34 @@ public class ShepherdSpecialGoal extends Goal {
         return villager.getMainHandStack().isOf(Items.WHEAT) || villager.getOffHandStack().isOf(Items.WHEAT);
     }
 
+    private boolean ensureGatherWheatDisplayed(ServerWorld world) {
+        if (isHoldingGatherWheat()) {
+            return true;
+        }
+        if (equipWheatForGathering(world)) {
+            return true;
+        }
+
+        villager.setStackInHand(Hand.MAIN_HAND, new ItemStack(Items.WHEAT));
+        LOGGER.info("Shepherd {} forced synthetic wheat display for gather session", villager.getUuidAsString());
+        return true;
+    }
+
     private void clearGatherWheatHands() {
         if (villager.getOffHandStack().isOf(Items.WHEAT)) {
             villager.setStackInHand(Hand.OFF_HAND, ItemStack.EMPTY);
         }
         if (villager.getMainHandStack().isOf(Items.WHEAT)) {
             villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
+        }
+    }
+
+    private void forceNearbySheepFocusOnShepherd(ServerWorld world) {
+        Box sheepBox = new Box(villager.getBlockPos()).expand(HERD_SELECTION_RANGE, 6.0D, HERD_SELECTION_RANGE);
+        List<SheepEntity> nearbySheep = world.getEntitiesByClass(SheepEntity.class, sheepBox, SheepEntity::isAlive);
+        for (SheepEntity sheep : nearbySheep) {
+            sheep.getLookControl().lookAt(villager, 30.0F, 30.0F);
+            sheep.getNavigation().startMovingTo(villager, 1.05D);
         }
     }
 
