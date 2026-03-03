@@ -464,7 +464,13 @@ public class ShepherdSpecialGoal extends Goal {
                                 penGatePos.getX() + 0.5D,
                                 penGatePos.getY() + 0.5D,
                                 penGatePos.getZ() + 0.5D);
-                        if (isInsidePen || distanceFromGateSquared >= shearsGateCloseDistanceSquared) {
+                        boolean reachedInsideTarget = shearsGateInsideTarget != null
+                                && villager.squaredDistanceTo(
+                                shearsGateInsideTarget.getX() + 0.5D,
+                                shearsGateInsideTarget.getY() + 0.5D,
+                                shearsGateInsideTarget.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+                        boolean safelyInsidePen = isInsidePen && distanceFromGateSquared >= 2.25D;
+                        if (reachedInsideTarget || safelyInsidePen) {
                             openGate(world, penGatePos, false);
                             shearsGateClosedAfterEntry = true;
                         }
