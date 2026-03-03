@@ -785,6 +785,7 @@ public class ShepherdSpecialGoal extends Goal {
                 boolean isInsidePen = penTarget != null
                         ? isInsideSpecificPen(world, villager.getBlockPos(), penTarget)
                         : isInsideFencePen(world, villager.getBlockPos());
+
                 if (isInsidePen) {
                     if (gatherExitPenStuckStartTick == 0L) {
                         gatherExitPenStuckStartTick = world.getTime();
@@ -793,24 +794,36 @@ public class ShepherdSpecialGoal extends Goal {
                         gatherExitPenStuckStartTick = world.getTime();
                         return;
                     }
-                } else {
-                    gatherExitPenStuckStartTick = 0L;
-                }
 
-                if (gatherExitTarget != null && !isNear(gatherExitTarget)) {
                     ensureGateOpen(world, penGatePos);
-                    moveTo(gatherExitTarget, FAST_GATE_CLOSE_SPEED);
+                    if (gatherExitTarget == null) {
+                        gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                    }
+                    moveTo(gatherExitTarget == null ? penGatePos : gatherExitTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
 
-                if (isNear(penGatePos) || (gatherExitTarget != null && isNear(gatherExitTarget))) {
+                gatherExitPenStuckStartTick = 0L;
+
+                BlockState gateState = world.getBlockState(penGatePos);
+                boolean gateOpen = gateState.getBlock() instanceof FenceGateBlock && gateState.get(FenceGateBlock.OPEN);
+                double distanceFromGateSquared = villager.squaredDistanceTo(
+                        penGatePos.getX() + 0.5D,
+                        penGatePos.getY() + 0.5D,
+                        penGatePos.getZ() + 0.5D);
+
+                if (gateOpen && distanceFromGateSquared > GATE_INTERACT_RANGE_SQUARED) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                if (gateOpen) {
                     openGate(world, penGatePos, false);
                     LOGGER.info("Shepherd {} closed pen gate at {} after wheat gather", villager.getUuidAsString(), penGatePos.toShortString());
-                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                    stage = Stage.DONE;
-                } else {
-                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
                 }
+
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
             }
             case RETURN_TO_CHEST -> {
                 updatePenGateAccess(world, penGatePos);
