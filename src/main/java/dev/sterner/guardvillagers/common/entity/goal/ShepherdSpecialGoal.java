@@ -1334,7 +1334,7 @@ public class ShepherdSpecialGoal extends Goal {
         candidates.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
         int desiredTargetCount = BACKUP_SHEAR_MIN_TARGETS
                 + villager.getRandom().nextInt(BACKUP_SHEAR_MAX_TARGETS - BACKUP_SHEAR_MIN_TARGETS + 1);
-        java.util.Collections.shuffle(candidates, villager.getRandom());
+        java.util.Collections.shuffle(candidates, new java.util.Random(villager.getRandom().nextLong()));
         int selectedCount = Math.min(desiredTargetCount, candidates.size());
         List<SheepEntity> selected = new ArrayList<>(candidates.subList(0, selectedCount));
         selected.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
