@@ -538,6 +538,10 @@ public class ShepherdSpecialGoal extends Goal {
                 BlockPos outsideTarget = shearsGateOutsideTarget == null
                         ? resolveOutsideGateTarget(world, penGatePos, currentShearPenCenter)
                         : shearsGateOutsideTarget;
+                double distanceFromGateSquared = villager.squaredDistanceTo(
+                        penGatePos.getX() + 0.5D,
+                        penGatePos.getY() + 0.5D,
+                        penGatePos.getZ() + 0.5D);
 
                 if (isInsidePen) {
                     BlockState gateState = world.getBlockState(penGatePos);
@@ -554,13 +558,15 @@ public class ShepherdSpecialGoal extends Goal {
 
                 if (outsideTarget != null) {
                     double outsideDistanceSquared = villager.squaredDistanceTo(outsideTarget.getX() + 0.5D, outsideTarget.getY() + 0.5D, outsideTarget.getZ() + 0.5D);
-                    if (outsideDistanceSquared > 1.0D) {
+                    if (outsideDistanceSquared > 4.0D && distanceFromGateSquared < 16.0D) {
                         moveTo(outsideTarget, FAST_GATE_CLOSE_SPEED);
                         return;
                     }
                 }
 
-                openGate(world, penGatePos, false);
+                if (distanceFromGateSquared < 64.0D) {
+                    openGate(world, penGatePos, false);
+                }
                 LOGGER.info("Shepherd {} closed shearing gate {} after exiting pen for banner {}",
                         villager.getUuidAsString(),
                         penGatePos.toShortString(),
