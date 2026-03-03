@@ -69,10 +69,12 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final int GATHER_CIRCLE_RADIUS = 20;
     private static final int GATHER_CIRCLE_WAYPOINT_COUNT = 16;
+    private static final int GATHER_BANNER_HOLD_TICKS = 1200;
     private static final double GATHER_GATE_ALIGNMENT_DOT_THRESHOLD = 0.96D;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
     private static final long SHEARS_EXIT_PEN_RETRY_TICKS = 200L;
+    private static final long GATHER_EXIT_PEN_RETRY_TICKS = 200L;
     private static final int BACKUP_SHEAR_MIN_TARGETS = 3;
     private static final int BACKUP_SHEAR_MAX_TARGETS = 6;
 
@@ -116,6 +118,8 @@ public class ShepherdSpecialGoal extends Goal {
     private long gatherSessionDurationTicks;
     private long nextGatherRepathTick;
     private long nextGatherFollowCheckTick;
+    private long gatherBannerHoldStartTick;
+    private long gatherExitPenStuckStartTick;
     private final List<BlockPos> gatherCircleWaypoints = new ArrayList<>();
     private int gatherCircleWaypointIndex;
     private int gatherCircleStartIndex;
@@ -387,6 +391,8 @@ public class ShepherdSpecialGoal extends Goal {
         gatherCircleStartIndex = findClosestGatherWaypointIndex(villager.getBlockPos());
         gatherCircleWaypointIndex = gatherCircleStartIndex;
         gatherCircleCompleted = false;
+        gatherBannerHoldStartTick = 0L;
+        gatherExitPenStuckStartTick = 0L;
         activeHerd.clear();
         refreshActiveHerd(world);
         LOGGER.info("Shepherd {} started wheat gather session near banner {} for {} ticks", villager.getUuidAsString(), gatherBannerPos.toShortString(), gatherSessionDurationTicks);
@@ -422,6 +428,8 @@ public class ShepherdSpecialGoal extends Goal {
         gatherCircleWaypointIndex = 0;
         gatherCircleStartIndex = 0;
         gatherCircleCompleted = false;
+        gatherBannerHoldStartTick = 0L;
+        gatherExitPenStuckStartTick = 0L;
         gatherExitTarget = null;
     }
 
@@ -724,12 +732,49 @@ public class ShepherdSpecialGoal extends Goal {
                 ensureGateOpen(world, penGatePos);
                 forceNearbySheepFocusOnShepherd(world);
                 if (isNear(gatherBannerPos)) {
-                    clearGatherWheatHands();
-                    gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
-                    stage = Stage.GATHER_EXIT_AND_CLOSE;
+                    gatherBannerHoldStartTick = world.getTime();
+                    villager.getNavigation().stop();
+                    LOGGER.info("Shepherd {} reached gather banner {}; holding center for {} ticks before exit",
+                            villager.getUuidAsString(),
+                            gatherBannerPos.toShortString(),
+                            GATHER_BANNER_HOLD_TICKS);
+                    stage = Stage.GATHER_HOLD_BANNER;
                 } else {
                     moveTo(gatherBannerPos, SLOW_GUIDE_SPEED);
                 }
+            }
+            case GATHER_HOLD_BANNER -> {
+                if (gatherBannerPos == null || penGatePos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                if (!ensureGatherWheatDisplayed(world)) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                ensureGateOpen(world, penGatePos);
+                forceNearbySheepFocusOnShepherd(world);
+                if (!isNear(gatherBannerPos)) {
+                    moveTo(gatherBannerPos, SLOW_GUIDE_SPEED);
+                    return;
+                }
+
+                villager.getNavigation().stop();
+                long holdElapsed = world.getTime() - gatherBannerHoldStartTick;
+                if (holdElapsed < GATHER_BANNER_HOLD_TICKS) {
+                    return;
+                }
+
+                clearGatherWheatHands();
+                activeHerd.clear();
+                LOGGER.info("Shepherd {} completed center hold at banner {}; wheat attraction disabled, exiting pen",
+                        villager.getUuidAsString(),
+                        gatherBannerPos.toShortString());
+                gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                gatherExitPenStuckStartTick = 0L;
+                stage = Stage.GATHER_EXIT_AND_CLOSE;
             }
             case GATHER_EXIT_AND_CLOSE -> {
                 if (penGatePos == null) {
@@ -737,20 +782,48 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
 
-                if (gatherExitTarget != null && !isNear(gatherExitTarget)) {
+                boolean isInsidePen = penTarget != null
+                        ? isInsideSpecificPen(world, villager.getBlockPos(), penTarget)
+                        : isInsideFencePen(world, villager.getBlockPos());
+
+                if (isInsidePen) {
+                    if (gatherExitPenStuckStartTick == 0L) {
+                        gatherExitPenStuckStartTick = world.getTime();
+                    } else if (world.getTime() - gatherExitPenStuckStartTick >= GATHER_EXIT_PEN_RETRY_TICKS) {
+                        retryGatherExitPen(world);
+                        gatherExitPenStuckStartTick = world.getTime();
+                        return;
+                    }
+
                     ensureGateOpen(world, penGatePos);
-                    moveTo(gatherExitTarget, FAST_GATE_CLOSE_SPEED);
+                    if (gatherExitTarget == null) {
+                        gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                    }
+                    moveTo(gatherExitTarget == null ? penGatePos : gatherExitTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
 
-                if (isNear(penGatePos) || (gatherExitTarget != null && isNear(gatherExitTarget))) {
+                gatherExitPenStuckStartTick = 0L;
+
+                BlockState gateState = world.getBlockState(penGatePos);
+                boolean gateOpen = gateState.getBlock() instanceof FenceGateBlock && gateState.get(FenceGateBlock.OPEN);
+                double distanceFromGateSquared = villager.squaredDistanceTo(
+                        penGatePos.getX() + 0.5D,
+                        penGatePos.getY() + 0.5D,
+                        penGatePos.getZ() + 0.5D);
+
+                if (gateOpen && distanceFromGateSquared > GATE_INTERACT_RANGE_SQUARED) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                if (gateOpen) {
                     openGate(world, penGatePos, false);
                     LOGGER.info("Shepherd {} closed pen gate at {} after wheat gather", villager.getUuidAsString(), penGatePos.toShortString());
-                    nextCheckTime = world.getTime() + nextRandomCheckInterval();
-                    stage = Stage.DONE;
-                } else {
-                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
                 }
+
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
             }
             case RETURN_TO_CHEST -> {
                 updatePenGateAccess(world, penGatePos);
@@ -1767,6 +1840,21 @@ public class ShepherdSpecialGoal extends Goal {
         moveTo(retryTarget, FAST_GATE_CLOSE_SPEED);
     }
 
+    private void retryGatherExitPen(ServerWorld world) {
+        if (penGatePos == null) {
+            return;
+        }
+        villager.getNavigation().stop();
+        gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+        openGate(world, penGatePos, true);
+        BlockPos retryTarget = gatherExitTarget == null ? penGatePos : gatherExitTarget;
+        LOGGER.info("Shepherd {} remained inside gather pen for {} ticks; retrying exit via {}",
+                villager.getUuidAsString(),
+                GATHER_EXIT_PEN_RETRY_TICKS,
+                retryTarget.toShortString());
+        moveTo(retryTarget, FAST_GATE_CLOSE_SPEED);
+    }
+
     private void monitorShearStageProgress(ServerWorld world) {
         // Intentionally disabled for shears while using the simplified per-pen chest handoff loop.
     }
@@ -2281,6 +2369,7 @@ public class ShepherdSpecialGoal extends Goal {
         GATHER_CIRCLE,
         GATHER_MOVE_TO_GATE,
         GATHER_MOVE_TO_BANNER,
+        GATHER_HOLD_BANNER,
         GATHER_EXIT_AND_CLOSE,
         RETURN_TO_CHEST,
         DONE
