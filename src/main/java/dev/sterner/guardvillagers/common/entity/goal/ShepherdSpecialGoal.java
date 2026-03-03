@@ -68,6 +68,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final double HERD_PEN_CLOSE_DISTANCE_SQUARED = 25.0D;
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
+    private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -101,6 +102,8 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos shearsGateOutsideTarget;
     private double shearsGateCloseDistanceSquared;
     private boolean shearsGateClosedAfterEntry;
+    private BlockPos currentShearBannerPos;
+    private long shearsChestReturnStartTick;
     private BlockPos gatherBannerPos;
     private long gatherSessionStartTick;
     private long gatherSessionDurationTicks;
@@ -126,6 +129,8 @@ public class ShepherdSpecialGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
+        this.currentShearBannerPos = null;
+        this.shearsChestReturnStartTick = 0L;
         invalidateSpatialSearchCache();
         observedChestBannerCount = -1;
         observedChestWheatCount = -1;
@@ -284,12 +289,11 @@ public class ShepherdSpecialGoal extends Goal {
             equipShearsFromInventory();
 
             shearPenTargets.clear();
-            PenTarget nextShearPen = findNextShearPen(world);
-            if (nextShearPen != null) {
-                shearPenTargets.add(nextShearPen);
-            }
+            shearPenTargets.addAll(findShearPensWithBanners(world));
             shearPenIndex = 0;
             currentShearPenCenter = null;
+            currentShearBannerPos = null;
+            shearsChestReturnStartTick = 0L;
             shearStageStartTick = world.getTime();
             lastShearObservedStage = Stage.IDLE;
 
@@ -371,6 +375,8 @@ public class ShepherdSpecialGoal extends Goal {
         shearsGateOutsideTarget = null;
         shearsGateCloseDistanceSquared = 0.0D;
         shearsGateClosedAfterEntry = false;
+        currentShearBannerPos = null;
+        shearsChestReturnStartTick = 0L;
         activeHerd.clear();
     }
 
@@ -388,6 +394,10 @@ public class ShepherdSpecialGoal extends Goal {
             case GO_TO_SHEEP -> {
                 SheepEntity targetEntity = getSheepTarget();
                 if (targetEntity == null) {
+                    LOGGER.info("Shepherd {} completed shearing session for banner {} (pen center {})",
+                            villager.getUuidAsString(),
+                            currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                            currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString());
                     stage = Stage.SHEARS_EXIT_PEN;
                     moveTo(penGatePos == null ? chestPos : penGatePos);
                     return;
@@ -400,6 +410,10 @@ public class ShepherdSpecialGoal extends Goal {
                     if (nextTarget != null) {
                         moveTo(nextTarget.getBlockPos());
                     } else {
+                        LOGGER.info("Shepherd {} completed shearing session for banner {} (pen center {})",
+                                villager.getUuidAsString(),
+                                currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                                currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString());
                         stage = Stage.SHEARS_EXIT_PEN;
                         moveTo(penGatePos == null ? chestPos : penGatePos);
                     }
@@ -424,6 +438,10 @@ public class ShepherdSpecialGoal extends Goal {
                         }
                         openGate(world, penGatePos, true);
                         openedPenGate = true;
+                        LOGGER.info("Shepherd {} opened shearing gate {} for banner {}",
+                                villager.getUuidAsString(),
+                                penGatePos.toShortString(),
+                                currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
                         penTarget = currentShearPenCenter;
                         shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos);
                         shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos);
@@ -457,9 +475,22 @@ public class ShepherdSpecialGoal extends Goal {
                         sheepTargets = findSheepTargets(world, currentShearPenCenter);
                         sheepTargetIndex = 0;
                         if (sheepTargets.isEmpty()) {
+                            LOGGER.info("Shepherd {} selected pen banner {} (center {}) with 0 shearable sheep",
+                                    villager.getUuidAsString(),
+                                    currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                                    currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString());
+                            LOGGER.info("Shepherd {} completed shearing session for banner {} (pen center {})",
+                                    villager.getUuidAsString(),
+                                    currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                                    currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString());
                             stage = Stage.SHEARS_EXIT_PEN;
                             moveTo(penGatePos == null ? chestPos : penGatePos);
                         } else {
+                            LOGGER.info("Shepherd {} selected pen banner {} (center {}) with {} shearable sheep",
+                                    villager.getUuidAsString(),
+                                    currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                                    currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString(),
+                                    sheepTargets.size());
                             stage = Stage.GO_TO_SHEEP;
                             moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
                         }
@@ -506,11 +537,19 @@ public class ShepherdSpecialGoal extends Goal {
 
                 if (isInsidePen) {
                     openGate(world, penGatePos, true);
+                    LOGGER.info("Shepherd {} opened shearing gate {} to exit pen for banner {}",
+                            villager.getUuidAsString(),
+                            penGatePos.toShortString(),
+                            currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
                     BlockPos outsideTarget = shearsGateOutsideTarget == null ? resolveOutsideGateTarget(world, penGatePos) : shearsGateOutsideTarget;
                     moveTo(outsideTarget == null ? penGatePos : outsideTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
                 openGate(world, penGatePos, false);
+                LOGGER.info("Shepherd {} closed shearing gate {} after exiting pen for banner {}",
+                        villager.getUuidAsString(),
+                        penGatePos.toShortString(),
+                        currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
                 openedPenGate = false;
                 wasInsidePen = false;
                 shearsGateInsideTarget = null;
@@ -518,6 +557,7 @@ public class ShepherdSpecialGoal extends Goal {
                 shearsGateCloseDistanceSquared = 0.0D;
                 shearsGateClosedAfterEntry = false;
                 stage = Stage.RETURN_TO_CHEST;
+                shearsChestReturnStartTick = world.getTime();
                 moveTo(chestPos);
             }
             case GATHER_WANDER -> {
@@ -592,12 +632,33 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(chestPos)) {
                     depositSpecialItems(world);
                     if (taskType == TaskType.SHEARS) {
-                                    nextCheckTime = world.getTime() + 20L;
+                        LOGGER.info("Shepherd {} delivered shearing output to chest after banner {}",
+                                villager.getUuidAsString(),
+                                currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
+                        shearPenIndex++;
+                        if (prepareCurrentShearPen(world)) {
+                            stage = Stage.GO_TO_PEN;
+                            shearsChestReturnStartTick = 0L;
+                            moveTo(penTarget);
+                            return;
+                        }
+                        nextCheckTime = world.getTime() + 20L;
                     } else {
                         nextCheckTime = resolveNextCheckTimeAfterChestReturn(world);
                     }
                     stage = Stage.DONE;
                 } else {
+                    if (taskType == TaskType.SHEARS && shearsChestReturnStartTick > 0L
+                            && world.getTime() - shearsChestReturnStartTick >= SHEARS_CHEST_RETURN_TIMEOUT_TICKS) {
+                        BlockPos escapePen = findNearestPenTarget(world);
+                        if (escapePen != null) {
+                            LOGGER.info("Shepherd {} chest return exceeded {} ticks; rerouting briefly via nearest pen target {} before retrying chest",
+                                    villager.getUuidAsString(), SHEARS_CHEST_RETURN_TIMEOUT_TICKS, escapePen.toShortString());
+                            moveTo(escapePen, FAST_GATE_CLOSE_SPEED);
+                            shearsChestReturnStartTick = world.getTime();
+                            return;
+                        }
+                    }
                     moveTo(chestPos);
                 }
             }
@@ -883,6 +944,7 @@ public class ShepherdSpecialGoal extends Goal {
                 continue;
             }
             currentShearPenCenter = target.center();
+            currentShearBannerPos = target.banner();
             penGatePos = resolveGateForPen(world, currentShearPenCenter, target.gate());
             penTarget = penGatePos;
             openedPenGate = false;
@@ -891,9 +953,17 @@ public class ShepherdSpecialGoal extends Goal {
             shearsGateOutsideTarget = null;
             shearsGateCloseDistanceSquared = 0.0D;
             shearsGateClosedAfterEntry = false;
+            int sheepCount = currentShearPenCenter == null ? 0 : findSheepTargets(world, currentShearPenCenter).size();
+            LOGGER.info("Shepherd {} selected shearing pen banner {} with {} sheep (center {}, gate {})",
+                    villager.getUuidAsString(),
+                    currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString(),
+                    sheepCount,
+                    currentShearPenCenter == null ? "unknown" : currentShearPenCenter.toShortString(),
+                    penGatePos == null ? "unknown" : penGatePos.toShortString());
             return penTarget != null;
         }
         currentShearPenCenter = null;
+        currentShearBannerPos = null;
         penGatePos = null;
         penTarget = null;
         shearsGateInsideTarget = null;
@@ -967,18 +1037,6 @@ public class ShepherdSpecialGoal extends Goal {
         }
         pens.sort(Comparator.comparingDouble(pen -> villagerPos.getSquaredDistance(pen.gate())));
         return pens;
-    }
-
-    private PenTarget findNextShearPen(ServerWorld world) {
-        for (PenTarget pen : findShearPensWithBanners(world)) {
-            if (pen == null || pen.center() == null) {
-                continue;
-            }
-            if (!findSheepTargets(world, pen.center()).isEmpty()) {
-                return pen;
-            }
-        }
-        return null;
     }
 
     private List<SheepEntity> findSheepTargets(ServerWorld world, BlockPos penCenter) {
@@ -1727,7 +1785,7 @@ public class ShepherdSpecialGoal extends Goal {
             double distanceToBanner = center.getSquaredDistance(bannerPos);
             if (distanceToBanner < nearestDistance) {
                 nearestDistance = distanceToBanner;
-                nearest = new PenTarget(center.toImmutable(), gatePos.toImmutable());
+                nearest = new PenTarget(bannerPos.toImmutable(), center.toImmutable(), gatePos.toImmutable());
             }
         }
         return nearest;
@@ -1939,6 +1997,6 @@ public class ShepherdSpecialGoal extends Goal {
         WHEAT_GATHER
     }
 
-    private record PenTarget(BlockPos center, BlockPos gate) {
+    private record PenTarget(BlockPos banner, BlockPos center, BlockPos gate) {
     }
 }
