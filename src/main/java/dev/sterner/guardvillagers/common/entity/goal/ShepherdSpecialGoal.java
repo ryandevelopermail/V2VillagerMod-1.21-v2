@@ -42,8 +42,8 @@ import org.slf4j.LoggerFactory;
 
 public class ShepherdSpecialGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdSpecialGoal.class);
-    private static final int SHEAR_CHECK_INTERVAL_TICKS = 1200;
-    private static final int SHEAR_CHECK_INTERVAL_VARIANCE_TICKS = 200;
+    private static final int SHEAR_CHECK_INTERVAL_MIN_TICKS = 6000;
+    private static final int SHEAR_CHECK_INTERVAL_MAX_TICKS = 12000;
     private static final int SHEEP_SENSOR_INTERVAL_TICKS = 80;
     private static final double MOVE_SPEED = 0.6D;
     private static final double SLOW_GUIDE_SPEED = 0.45D;
@@ -70,6 +70,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
     private static final long SHEARS_EXIT_PEN_RETRY_TICKS = 200L;
+    private static final int BACKUP_SHEAR_MIN_TARGETS = 3;
+    private static final int BACKUP_SHEAR_MAX_TARGETS = 6;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -300,8 +302,22 @@ public class ShepherdSpecialGoal extends Goal {
             lastShearObservedStage = Stage.IDLE;
 
             if (!prepareCurrentShearPen(world)) {
-                nextCheckTime = world.getTime() + 20L;
-                stage = Stage.DONE;
+                sheepTargets = findBackupSheepTargets(world);
+                sheepTargetIndex = 0;
+                if (sheepTargets.isEmpty()) {
+                    scheduleNextShearCheck(world, "no paired pens or backup sheep targets available");
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                LOGGER.info("Shepherd {} entering backup shearing mode with {} target(s) (no paired pens found)",
+                        villager.getUuidAsString(),
+                        sheepTargets.size());
+                currentShearPenCenter = null;
+                currentShearBannerPos = null;
+                penGatePos = null;
+                stage = Stage.GO_TO_SHEEP;
+                moveTo(sheepTargets.get(sheepTargetIndex).getBlockPos());
                 return;
             }
 
@@ -688,7 +704,7 @@ public class ShepherdSpecialGoal extends Goal {
                             moveTo(penTarget);
                             return;
                         }
-                        nextCheckTime = world.getTime() + 20L;
+                        scheduleNextShearCheck(world, "shearing session complete");
                     } else {
                         nextCheckTime = resolveNextCheckTimeAfterChestReturn(world);
                     }
@@ -1269,7 +1285,8 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private long nextRandomCheckInterval() {
-        return SHEAR_CHECK_INTERVAL_TICKS + villager.getRandom().nextInt(SHEAR_CHECK_INTERVAL_VARIANCE_TICKS + 1);
+        return SHEAR_CHECK_INTERVAL_MIN_TICKS
+                + villager.getRandom().nextInt(SHEAR_CHECK_INTERVAL_MAX_TICKS - SHEAR_CHECK_INTERVAL_MIN_TICKS + 1);
     }
 
     private void scheduleNextShearCheck(ServerWorld world, String reason) {
@@ -1301,6 +1318,32 @@ public class ShepherdSpecialGoal extends Goal {
             case BLACK -> Items.BLACK_WOOL;
             default -> Items.WHITE_WOOL;
         };
+    }
+
+    private List<SheepEntity> findBackupSheepTargets(ServerWorld world) {
+        Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
+        List<SheepEntity> candidates = new ArrayList<>(world.getEntitiesByClass(
+                SheepEntity.class,
+                box,
+                entity -> entity.isAlive() && entity.isShearable()));
+
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+
+        candidates.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
+        int desiredTargetCount = BACKUP_SHEAR_MIN_TARGETS
+                + villager.getRandom().nextInt(BACKUP_SHEAR_MAX_TARGETS - BACKUP_SHEAR_MIN_TARGETS + 1);
+        java.util.Collections.shuffle(candidates, new java.util.Random(villager.getRandom().nextLong()));
+        int selectedCount = Math.min(desiredTargetCount, candidates.size());
+        List<SheepEntity> selected = new ArrayList<>(candidates.subList(0, selectedCount));
+        selected.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
+        LOGGER.info("Shepherd {} backup shearing selected {} target(s) (requested {}, available {})",
+                villager.getUuidAsString(),
+                selected.size(),
+                desiredTargetCount,
+                candidates.size());
+        return selected;
     }
 
 
