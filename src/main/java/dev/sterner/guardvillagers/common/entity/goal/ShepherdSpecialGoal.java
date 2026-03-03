@@ -69,6 +69,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final int GATHER_CIRCLE_RADIUS = 20;
     private static final int GATHER_CIRCLE_WAYPOINT_COUNT = 16;
+    private static final int GATHER_BANNER_HOLD_TICKS = 200;
     private static final double GATHER_GATE_ALIGNMENT_DOT_THRESHOLD = 0.96D;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
@@ -116,6 +117,7 @@ public class ShepherdSpecialGoal extends Goal {
     private long gatherSessionDurationTicks;
     private long nextGatherRepathTick;
     private long nextGatherFollowCheckTick;
+    private long gatherBannerHoldStartTick;
     private final List<BlockPos> gatherCircleWaypoints = new ArrayList<>();
     private int gatherCircleWaypointIndex;
     private int gatherCircleStartIndex;
@@ -387,6 +389,7 @@ public class ShepherdSpecialGoal extends Goal {
         gatherCircleStartIndex = findClosestGatherWaypointIndex(villager.getBlockPos());
         gatherCircleWaypointIndex = gatherCircleStartIndex;
         gatherCircleCompleted = false;
+        gatherBannerHoldStartTick = 0L;
         activeHerd.clear();
         refreshActiveHerd(world);
         LOGGER.info("Shepherd {} started wheat gather session near banner {} for {} ticks", villager.getUuidAsString(), gatherBannerPos.toShortString(), gatherSessionDurationTicks);
@@ -422,6 +425,7 @@ public class ShepherdSpecialGoal extends Goal {
         gatherCircleWaypointIndex = 0;
         gatherCircleStartIndex = 0;
         gatherCircleCompleted = false;
+        gatherBannerHoldStartTick = 0L;
         gatherExitTarget = null;
     }
 
@@ -724,12 +728,48 @@ public class ShepherdSpecialGoal extends Goal {
                 ensureGateOpen(world, penGatePos);
                 forceNearbySheepFocusOnShepherd(world);
                 if (isNear(gatherBannerPos)) {
-                    clearGatherWheatHands();
-                    gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
-                    stage = Stage.GATHER_EXIT_AND_CLOSE;
+                    gatherBannerHoldStartTick = world.getTime();
+                    villager.getNavigation().stop();
+                    LOGGER.info("Shepherd {} reached gather banner {}; holding center for {} ticks before exit",
+                            villager.getUuidAsString(),
+                            gatherBannerPos.toShortString(),
+                            GATHER_BANNER_HOLD_TICKS);
+                    stage = Stage.GATHER_HOLD_BANNER;
                 } else {
                     moveTo(gatherBannerPos, SLOW_GUIDE_SPEED);
                 }
+            }
+            case GATHER_HOLD_BANNER -> {
+                if (gatherBannerPos == null || penGatePos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                if (!ensureGatherWheatDisplayed(world)) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                ensureGateOpen(world, penGatePos);
+                forceNearbySheepFocusOnShepherd(world);
+                if (!isNear(gatherBannerPos)) {
+                    moveTo(gatherBannerPos, SLOW_GUIDE_SPEED);
+                    return;
+                }
+
+                villager.getNavigation().stop();
+                long holdElapsed = world.getTime() - gatherBannerHoldStartTick;
+                if (holdElapsed < GATHER_BANNER_HOLD_TICKS) {
+                    return;
+                }
+
+                clearGatherWheatHands();
+                activeHerd.clear();
+                LOGGER.info("Shepherd {} completed center hold at banner {}; wheat attraction disabled, exiting pen",
+                        villager.getUuidAsString(),
+                        gatherBannerPos.toShortString());
+                gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                stage = Stage.GATHER_EXIT_AND_CLOSE;
             }
             case GATHER_EXIT_AND_CLOSE -> {
                 if (penGatePos == null) {
@@ -2281,6 +2321,7 @@ public class ShepherdSpecialGoal extends Goal {
         GATHER_CIRCLE,
         GATHER_MOVE_TO_GATE,
         GATHER_MOVE_TO_BANNER,
+        GATHER_HOLD_BANNER,
         GATHER_EXIT_AND_CLOSE,
         RETURN_TO_CHEST,
         DONE
