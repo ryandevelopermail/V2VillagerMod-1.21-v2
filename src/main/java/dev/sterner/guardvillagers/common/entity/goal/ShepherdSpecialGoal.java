@@ -534,17 +534,29 @@ public class ShepherdSpecialGoal extends Goal {
                     return;
                 }
                 boolean isInsidePen = isInsideFencePen(world, villager.getBlockPos());
+                BlockPos outsideTarget = shearsGateOutsideTarget == null ? resolveOutsideGateTarget(world, penGatePos) : shearsGateOutsideTarget;
 
                 if (isInsidePen) {
+                    BlockState gateState = world.getBlockState(penGatePos);
                     openGate(world, penGatePos, true);
-                    LOGGER.info("Shepherd {} opened shearing gate {} to exit pen for banner {}",
-                            villager.getUuidAsString(),
-                            penGatePos.toShortString(),
-                            currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
-                    BlockPos outsideTarget = shearsGateOutsideTarget == null ? resolveOutsideGateTarget(world, penGatePos) : shearsGateOutsideTarget;
+                    if (gateState.getBlock() instanceof FenceGateBlock && !gateState.get(FenceGateBlock.OPEN)) {
+                        LOGGER.info("Shepherd {} opened shearing gate {} to exit pen for banner {}",
+                                villager.getUuidAsString(),
+                                penGatePos.toShortString(),
+                                currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
+                    }
                     moveTo(outsideTarget == null ? penGatePos : outsideTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
+
+                if (outsideTarget != null) {
+                    double outsideDistanceSquared = villager.squaredDistanceTo(outsideTarget.getX() + 0.5D, outsideTarget.getY() + 0.5D, outsideTarget.getZ() + 0.5D);
+                    if (outsideDistanceSquared > 1.0D) {
+                        moveTo(outsideTarget, FAST_GATE_CLOSE_SPEED);
+                        return;
+                    }
+                }
+
                 openGate(world, penGatePos, false);
                 LOGGER.info("Shepherd {} closed shearing gate {} after exiting pen for banner {}",
                         villager.getUuidAsString(),
@@ -1554,6 +1566,9 @@ public class ShepherdSpecialGoal extends Goal {
 
     private void updatePenGateAccess(ServerWorld world, BlockPos gatePos) {
         if (taskType == TaskType.WHEAT_GATHER) {
+            return;
+        }
+        if (taskType == TaskType.SHEARS && stage == Stage.RETURN_TO_CHEST) {
             return;
         }
         if (gatePos == null) {
