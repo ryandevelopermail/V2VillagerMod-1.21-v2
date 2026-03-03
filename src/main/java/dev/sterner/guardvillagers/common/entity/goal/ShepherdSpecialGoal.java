@@ -97,6 +97,10 @@ public class ShepherdSpecialGoal extends Goal {
     private ItemStack carriedItem = ItemStack.EMPTY;
     private boolean openedPenGate;
     private boolean wasInsidePen;
+    private BlockPos shearsGateInsideTarget;
+    private BlockPos shearsGateOutsideTarget;
+    private double shearsGateCloseDistanceSquared;
+    private boolean shearsGateClosedAfterEntry;
     private BlockPos gatherBannerPos;
     private long gatherSessionStartTick;
     private long gatherSessionDurationTicks;
@@ -363,6 +367,10 @@ public class ShepherdSpecialGoal extends Goal {
         carriedItem = ItemStack.EMPTY;
         openedPenGate = false;
         wasInsidePen = false;
+        shearsGateInsideTarget = null;
+        shearsGateOutsideTarget = null;
+        shearsGateCloseDistanceSquared = 0.0D;
+        shearsGateClosedAfterEntry = false;
         activeHerd.clear();
     }
 
@@ -414,11 +422,33 @@ public class ShepherdSpecialGoal extends Goal {
                             moveTo(penGatePos);
                             return;
                         }
+                        openGate(world, penGatePos, true);
+                        openedPenGate = true;
                         penTarget = currentShearPenCenter;
+                        shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos);
+                        shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos);
+                        shearsGateCloseDistanceSquared = calculateGateCloseDistanceSquared(penGatePos, currentShearPenCenter);
+                        shearsGateClosedAfterEntry = false;
+                        if (shearsGateInsideTarget != null) {
+                            moveTo(shearsGateInsideTarget, FAST_GATE_CLOSE_SPEED);
+                            return;
+                        }
                         if (penTarget == null) {
                             stage = Stage.RETURN_TO_CHEST;
                             moveTo(chestPos);
                             return;
+                        }
+                    }
+
+                    if (!shearsGateClosedAfterEntry && penGatePos != null) {
+                        boolean isInsidePen = isInsideFencePen(world, villager.getBlockPos());
+                        double distanceFromGateSquared = villager.squaredDistanceTo(
+                                penGatePos.getX() + 0.5D,
+                                penGatePos.getY() + 0.5D,
+                                penGatePos.getZ() + 0.5D);
+                        if (isInsidePen || distanceFromGateSquared >= shearsGateCloseDistanceSquared) {
+                            openGate(world, penGatePos, false);
+                            shearsGateClosedAfterEntry = true;
                         }
                     }
 
@@ -472,25 +502,21 @@ public class ShepherdSpecialGoal extends Goal {
                     moveTo(chestPos);
                     return;
                 }
-
-                updatePenGateAccess(world, penGatePos);
                 boolean isInsidePen = isInsideFencePen(world, villager.getBlockPos());
 
                 if (isInsidePen) {
                     openGate(world, penGatePos, true);
-                    BlockPos outsideTarget = resolveOutsideGateTarget(world, penGatePos);
+                    BlockPos outsideTarget = shearsGateOutsideTarget == null ? resolveOutsideGateTarget(world, penGatePos) : shearsGateOutsideTarget;
                     moveTo(outsideTarget == null ? penGatePos : outsideTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
-
-                if (!isNear(penGatePos)) {
-                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
-                    return;
-                }
-
                 openGate(world, penGatePos, false);
                 openedPenGate = false;
                 wasInsidePen = false;
+                shearsGateInsideTarget = null;
+                shearsGateOutsideTarget = null;
+                shearsGateCloseDistanceSquared = 0.0D;
+                shearsGateClosedAfterEntry = false;
                 stage = Stage.RETURN_TO_CHEST;
                 moveTo(chestPos);
             }
@@ -861,11 +887,19 @@ public class ShepherdSpecialGoal extends Goal {
             penTarget = penGatePos;
             openedPenGate = false;
             wasInsidePen = false;
+            shearsGateInsideTarget = null;
+            shearsGateOutsideTarget = null;
+            shearsGateCloseDistanceSquared = 0.0D;
+            shearsGateClosedAfterEntry = false;
             return penTarget != null;
         }
         currentShearPenCenter = null;
         penGatePos = null;
         penTarget = null;
+        shearsGateInsideTarget = null;
+        shearsGateOutsideTarget = null;
+        shearsGateCloseDistanceSquared = 0.0D;
+        shearsGateClosedAfterEntry = false;
         return false;
     }
 
@@ -1565,6 +1599,34 @@ public class ShepherdSpecialGoal extends Goal {
 
     private boolean isNear(BlockPos target) {
         return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    private double calculateGateCloseDistanceSquared(BlockPos gatePos, BlockPos penCenter) {
+        if (gatePos == null || penCenter == null) {
+            return 0.0D;
+        }
+        double gateToPenDistance = Math.sqrt(gatePos.getSquaredDistance(penCenter));
+        double closeDistance = Math.min(2.0D, gateToPenDistance);
+        return closeDistance * closeDistance;
+    }
+
+    private BlockPos resolveInsideGateTarget(ServerWorld world, BlockPos gatePos) {
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock) || !state.contains(FenceGateBlock.FACING)) {
+            return gatePos;
+        }
+        Direction facing = state.get(FenceGateBlock.FACING);
+        BlockPos front = gatePos.offset(facing);
+        BlockPos back = gatePos.offset(facing.getOpposite());
+        boolean frontInside = isInsideFencePen(world, front);
+        boolean backInside = isInsideFencePen(world, back);
+        if (frontInside && !backInside) {
+            return front.toImmutable();
+        }
+        if (backInside && !frontInside) {
+            return back.toImmutable();
+        }
+        return gatePos;
     }
 
     private BlockPos resolveOutsideGateTarget(ServerWorld world, BlockPos gatePos) {
