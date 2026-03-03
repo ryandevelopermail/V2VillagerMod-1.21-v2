@@ -301,6 +301,7 @@ public final class VillageGuardStandManager {
 
     private static void assignGuardToStand(ServerWorld world, GuardEntity guard, ArmorStandEntity stand) {
         guard.setPairedStandUuid(stand.getUuid());
+        guard.setStandCustomizationEnabled(true);
         GuardStandEquipmentSync.syncStandFromGuard(guard, stand);
         JobBlockPairingHelper.playPairingAnimation(world, stand.getBlockPos(), guard, stand.getBlockPos());
     }
