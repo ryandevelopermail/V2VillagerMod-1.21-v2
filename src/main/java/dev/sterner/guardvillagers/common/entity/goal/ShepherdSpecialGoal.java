@@ -69,6 +69,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
+    private static final long SHEARS_EXIT_PEN_RETRY_TICKS = 200L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -102,6 +103,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos shearsGateOutsideTarget;
     private double shearsGateCloseDistanceSquared;
     private boolean shearsGateClosedAfterEntry;
+    private long shearsExitPenStuckStartTick;
     private BlockPos currentShearBannerPos;
     private long shearsChestReturnStartTick;
     private BlockPos gatherBannerPos;
@@ -375,6 +377,7 @@ public class ShepherdSpecialGoal extends Goal {
         shearsGateOutsideTarget = null;
         shearsGateCloseDistanceSquared = 0.0D;
         shearsGateClosedAfterEntry = false;
+        shearsExitPenStuckStartTick = 0L;
         currentShearBannerPos = null;
         shearsChestReturnStartTick = 0L;
         activeHerd.clear();
@@ -550,6 +553,13 @@ public class ShepherdSpecialGoal extends Goal {
                         penGatePos.getZ() + 0.5D);
 
                 if (isInsidePen) {
+                    if (shearsExitPenStuckStartTick == 0L) {
+                        shearsExitPenStuckStartTick = world.getTime();
+                    } else if (world.getTime() - shearsExitPenStuckStartTick >= SHEARS_EXIT_PEN_RETRY_TICKS) {
+                        retryShearsExitPen(world);
+                        shearsExitPenStuckStartTick = world.getTime();
+                        return;
+                    }
                     BlockState gateState = world.getBlockState(penGatePos);
                     openGate(world, penGatePos, true);
                     if (gateState.getBlock() instanceof FenceGateBlock && !gateState.get(FenceGateBlock.OPEN)) {
@@ -561,6 +571,7 @@ public class ShepherdSpecialGoal extends Goal {
                     moveTo(outsideTarget == null ? penGatePos : outsideTarget, FAST_GATE_CLOSE_SPEED);
                     return;
                 }
+                shearsExitPenStuckStartTick = 0L;
 
                 if (outsideTarget != null) {
                     double outsideDistanceSquared = villager.squaredDistanceTo(outsideTarget.getX() + 0.5D, outsideTarget.getY() + 0.5D, outsideTarget.getZ() + 0.5D);
@@ -590,6 +601,7 @@ public class ShepherdSpecialGoal extends Goal {
                 shearsGateOutsideTarget = null;
                 shearsGateCloseDistanceSquared = 0.0D;
                 shearsGateClosedAfterEntry = false;
+                shearsExitPenStuckStartTick = 0L;
                 stage = Stage.RETURN_TO_CHEST;
                 shearsChestReturnStartTick = world.getTime();
                 moveTo(chestPos);
@@ -1594,6 +1606,23 @@ public class ShepherdSpecialGoal extends Goal {
     private void triggerBannerPairing(ServerWorld world, BlockPos bannerPos) {
         BlockState bannerState = world.getBlockState(bannerPos);
         JobBlockPairingHelper.handleBannerPlacement(world, bannerPos, bannerState);
+    }
+
+    private void retryShearsExitPen(ServerWorld world) {
+        if (penGatePos == null) {
+            return;
+        }
+        villager.getNavigation().stop();
+        shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos, currentShearPenCenter);
+        shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos, currentShearPenCenter);
+        shearsGateCloseDistanceSquared = calculateGateCloseDistanceSquared(penGatePos, currentShearPenCenter);
+        openGate(world, penGatePos, true);
+        BlockPos retryTarget = shearsGateOutsideTarget == null ? penGatePos : shearsGateOutsideTarget;
+        LOGGER.info("Shepherd {} was inside pen for {} ticks while exiting; retrying leave-pen logic via {}",
+                villager.getUuidAsString(),
+                SHEARS_EXIT_PEN_RETRY_TICKS,
+                retryTarget.toShortString());
+        moveTo(retryTarget, FAST_GATE_CLOSE_SPEED);
     }
 
     private void monitorShearStageProgress(ServerWorld world) {
