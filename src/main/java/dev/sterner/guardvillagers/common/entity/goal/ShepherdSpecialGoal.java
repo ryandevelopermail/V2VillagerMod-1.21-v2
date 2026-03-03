@@ -1081,7 +1081,7 @@ public class ShepherdSpecialGoal extends Goal {
         List<SheepEntity> sheep = world.getEntitiesByClass(
                 SheepEntity.class,
                 box,
-                entity -> entity.isAlive() && entity.isShearable() && isInsideFencePen(world, entity.getBlockPos()));
+                entity -> entity.isAlive() && entity.isShearable() && isInsideSpecificPen(world, entity.getBlockPos(), penCenter));
         sheep.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
         return new ArrayList<>(sheep);
     }
@@ -1089,8 +1089,14 @@ public class ShepherdSpecialGoal extends Goal {
     private SheepEntity getSheepTarget() {
         while (sheepTargetIndex < sheepTargets.size()) {
             SheepEntity target = sheepTargets.get(sheepTargetIndex);
-            if (target != null && target.isAlive()) {
-                return target;
+            if (target != null && target.isAlive() && target.isShearable()) {
+                if (currentShearPenCenter == null) {
+                    return target;
+                }
+                if (villager.getWorld() instanceof ServerWorld world
+                        && isInsideSpecificPen(world, target.getBlockPos(), currentShearPenCenter)) {
+                    return target;
+                }
             }
             sheepTargetIndex++;
         }
