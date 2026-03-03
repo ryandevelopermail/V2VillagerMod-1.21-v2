@@ -564,13 +564,20 @@ public class ShepherdSpecialGoal extends Goal {
                     }
                 }
 
-                if (distanceFromGateSquared < 64.0D) {
-                    openGate(world, penGatePos, false);
+                BlockState gateState = world.getBlockState(penGatePos);
+                boolean gateOpen = gateState.getBlock() instanceof FenceGateBlock && gateState.get(FenceGateBlock.OPEN);
+                if (gateOpen && distanceFromGateSquared > GATE_INTERACT_RANGE_SQUARED) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
                 }
-                LOGGER.info("Shepherd {} closed shearing gate {} after exiting pen for banner {}",
-                        villager.getUuidAsString(),
-                        penGatePos.toShortString(),
-                        currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
+
+                if (gateOpen) {
+                    openGate(world, penGatePos, false);
+                    LOGGER.info("Shepherd {} closed shearing gate {} after exiting pen for banner {}",
+                            villager.getUuidAsString(),
+                            penGatePos.toShortString(),
+                            currentShearBannerPos == null ? "unknown" : currentShearBannerPos.toShortString());
+                }
                 openedPenGate = false;
                 wasInsidePen = false;
                 shearsGateInsideTarget = null;
