@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
@@ -11,6 +12,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
+import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.recipe.CraftingRecipe;
 import net.minecraft.recipe.Ingredient;
@@ -30,6 +32,8 @@ import java.util.Optional;
 
 public class ToolsmithCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
+    private static final int NON_TABLE_GRID_SIZE = 2;
+    private static final int SHEARS_PER_SHEPHERD_CHEST = 1;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
 
@@ -73,10 +77,11 @@ public class ToolsmithCraftingGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.TOOLSMITH) {
             return false;
         }
-        if (craftingTablePos == null || chestPos == null) {
+        if (chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+        boolean hasCraftingTable = hasValidCraftingTable(world);
+        if (!hasCraftingTable && !hasNonTableCraftableRecipe(world)) {
             return false;
         }
         refreshDailyLimit(world);
@@ -102,8 +107,12 @@ public class ToolsmithCraftingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+        if (hasValidCraftingTable(villager.getWorld() instanceof ServerWorld serverWorld ? serverWorld : null)) {
+            stage = Stage.GO_TO_TABLE;
+            moveTo(craftingTablePos);
+            return;
+        }
+        stage = Stage.CRAFT;
     }
 
     @Override
@@ -186,10 +195,18 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private List<ToolRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<ToolRecipe> recipes = new ArrayList<>();
+        int eligibleShepherdChestCount = DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, 24.0D).size();
+        int currentShearsStock = countItemInInventory(inventory, ShearsItem.class);
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (result.isEmpty() || !isToolItem(result)) {
+                continue;
+            }
+            if (!canUseRecipeWithoutCraftingTable(recipe) && !hasValidCraftingTable(world)) {
+                continue;
+            }
+            if (result.getItem() instanceof ShearsItem && currentShearsStock >= eligibleShepherdChestCount * SHEARS_PER_SHEPHERD_CHEST) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
@@ -202,7 +219,51 @@ public class ToolsmithCraftingGoal extends Goal {
     private boolean isToolItem(ItemStack stack) {
         return stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
-                || stack.getItem() instanceof HoeItem;
+                || stack.getItem() instanceof HoeItem
+                || stack.getItem() instanceof ShearsItem;
+    }
+
+    private int countItemInInventory(Inventory inventory, Class<?> itemType) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (itemType.isInstance(stack.getItem())) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private boolean hasNonTableCraftableRecipe(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return false;
+        }
+        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            CraftingRecipe recipe = entry.value();
+            ItemStack result = recipe.getResult(world.getRegistryManager());
+            if (result.isEmpty() || !isToolItem(result)) {
+                continue;
+            }
+            if (!canUseRecipeWithoutCraftingTable(recipe)) {
+                continue;
+            }
+            if (canCraft(inventory, recipe)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean canUseRecipeWithoutCraftingTable(CraftingRecipe recipe) {
+        return recipe.fits(NON_TABLE_GRID_SIZE, NON_TABLE_GRID_SIZE);
+    }
+
+    private boolean hasValidCraftingTable(@Nullable ServerWorld world) {
+        if (world == null || craftingTablePos == null) {
+            return false;
+        }
+        return world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
     }
 
     private List<ToolRecipe> filterLastCrafted(List<ToolRecipe> recipes) {

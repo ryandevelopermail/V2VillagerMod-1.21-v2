@@ -9,6 +9,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
+import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -28,7 +29,8 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
     protected boolean isDistributableItem(ItemStack stack) {
         return stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
-                || stack.getItem() instanceof HoeItem;
+                || stack.getItem() instanceof HoeItem
+                || stack.getItem() instanceof ShearsItem;
     }
 
     @Override
@@ -151,6 +153,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         }
         if (stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem) {
             return DistributionRecipientHelper.findEligibleMasonRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        }
+        if (stack.getItem() instanceof ShearsItem) {
+            return DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         return List.of();
     }
