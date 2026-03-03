@@ -69,7 +69,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_FOLLOW_CHECK_INTERVAL_TICKS = 40;
     private static final int GATHER_CIRCLE_RADIUS = 20;
     private static final int GATHER_CIRCLE_WAYPOINT_COUNT = 16;
-    private static final int GATHER_BANNER_HOLD_TICKS = 400;
+    private static final int GATHER_BANNER_HOLD_TICKS = 1200;
     private static final double GATHER_GATE_ALIGNMENT_DOT_THRESHOLD = 0.96D;
     private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
