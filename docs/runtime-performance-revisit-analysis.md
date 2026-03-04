@@ -37,3 +37,14 @@ Switching these calls to brain memory forgets avoids forcing POI ticket release 
 - Add lightweight profiling counters around `ProfessionDefinitions.runConversionHooks(world)` to track candidate counts and conversions per tick window.
 - Consider rate-limiting conversion hooks further under TPS pressure (e.g., skip hook cycle when mspt exceeds threshold).
 - Optionally downgrade some pairing `INFO` logs to `DEBUG` if high-frequency in real servers.
+
+
+## Follow-up optimization expansion
+
+Additional optimizations were extended into more behavior files:
+
+- `ButcherBehavior` chest listeners now rate-limit conversion scans and only run hooks when a convertible weapon is present in the paired chest.
+- `FishermanBehavior` chest listeners now rate-limit conversion scans and only run hooks when a fishing rod trigger exists in barrel/chest storage.
+- `MasonBehavior` conversion polling now skips stale/removed/off-world entities before deeper checks.
+
+This reduces conversion-hook churn caused by rapid inventory mutation events while keeping conversion responsiveness.

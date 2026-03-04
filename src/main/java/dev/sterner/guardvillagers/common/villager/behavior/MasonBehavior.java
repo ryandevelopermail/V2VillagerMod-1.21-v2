@@ -143,6 +143,9 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
     public static void tryConvertMasonsWithMiningTool(ServerWorld world) {
         for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.MASON)) {
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                continue;
+            }
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;

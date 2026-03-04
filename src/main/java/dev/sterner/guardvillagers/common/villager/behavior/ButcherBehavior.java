@@ -41,11 +41,13 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final int MEAT_DISTRIBUTION_GOAL_PRIORITY = 6;
     private static final int LEATHER_DISTRIBUTION_GOAL_PRIORITY = 7;
+    private static final long CHEST_SCAN_COOLDOWN_TICKS = 20L;
     private static final Map<VillagerEntity, ButcherSmokerGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherMeatDistributionGoal> MEAT_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherToLeatherworkerDistributionGoal> LEATHER_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -276,6 +278,37 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         return stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem;
     }
 
+    private static boolean hasConvertibleWeaponInChest(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (inventory == null) {
+            return false;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && isConvertibleWeapon(stack)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean isConversionScanOnCooldown(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CONVERSION_SCAN_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return true;
+        }
+        NEXT_CONVERSION_SCAN_TICK.put(villager, now + CHEST_SCAN_COOLDOWN_TICKS);
+        return false;
+    }
+
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
         Inventory inventory = getChestInventory(world, chestPos);
         ChestListener existing = CHEST_LISTENERS.get(villager);
@@ -311,7 +344,9 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             }
             if (villager.getWorld() instanceof ServerWorld serverWorld) {
                 VillagerConversionCandidateIndex.markCandidate(serverWorld, villager);
-                ProfessionDefinitions.runConversionHooks(serverWorld);
+                if (!isConversionScanOnCooldown(serverWorld, villager) && hasConvertibleWeaponInChest(serverWorld, chestPos)) {
+                    ProfessionDefinitions.runConversionHooks(serverWorld);
+                }
             }
         };
         simpleInventory.addListener(listener);

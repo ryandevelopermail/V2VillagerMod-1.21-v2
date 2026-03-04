@@ -38,9 +38,11 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(FishermanBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
+    private static final long CHEST_SCAN_COOLDOWN_TICKS = 20L;
     private static final Map<VillagerEntity, FishermanCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FishermanDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -138,6 +140,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
     public static void tryConvertFishermenWithRod(ServerWorld world) {
         for (VillagerEntity villager : VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN)) {
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                continue;
+            }
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
             if (jobSite.isEmpty()) {
                 continue;
@@ -226,6 +231,46 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         return ItemStack.EMPTY;
     }
 
+    private static boolean hasRodConversionTrigger(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
+        Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                .map(net.minecraft.util.math.GlobalPos::pos);
+        if (jobSite.isEmpty()) {
+            return false;
+        }
+
+        BlockPos jobPos = jobSite.get();
+        if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FISHERMAN, world.getBlockState(jobPos))) {
+            return false;
+        }
+
+        return hasFishingRodInInventory(world.getBlockEntity(jobPos)) || hasFishingRodInInventory(world.getBlockEntity(chestPos));
+    }
+
+    private static boolean hasFishingRodInInventory(BlockEntity blockEntity) {
+        if (!(blockEntity instanceof Inventory inventory)) {
+            return false;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(Items.FISHING_ROD)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean isConversionScanOnCooldown(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CONVERSION_SCAN_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return true;
+        }
+        NEXT_CONVERSION_SCAN_TICK.put(villager, now + CHEST_SCAN_COOLDOWN_TICKS);
+        return false;
+    }
+
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
         Inventory inventory = getChestInventory(world, chestPos);
         ChestListener existing = CHEST_LISTENERS.get(villager);
@@ -250,7 +295,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             }
             if (villager.getWorld() instanceof ServerWorld serverWorld) {
                 VillagerConversionCandidateIndex.markCandidate(serverWorld, villager);
-                ProfessionDefinitions.runConversionHooks(serverWorld);
+                if (!isConversionScanOnCooldown(serverWorld, villager) && hasRodConversionTrigger(serverWorld, villager, chestPos)) {
+                    ProfessionDefinitions.runConversionHooks(serverWorld);
+                }
             }
         };
         simpleInventory.addListener(listener);
