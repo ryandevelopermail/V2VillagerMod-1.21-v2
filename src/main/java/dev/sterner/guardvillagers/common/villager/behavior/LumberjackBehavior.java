@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackBootstrapGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackFurnaceGoal;
@@ -27,19 +28,45 @@ import java.util.WeakHashMap;
 
 public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackBehavior.class);
+    private static final int BOOTSTRAP_GOAL_PRIORITY = 2;
     private static final int GATHERING_GOAL_PRIORITY = 3;
     private static final int FURNACE_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 6;
 
+    private static final Map<VillagerEntity, LumberjackBootstrapGoal> BOOTSTRAP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackGatheringGoal> GATHERING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackFurnaceGoal> FURNACE_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, BlockPos> PAIRED_FURNACES = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> PENDING_INITIAL_COUNTDOWNS = new WeakHashMap<>();
 
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+
+    public static void queueInitialCountdown(VillagerEntity villager, long ticks) {
+        PENDING_INITIAL_COUNTDOWNS.put(villager, Math.max(20L, ticks));
+    }
+
+    @Override
+    public void onJobBlockPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        if (!villager.isAlive()) {
+            return;
+        }
+        if (!ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(jobPos))) {
+            return;
+        }
+
+        LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
+                () -> new LumberjackBootstrapGoal(villager, jobPos));
+        bootstrapGoal.setJobPos(jobPos);
+        bootstrapGoal.requestImmediateStart();
+
+        LOGGER.info("Lumberjack {} started startup workflow at {}",
+                villager.getUuidAsString(),
+                jobPos.toShortString());
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -48,6 +75,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 () -> {
                     clearChestListener(villager);
                     PAIRED_FURNACES.remove(villager);
+                    PENDING_INITIAL_COUNTDOWNS.remove(villager);
                 })) {
             return;
         }
@@ -62,6 +90,11 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         LumberjackGatheringGoal gatheringGoal = upsertGoal(GATHERING_GOALS, villager, GATHERING_GOAL_PRIORITY,
                 () -> new LumberjackGatheringGoal(villager, jobPos, chestPos, resolvedCraftingTable));
         gatheringGoal.setTargets(jobPos, chestPos, resolvedCraftingTable);
+
+        Long pendingCountdown = PENDING_INITIAL_COUNTDOWNS.remove(villager);
+        if (pendingCountdown != null) {
+            gatheringGoal.startExternalCountdown(world, pendingCountdown, "startup bootstrap complete");
+        }
         gatheringGoal.requestImmediateCheck();
 
         LumberjackCraftingGoal craftingGoal = upsertGoal(CRAFTING_GOALS, villager, CRAFTING_GOAL_PRIORITY,
@@ -299,3 +332,5 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 }
+
+

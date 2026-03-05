@@ -5,6 +5,9 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 
 public interface VillagerProfessionBehavior {
+    default void onJobBlockPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+    }
+
     default void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
     }
 

@@ -35,8 +35,8 @@ public class LumberjackGatheringGoal extends Goal {
     private static final int MAX_LOGS_PER_TREE = 96;
     private static final int TREE_CLUSTER_RADIUS = 10;
     private static final int NO_AXE_RETRY_TICKS = 80;
-    private static final int SESSION_COOLDOWN_MIN_TICKS = 20 * 60 * 2;
-    private static final int SESSION_COOLDOWN_MAX_TICKS = 20 * 60 * 6;
+    private static final int SESSION_COOLDOWN_MIN_TICKS = 20 * 60;
+    private static final int SESSION_COOLDOWN_MAX_TICKS = 20 * 60;
 
     private final VillagerEntity villager;
 
@@ -258,7 +258,12 @@ public class LumberjackGatheringGoal extends Goal {
     }
 
     private void startSessionCountdown(ServerWorld world, String reason) {
-        sessionCountdownTotalTicks = MathHelper.nextInt(villager.getRandom(), SESSION_COOLDOWN_MIN_TICKS, SESSION_COOLDOWN_MAX_TICKS);
+        startExternalCountdown(world,
+                MathHelper.nextInt(villager.getRandom(), SESSION_COOLDOWN_MIN_TICKS, SESSION_COOLDOWN_MAX_TICKS),
+                reason);
+    }
+    public void startExternalCountdown(ServerWorld world, long countdownTicks, String reason) {
+        sessionCountdownTotalTicks = Math.max(20L, countdownTicks);
         sessionCountdownStartTick = world.getTime();
         nextSessionStartTick = sessionCountdownStartTick + sessionCountdownTotalTicks;
         lastCountdownLogStep = 0;
@@ -665,3 +670,4 @@ public class LumberjackGatheringGoal extends Goal {
         }
     }
 }
+
