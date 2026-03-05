@@ -1,6 +1,7 @@
 # gradle
 
 .gradle/
+.gradle-user/
 build/
 out/
 classes/
@@ -38,3 +39,4 @@ hs_err_*.log
 replay_*.log
 *.hprof
 *.jfr
+
