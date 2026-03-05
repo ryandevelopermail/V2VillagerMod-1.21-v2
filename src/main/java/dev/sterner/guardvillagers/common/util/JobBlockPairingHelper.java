@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.util;
 import com.google.common.collect.Sets;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ButcherBannerTracker;
+import dev.sterner.guardvillagers.common.villager.LumberjackProfession;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
@@ -42,6 +43,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -93,6 +95,7 @@ public final class JobBlockPairingHelper {
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
         world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
+        tryPairNearestUnemployedLumberjack(world, placedPos);
     }
 
     public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
@@ -180,6 +183,89 @@ public final class JobBlockPairingHelper {
         VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, placedPos);
     }
 
+    private static void tryPairNearestUnemployedLumberjack(ServerWorld world, BlockPos craftingTablePos) {
+        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+            return;
+        }
+
+        Optional<VillagerEntity> existingLumberjack = findClaimedLumberjackAtJobSite(world, craftingTablePos);
+        if (existingLumberjack.isPresent()) {
+            VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, existingLumberjack.get(), craftingTablePos);
+            refreshVillagerPairings(world, existingLumberjack.get());
+            return;
+        }
+
+        Optional<VillagerEntity> candidate = findUnemployedVillagerAtJobSite(world, craftingTablePos);
+        if (candidate.isEmpty()) {
+            candidate = findNearestUnemployedVillager(world, craftingTablePos);
+        }
+
+        if (candidate.isEmpty()) {
+            return;
+        }
+
+        VillagerEntity villager = candidate.get();
+        villager.setVillagerData(villager.getVillagerData().withProfession(LumberjackProfession.LUMBERJACK));
+        villager.getBrain().remember(MemoryModuleType.JOB_SITE, GlobalPos.create(world.getRegistryKey(), craftingTablePos.toImmutable()));
+
+        LOGGER.info("Lumberjack {} paired with crafting table job block at {}",
+                villager.getUuidAsString(),
+                craftingTablePos.toShortString());
+
+        playPairingAnimation(world, craftingTablePos, villager, craftingTablePos);
+        VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, craftingTablePos);
+        VillagerConversionCandidateIndex.markCandidate(world, villager);
+        refreshVillagerPairings(world, villager);
+    }
+
+    private static Optional<VillagerEntity> findClaimedLumberjackAtJobSite(ServerWorld world, BlockPos jobPos) {
+        return world.getEntitiesByClass(
+                        VillagerEntity.class,
+                        getWorldBounds(world),
+                        villager -> villager.isAlive()
+                                && villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK
+                                && hasJobSiteAt(world, villager, jobPos))
+                .stream()
+                .min(Comparator.comparingDouble(villager -> villager.squaredDistanceTo(
+                        jobPos.getX() + 0.5D,
+                        jobPos.getY() + 0.5D,
+                        jobPos.getZ() + 0.5D)));
+    }
+
+    private static Optional<VillagerEntity> findUnemployedVillagerAtJobSite(ServerWorld world, BlockPos jobPos) {
+        return world.getEntitiesByClass(
+                        VillagerEntity.class,
+                        getWorldBounds(world),
+                        villager -> isUnemployedVillager(villager) && hasJobSiteAt(world, villager, jobPos))
+                .stream()
+                .min(Comparator.comparingDouble(villager -> villager.squaredDistanceTo(
+                        jobPos.getX() + 0.5D,
+                        jobPos.getY() + 0.5D,
+                        jobPos.getZ() + 0.5D)));
+    }
+
+    private static Optional<VillagerEntity> findNearestUnemployedVillager(ServerWorld world, BlockPos jobPos) {
+        return world.getEntitiesByClass(
+                        VillagerEntity.class,
+                        new Box(jobPos).expand(NEARBY_VILLAGER_SCAN_RANGE),
+                        JobBlockPairingHelper::isUnemployedVillager)
+                .stream()
+                .min(Comparator.comparingDouble(villager -> villager.squaredDistanceTo(
+                        jobPos.getX() + 0.5D,
+                        jobPos.getY() + 0.5D,
+                        jobPos.getZ() + 0.5D)));
+    }
+
+    private static boolean hasJobSiteAt(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return false;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        return Objects.equals(globalPos.dimension(), world.getRegistryKey()) && globalPos.pos().equals(jobPos);
+    }
+
     public static void handleBannerPlacement(ServerWorld world, BlockPos bannerPos, BlockState bannerState) {
         if (!isBannerOnFence(world, bannerPos, bannerState)) {
             return;
@@ -236,6 +322,10 @@ public final class JobBlockPairingHelper {
         }
 
         VillagerProfession profession = villager.getVillagerData().getProfession();
+        if (profession == LumberjackProfession.LUMBERJACK && nearbyChest.isEmpty()) {
+            VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, jobPos);
+        }
+
         if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
             Collection<BlockPos> bannerPositions = findBannersWithinRange(world, jobPos, 300);
             for (BlockPos bannerPos : bannerPositions) {
@@ -487,6 +577,12 @@ public final class JobBlockPairingHelper {
         return profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT && !villager.isBaby();
     }
 
+    private static boolean isUnemployedVillager(VillagerEntity villager) {
+        return villager.isAlive()
+                && !villager.isBaby()
+                && villager.getVillagerData().getProfession() == VillagerProfession.NONE;
+    }
+
     private static void spawnHappyParticles(ServerWorld world, BlockPos pos) {
         world.spawnParticles(ParticleTypes.HAPPY_VILLAGER, pos.getX() + 0.5D, pos.getY() + 1.0D, pos.getZ() + 0.5D, 12, 0.35D, 0.35D, 0.35D, 0.0D);
     }
@@ -513,3 +609,5 @@ public final class JobBlockPairingHelper {
         return Optional.empty();
     }
 }
+
+

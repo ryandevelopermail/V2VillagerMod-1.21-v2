@@ -1,8 +1,8 @@
 {
   "entity.guardvillagers.guard": "Guard",
   "item.guardvillagers.guard_spawn_egg": "Guard Spawn Egg",
-  "entity.guardvillagers.axe_guard": "Axe Guard",
-  "item.guardvillagers.axe_guard_spawn_egg": "Axe Guard Spawn Egg",
+  "entity.guardvillagers.axe_guard": "Lumberjack Guard",
+  "item.guardvillagers.axe_guard_spawn_egg": "Lumberjack Guard Spawn Egg",
   "entity.guardvillagers.butcher_guard": "Butcher Guard",
   "item.guardvillagers.butcher_guard_spawn_egg": "Butcher Guard Spawn Egg",
   "block.guardvillagers.guard_stand_modifier": "Guard Stand Modifier",
@@ -36,5 +36,9 @@
   "entity.guardvillagers.mason_guard": "Mason Guard",
   "item.guardvillagers.mason_guard_spawn_egg": "Mason Guard Spawn Egg",
   "entity.guardvillagers.fisherman_guard": "Fisherman Guard",
-  "item.guardvillagers.fisherman_guard_spawn_egg": "Fisherman Guard Spawn Egg"
+  "item.guardvillagers.fisherman_guard_spawn_egg": "Fisherman Guard Spawn Egg",
+  "entity.minecraft.villager.guardvillagers.lumberjack": "Lumberjack"
 }
+
+
+

@@ -2,36 +2,38 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherToLeatherworkerDistributionGoal;
-import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
-import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
-import net.minecraft.inventory.InventoryChangedListener;
-import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.SwordItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -48,7 +50,8 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ButcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherMeatDistributionGoal> MEAT_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ButcherToLeatherworkerDistributionGoal> LEATHER_DISTRIBUTION_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
+    private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -104,7 +107,6 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         goal.requestImmediateCheck();
 
         updateChestListener(world, villager, chestPos);
-
         tryConvertWithWeapon(world, villager, jobPos, chestPos);
     }
 
@@ -201,8 +203,56 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         }
     }
 
+    public static void onChestInventoryMutated(ServerWorld world, BlockPos chestPos) {
+        Set<VillagerEntity> villagers = CHEST_WATCHERS_BY_POS.get(chestPos);
+        if (villagers == null || villagers.isEmpty()) {
+            return;
+        }
+
+        Set<VillagerEntity> snapshot = Set.copyOf(villagers);
+        boolean shouldRunConversionHooks = false;
+        for (VillagerEntity villager : snapshot) {
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                clearChestListener(villager);
+                continue;
+            }
+
+            ButcherSmokerGoal smokerGoal = GOALS.get(villager);
+            if (smokerGoal != null) {
+                smokerGoal.requestImmediateCheck();
+            }
+
+            ButcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null) {
+                craftingGoal.requestImmediateCraft(world);
+            }
+
+            ButcherMeatDistributionGoal meatDistributionGoal = MEAT_DISTRIBUTION_GOALS.get(villager);
+            if (meatDistributionGoal != null) {
+                meatDistributionGoal.requestImmediateDistribution();
+            }
+
+            ButcherToLeatherworkerDistributionGoal leatherDistributionGoal = LEATHER_DISTRIBUTION_GOALS.get(villager);
+            if (leatherDistributionGoal != null) {
+                leatherDistributionGoal.requestImmediateDistribution();
+            }
+
+            VillagerConversionCandidateIndex.markCandidate(world, villager);
+            shouldRunConversionHooks = true;
+        }
+
+        if (shouldRunConversionHooks) {
+            ProfessionDefinitions.runConversionHooks(world);
+        }
+    }
+
     private static void tryConvertWithWeapon(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!villager.isAlive() || villager.getVillagerData().getProfession() != VillagerProfession.BUTCHER) {
+            return;
+        }
+
+        Optional<WeaponSlotReference> triggerReference = findConvertibleWeaponSlot(world, chestPos);
+        if (triggerReference.isEmpty()) {
             return;
         }
 
@@ -211,11 +261,30 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        ItemStack weaponStack = takeWeaponFromChest(world, chestPos);
-        if (weaponStack.isEmpty()) {
+        Optional<WeaponTrigger> trigger = extractWeaponTrigger(triggerReference.get());
+        if (trigger.isEmpty()) {
             return;
         }
 
+        prepareConvertedGuard(guard, world, villager, jobPos, trigger.get().weapon());
+        guard.setHuntOnSpawn();
+        guard.setPairedChestPos(chestPos);
+        guard.setPairedSmokerPos(jobPos);
+
+        world.spawnEntityAndPassengers(guard);
+        VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
+
+        LOGGER.info("Butcher {} converted into Butcher Guard {} using {} from chest {} slot {}",
+                villager.getUuidAsString(),
+                guard.getUuidAsString(),
+                trigger.get().weapon().getItem(),
+                chestPos.toShortString(),
+                trigger.get().slot());
+
+        discardVillager(villager);
+    }
+
+    private static void prepareConvertedGuard(GuardEntity guard, ServerWorld world, VillagerEntity villager, BlockPos jobPos, ItemStack weaponStack) {
         guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
         guard.spawnWithArmor = false;
         guard.copyPositionAndRotation(villager);
@@ -232,27 +301,17 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
         clearArmorAndOffhand(guard);
-        guard.equipStack(EquipmentSlot.MAINHAND, weaponStack);
-        guard.setHuntOnSpawn();
-        guard.setPairedChestPos(chestPos);
-        guard.setPairedSmokerPos(jobPos);
+        guard.equipStack(EquipmentSlot.MAINHAND, weaponStack.copyWithCount(1));
+    }
 
-        world.spawnEntityAndPassengers(guard);
-        VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
-
-        LOGGER.info("Butcher {} converted into Butcher Guard {} using weapon from chest {}",
-                villager.getUuidAsString(),
-                guard.getUuidAsString(),
-                chestPos.toShortString());
-
+    private static void discardVillager(VillagerEntity villager) {
         villager.releaseTicketFor(MemoryModuleType.HOME);
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
         villager.discard();
     }
 
-
-    private static void clearArmorAndOffhand(ButcherGuardEntity guard) {
+    private static void clearArmorAndOffhand(GuardEntity guard) {
         guard.equipStack(EquipmentSlot.HEAD, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.CHEST, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.LEGS, ItemStack.EMPTY);
@@ -260,94 +319,122 @@ public class ButcherBehavior implements VillagerProfessionBehavior {
         guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
     }
 
-    private static ItemStack takeWeaponFromChest(ServerWorld world, BlockPos chestPos) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return ItemStack.EMPTY;
-        }
-
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    private static Optional<WeaponSlotReference> findConvertibleWeaponSlot(ServerWorld world, BlockPos chestPos) {
+        Inventory inventory = getChestInventory(world, chestPos);
         if (inventory == null) {
-            return ItemStack.EMPTY;
+            return Optional.empty();
         }
 
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && isConvertibleWeapon(stack)) {
-                ItemStack extracted = stack.split(1);
-                inventory.markDirty();
-                return extracted;
+            if (!stack.isEmpty() && (stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem)) {
+                return Optional.of(new WeaponSlotReference(inventory, slot));
             }
         }
 
-        return ItemStack.EMPTY;
+        return Optional.empty();
     }
 
-    private static boolean isConvertibleWeapon(ItemStack stack) {
-        return stack.getItem() instanceof AxeItem || stack.getItem() instanceof SwordItem;
+    private static Optional<WeaponTrigger> extractWeaponTrigger(WeaponSlotReference reference) {
+        ItemStack stack = reference.inventory().getStack(reference.slot());
+        if (stack.isEmpty() || (!(stack.getItem() instanceof AxeItem) && !(stack.getItem() instanceof SwordItem))) {
+            return Optional.empty();
+        }
+
+        ItemStack extracted = stack.split(1);
+        reference.inventory().markDirty();
+        return Optional.of(new WeaponTrigger(extracted, reference.slot()));
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
-        Inventory inventory = getChestInventory(world, chestPos);
-        ChestListener existing = CHEST_LISTENERS.get(villager);
-        if (existing != null && existing.inventory() == inventory) {
+        Set<BlockPos> observedChestPositions = getObservedChestPositions(world, chestPos);
+        if (observedChestPositions.isEmpty()) {
+            clearChestListener(villager);
             return;
         }
+
+        ChestRegistration existing = CHEST_REGISTRATIONS.get(villager);
+        if (existing != null && existing.observedChestPositions().equals(observedChestPositions)) {
+            return;
+        }
+
         if (existing != null) {
             removeChestListener(existing);
-            CHEST_LISTENERS.remove(villager);
+            CHEST_REGISTRATIONS.remove(villager);
         }
-        if (!(inventory instanceof SimpleInventory simpleInventory)) {
-            return;
+
+        for (BlockPos observedPos : observedChestPositions) {
+            CHEST_WATCHERS_BY_POS.computeIfAbsent(observedPos, ignored -> new HashSet<>()).add(villager);
         }
-        InventoryChangedListener listener = sender -> {
-            ButcherSmokerGoal smokerGoal = GOALS.get(villager);
-            if (smokerGoal != null) {
-                smokerGoal.requestImmediateCheck();
-            }
 
-            ButcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                craftingGoal.requestImmediateCraft(serverWorld);
-            }
-
-            ButcherMeatDistributionGoal meatDistributionGoal = MEAT_DISTRIBUTION_GOALS.get(villager);
-            if (meatDistributionGoal != null) {
-                meatDistributionGoal.requestImmediateDistribution();
-            }
-
-            ButcherToLeatherworkerDistributionGoal leatherDistributionGoal = LEATHER_DISTRIBUTION_GOALS.get(villager);
-            if (leatherDistributionGoal != null) {
-                leatherDistributionGoal.requestImmediateDistribution();
-            }
-            if (villager.getWorld() instanceof ServerWorld serverWorld) {
-                VillagerConversionCandidateIndex.markCandidate(serverWorld, villager);
-                ProfessionDefinitions.runConversionHooks(serverWorld);
-            }
-        };
-        simpleInventory.addListener(listener);
-        CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
+        CHEST_REGISTRATIONS.put(villager, new ChestRegistration(villager, observedChestPositions));
     }
 
-    private void clearChestListener(VillagerEntity villager) {
-        ChestListener existing = CHEST_LISTENERS.remove(villager);
+    private static void clearChestListener(VillagerEntity villager) {
+        ChestRegistration existing = CHEST_REGISTRATIONS.remove(villager);
         if (existing != null) {
             removeChestListener(existing);
         }
     }
 
-    private void removeChestListener(ChestListener existing) {
-        existing.inventory().removeListener(existing.listener());
+    private static void removeChestListener(ChestRegistration existing) {
+        for (BlockPos observedPos : existing.observedChestPositions()) {
+            Set<VillagerEntity> watchers = CHEST_WATCHERS_BY_POS.get(observedPos);
+            if (watchers == null) {
+                continue;
+            }
+
+            watchers.remove(existing.villager());
+            if (watchers.isEmpty()) {
+                CHEST_WATCHERS_BY_POS.remove(observedPos);
+            }
+        }
     }
 
-    private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
+    private static Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock)) {
+            return Set.of();
+        }
+
+        Set<BlockPos> positions = new HashSet<>();
+        positions.add(chestPos.toImmutable());
+
+        ChestType chestType = state.get(ChestBlock.CHEST_TYPE);
+        if (chestType != ChestType.SINGLE) {
+            Direction facing = state.get(ChestBlock.FACING);
+            Direction offsetDirection = chestType == ChestType.LEFT
+                    ? facing.rotateYClockwise()
+                    : facing.rotateYCounterclockwise();
+            BlockPos otherHalfPos = chestPos.offset(offsetDirection);
+            BlockState otherState = world.getBlockState(otherHalfPos);
+            if (otherState.getBlock() instanceof ChestBlock && otherState.get(ChestBlock.FACING) == facing) {
+                positions.add(otherHalfPos.toImmutable());
+            }
+        }
+
+        return positions;
+    }
+
+    private static Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
+
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
     }
 
-    private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
+    private record ChestRegistration(VillagerEntity villager, Set<BlockPos> observedChestPositions) {
+        private ChestRegistration(VillagerEntity villager, Set<BlockPos> observedChestPositions) {
+            this.villager = villager;
+            this.observedChestPositions = Set.copyOf(observedChestPositions);
+        }
+    }
+
+    private record WeaponSlotReference(Inventory inventory, int slot) {
+    }
+
+    private record WeaponTrigger(ItemStack weapon, int slot) {
     }
 }
