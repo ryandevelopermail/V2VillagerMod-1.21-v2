@@ -8,9 +8,9 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.util.math.ChunkPos;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.List;
@@ -39,7 +39,17 @@ public final class ProfessionDefinitions {
             definition(VillagerProfession.MASON, Set.of(Blocks.STONECUTTER), MasonBehavior::new, MasonBehavior::tryConvertMasonsWithMiningTool),
             definition(VillagerProfession.SHEPHERD, Set.of(Blocks.LOOM), ShepherdBehavior::new),
             definition(VillagerProfession.TOOLSMITH, Set.of(Blocks.SMITHING_TABLE), ToolsmithBehavior::new),
-            definition(VillagerProfession.WEAPONSMITH, Set.of(Blocks.GRINDSTONE), WeaponsmithBehavior::new)
+            definition(VillagerProfession.WEAPONSMITH, Set.of(Blocks.GRINDSTONE), WeaponsmithBehavior::new),
+            definition(
+                    LumberjackProfession.LUMBERJACK,
+                    Set.of(Blocks.CRAFTING_TABLE),
+                    LumberjackBehavior::new,
+                    List.of(new SpecialModifier(
+                            GuardVillagers.id("lumberjack_furnace_modifier"),
+                            Blocks.FURNACE,
+                            JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE
+                    ))
+            )
     );
 
     private static final Map<VillagerProfession, ProfessionDefinition> DEFINITIONS_BY_PROFESSION = DEFINITIONS.stream()
@@ -122,17 +132,25 @@ public final class ProfessionDefinitions {
     }
 
     private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory) {
-        return definition(profession, expectedJobBlocks, behaviorFactory, null);
+        return definition(profession, expectedJobBlocks, behaviorFactory, null, List.of());
     }
 
     private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory, Consumer<ServerWorld> conversionHook) {
+        return definition(profession, expectedJobBlocks, behaviorFactory, conversionHook, List.of());
+    }
+
+    private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory, List<SpecialModifier> specialModifiers) {
+        return definition(profession, expectedJobBlocks, behaviorFactory, null, specialModifiers);
+    }
+
+    private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory, Consumer<ServerWorld> conversionHook, List<SpecialModifier> specialModifiers) {
         return new ProfessionDefinition(
                 Registries.VILLAGER_PROFESSION.getId(profession),
                 profession,
                 expectedJobBlocks,
                 behaviorFactory,
                 conversionHook,
-                List.of()
+                specialModifiers
         );
     }
 }

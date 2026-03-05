@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.ArmorerBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
+import dev.sterner.guardvillagers.common.villager.behavior.LumberjackBehavior;
 import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.item.ItemStack;
@@ -38,6 +39,8 @@ public class ChestBlockEntityMixin {
             MasonBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
             ArmorerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
             CartographerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
+            LumberjackBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
         }
     }
 }
+
