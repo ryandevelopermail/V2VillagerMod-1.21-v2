@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackBootstrapGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackDistributionGoal;
@@ -8,17 +11,29 @@ import dev.sterner.guardvillagers.common.entity.goal.LumberjackGatheringGoal;
 import dev.sterner.guardvillagers.common.villager.LumberjackProfession;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
+import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
+import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.SpawnReason;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.AxeItem;
+import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.GlobalPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.LinkedHashSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -122,6 +137,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
+        tryConvertWithAxe(world, villager, jobPos, chestPos, "chest paired workflow");
     }
 
     @Override
@@ -216,7 +232,119 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
             }
+
+            if (villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK) {
+                VillagerConversionCandidateIndex.markCandidate(world, villager);
+            }
         }
+    }
+
+    public static void tryConvertLumberjacksWithAxe(ServerWorld world) {
+        Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, LumberjackProfession.LUMBERJACK));
+        Box worldBounds = new Box(world.getWorldBorder().getBoundWest(), world.getBottomY(), world.getWorldBorder().getBoundNorth(),
+                world.getWorldBorder().getBoundEast(), world.getTopY(), world.getWorldBorder().getBoundSouth());
+        candidates.addAll(world.getEntitiesByClass(
+                VillagerEntity.class,
+                worldBounds,
+                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK
+        ));
+
+        for (VillagerEntity villager : candidates) {
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                continue;
+            }
+
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isEmpty() || !jobSite.get().dimension().equals(world.getRegistryKey())) {
+                continue;
+            }
+
+            BlockPos jobPos = jobSite.get().pos();
+            if (!ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(jobPos))) {
+                continue;
+            }
+
+            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos);
+            if (chestPos.isEmpty() || !jobPos.isWithinDistance(chestPos.get(), 3.0D)) {
+                continue;
+            }
+
+            tryConvertWithAxe(world, villager, jobPos, chestPos.get(), "candidate scan");
+        }
+    }
+
+    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String source) {
+        if (!villager.isAlive() || villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
+            return;
+        }
+
+        AxeGuardEntity guard = GuardVillagers.AXE_GUARD_VILLAGER.create(world);
+        if (guard == null) {
+            return;
+        }
+
+        ItemStack axeStack = takeAxeFromChest(world, chestPos);
+        if (axeStack.isEmpty()) {
+            return;
+        }
+
+        guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
+        guard.spawnWithArmor = false;
+        guard.copyPositionAndRotation(villager);
+        guard.headYaw = villager.headYaw;
+        guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
+        guard.setGuardVariant(GuardEntity.getRandomTypeForBiome(world, guard.getBlockPos()));
+        guard.setPersistent();
+        guard.setCustomName(villager.getCustomName());
+        guard.setCustomNameVisible(villager.isCustomNameVisible());
+        guard.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
+        guard.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
+        guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
+        guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
+        guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
+        guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+        guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
+
+        world.spawnEntityAndPassengers(guard);
+        VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
+
+        LOGGER.info("Lumberjack {} converted into Axe Guard {} using axe from chest {} ({})",
+                villager.getUuidAsString(),
+                guard.getUuidAsString(),
+                chestPos.toShortString(),
+                source);
+
+        villager.releaseTicketFor(MemoryModuleType.HOME);
+        villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
+        villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
+        villager.discard();
+    }
+
+    private static ItemStack takeAxeFromChest(ServerWorld world, BlockPos chestPos) {
+        Inventory inventory = getChestInventory(world, chestPos).orElse(null);
+        if (inventory == null) {
+            return ItemStack.EMPTY;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() instanceof AxeItem) {
+                ItemStack extracted = stack.split(1);
+                inventory.markDirty();
+                return extracted;
+            }
+        }
+
+        return ItemStack.EMPTY;
+    }
+
+    private static Optional<Inventory> getChestInventory(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return Optional.empty();
+        }
+
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
@@ -332,5 +460,4 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 }
-
 

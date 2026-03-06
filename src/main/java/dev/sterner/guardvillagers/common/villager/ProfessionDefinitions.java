@@ -44,6 +44,7 @@ public final class ProfessionDefinitions {
                     LumberjackProfession.LUMBERJACK,
                     Set.of(Blocks.CRAFTING_TABLE),
                     LumberjackBehavior::new,
+                    LumberjackBehavior::tryConvertLumberjacksWithAxe,
                     List.of(new SpecialModifier(
                             GuardVillagers.id("lumberjack_furnace_modifier"),
                             Blocks.FURNACE,
