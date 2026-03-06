@@ -321,7 +321,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     }
 
     private static ItemStack takeAxeFromChest(ServerWorld world, BlockPos chestPos) {
-        Inventory inventory = getChestInventory(world, chestPos).orElse(null);
+        Inventory inventory = getChestInventoryOptional(world, chestPos).orElse(null);
         if (inventory == null) {
             return ItemStack.EMPTY;
         }
@@ -338,7 +338,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         return ItemStack.EMPTY;
     }
 
-    private static Optional<Inventory> getChestInventory(ServerWorld world, BlockPos chestPos) {
+    private static Optional<Inventory> getChestInventoryOptional(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
