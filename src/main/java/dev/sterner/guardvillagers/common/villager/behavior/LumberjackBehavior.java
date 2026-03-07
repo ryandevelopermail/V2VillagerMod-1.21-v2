@@ -361,13 +361,15 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return false;
         }
 
-        BlockPos resolvedJobPos = jobPos;
-        if (resolvedJobPos == null) {
+        BlockPos candidateJobPos = jobPos;
+        if (candidateJobPos == null) {
             Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
             if (jobSite.isPresent() && jobSite.get().dimension().equals(world.getRegistryKey())) {
-                resolvedJobPos = jobSite.get().pos();
+                candidateJobPos = jobSite.get().pos();
             }
         }
+
+        final BlockPos resolvedJobPos = candidateJobPos;
 
         if (resolvedJobPos == null || !ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(resolvedJobPos))) {
             return false;
