@@ -284,6 +284,16 @@ public class LumberjackBootstrapGoal extends Goal {
         LumberjackBehavior.queueInitialCountdown(villager, STARTUP_COUNTDOWN_TICKS);
         JobBlockPairingHelper.handlePairingBlockPlacement(world, chestPos, world.getBlockState(chestPos));
 
+        LOGGER.info("event=lumberjack_post_bootstrap_handoff begin villager_uuid={} job_pos={} chest_pos={}",
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                chestPos.toShortString());
+        LumberjackBehavior.runPostBootstrapHandoff(world, villager, jobPos, chestPos);
+        LOGGER.info("event=lumberjack_post_bootstrap_handoff success villager_uuid={} job_pos={} chest_pos={}",
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                chestPos.toShortString());
+
         logStartupWorkflowResult("SUCCESS", true, chestPos);
 
         if (syntheticBootstrapInjected) {
