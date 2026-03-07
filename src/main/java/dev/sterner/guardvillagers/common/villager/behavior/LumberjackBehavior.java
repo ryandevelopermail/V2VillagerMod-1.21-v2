@@ -22,7 +22,9 @@ import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -80,9 +82,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 villager.getUuidAsString(),
                 jobPos.toShortString());
 
-        Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, jobPos)
-                .filter(chestPos -> jobPos.isWithinDistance(chestPos, CHEST_PAIR_RANGE));
-        tryConvertToGuardLumberjack(world, villager, jobPos, pairedChest.orElse(null), "job block paired workflow");
     }
 
     @Override
@@ -139,7 +138,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
-        tryConvertToGuardLumberjack(world, villager, jobPos, chestPos, "chest paired workflow");
     }
 
     @Override
@@ -172,7 +170,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
-        tryConvertToGuardLumberjack(world, villager, jobPos, chestPos, "crafting table paired workflow");
     }
 
     @Override
@@ -311,6 +308,10 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
+        if (chestPos == null || !hasConversionReadyAxe(world, chestPos)) {
+            return;
+        }
+
         AxeGuardEntity guard = GuardVillagers.AXE_GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
@@ -355,6 +356,30 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
         villager.discard();
+    }
+
+    private static boolean hasConversionReadyAxe(ServerWorld world, BlockPos chestPos) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+
+        net.minecraft.inventory.Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (inventory == null) {
+            return false;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !(stack.getItem() instanceof AxeItem)) {
+                continue;
+            }
+            if (!stack.isOf(Items.WOODEN_AXE)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
