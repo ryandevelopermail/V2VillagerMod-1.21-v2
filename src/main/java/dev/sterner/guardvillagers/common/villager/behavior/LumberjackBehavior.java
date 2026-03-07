@@ -235,8 +235,38 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
             if (villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK) {
                 VillagerConversionCandidateIndex.markCandidate(world, villager);
+                tryConvertOnChestMutation(world, villager, chestPos);
             }
         }
+    }
+
+    private static void tryConvertOnChestMutation(ServerWorld world, VillagerEntity villager, BlockPos changedChestPos) {
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty() || !jobSite.get().dimension().equals(world.getRegistryKey())) {
+            return;
+        }
+
+        BlockPos jobPos = jobSite.get().pos();
+        if (!ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(jobPos))) {
+            return;
+        }
+
+        Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, jobPos);
+        if (pairedChest.isEmpty()) {
+            return;
+        }
+
+        BlockPos pairedChestPos = pairedChest.get();
+        if (!jobPos.isWithinDistance(pairedChestPos, 3.0D)) {
+            return;
+        }
+
+        if (!changedChestPos.equals(pairedChestPos)
+                && !getObservedChestPositions(world, pairedChestPos).contains(changedChestPos.toImmutable())) {
+            return;
+        }
+
+        tryConvertWithAxe(world, villager, jobPos, pairedChestPos, "chest mutation");
     }
 
     public static void tryConvertLumberjacksWithAxe(ServerWorld world) {
@@ -303,6 +333,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
         guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+
+        guard.equipStack(EquipmentSlot.HEAD, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.CHEST, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.LEGS, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.FEET, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
+        guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+
         guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
 
         world.spawnEntityAndPassengers(guard);
@@ -460,4 +498,3 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 }
-
