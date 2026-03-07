@@ -77,7 +77,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING, "job block paired");
+        if (getPhase(villager).ordinal() < LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE.ordinal()) {
+            transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING, "job block paired");
+        } else {
+            LOGGER.debug("Ignored backward lifecycle transition for lumberjack {} at {} (reason: already at phase {})",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    getPhase(villager));
+        }
 
         LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
@@ -132,6 +139,22 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         bootstrapGoal.requestImmediateStart();
 
         updateChestListener(world, villager, chestPos);
+    }
+
+
+    public static boolean isBootstrapGoalActiveFor(VillagerEntity villager, BlockPos jobPos) {
+        LumberjackBootstrapGoal bootstrapGoal = BOOTSTRAP_GOALS.get(villager);
+        if (bootstrapGoal == null) {
+            return false;
+        }
+
+        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+        if (jobSite.isEmpty()) {
+            return false;
+        }
+
+        GlobalPos globalPos = jobSite.get();
+        return globalPos.pos().equals(jobPos);
     }
 
     @Override

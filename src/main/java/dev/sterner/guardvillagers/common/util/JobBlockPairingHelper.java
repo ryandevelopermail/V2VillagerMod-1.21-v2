@@ -44,9 +44,12 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
@@ -54,7 +57,9 @@ public final class JobBlockPairingHelper {
     private static final double FARMER_BANNER_PAIR_RANGE = 500.0D;
     private static final double SHEPHERD_BANNER_PAIR_RANGE = 500.0D;
     private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
+    private static final long JOB_PAIRED_NOTIFY_COOLDOWN_TICKS = 40L;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
+    private static final Map<JobPairingKey, Long> LAST_JOB_PAIRED_NOTIFY_TICKS = new HashMap<>();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
     static {
@@ -190,7 +195,7 @@ public final class JobBlockPairingHelper {
 
         Optional<VillagerEntity> existingLumberjack = findClaimedLumberjackAtJobSite(world, craftingTablePos);
         if (existingLumberjack.isPresent()) {
-            VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, existingLumberjack.get(), craftingTablePos);
+            notifyJobBlockPairedIdempotent(world, existingLumberjack.get(), craftingTablePos, "existing lumberjack at claimed job site");
             refreshVillagerPairings(world, existingLumberjack.get());
             return;
         }
@@ -213,7 +218,7 @@ public final class JobBlockPairingHelper {
                 craftingTablePos.toShortString());
 
         playPairingAnimation(world, craftingTablePos, villager, craftingTablePos);
-        VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, craftingTablePos);
+        notifyJobBlockPairedIdempotent(world, villager, craftingTablePos, "newly paired lumberjack at placed crafting table");
         VillagerConversionCandidateIndex.markCandidate(world, villager);
         refreshVillagerPairings(world, villager);
     }
@@ -323,7 +328,13 @@ public final class JobBlockPairingHelper {
 
         VillagerProfession profession = villager.getVillagerData().getProfession();
         if (profession == LumberjackProfession.LUMBERJACK && nearbyChest.isEmpty()) {
-            VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, jobPos);
+            if (LumberjackBehavior.isBootstrapGoalActiveFor(villager, jobPos)) {
+                LOGGER.debug("Ignored duplicate job-paired event for lumberjack {} at {} (reason: bootstrap goal already active)",
+                        villager.getUuidAsString(),
+                        jobPos.toShortString());
+            } else {
+                notifyJobBlockPairedIdempotent(world, villager, jobPos, "refresh with no nearby chest");
+            }
         }
 
         if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
@@ -608,5 +619,31 @@ public final class JobBlockPairingHelper {
         }
         return Optional.empty();
     }
-}
 
+    private static boolean notifyJobBlockPairedIdempotent(ServerWorld world, VillagerEntity villager, BlockPos jobPos, String reason) {
+        long now = world.getTime();
+        JobPairingKey key = new JobPairingKey(villager.getUuid(), jobPos.toImmutable());
+        Long lastNotifiedAt = LAST_JOB_PAIRED_NOTIFY_TICKS.get(key);
+        if (lastNotifiedAt != null && now - lastNotifiedAt <= JOB_PAIRED_NOTIFY_COOLDOWN_TICKS) {
+            LOGGER.debug("Ignored duplicate job-paired event for villager {} at {} (reason: {}; {} ticks since last notify)",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    reason,
+                    now - lastNotifiedAt);
+            return false;
+        }
+
+        LAST_JOB_PAIRED_NOTIFY_TICKS.put(key, now);
+        pruneJobPairedNotifyCache(now);
+        VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, jobPos);
+        return true;
+    }
+
+    private static void pruneJobPairedNotifyCache(long now) {
+        long expiryTicks = JOB_PAIRED_NOTIFY_COOLDOWN_TICKS * 4L;
+        LAST_JOB_PAIRED_NOTIFY_TICKS.entrySet().removeIf(entry -> now - entry.getValue() > expiryTicks);
+    }
+
+    private record JobPairingKey(UUID villagerUuid, BlockPos jobPos) {
+    }
+}
