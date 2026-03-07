@@ -106,7 +106,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         gatheringGoal.setTargets(jobPos, chestPos, resolvedCraftingTable);
 
         Long pendingCountdown = PENDING_INITIAL_COUNTDOWNS.remove(villager);
-        if (pendingCountdown != null) {
+        boolean startupBootstrapComplete = pendingCountdown != null;
+        if (startupBootstrapComplete) {
             gatheringGoal.startExternalCountdown(world, pendingCountdown, "startup bootstrap complete");
         }
         gatheringGoal.requestImmediateCheck();
@@ -136,7 +137,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
-        tryConvertToGuardLumberjack(world, villager, jobPos, chestPos, "chest paired workflow");
+        if (startupBootstrapComplete) {
+            tryConvertToGuardLumberjack(world, villager, jobPos, chestPos, "chest paired workflow");
+        }
     }
 
     @Override
