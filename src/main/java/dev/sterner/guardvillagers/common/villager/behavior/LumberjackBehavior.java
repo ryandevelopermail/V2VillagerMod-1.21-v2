@@ -25,6 +25,7 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -137,7 +138,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
-        tryConvertWithAxe(world, villager, jobPos, chestPos, "chest paired workflow");
+        tryConvertWithAxe(world, villager, jobPos, Optional.of(chestPos), "chest paired workflow");
     }
 
     @Override
@@ -266,7 +267,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        tryConvertWithAxe(world, villager, jobPos, pairedChestPos, "chest mutation");
+        tryConvertWithAxe(world, villager, jobPos, Optional.of(pairedChestPos), "chest mutation");
     }
 
     public static void tryConvertLumberjacksWithAxe(ServerWorld world) {
@@ -294,16 +295,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 continue;
             }
 
-            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos);
-            if (chestPos.isEmpty() || !jobPos.isWithinDistance(chestPos.get(), 3.0D)) {
-                continue;
-            }
+            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos)
+                    .filter(pos -> jobPos.isWithinDistance(pos, 3.0D));
 
-            tryConvertWithAxe(world, villager, jobPos, chestPos.get(), "candidate scan");
+            tryConvertWithAxe(world, villager, jobPos, chestPos, "candidate scan");
         }
     }
 
-    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String source) {
+    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, BlockPos jobPos, Optional<BlockPos> chestPos, String source) {
         if (!villager.isAlive() || villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
             return;
         }
@@ -313,10 +312,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        ItemStack axeStack = takeAxeFromChest(world, chestPos);
-        if (axeStack.isEmpty()) {
-            return;
-        }
+        ResolvedConversionAxe resolvedAxe = resolveConversionAxe(world, villager, chestPos);
+        ItemStack axeStack = resolvedAxe.axeStack();
 
         guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
         guard.spawnWithArmor = false;
@@ -346,10 +343,10 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
-        LOGGER.info("Lumberjack {} converted into Axe Guard {} using axe from chest {} ({})",
+        LOGGER.info("Lumberjack {} converted into Axe Guard {} using axe from {} ({})",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),
-                chestPos.toShortString(),
+                resolvedAxe.source(),
                 source);
 
         villager.releaseTicketFor(MemoryModuleType.HOME);
@@ -358,22 +355,47 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         villager.discard();
     }
 
-    private static ItemStack takeAxeFromChest(ServerWorld world, BlockPos chestPos) {
-        Inventory inventory = getChestInventoryOptional(world, chestPos).orElse(null);
-        if (inventory == null) {
-            return ItemStack.EMPTY;
+    private static ResolvedConversionAxe resolveConversionAxe(ServerWorld world, VillagerEntity villager, Optional<BlockPos> chestPos) {
+        ItemStack mainHand = villager.getMainHandStack();
+        if (!mainHand.isEmpty() && mainHand.getItem() instanceof AxeItem) {
+            return new ResolvedConversionAxe(mainHand.split(1), "villager main hand");
         }
 
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
+        ItemStack offHand = villager.getOffHandStack();
+        if (!offHand.isEmpty() && offHand.getItem() instanceof AxeItem) {
+            return new ResolvedConversionAxe(offHand.split(1), "villager off hand");
+        }
+
+        Inventory villagerInventory = villager.getInventory();
+        for (int slot = 0; slot < villagerInventory.size(); slot++) {
+            ItemStack stack = villagerInventory.getStack(slot);
             if (!stack.isEmpty() && stack.getItem() instanceof AxeItem) {
                 ItemStack extracted = stack.split(1);
-                inventory.markDirty();
-                return extracted;
+                villagerInventory.markDirty();
+                return new ResolvedConversionAxe(extracted, "villager inventory slot " + slot);
             }
         }
 
-        return ItemStack.EMPTY;
+        if (chestPos.isPresent()) {
+            Inventory chestInventory = getChestInventoryOptional(world, chestPos.get()).orElse(null);
+            if (chestInventory != null) {
+                for (int slot = 0; slot < chestInventory.size(); slot++) {
+                    ItemStack stack = chestInventory.getStack(slot);
+                    if (!stack.isEmpty() && stack.getItem() instanceof AxeItem) {
+                        ItemStack extracted = stack.split(1);
+                        chestInventory.markDirty();
+                        return new ResolvedConversionAxe(extracted,
+                                "paired chest " + chestPos.get().toShortString() + " slot " + slot);
+                    }
+                }
+            }
+        }
+
+        return new ResolvedConversionAxe(new ItemStack(Items.WOODEN_AXE), "default fallback wooden axe");
+    }
+
+
+    private record ResolvedConversionAxe(ItemStack axeStack, String source) {
     }
 
     private static Optional<Inventory> getChestInventoryOptional(ServerWorld world, BlockPos chestPos) {
