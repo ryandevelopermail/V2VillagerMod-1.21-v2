@@ -103,6 +103,10 @@ public final class ProfessionDefinitions {
     }
 
     public static void runConversionHooks(ServerWorld world) {
+        runConversionHooks(world, "default");
+    }
+
+    public static void runConversionHooks(ServerWorld world, String source) {
         for (ProfessionDefinition definition : DEFINITIONS) {
             Consumer<ServerWorld> conversionHook = definition.conversionHook();
             if (conversionHook != null) {
@@ -129,7 +133,7 @@ public final class ProfessionDefinitions {
             }
         }
 
-        runConversionHooks(world);
+        runConversionHooks(world, "fallback sweep");
     }
 
     private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory) {
