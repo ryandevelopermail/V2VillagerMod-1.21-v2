@@ -50,6 +50,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     private static final int FURNACE_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 6;
+    private static final long BOOTSTRAP_STALL_TIMEOUT_TICKS = 300L;
+    private static final int BOOTSTRAP_STALL_MAX_RETRIES = 3;
+    private static final long FALLBACK_STARTUP_COUNTDOWN_TICKS = 20L * 60L;
 
     private static final Map<VillagerEntity, LumberjackBootstrapGoal> BOOTSTRAP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackGatheringGoal> GATHERING_GOALS = new WeakHashMap<>();
@@ -59,6 +62,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, BlockPos> PAIRED_FURNACES = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> PENDING_INITIAL_COUNTDOWNS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackLifecyclePhase> LIFECYCLE_PHASES = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> BOOTSTRAP_STARTED_AT = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Integer> BOOTSTRAP_RECOVERY_ATTEMPTS = new WeakHashMap<>();
 
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
@@ -90,14 +95,18 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                     "jobPos=" + jobPos.toShortString() + ",currentPhase=" + getPhase(villager));
         }
 
+        boolean reusedGoal = BOOTSTRAP_GOALS.containsKey(villager);
         LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
+        BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
+        BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
         bootstrapGoal.setJobPos(jobPos);
         bootstrapGoal.requestImmediateStart();
 
-        LOGGER.info("Lumberjack {} started startup workflow at {}",
+        LOGGER.info("Lumberjack {} started startup workflow at {} (goal={})",
                 villager.getUuidAsString(),
-                jobPos.toShortString());
+                jobPos.toShortString(),
+                reusedGoal ? "reused" : "new");
     }
 
     @Override
@@ -109,9 +118,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                     PAIRED_FURNACES.remove(villager);
                     PENDING_INITIAL_COUNTDOWNS.remove(villager);
                     LIFECYCLE_PHASES.remove(villager);
+                    BOOTSTRAP_STARTED_AT.remove(villager);
+                    BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
                 })) {
             return;
         }
+
+        BOOTSTRAP_STARTED_AT.remove(villager);
+        BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
 
         LOGGER.info("Lumberjack {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
@@ -283,12 +297,105 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             }
 
             Optional<LifecycleReconcileContext> context = reconcileLifecycle(world, villager, jobPos, Optional.empty(), "CANDIDATE_SCAN");
+            handleBootstrapStallRecovery(world, villager, jobPos);
             if (context.isEmpty()) {
                 continue;
             }
 
             tryConvertWithAxe(world, villager, context.get(), "CANDIDATE_SCAN");
         }
+    }
+
+    private static void handleBootstrapStallRecovery(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        if (getPhase(villager) != LumberjackLifecyclePhase.BOOTSTRAP_PENDING) {
+            return;
+        }
+
+        if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()) {
+            BOOTSTRAP_STARTED_AT.remove(villager);
+            BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
+            return;
+        }
+
+        long startedAt = BOOTSTRAP_STARTED_AT.computeIfAbsent(villager, ignored -> world.getTime());
+        long elapsed = world.getTime() - startedAt;
+        if (elapsed <= BOOTSTRAP_STALL_TIMEOUT_TICKS) {
+            return;
+        }
+
+        int attempt = BOOTSTRAP_RECOVERY_ATTEMPTS.getOrDefault(villager, 0) + 1;
+        BOOTSTRAP_RECOVERY_ATTEMPTS.put(villager, attempt);
+        BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
+
+        LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
+                () -> new LumberjackBootstrapGoal(villager, jobPos));
+        bootstrapGoal.setJobPos(jobPos);
+        bootstrapGoal.requestImmediateStart();
+        JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+
+        LOGGER.warn("LUMBERJACK_BOOTSTRAP_WARNING villager={} code=BOOTSTRAP_STALLED jobPos={} elapsedTicks={} attempt={} action=RETRY_BOOTSTRAP",
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                elapsed,
+                attempt);
+
+        if (attempt >= BOOTSTRAP_STALL_MAX_RETRIES) {
+            forceDeterministicBootstrapFallback(world, villager, jobPos, attempt, elapsed);
+        }
+    }
+
+    private static void forceDeterministicBootstrapFallback(ServerWorld world, VillagerEntity villager, BlockPos jobPos, int attempt, long elapsed) {
+        if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()) {
+            BOOTSTRAP_STARTED_AT.remove(villager);
+            BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
+            return;
+        }
+
+        Optional<BlockPos> placement = findChestPlacementAdjacentToJob(world, jobPos);
+        if (placement.isEmpty()) {
+            LOGGER.warn("LUMBERJACK_BOOTSTRAP_WARNING villager={} code=BOOTSTRAP_STALLED jobPos={} elapsedTicks={} attempt={} action=FALLBACK_PLACE_FAILED",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    elapsed,
+                    attempt);
+            return;
+        }
+
+        BlockPos chestPos = placement.get();
+        world.setBlockState(chestPos, Blocks.CHEST.getDefaultState());
+        getChestInventoryOptional(world, chestPos).ifPresent(chest -> {
+            chest.setStack(0, new ItemStack(Items.OAK_PLANKS, 11));
+            chest.setStack(1, new ItemStack(Items.STICK, 2));
+            chest.setStack(2, new ItemStack(Items.WOODEN_AXE, 1));
+            chest.markDirty();
+        });
+
+        queueInitialCountdown(villager, FALLBACK_STARTUP_COUNTDOWN_TICKS);
+        JobBlockPairingHelper.handlePairingBlockPlacement(world, chestPos, world.getBlockState(chestPos));
+        JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+        BOOTSTRAP_STARTED_AT.remove(villager);
+        BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
+
+        LOGGER.warn("LUMBERJACK_BOOTSTRAP_WARNING villager={} code=BOOTSTRAP_STALLED jobPos={} elapsedTicks={} attempt={} action=FALLBACK_PLACE_CHEST chestPos={}",
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                elapsed,
+                attempt,
+                chestPos.toShortString());
+    }
+
+    private static Optional<BlockPos> findChestPlacementAdjacentToJob(ServerWorld world, BlockPos jobPos) {
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos candidate = jobPos.offset(direction);
+            if (!world.getBlockState(candidate).isAir()) {
+                continue;
+            }
+            if (!world.getBlockState(candidate.down()).isSolidBlock(world, candidate.down())) {
+                continue;
+            }
+            return Optional.of(candidate.toImmutable());
+        }
+        return Optional.empty();
     }
 
     private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, LifecycleReconcileContext context, String source) {
@@ -373,6 +480,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         villager.releaseTicketFor(MemoryModuleType.HOME);
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
+        BOOTSTRAP_STARTED_AT.remove(villager);
+        BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
         villager.discard();
 
     }
