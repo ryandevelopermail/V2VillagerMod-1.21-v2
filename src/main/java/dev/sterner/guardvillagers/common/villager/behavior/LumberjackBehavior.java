@@ -17,7 +17,6 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -86,8 +85,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         boolean reusedGoal = BOOTSTRAP_GOALS.containsKey(villager);
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
-                () -> new LumberjackBootstrapGoal(villager, jobPos));
+        LumberjackBootstrapGoal bootstrapGoal = getOrCreateBootstrapGoal(villager, jobPos);
         BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
         BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
         bootstrapGoal.setJobPos(jobPos);
@@ -122,7 +120,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 jobPos.toShortString());
 
         updateChestListener(world, villager, chestPos);
-        reconcileAndMaybeConvert(world, villager, jobPos, Optional.of(chestPos), null, "CHEST_PAIRED_WORKFLOW");
+        reconcileAndMaybeConvert(world, villager, jobPos, chestPos, null, "CHEST_PAIRED_WORKFLOW");
     }
 
     @Override
@@ -131,8 +129,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 "CRAFTING_TABLE_JOB_PAIRED",
                 "crafting-table/job pairing");
 
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
-                () -> new LumberjackBootstrapGoal(villager, jobPos));
+        LumberjackBootstrapGoal bootstrapGoal = getOrCreateBootstrapGoal(villager, jobPos);
         bootstrapGoal.setJobPos(jobPos);
         bootstrapGoal.requestImmediateStart();
 
@@ -281,8 +278,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         BOOTSTRAP_RECOVERY_ATTEMPTS.put(villager, attempt);
         BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
 
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
-                () -> new LumberjackBootstrapGoal(villager, jobPos));
+        LumberjackBootstrapGoal bootstrapGoal = getOrCreateBootstrapGoal(villager, jobPos);
         bootstrapGoal.setJobPos(jobPos);
         bootstrapGoal.requestImmediateStart();
         JobBlockPairingHelper.refreshVillagerPairings(world, villager);
@@ -339,18 +335,15 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 chestPos.toShortString());
     }
 
-    private static <T extends Goal> T upsertGoalStatic(Map<VillagerEntity, T> goalMap,
-                                                       VillagerEntity villager,
-                                                       int priority,
-                                                       java.util.function.Supplier<T> factory) {
-        T goal = goalMap.get(villager);
+    private static LumberjackBootstrapGoal getOrCreateBootstrapGoal(VillagerEntity villager, BlockPos jobPos) {
+        LumberjackBootstrapGoal goal = BOOTSTRAP_GOALS.get(villager);
         if (goal != null) {
             return goal;
         }
 
-        goal = factory.get();
-        goalMap.put(villager, goal);
-        villager.goalSelector.add(priority, goal);
+        goal = new LumberjackBootstrapGoal(villager, jobPos);
+        BOOTSTRAP_GOALS.put(villager, goal);
+        villager.goalSelector.add(BOOTSTRAP_GOAL_PRIORITY, goal);
         return goal;
     }
 
@@ -421,13 +414,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         guard.setJobPos(jobPos);
         if (chestPos != null) {
             guard.setChestPos(chestPos);
-            if (world.getBlockState(jobPos).isOf(Blocks.CRAFTING_TABLE)) {
-                guard.setCraftingTablePos(jobPos);
-            }
+            resolveCraftingTablePos(world, jobPos, chestPos).ifPresent(guard::setCraftingTablePos);
             for (BlockPos checkPos : BlockPos.iterate(chestPos.add(-3, -2, -3), chestPos.add(3, 2, 3))) {
-                if (world.getBlockState(checkPos).isOf(Blocks.CRAFTING_TABLE) && guard.getCraftingTablePos() == null) {
-                    guard.setCraftingTablePos(checkPos.toImmutable());
-                }
                 if (world.getBlockState(checkPos).isOf(Blocks.FURNACE) && guard.getPairedFurnacePos() == null) {
                     guard.setPairedFurnacePos(checkPos.toImmutable());
                 }
@@ -675,7 +663,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 
-    private Optional<BlockPos> resolveCraftingTablePos(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
+    private static Optional<BlockPos> resolveCraftingTablePos(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
         if (world.getBlockState(jobPos).isOf(Blocks.CRAFTING_TABLE)) {
             return Optional.of(jobPos.toImmutable());
         }
