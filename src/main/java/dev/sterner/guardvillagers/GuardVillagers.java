@@ -230,6 +230,7 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getTime() % 100L == 0L) {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
+                JobBlockPairingHelper.tick(world);
                 if (world.getTime() % 40L == 0L) {
                     ProfessionDefinitions.runConversionHooks(world);
                 }

@@ -25,6 +25,7 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
@@ -35,6 +36,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import net.minecraft.world.World;
 import net.minecraft.world.event.GameEvent;
 import net.minecraft.world.border.WorldBorder;
 import net.minecraft.world.chunk.Chunk;
@@ -59,8 +61,11 @@ public final class JobBlockPairingHelper {
     private static final double SHEPHERD_BANNER_PAIR_RANGE = 500.0D;
     private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
     private static final long JOB_PAIRED_NOTIFY_COOLDOWN_TICKS = 40L;
+    private static final long LUMBERJACK_CALLBACK_MISMATCH_WARNING_TICKS = 200L;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Map<JobPairingKey, Long> LAST_JOB_PAIRED_NOTIFY_TICKS = new HashMap<>();
+    private static final Map<UUID, PendingLumberjackCallbackCheck> PENDING_LUMBERJACK_CALLBACK_CHECKS = new HashMap<>();
+    private static final Set<UUID> LUMBERJACK_MISMATCH_WARNED = Sets.newHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
     static {
@@ -127,7 +132,7 @@ public final class JobBlockPairingHelper {
 
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
-            VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
+            notifyChestPaired(world, villager, globalPos.pos(), placedPos);
         }
     }
 
@@ -157,7 +162,7 @@ public final class JobBlockPairingHelper {
         }
 
         playPairingAnimation(world, placedPos, villager, jobPos);
-        VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), placedPos);
+        notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), placedPos);
     }
 
     private static void tryPlayPairingAnimationWithSpecialModifier(ServerWorld world, VillagerEntity villager, BlockPos placedPos, SpecialModifier modifier) {
@@ -214,14 +219,67 @@ public final class JobBlockPairingHelper {
         villager.setVillagerData(villager.getVillagerData().withProfession(LumberjackProfession.LUMBERJACK));
         villager.getBrain().remember(MemoryModuleType.JOB_SITE, GlobalPos.create(world.getRegistryKey(), craftingTablePos.toImmutable()));
 
+        VillagerProfession assignedProfession = villager.getVillagerData().getProfession();
+        boolean professionStuck = assignedProfession == LumberjackProfession.LUMBERJACK;
+        LOGGER.info("Lumberjack pairing validation for villager {}: profession={}, level={}, type={}",
+                villager.getUuidAsString(),
+                Registries.VILLAGER_PROFESSION.getId(assignedProfession),
+                villager.getVillagerData().getLevel(),
+                Registries.VILLAGER_TYPE.getId(villager.getVillagerData().getType()));
+
+        refreshVillagerForProfessionTransition(world, villager, "crafting table pairing assignment");
+
         LOGGER.info("Lumberjack {} paired with crafting table job block at {}",
                 villager.getUuidAsString(),
                 craftingTablePos.toShortString());
 
         playPairingAnimation(world, craftingTablePos, villager, craftingTablePos);
         notifyJobBlockPairedIdempotent(world, villager, craftingTablePos, "newly paired lumberjack at placed crafting table");
+        if (!professionStuck) {
+            LOGGER.warn("Lumberjack profession did not stick for villager {} at {}; re-running pairing notification",
+                    villager.getUuidAsString(),
+                    craftingTablePos.toShortString());
+            villager.setVillagerData(villager.getVillagerData().withProfession(LumberjackProfession.LUMBERJACK));
+            refreshVillagerForProfessionTransition(world, villager, "profession assignment recovery");
+            notifyJobBlockPairedIdempotent(world, villager, craftingTablePos, "profession validation retry");
+        }
+
+        trackLumberjackCallbackExpectation(world, villager, craftingTablePos, "post-pairing validation");
         VillagerConversionCandidateIndex.markCandidate(world, villager);
         refreshVillagerPairings(world, villager);
+    }
+
+    public static void tick(ServerWorld world) {
+        long now = world.getTime();
+        for (Map.Entry<UUID, PendingLumberjackCallbackCheck> entry : new ArrayList<>(PENDING_LUMBERJACK_CALLBACK_CHECKS.entrySet())) {
+            PendingLumberjackCallbackCheck pending = entry.getValue();
+            if (!pending.dimension().equals(world.getRegistryKey())) {
+                continue;
+            }
+
+            if (now < pending.warnAtTick()) {
+                continue;
+            }
+
+            Entity entity = world.getEntity(entry.getKey());
+            if (!(entity instanceof VillagerEntity villager) || !villager.isAlive()) {
+                PENDING_LUMBERJACK_CALLBACK_CHECKS.remove(entry.getKey());
+                continue;
+            }
+
+            if (villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK
+                    && LUMBERJACK_MISMATCH_WARNED.add(villager.getUuid())) {
+                LOGGER.warn("Possible lumberjack texture/profession mismatch for villager {} at {}: server profession is lumberjack but no lumberjack callbacks observed within {} ticks after {}. Forcing safe refresh.",
+                        villager.getUuidAsString(),
+                        pending.jobPos().toShortString(),
+                        LUMBERJACK_CALLBACK_MISMATCH_WARNING_TICKS,
+                        pending.source());
+                refreshVillagerForProfessionTransition(world, villager, "lumberjack callback timeout");
+                refreshVillagerPairings(world, villager);
+            }
+
+            PENDING_LUMBERJACK_CALLBACK_CHECKS.remove(entry.getKey());
+        }
     }
 
     private static Optional<VillagerEntity> findClaimedLumberjackAtJobSite(ServerWorld world, BlockPos jobPos) {
@@ -320,11 +378,11 @@ public final class JobBlockPairingHelper {
         BlockPos jobPos = globalPos.pos();
         VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
         Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
-        nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
+        nearbyChest.ifPresent(chestPos -> notifyChestPaired(world, villager, jobPos, chestPos));
 
         if (nearbyChest.isPresent()) {
             Optional<BlockPos> craftingTablePos = findNearbyCraftingTable(world, jobPos);
-            craftingTablePos.ifPresent(pos -> VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
+            craftingTablePos.ifPresent(pos -> notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
         }
 
         VillagerProfession profession = villager.getVillagerData().getProfession();
@@ -520,6 +578,45 @@ public final class JobBlockPairingHelper {
         return Optional.empty();
     }
 
+    private static void trackLumberjackCallbackExpectation(ServerWorld world, VillagerEntity villager, BlockPos jobPos, String source) {
+        if (villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
+            PENDING_LUMBERJACK_CALLBACK_CHECKS.remove(villager.getUuid());
+            return;
+        }
+
+        long warnAtTick = world.getTime() + LUMBERJACK_CALLBACK_MISMATCH_WARNING_TICKS;
+        PENDING_LUMBERJACK_CALLBACK_CHECKS.put(villager.getUuid(), new PendingLumberjackCallbackCheck(world.getRegistryKey(), jobPos.toImmutable(), warnAtTick, source));
+    }
+
+    private static void markLumberjackCallbackObserved(VillagerEntity villager, String callbackName) {
+        if (villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
+            return;
+        }
+
+        PendingLumberjackCallbackCheck removed = PENDING_LUMBERJACK_CALLBACK_CHECKS.remove(villager.getUuid());
+        if (removed != null) {
+            LOGGER.debug("Observed lumberjack callback {} for villager {} at {}", callbackName, villager.getUuidAsString(), removed.jobPos().toShortString());
+        }
+    }
+
+    private static void notifyChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos);
+        markLumberjackCallbackObserved(villager, "notifyChestPaired");
+    }
+
+    private static void notifyCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, chestPos, craftingTablePos);
+        markLumberjackCallbackObserved(villager, "notifyCraftingTablePaired");
+    }
+
+    private static void refreshVillagerForProfessionTransition(ServerWorld world, VillagerEntity villager, String source) {
+        villager.reinitializeBrain(world);
+        LOGGER.debug("Refreshed villager {} for profession transition ({})", villager.getUuidAsString(), source);
+    }
+
+    private record PendingLumberjackCallbackCheck(RegistryKey<World> dimension, BlockPos jobPos, long warnAtTick, String source) {
+    }
+
     private static Collection<BlockPos> findBannersWithinRange(ServerWorld world, BlockPos center, int range) {
         int chunkRadius = MathHelper.ceil(range / 16.0D);
         int centerChunkX = center.getX() >> 4;
@@ -637,6 +734,7 @@ public final class JobBlockPairingHelper {
         LAST_JOB_PAIRED_NOTIFY_TICKS.put(key, now);
         pruneJobPairedNotifyCache(now);
         VillagerProfessionBehaviorRegistry.notifyJobBlockPaired(world, villager, jobPos);
+        markLumberjackCallbackObserved(villager, "notifyJobBlockPaired");
         return true;
     }
 
