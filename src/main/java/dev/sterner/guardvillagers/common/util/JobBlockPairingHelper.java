@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.behavior.LumberjackBehavior;
 import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
