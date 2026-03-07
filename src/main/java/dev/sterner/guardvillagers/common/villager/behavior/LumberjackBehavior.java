@@ -47,6 +47,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     private static final long BOOTSTRAP_STALL_TIMEOUT_TICKS = 300L;
     private static final int BOOTSTRAP_STALL_MAX_RETRIES = 3;
     private static final long FALLBACK_STARTUP_COUNTDOWN_TICKS = 20L * 60L;
+    private static final long POST_BOOTSTRAP_CALLBACK_WARN_TICKS = 100L;
 
     private static final Map<VillagerEntity, LumberjackBootstrapGoal> BOOTSTRAP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> PENDING_INITIAL_COUNTDOWNS = new WeakHashMap<>();
@@ -56,12 +57,34 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, PendingPostBootstrapCallback> PENDING_POST_BOOTSTRAP_CALLBACKS = new WeakHashMap<>();
 
     public static void queueInitialCountdown(VillagerEntity villager, long ticks) {
         PENDING_INITIAL_COUNTDOWNS.put(villager, Math.max(20L, ticks));
         transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE,
                 "BOOTSTRAP_COUNTDOWN_QUEUED",
                 "bootstrap countdown queued");
+    }
+
+    public static void runPostBootstrapHandoff(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        runPostBootstrapHandoff(world, villager, jobPos, chestPos, true, "POST_BOOTSTRAP_HANDOFF");
+    }
+
+    private static void runPostBootstrapHandoff(ServerWorld world,
+                                                 VillagerEntity villager,
+                                                 BlockPos jobPos,
+                                                 BlockPos chestPos,
+                                                 boolean awaitCallbackPath,
+                                                 String source) {
+        updateChestListener(world, villager, chestPos);
+        resolveCraftingTablePos(world, jobPos, chestPos);
+        resolveNearbyFurnacePos(world, chestPos);
+        reconcileAndMaybeConvert(world, villager, jobPos, chestPos, null, source);
+
+        if (awaitCallbackPath) {
+            PENDING_POST_BOOTSTRAP_CALLBACKS.put(villager,
+                    new PendingPostBootstrapCallback(jobPos.toImmutable(), chestPos.toImmutable(), world.getTime()));
+        }
     }
 
     @Override
@@ -107,20 +130,21 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                     LIFECYCLE_PHASES.remove(villager);
                     BOOTSTRAP_STARTED_AT.remove(villager);
                     BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
+                    PENDING_POST_BOOTSTRAP_CALLBACKS.remove(villager);
                 })) {
             return;
         }
 
         BOOTSTRAP_STARTED_AT.remove(villager);
         BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
+        PENDING_POST_BOOTSTRAP_CALLBACKS.remove(villager);
 
         LOGGER.info("Lumberjack {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
 
-        updateChestListener(world, villager, chestPos);
-        reconcileAndMaybeConvert(world, villager, jobPos, chestPos, null, "CHEST_PAIRED_WORKFLOW");
+        runPostBootstrapHandoff(world, villager, jobPos, chestPos, false, "CHEST_PAIRED_WORKFLOW");
     }
 
     @Override
@@ -181,6 +205,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     }
 
     public static void tryConvertLumberjacksWithAxe(ServerWorld world) {
+        warnIfPostBootstrapCallbackMissing(world);
+
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, LumberjackProfession.LUMBERJACK));
         Box worldBounds = new Box(world.getWorldBorder().getBoundWest(), world.getBottomY(), world.getWorldBorder().getBoundNorth(),
                 world.getWorldBorder().getBoundEast(), world.getTopY(), world.getWorldBorder().getBoundSouth());
@@ -208,6 +234,29 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             }
 
             reconcileAndMaybeConvert(world, villager, jobPos, null, null, "CANDIDATE_SCAN");
+        }
+    }
+
+    private static void warnIfPostBootstrapCallbackMissing(ServerWorld world) {
+        for (Map.Entry<VillagerEntity, PendingPostBootstrapCallback> entry : Set.copyOf(PENDING_POST_BOOTSTRAP_CALLBACKS.entrySet())) {
+            VillagerEntity villager = entry.getKey();
+            PendingPostBootstrapCallback callback = entry.getValue();
+            if (villager == null || callback == null || !villager.isAlive() || villager.getWorld() != world) {
+                PENDING_POST_BOOTSTRAP_CALLBACKS.remove(villager);
+                continue;
+            }
+
+            if (world.getTime() - callback.bootstrapCompletedAt() <= POST_BOOTSTRAP_CALLBACK_WARN_TICKS) {
+                continue;
+            }
+
+            LOGGER.warn("event=lumberjack_post_bootstrap_callback_missing villager_uuid={} job_pos={} chest_pos={} elapsed_ticks={} threshold_ticks={}",
+                    villager.getUuidAsString(),
+                    callback.jobPos().toShortString(),
+                    callback.chestPos().toShortString(),
+                    world.getTime() - callback.bootstrapCompletedAt(),
+                    POST_BOOTSTRAP_CALLBACK_WARN_TICKS);
+            PENDING_POST_BOOTSTRAP_CALLBACKS.remove(villager);
         }
     }
 
@@ -323,6 +372,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
         queueInitialCountdown(villager, FALLBACK_STARTUP_COUNTDOWN_TICKS);
         JobBlockPairingHelper.handlePairingBlockPlacement(world, chestPos, world.getBlockState(chestPos));
+        runPostBootstrapHandoff(world, villager, jobPos, chestPos, false, "FALLBACK_CHEST_PLACED");
         JobBlockPairingHelper.refreshVillagerPairings(world, villager);
         BOOTSTRAP_STARTED_AT.remove(villager);
         BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
@@ -619,7 +669,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
     }
 
-    private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
+    private static void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
         Set<BlockPos> observedChestPositions = getObservedChestPositions(world, chestPos);
         if (observedChestPositions.isEmpty()) {
             clearChestListener(villager);
@@ -643,14 +693,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         CHEST_REGISTRATIONS.put(villager, new ChestRegistration(villager, observedChestPositions));
     }
 
-    private void clearChestListener(VillagerEntity villager) {
+    private static void clearChestListener(VillagerEntity villager) {
         ChestRegistration existing = CHEST_REGISTRATIONS.remove(villager);
         if (existing != null) {
             removeChestListener(existing);
         }
     }
 
-    private void removeChestListener(ChestRegistration existing) {
+    private static void removeChestListener(ChestRegistration existing) {
         for (BlockPos observedPos : existing.observedChestPositions()) {
             Set<VillagerEntity> watchers = CHEST_WATCHERS_BY_POS.get(observedPos);
             if (watchers == null) {
@@ -663,6 +713,16 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
     }
 
+
+    private static Optional<BlockPos> resolveNearbyFurnacePos(ServerWorld world, BlockPos chestPos) {
+        for (BlockPos checkPos : BlockPos.iterate(chestPos.add(-3, -2, -3), chestPos.add(3, 2, 3))) {
+            if (world.getBlockState(checkPos).isOf(Blocks.FURNACE)) {
+                return Optional.of(checkPos.toImmutable());
+            }
+        }
+
+        return Optional.empty();
+    }
     private static Optional<BlockPos> resolveCraftingTablePos(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
         if (world.getBlockState(jobPos).isOf(Blocks.CRAFTING_TABLE)) {
             return Optional.of(jobPos.toImmutable());
@@ -714,5 +774,8 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             this.villager = villager;
             this.observedChestPositions = Set.copyOf(observedChestPositions);
         }
+    }
+
+    private record PendingPostBootstrapCallback(BlockPos jobPos, BlockPos chestPos, long bootstrapCompletedAt) {
     }
 }
