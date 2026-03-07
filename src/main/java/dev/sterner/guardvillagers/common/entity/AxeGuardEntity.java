@@ -92,6 +92,9 @@ public class AxeGuardEntity extends GuardEntity {
         }
         if (craftingGoal != null) {
             craftingGoal.requestImmediateCheck();
+            if (this.getWorld() instanceof ServerWorld world) {
+                craftingGoal.onChestInventoryChanged(world);
+            }
         }
         if (furnaceGoal != null) {
             furnaceGoal.requestImmediateCheck();
