@@ -79,6 +79,10 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         LOGGER.info("Lumberjack {} started startup workflow at {}",
                 villager.getUuidAsString(),
                 jobPos.toShortString());
+
+        Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, jobPos)
+                .filter(chestPos -> jobPos.isWithinDistance(chestPos, CHEST_PAIR_RANGE));
+        tryConvertToGuardLumberjack(world, villager, jobPos, pairedChest.orElse(null), "job block paired workflow");
     }
 
     @Override
@@ -334,7 +338,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         guard.equipStack(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
         guard.setPairedJobPos(jobPos);
-        guard.setPairedChestPos(chestPos);
+        if (chestPos != null) {
+            guard.setPairedChestPos(chestPos);
+        }
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
@@ -342,7 +348,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         LOGGER.info("Lumberjack {} converted into Axe Guard {} with paired chest {} ({})",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),
-                chestPos.toShortString(),
+                chestPos != null ? chestPos.toShortString() : "none",
                 source);
 
         villager.releaseTicketFor(MemoryModuleType.HOME);

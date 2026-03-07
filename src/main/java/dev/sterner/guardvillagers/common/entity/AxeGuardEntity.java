@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity;
 
 import dev.sterner.guardvillagers.common.util.GearGradeComparator;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EntityType;
@@ -58,7 +59,12 @@ public class AxeGuardEntity extends GuardEntity {
     }
 
     private void updateMainHandAxeFromChest() {
-        if (!(this.getWorld() instanceof ServerWorld serverWorld) || this.pairedChestPos == null) {
+        if (!(this.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        resolvePairedChest(serverWorld);
+        if (this.pairedChestPos == null) {
             return;
         }
 
@@ -93,6 +99,23 @@ public class AxeGuardEntity extends GuardEntity {
         this.equipStack(EquipmentSlot.MAINHAND, replacement);
         this.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
         inventory.markDirty();
+    }
+
+
+    private void resolvePairedChest(ServerWorld world) {
+        if (this.pairedChestPos != null && getChestInventory(world, this.pairedChestPos).isPresent()) {
+            return;
+        }
+
+        if (this.pairedJobPos == null) {
+            this.pairedChestPos = null;
+            return;
+        }
+
+        this.pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, this.pairedJobPos)
+                .filter(pos -> this.pairedJobPos.isWithinDistance(pos, 3.0D))
+                .map(BlockPos::toImmutable)
+                .orElse(null);
     }
 
     private Optional<InventorySlot> findBestAxeInChest(ServerWorld world) {
