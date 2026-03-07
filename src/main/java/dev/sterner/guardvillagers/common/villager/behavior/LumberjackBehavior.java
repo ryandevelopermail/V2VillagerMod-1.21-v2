@@ -65,7 +65,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
     public static void queueInitialCountdown(VillagerEntity villager, long ticks) {
         PENDING_INITIAL_COUNTDOWNS.put(villager, Math.max(20L, ticks));
-        transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE, "bootstrap countdown queued");
+        transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE,
+                "BOOTSTRAP_COUNTDOWN_QUEUED",
+                "bootstrap countdown queued");
     }
 
     @Override
@@ -78,12 +80,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         if (getPhase(villager).ordinal() < LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE.ordinal()) {
-            transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING, "job block paired");
+            transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING,
+                    "JOB_BLOCK_PAIRED",
+                    "job block paired");
         } else {
-            LOGGER.debug("Ignored backward lifecycle transition for lumberjack {} at {} (reason: already at phase {})",
-                    villager.getUuidAsString(),
-                    jobPos.toShortString(),
-                    getPhase(villager));
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.BOOTSTRAP_PENDING,
+                    "BLOCKED_BACKWARD_TRANSITION",
+                    "jobPos=" + jobPos.toShortString() + ",currentPhase=" + getPhase(villager));
         }
 
         LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
@@ -122,16 +126,19 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
         updateChestListener(world, villager, chestPos);
 
-        if (!prepareConversionPendingPhase(world, villager, jobPos, Optional.of(chestPos), "chest paired workflow")) {
+        Optional<LifecycleReconcileContext> context = reconcileLifecycle(world, villager, jobPos, Optional.of(chestPos), "CHEST_PAIRED_WORKFLOW");
+        if (context.isEmpty()) {
             return;
         }
 
-        tryConvertWithAxe(world, villager, jobPos, Optional.of(chestPos), "chest paired workflow");
+        tryConvertWithAxe(world, villager, context.get(), "CHEST_PAIRED_WORKFLOW");
     }
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING, "crafting-table/job pairing");
+        transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING,
+                "CRAFTING_TABLE_JOB_PAIRED",
+                "crafting-table/job pairing");
 
         LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
@@ -220,44 +227,34 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
             if (villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK) {
                 VillagerConversionCandidateIndex.markCandidate(world, villager);
-                if (prepareConversionPendingPhase(world, villager, null, Optional.of(chestPos), "chest mutation")) {
-                    tryConvertOnChestMutation(world, villager, chestPos);
+                Optional<LifecycleReconcileContext> context = reconcileLifecycle(world, villager, null, Optional.of(chestPos), "CHEST_MUTATION");
+                if (context.isPresent()) {
+                    tryConvertOnChestMutation(world, villager, chestPos, context.get());
                 }
             }
         }
     }
 
-    private static void tryConvertOnChestMutation(ServerWorld world, VillagerEntity villager, BlockPos changedChestPos) {
-        Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-        if (jobSite.isEmpty() || !jobSite.get().dimension().equals(world.getRegistryKey())) {
-            return;
-        }
-
-        BlockPos jobPos = jobSite.get().pos();
-        if (!ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(jobPos))) {
-            return;
-        }
-
-        Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, jobPos);
-        if (pairedChest.isEmpty()) {
-            return;
-        }
-
-        BlockPos pairedChestPos = pairedChest.get();
-        if (!jobPos.isWithinDistance(pairedChestPos, 3.0D)) {
+    private static void tryConvertOnChestMutation(ServerWorld world, VillagerEntity villager, BlockPos changedChestPos, LifecycleReconcileContext context) {
+        BlockPos pairedChestPos = context.chestPos().orElse(null);
+        if (pairedChestPos == null) {
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_CHEST_REQUIRED_FOR_EVENT_FILTER",
+                    "source=CHEST_MUTATION");
             return;
         }
 
         if (!changedChestPos.equals(pairedChestPos)
                 && !getObservedChestPositions(world, pairedChestPos).contains(changedChestPos.toImmutable())) {
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_CHEST_EVENT_NOT_TRACKED",
+                    "source=CHEST_MUTATION,changed=" + changedChestPos.toShortString() + ",tracked=" + pairedChestPos.toShortString());
             return;
         }
 
-        if (!prepareConversionPendingPhase(world, villager, jobPos, Optional.of(pairedChestPos), "chest mutation")) {
-            return;
-        }
-
-        tryConvertWithAxe(world, villager, jobPos, Optional.of(pairedChestPos), "chest mutation");
+        tryConvertWithAxe(world, villager, context, "CHEST_MUTATION");
     }
 
     public static void tryConvertLumberjacksWithAxe(ServerWorld world) {
@@ -285,26 +282,26 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 continue;
             }
 
-            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos)
-                    .filter(pos -> jobPos.isWithinDistance(pos, 3.0D));
-
-            if (!prepareConversionPendingPhase(world, villager, jobPos, chestPos, "candidate scan")) {
+            Optional<LifecycleReconcileContext> context = reconcileLifecycle(world, villager, jobPos, Optional.empty(), "CANDIDATE_SCAN");
+            if (context.isEmpty()) {
                 continue;
             }
 
-            tryConvertWithAxe(world, villager, jobPos, chestPos, "candidate scan");
+            tryConvertWithAxe(world, villager, context.get(), "CANDIDATE_SCAN");
         }
     }
 
-    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, BlockPos jobPos, Optional<BlockPos> chestPos, String source) {
+    private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, LifecycleReconcileContext context, String source) {
         if (!villager.isAlive() || villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
             return;
         }
+        BlockPos jobPos = context.jobPos();
+        Optional<BlockPos> chestPos = context.chestPos();
         if (getPhase(villager) != LumberjackLifecyclePhase.CONVERSION_PENDING) {
-            LOGGER.debug("Skipping lumberjack conversion for {} from {} because phase is {}",
-                    villager.getUuidAsString(),
-                    source,
-                    getPhase(villager));
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_PHASE_NOT_PENDING",
+                    "source=" + source + ",phase=" + getPhase(villager));
             return;
         }
 
@@ -313,7 +310,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        transitionPhase(villager, LumberjackLifecyclePhase.CONVERTED_ACTIVE, "conversion started");
+        transitionPhase(villager, LumberjackLifecyclePhase.CONVERTED_ACTIVE,
+                "CONVERSION_STARTED",
+                "source=" + source);
 
         ResolvedConversionAxe resolvedAxe = resolveConversionAxe(world, villager, chestPos);
         ItemStack axeStack = resolvedAxe.axeStack();
@@ -378,10 +377,14 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
     }
 
-    private static boolean prepareConversionPendingPhase(ServerWorld world, VillagerEntity villager, BlockPos jobPos, Optional<BlockPos> chestPos, String source) {
+    private static Optional<LifecycleReconcileContext> reconcileLifecycle(ServerWorld world, VillagerEntity villager, BlockPos jobPos, Optional<BlockPos> chestPos, String source) {
         LumberjackLifecyclePhase currentPhase = getPhase(villager);
         if (currentPhase == LumberjackLifecyclePhase.CONVERTED_ACTIVE) {
-            return false;
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_ALREADY_CONVERTED",
+                    "source=" + source);
+            return Optional.empty();
         }
 
         BlockPos candidateJobPos = jobPos;
@@ -395,42 +398,86 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         final BlockPos resolvedJobPos = candidateJobPos;
 
         if (resolvedJobPos == null || !ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, world.getBlockState(resolvedJobPos))) {
-            return false;
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_INVALID_JOB_BLOCK",
+                    "source=" + source + ",jobPos=" + (resolvedJobPos == null ? "<none>" : resolvedJobPos.toShortString()));
+            return Optional.empty();
         }
 
         Optional<BlockPos> resolvedChestPos = chestPos.isPresent()
                 ? chestPos
                 : JobBlockPairingHelper.findNearbyChest(world, resolvedJobPos).filter(pos -> resolvedJobPos.isWithinDistance(pos, 3.0D));
-        if (resolvedChestPos.isEmpty()) {
-            return false;
+
+        boolean bootstrapComplete = currentPhase.ordinal() >= LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE.ordinal();
+        if (!bootstrapComplete && PENDING_INITIAL_COUNTDOWNS.containsKey(villager)) {
+            bootstrapComplete = true;
+            transitionPhase(villager,
+                    LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE,
+                    "BOOTSTRAP_COMPLETE_COUNTDOWN_FALLBACK",
+                    "source=" + source);
+            currentPhase = getPhase(villager);
         }
 
-        if (currentPhase == LumberjackLifecyclePhase.BOOTSTRAP_PENDING) {
-            transitionPhase(villager, LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE, source + " bootstrap complete");
-            currentPhase = LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE;
+        if (!bootstrapComplete && !isBootstrapGoalActiveFor(villager, resolvedJobPos)) {
+            bootstrapComplete = true;
+            transitionPhase(villager,
+                    LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE,
+                    "BOOTSTRAP_COMPLETE_GOAL_FALLBACK",
+                    "source=" + source + ",jobPos=" + resolvedJobPos.toShortString());
+            currentPhase = getPhase(villager);
+        }
+
+        if (!bootstrapComplete) {
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_BOOTSTRAP_INCOMPLETE",
+                    "source=" + source + ",phase=" + currentPhase);
+            return Optional.empty();
         }
 
         if (currentPhase == LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE) {
-            transitionPhase(villager, LumberjackLifecyclePhase.CONVERSION_PENDING, source + " conversion pending");
-            currentPhase = LumberjackLifecyclePhase.CONVERSION_PENDING;
+            transitionPhase(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "ADVANCED_TO_CONVERSION_PENDING",
+                    "source=" + source + ",chestPresent=" + resolvedChestPos.isPresent());
+            currentPhase = getPhase(villager);
         }
 
-        return currentPhase == LumberjackLifecyclePhase.CONVERSION_PENDING;
+        if (currentPhase != LumberjackLifecyclePhase.CONVERSION_PENDING) {
+            logLifecycleBlocked(villager,
+                    LumberjackLifecyclePhase.CONVERSION_PENDING,
+                    "BLOCKED_PHASE_NOT_PENDING",
+                    "source=" + source + ",phase=" + currentPhase);
+            return Optional.empty();
+        }
+
+        return Optional.of(new LifecycleReconcileContext(resolvedJobPos, resolvedChestPos));
     }
 
     private static LumberjackLifecyclePhase getPhase(VillagerEntity villager) {
         return LIFECYCLE_PHASES.getOrDefault(villager, LumberjackLifecyclePhase.BOOTSTRAP_PENDING);
     }
 
-    private static void transitionPhase(VillagerEntity villager, LumberjackLifecyclePhase nextPhase, String reason) {
+    private static void transitionPhase(VillagerEntity villager, LumberjackLifecyclePhase nextPhase, String reasonCode, String reasonDetail) {
         LumberjackLifecyclePhase previousPhase = LIFECYCLE_PHASES.put(villager, nextPhase);
         if (previousPhase != nextPhase) {
-            LOGGER.info("Lumberjack {} lifecycle {} -> {} ({})",
+            LOGGER.info("LUMBERJACK_LIFECYCLE transition villager={} from={} to={} code={} detail={}",
                     villager.getUuidAsString(),
                     previousPhase == null ? "<unset>" : previousPhase,
                     nextPhase,
-                    reason);
+                    reasonCode,
+                    reasonDetail);
         }
+    }
+
+    private static void logLifecycleBlocked(VillagerEntity villager, LumberjackLifecyclePhase targetPhase, String reasonCode, String reasonDetail) {
+        LOGGER.info("LUMBERJACK_LIFECYCLE blocked villager={} current={} target={} code={} detail={}",
+                villager.getUuidAsString(),
+                getPhase(villager),
+                targetPhase,
+                reasonCode,
+                reasonDetail);
     }
 
     private static ResolvedConversionAxe resolveConversionAxe(ServerWorld world, VillagerEntity villager, Optional<BlockPos> chestPos) {
@@ -474,6 +521,9 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
 
     private record ResolvedConversionAxe(ItemStack axeStack, String source) {
+    }
+
+    private record LifecycleReconcileContext(BlockPos jobPos, Optional<BlockPos> chestPos) {
     }
 
     private static Optional<Inventory> getChestInventoryOptional(ServerWorld world, BlockPos chestPos) {
