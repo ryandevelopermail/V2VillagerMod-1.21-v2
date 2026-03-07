@@ -450,7 +450,7 @@ public class LumberjackBootstrapGoal extends Goal {
             for (int z = jobPos.getZ() - SURFACE_TREE_SCAN_RADIUS; z <= jobPos.getZ() + SURFACE_TREE_SCAN_RADIUS; z++) {
                 int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
                 int minY = Math.max(world.getBottomY(), topY - SURFACE_TREE_SCAN_DEPTH);
-                int maxY = Math.min(world.getTopYInclusive(), topY + 2);
+                int maxY = Math.min(world.getTopY() - 1, topY + 2);
 
                 for (int y = maxY; y >= minY; y--) {
                     BlockPos candidate = new BlockPos(x, y, z);
