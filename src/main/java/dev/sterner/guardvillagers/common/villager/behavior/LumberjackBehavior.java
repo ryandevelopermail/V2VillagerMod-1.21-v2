@@ -20,6 +20,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -327,7 +328,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         BOOTSTRAP_RECOVERY_ATTEMPTS.put(villager, attempt);
         BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
 
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
+        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
         bootstrapGoal.setJobPos(jobPos);
         bootstrapGoal.requestImmediateStart();
@@ -382,6 +383,21 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 elapsed,
                 attempt,
                 chestPos.toShortString());
+    }
+
+    private static <T extends Goal> T upsertGoalStatic(Map<VillagerEntity, T> goalMap,
+                                                       VillagerEntity villager,
+                                                       int priority,
+                                                       java.util.function.Supplier<T> factory) {
+        T goal = goalMap.get(villager);
+        if (goal != null) {
+            return goal;
+        }
+
+        goal = factory.get();
+        goalMap.put(villager, goal);
+        villager.goalSelector.add(priority, goal);
+        return goal;
     }
 
     private static Optional<BlockPos> findChestPlacementAdjacentToJob(ServerWorld world, BlockPos jobPos) {
