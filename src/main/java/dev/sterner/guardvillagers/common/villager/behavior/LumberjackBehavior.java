@@ -3,11 +3,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.entity.goal.AxeGuardWorkflowRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackBootstrapGoal;
-import dev.sterner.guardvillagers.common.entity.goal.LumberjackCraftingGoal;
-import dev.sterner.guardvillagers.common.entity.goal.LumberjackDistributionGoal;
-import dev.sterner.guardvillagers.common.entity.goal.LumberjackFurnaceGoal;
-import dev.sterner.guardvillagers.common.entity.goal.LumberjackGatheringGoal;
 import dev.sterner.guardvillagers.common.villager.LumberjackLifecyclePhase;
 import dev.sterner.guardvillagers.common.villager.LumberjackProfession;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
@@ -47,20 +44,11 @@ import java.util.WeakHashMap;
 public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackBehavior.class);
     private static final int BOOTSTRAP_GOAL_PRIORITY = 2;
-    private static final int GATHERING_GOAL_PRIORITY = 3;
-    private static final int FURNACE_GOAL_PRIORITY = 4;
-    private static final int CRAFTING_GOAL_PRIORITY = 5;
-    private static final int DISTRIBUTION_GOAL_PRIORITY = 6;
     private static final long BOOTSTRAP_STALL_TIMEOUT_TICKS = 300L;
     private static final int BOOTSTRAP_STALL_MAX_RETRIES = 3;
     private static final long FALLBACK_STARTUP_COUNTDOWN_TICKS = 20L * 60L;
 
     private static final Map<VillagerEntity, LumberjackBootstrapGoal> BOOTSTRAP_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, LumberjackGatheringGoal> GATHERING_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, LumberjackCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, LumberjackFurnaceGoal> FURNACE_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, LumberjackDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, BlockPos> PAIRED_FURNACES = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> PENDING_INITIAL_COUNTDOWNS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LumberjackLifecyclePhase> LIFECYCLE_PHASES = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> BOOTSTRAP_STARTED_AT = new WeakHashMap<>();
@@ -116,7 +104,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 (serverWorld, pos) -> ProfessionDefinitions.isExpectedJobBlock(LumberjackProfession.LUMBERJACK, serverWorld.getBlockState(pos)),
                 () -> {
                     clearChestListener(villager);
-                    PAIRED_FURNACES.remove(villager);
                     PENDING_INITIAL_COUNTDOWNS.remove(villager);
                     LIFECYCLE_PHASES.remove(villager);
                     BOOTSTRAP_STARTED_AT.remove(villager);
@@ -132,12 +119,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
-
-        Optional<BlockPos> resolvedFurnace = resolvePairedFurnace(world, jobPos, chestPos);
-        resolvedFurnace.ifPresentOrElse(
-                pos -> PAIRED_FURNACES.put(villager, pos),
-                () -> PAIRED_FURNACES.remove(villager)
-        );
 
         updateChestListener(world, villager, chestPos);
 
@@ -186,29 +167,15 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         BlockPos furnacePos = modifierPos.toImmutable();
-        PAIRED_FURNACES.put(villager, furnacePos);
 
-        LumberjackFurnaceGoal furnaceGoal = upsertGoalStatic(FURNACE_GOALS, villager, FURNACE_GOAL_PRIORITY,
-                () -> new LumberjackFurnaceGoal(villager, jobPos, chestPos, furnacePos));
-        furnaceGoal.setTargets(jobPos, chestPos, furnacePos);
-        furnaceGoal.requestImmediateCheck();
-
-        LumberjackCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-        if (craftingGoal != null) {
-            craftingGoal.setPairedFurnacePos(furnacePos);
-            craftingGoal.requestImmediateCheck(world);
-        }
-
-        LumberjackDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal != null) {
-            distributionGoal.setPairedFurnacePos(furnacePos);
-            distributionGoal.requestImmediateDistribution();
-        }
+        AxeGuardWorkflowRegistry.onChestInventoryMutated(world, chestPos);
 
         LOGGER.info("Lumberjack {} paired furnace modifier at {}", villager.getUuidAsString(), furnacePos.toShortString());
     }
 
     public static void onChestInventoryMutated(ServerWorld world, BlockPos chestPos) {
+        AxeGuardWorkflowRegistry.onChestInventoryMutated(world, chestPos);
+
         Set<VillagerEntity> villagers = CHEST_WATCHERS_BY_POS.get(chestPos);
         if (villagers == null || villagers.isEmpty()) {
             return;
@@ -217,27 +184,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         for (VillagerEntity villager : Set.copyOf(villagers)) {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
-            }
-
-            LumberjackGatheringGoal gatheringGoal = GATHERING_GOALS.get(villager);
-            if (gatheringGoal != null) {
-                gatheringGoal.requestImmediateCheck();
-            }
-
-            LumberjackCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-            if (craftingGoal != null) {
-                craftingGoal.onChestInventoryChanged(world);
-                craftingGoal.requestImmediateCheck(world);
-            }
-
-            LumberjackFurnaceGoal furnaceGoal = FURNACE_GOALS.get(villager);
-            if (furnaceGoal != null) {
-                furnaceGoal.requestImmediateCheck();
-            }
-
-            LumberjackDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-            if (distributionGoal != null) {
-                distributionGoal.requestImmediateDistribution();
             }
 
             if (villager.getVillagerData().getProfession() == LumberjackProfession.LUMBERJACK) {
@@ -722,22 +668,6 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
             }
         }
 
-        return Optional.empty();
-    }
-
-    private Optional<BlockPos> resolvePairedFurnace(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
-        int range = (int) Math.ceil(CHEST_PAIR_RANGE);
-        for (BlockPos checkPos : BlockPos.iterate(jobPos.add(-range, -range, -range), jobPos.add(range, range, range))) {
-            if (!jobPos.isWithinDistance(checkPos, CHEST_PAIR_RANGE)) {
-                continue;
-            }
-            if (!chestPos.isWithinDistance(checkPos, CHEST_PAIR_RANGE)) {
-                continue;
-            }
-            if (world.getBlockState(checkPos).isOf(Blocks.FURNACE)) {
-                return Optional.of(checkPos.toImmutable());
-            }
-        }
         return Optional.empty();
     }
 
