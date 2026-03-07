@@ -97,7 +97,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         boolean reusedGoal = BOOTSTRAP_GOALS.containsKey(villager);
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
+        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
         BOOTSTRAP_STARTED_AT.put(villager, world.getTime());
         BOOTSTRAP_RECOVERY_ATTEMPTS.remove(villager);
@@ -155,7 +155,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 "CRAFTING_TABLE_JOB_PAIRED",
                 "crafting-table/job pairing");
 
-        LumberjackBootstrapGoal bootstrapGoal = upsertGoal(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
+        LumberjackBootstrapGoal bootstrapGoal = upsertGoalStatic(BOOTSTRAP_GOALS, villager, BOOTSTRAP_GOAL_PRIORITY,
                 () -> new LumberjackBootstrapGoal(villager, jobPos));
         bootstrapGoal.setJobPos(jobPos);
         bootstrapGoal.requestImmediateStart();
@@ -188,7 +188,7 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         BlockPos furnacePos = modifierPos.toImmutable();
         PAIRED_FURNACES.put(villager, furnacePos);
 
-        LumberjackFurnaceGoal furnaceGoal = upsertGoal(FURNACE_GOALS, villager, FURNACE_GOAL_PRIORITY,
+        LumberjackFurnaceGoal furnaceGoal = upsertGoalStatic(FURNACE_GOALS, villager, FURNACE_GOAL_PRIORITY,
                 () -> new LumberjackFurnaceGoal(villager, jobPos, chestPos, furnacePos));
         furnaceGoal.setTargets(jobPos, chestPos, furnacePos);
         furnaceGoal.requestImmediateCheck();
