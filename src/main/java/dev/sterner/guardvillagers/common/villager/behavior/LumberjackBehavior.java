@@ -277,6 +277,13 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
         Optional<LifecycleReconcileContext> lifecycle = advanceLifecycleForConversion(villager, context.jobPos(), context.chestPos(), source);
         if (lifecycle.isEmpty()) {
+            LOGGER.info("LUMBERJACK_CONVERSION blocked villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={} reason=CONTEXT_RECONCILE_FAILED",
+                    villager.getUuidAsString(),
+                    getPhase(villager),
+                    source,
+                    context.jobPos().toShortString(),
+                    context.chestPos() == null ? "<none>" : context.chestPos().toShortString(),
+                    context.chestPos() != null && pairedChestContainsAxe(world, context.chestPos()));
             return;
         }
 
@@ -286,6 +293,13 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         if (changedChestPos != null) {
             BlockPos pairedChestPos = lifecycleContext.chestPos();
             if (pairedChestPos == null) {
+                LOGGER.info("LUMBERJACK_CONVERSION blocked villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={} reason=MISSING_CHEST_REQUIRED_FOR_CHEST_TRIGGER",
+                        villager.getUuidAsString(),
+                        getPhase(villager),
+                        source,
+                        lifecycleContext.jobPos().toShortString(),
+                        "<none>",
+                        false);
                 logLifecycleBlocked(villager,
                         LumberjackLifecyclePhase.CONVERSION_PENDING,
                         "BLOCKED_CHEST_REQUIRED_FOR_EVENT_FILTER",
@@ -443,12 +457,36 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
     }
 
     private static void tryConvertWithAxe(ServerWorld world, VillagerEntity villager, LifecycleReconcileContext context, String source) {
-        if (!villager.isAlive() || villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
-            return;
-        }
         BlockPos jobPos = context.jobPos();
         @Nullable BlockPos chestPos = context.chestPos();
+        boolean chestHasAxe = chestPos != null && pairedChestContainsAxe(world, chestPos);
+
+        LOGGER.info("LUMBERJACK_CONVERSION_ATTEMPT villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={}",
+                villager.getUuidAsString(),
+                getPhase(villager),
+                source,
+                jobPos.toShortString(),
+                chestPos == null ? "<none>" : chestPos.toShortString(),
+                chestHasAxe);
+
+        if (!villager.isAlive() || villager.getVillagerData().getProfession() != LumberjackProfession.LUMBERJACK) {
+            LOGGER.info("LUMBERJACK_CONVERSION blocked villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={} reason=INVALID_PROFESSION_OR_NOT_ALIVE",
+                    villager.getUuidAsString(),
+                    getPhase(villager),
+                    source,
+                    jobPos.toShortString(),
+                    chestPos == null ? "<none>" : chestPos.toShortString(),
+                    chestHasAxe);
+            return;
+        }
         if (getPhase(villager) != LumberjackLifecyclePhase.CONVERSION_PENDING) {
+            LOGGER.info("LUMBERJACK_CONVERSION blocked villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={} reason=PHASE_NOT_PENDING",
+                    villager.getUuidAsString(),
+                    getPhase(villager),
+                    source,
+                    jobPos.toShortString(),
+                    chestPos == null ? "<none>" : chestPos.toShortString(),
+                    chestHasAxe);
             logLifecycleBlocked(villager,
                     LumberjackLifecyclePhase.CONVERSION_PENDING,
                     "BLOCKED_PHASE_NOT_PENDING",
@@ -458,6 +496,13 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
 
         AxeGuardEntity guard = GuardVillagers.AXE_GUARD_VILLAGER.create(world);
         if (guard == null) {
+            LOGGER.warn("LUMBERJACK_CONVERSION blocked villager={} phase={} source={} jobPos={} chestPos={} chestHasAxe={} reason=ENTITY_CREATE_RETURNED_NULL",
+                    villager.getUuidAsString(),
+                    getPhase(villager),
+                    source,
+                    jobPos.toShortString(),
+                    chestPos == null ? "<none>" : chestPos.toShortString(),
+                    chestHasAxe);
             return;
         }
 
@@ -517,9 +562,13 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 source);
 
         if ("CHEST_MUTATION".equals(source)) {
-            LOGGER.info("LUMBERJACK_CONVERSION_SUCCESS villager={} guard={} source=CHEST_MUTATION axe_source={}",
+            LOGGER.info("LUMBERJACK_CONVERSION_SUCCESS villager={} guard={} phase={} source=CHEST_MUTATION jobPos={} chestPos={} chestHasAxe={} axe_source={}",
                     villager.getUuidAsString(),
                     guard.getUuidAsString(),
+                    getPhase(villager),
+                    jobPos.toShortString(),
+                    chestPos == null ? "<none>" : chestPos.toShortString(),
+                    chestHasAxe,
                     resolvedAxe.source());
         }
 
