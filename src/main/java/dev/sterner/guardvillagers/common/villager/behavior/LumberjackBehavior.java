@@ -339,6 +339,21 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
 
         guard.equipStack(EquipmentSlot.MAINHAND, axeStack);
+        guard.setJobPos(jobPos);
+        chestPos.ifPresent(guard::setChestPos);
+        chestPos.ifPresent(pos -> {
+            if (world.getBlockState(jobPos).isOf(Blocks.CRAFTING_TABLE)) {
+                guard.setCraftingTablePos(jobPos);
+            }
+            for (BlockPos checkPos : BlockPos.iterate(pos.add(-3, -2, -3), pos.add(3, 2, 3))) {
+                if (world.getBlockState(checkPos).isOf(Blocks.CRAFTING_TABLE) && guard.getCraftingTablePos() == null) {
+                    guard.setCraftingTablePos(checkPos.toImmutable());
+                }
+                if (world.getBlockState(checkPos).isOf(Blocks.FURNACE) && guard.getPairedFurnacePos() == null) {
+                    guard.setPairedFurnacePos(checkPos.toImmutable());
+                }
+            }
+        });
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
