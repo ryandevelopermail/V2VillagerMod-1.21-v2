@@ -227,7 +227,7 @@ public class AxeGuardGatheringGoal extends Goal {
             return true;
         }
 
-        ItemStack fromInventory = takeOne(guard.getInventory(), stack -> stack.getItem() instanceof AxeItem);
+        ItemStack fromInventory = takeOne(guard.guardInventory, stack -> stack.getItem() instanceof AxeItem);
         if (!fromInventory.isEmpty()) {
             guard.equipStack(net.minecraft.entity.EquipmentSlot.MAINHAND, fromInventory);
             return true;
