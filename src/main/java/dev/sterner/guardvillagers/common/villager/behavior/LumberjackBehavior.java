@@ -301,6 +301,37 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                         "source=" + source + ",changed=" + changedChestPos.toShortString() + ",tracked=" + pairedChestPos.toShortString());
                 return;
             }
+
+            if ("CHEST_MUTATION".equals(source) && changedChestPos.equals(pairedChestPos)) {
+                if (!pairedChestContainsAxe(world, pairedChestPos)) {
+                    logLifecycleBlocked(villager,
+                            LumberjackLifecyclePhase.CONVERSION_PENDING,
+                            "BLOCKED_NO_AXE_IN_PAIRED_CHEST",
+                            "source=CHEST_MUTATION,chestPos=" + pairedChestPos.toShortString());
+                    return;
+                }
+
+                if (getPhase(villager) == LumberjackLifecyclePhase.BOOTSTRAP_COMPLETE) {
+                    transitionPhase(villager,
+                            LumberjackLifecyclePhase.CONVERSION_PENDING,
+                            "AXE_PRESENT_IN_PAIRED_CHEST",
+                            "source=CHEST_MUTATION,chestPos=" + pairedChestPos.toShortString());
+                }
+
+                if (getPhase(villager) != LumberjackLifecyclePhase.CONVERSION_PENDING) {
+                    logLifecycleBlocked(villager,
+                            LumberjackLifecyclePhase.CONVERSION_PENDING,
+                            "BLOCKED_PHASE_NOT_PENDING",
+                            "source=CHEST_MUTATION,phase=" + getPhase(villager));
+                    return;
+                }
+
+                LOGGER.info("LUMBERJACK_CONVERSION_ATTEMPT villager={} source=CHEST_MUTATION chestPos={}",
+                        villager.getUuidAsString(),
+                        pairedChestPos.toShortString());
+                tryConvertWithAxe(world, villager, lifecycleContext, source);
+                return;
+            }
         }
 
         tryConvertWithAxe(world, villager, lifecycleContext, source);
@@ -485,6 +516,13 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
                 resolvedAxe.source(),
                 source);
 
+        if ("CHEST_MUTATION".equals(source)) {
+            LOGGER.info("LUMBERJACK_CONVERSION_SUCCESS villager={} guard={} source=CHEST_MUTATION axe_source={}",
+                    villager.getUuidAsString(),
+                    guard.getUuidAsString(),
+                    resolvedAxe.source());
+        }
+
         villager.releaseTicketFor(MemoryModuleType.HOME);
         villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
         villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
@@ -667,6 +705,22 @@ public class LumberjackBehavior extends AbstractPairedProfessionBehavior {
         }
 
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
+    }
+
+    private static boolean pairedChestContainsAxe(ServerWorld world, BlockPos chestPos) {
+        Inventory chestInventory = getChestInventoryOptional(world, chestPos).orElse(null);
+        if (chestInventory == null) {
+            return false;
+        }
+
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() instanceof AxeItem) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
