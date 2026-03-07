@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.entity.goal.AxeGuardDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.AxeGuardFurnaceGoal;
 import dev.sterner.guardvillagers.common.entity.goal.AxeGuardGatheringGoal;
 import dev.sterner.guardvillagers.common.entity.goal.AxeGuardWorkflowRegistry;
+import dev.sterner.guardvillagers.common.villager.LumberjackLifecyclePhase;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.FurnaceBlockEntity;
@@ -37,6 +38,7 @@ public class AxeGuardEntity extends GuardEntity {
     private long nextSessionStartTick;
     private int sessionsCompletedToday;
     private int furnaceBatchInputLogs;
+    private LumberjackLifecyclePhase lumberjackLifecyclePhase = LumberjackLifecyclePhase.CONVERTED_ACTIVE;
 
     private AxeGuardGatheringGoal gatheringGoal;
     private AxeGuardCraftingGoal craftingGoal;
@@ -191,6 +193,21 @@ public class AxeGuardEntity extends GuardEntity {
         return moved;
     }
 
+    public void initializeConvertedWorkflow(ServerWorld world, long transferredCountdownTicks) {
+        this.lumberjackLifecyclePhase = LumberjackLifecyclePhase.CONVERTED_ACTIVE;
+        startWorkflowCountdown(world, transferredCountdownTicks);
+    }
+
+    public LumberjackLifecyclePhase getLumberjackLifecyclePhase() {
+        return lumberjackLifecyclePhase;
+    }
+
+    public void setLumberjackLifecyclePhase(LumberjackLifecyclePhase lumberjackLifecyclePhase) {
+        this.lumberjackLifecyclePhase = lumberjackLifecyclePhase == null
+                ? LumberjackLifecyclePhase.CONVERTED_ACTIVE
+                : lumberjackLifecyclePhase;
+    }
+
     public void startWorkflowCountdown(ServerWorld world, long totalTicks) {
         this.workflowCountdownStartTick = world.getTime();
         this.workflowCountdownTotalTicks = Math.max(20L, totalTicks);
@@ -253,6 +270,15 @@ public class AxeGuardEntity extends GuardEntity {
         this.nextSessionStartTick = nbt.getLong("AxeGuardNextSessionStart");
         this.sessionsCompletedToday = nbt.getInt("AxeGuardSessionsCompletedToday");
         this.furnaceBatchInputLogs = nbt.getInt("AxeGuardFurnaceBatchInput");
+        if (nbt.contains("AxeGuardLifecyclePhase")) {
+            try {
+                this.lumberjackLifecyclePhase = LumberjackLifecyclePhase.valueOf(nbt.getString("AxeGuardLifecyclePhase"));
+            } catch (IllegalArgumentException ignored) {
+                this.lumberjackLifecyclePhase = LumberjackLifecyclePhase.CONVERTED_ACTIVE;
+            }
+        } else {
+            this.lumberjackLifecyclePhase = LumberjackLifecyclePhase.CONVERTED_ACTIVE;
+        }
     }
 
     @Override
@@ -267,6 +293,7 @@ public class AxeGuardEntity extends GuardEntity {
         nbt.putLong("AxeGuardNextSessionStart", this.nextSessionStartTick);
         nbt.putInt("AxeGuardSessionsCompletedToday", this.sessionsCompletedToday);
         nbt.putInt("AxeGuardFurnaceBatchInput", this.furnaceBatchInputLogs);
+        nbt.putString("AxeGuardLifecyclePhase", this.lumberjackLifecyclePhase.name());
     }
 
     private static void writePos(NbtCompound nbt, String key, BlockPos pos) {
