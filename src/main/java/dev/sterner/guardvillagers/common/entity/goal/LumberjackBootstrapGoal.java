@@ -42,6 +42,7 @@ public class LumberjackBootstrapGoal extends Goal {
     private static final int MAX_LOGS_PER_TREE = 96;
     private static final int RETRY_TICKS = 80;
     private static final long STARTUP_COUNTDOWN_TICKS = 20L * 60L;
+    private static final long MOVEMENT_IDLE_LOG_INTERVAL_TICKS = 40L;
 
     private final VillagerEntity villager;
 
@@ -54,6 +55,7 @@ public class LumberjackBootstrapGoal extends Goal {
     private int treeTarget;
     private int treesChopped;
     private boolean syntheticBootstrapInjected;
+    private long nextMovementIdleLogTime;
 
     public LumberjackBootstrapGoal(VillagerEntity villager, BlockPos jobPos) {
         this.villager = villager;
@@ -95,26 +97,26 @@ public class LumberjackBootstrapGoal extends Goal {
         boolean hasStartupMaterials = hasStartupMaterials(inventory);
 
         if (currentTreeRoot != null) {
-            LOGGER.info("Lumberjack {} bootstrap branch: local tree path selected at {}",
+            LOGGER.info("event=lumberjack_bootstrap_tree_discovery branch=LOCAL_TREE villager_uuid={} target_pos={}",
                     villager.getUuidAsString(),
                     currentTreeRoot.toShortString());
         } else {
             currentTreeRoot = findNearestSurfaceTreeRoot(world).orElse(null);
             if (currentTreeRoot != null) {
-                LOGGER.info("Lumberjack {} bootstrap branch: surface fallback selected at {}",
+                LOGGER.info("event=lumberjack_bootstrap_tree_discovery branch=SURFACE_TREE_FALLBACK villager_uuid={} target_pos={}",
                         villager.getUuidAsString(),
                         currentTreeRoot.toShortString());
             } else if (!hasStartupMaterials) {
                 injectSyntheticBootstrapMaterials(inventory);
                 syntheticBootstrapInjected = true;
                 hasStartupMaterials = true;
-                LOGGER.info("Lumberjack {} bootstrap branch: synthetic bootstrap materials fallback selected",
+                LOGGER.info("event=lumberjack_bootstrap_tree_discovery branch=SYNTHETIC_MATERIALS_FALLBACK villager_uuid={} target_pos=none",
                         villager.getUuidAsString());
             }
         }
 
         if (currentTreeRoot == null && hasStartupMaterials) {
-            LOGGER.info("Lumberjack {} bootstrap will proceed without tree chopping using available startup materials",
+            LOGGER.info("event=lumberjack_bootstrap_tree_discovery branch=NO_TREE_AVAILABLE_WITH_STARTUP_MATERIALS villager_uuid={} target_pos=none",
                     villager.getUuidAsString());
         }
 
@@ -133,13 +135,17 @@ public class LumberjackBootstrapGoal extends Goal {
     @Override
     public void start() {
         if (currentTreeRoot == null) {
+            logBranchSelection("NO_TREE_BOOTSTRAP_PATH", jobPos);
             stage = Stage.RETURN_TO_TABLE;
             moveTo(jobPos);
+            logStageTransition(Stage.RETURN_TO_TABLE, jobPos);
             return;
         }
 
+        logBranchSelection("TREE_PATH", currentTreeRoot);
         stage = Stage.MOVE_TO_TREE;
         moveTo(currentTreeRoot);
+        logStageTransition(Stage.MOVE_TO_TREE, currentTreeRoot);
     }
 
     @Override
@@ -148,6 +154,7 @@ public class LumberjackBootstrapGoal extends Goal {
         stage = Stage.DONE;
         currentTreeRoot = null;
         syntheticBootstrapInjected = false;
+        nextMovementIdleLogTime = 0L;
     }
 
     @Override
@@ -161,16 +168,19 @@ public class LumberjackBootstrapGoal extends Goal {
             if (currentTreeRoot == null) {
                 stage = Stage.RETURN_TO_TABLE;
                 moveTo(jobPos);
+                logStageTransition(Stage.RETURN_TO_TABLE, jobPos);
                 return;
             }
 
             villager.getLookControl().lookAt(Vec3d.ofCenter(currentTreeRoot));
             if (isNear(currentTreeRoot)) {
                 stage = Stage.CHOP_TREE;
+                logStageTransition(Stage.CHOP_TREE, currentTreeRoot);
                 return;
             }
 
             if (villager.getNavigation().isIdle()) {
+                logMovementIdle(world, stage, currentTreeRoot);
                 moveTo(currentTreeRoot);
             }
             return;
@@ -180,6 +190,7 @@ public class LumberjackBootstrapGoal extends Goal {
             if (currentTreeRoot == null) {
                 stage = Stage.RETURN_TO_TABLE;
                 moveTo(jobPos);
+                logStageTransition(Stage.RETURN_TO_TABLE, jobPos);
                 return;
             }
 
@@ -191,6 +202,7 @@ public class LumberjackBootstrapGoal extends Goal {
             if (treesChopped >= treeTarget) {
                 stage = Stage.RETURN_TO_TABLE;
                 moveTo(jobPos);
+                logStageTransition(Stage.RETURN_TO_TABLE, jobPos);
                 return;
             }
 
@@ -198,11 +210,13 @@ public class LumberjackBootstrapGoal extends Goal {
             if (currentTreeRoot == null) {
                 stage = Stage.RETURN_TO_TABLE;
                 moveTo(jobPos);
+                logStageTransition(Stage.RETURN_TO_TABLE, jobPos);
                 return;
             }
 
             stage = Stage.MOVE_TO_TREE;
             moveTo(currentTreeRoot);
+            logStageTransition(Stage.MOVE_TO_TREE, currentTreeRoot);
             return;
         }
 
@@ -217,6 +231,7 @@ public class LumberjackBootstrapGoal extends Goal {
             }
 
             if (villager.getNavigation().isIdle()) {
+                logMovementIdle(world, stage, jobPos);
                 moveTo(jobPos);
             }
         }
@@ -224,6 +239,7 @@ public class LumberjackBootstrapGoal extends Goal {
 
     private boolean completeStartupWorkflow(ServerWorld world) {
         if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()) {
+            logStartupWorkflowResult("SUCCESS_ALREADY_PAIRED", true, null);
             return true;
         }
 
@@ -231,26 +247,24 @@ public class LumberjackBootstrapGoal extends Goal {
         applyStartupConversions(inventory);
 
         if (!ensureChestCrafted(inventory)) {
-            LOGGER.info("Lumberjack {} startup delayed: unable to craft chest yet", villager.getUuidAsString());
+            logStartupWorkflowResult("MISSING_CHEST_MATERIALS", false, null);
             return false;
         }
 
         if (!ensureWoodenAxeCrafted(inventory)) {
-            LOGGER.info("Lumberjack {} startup delayed: unable to craft wooden axe yet", villager.getUuidAsString());
+            logStartupWorkflowResult("MISSING_WOODEN_AXE_MATERIALS", false, null);
             return false;
         }
 
         Optional<BlockPos> chestPlacement = findAdjacentPlacement(world, jobPos, Blocks.CHEST.getDefaultState());
         if (chestPlacement.isEmpty()) {
-            LOGGER.info("Lumberjack {} startup delayed: no valid chest placement near crafting table {}",
-                    villager.getUuidAsString(),
-                    jobPos.toShortString());
+            logStartupWorkflowResult("NO_CHEST_PLACEMENT", false, jobPos);
             return false;
         }
 
         int consumedChest = consumeMatching(inventory, stack -> stack.isOf(Items.CHEST), 1);
         if (consumedChest < 1) {
-            LOGGER.info("Lumberjack {} startup delayed: chest item missing before placement", villager.getUuidAsString());
+            logStartupWorkflowResult("CHEST_ITEM_MISSING", false, null);
             return false;
         }
 
@@ -259,9 +273,7 @@ public class LumberjackBootstrapGoal extends Goal {
 
         Inventory chestInventory = getChestInventory(world, chestPos).orElse(null);
         if (chestInventory == null) {
-            LOGGER.info("Lumberjack {} startup delayed: placed chest at {} but inventory was unavailable",
-                    villager.getUuidAsString(),
-                    chestPos.toShortString());
+            logStartupWorkflowResult("CHEST_INVENTORY_UNAVAILABLE", false, chestPos);
             return false;
         }
 
@@ -272,17 +284,58 @@ public class LumberjackBootstrapGoal extends Goal {
         LumberjackBehavior.queueInitialCountdown(villager, STARTUP_COUNTDOWN_TICKS);
         JobBlockPairingHelper.handlePairingBlockPlacement(world, chestPos, world.getBlockState(chestPos));
 
-        LOGGER.info("Lumberjack {} startup complete: chopped {} tree(s), placed chest at {}, and queued {}-tick countdown",
-                villager.getUuidAsString(),
-                treesChopped,
-                chestPos.toShortString(),
-                STARTUP_COUNTDOWN_TICKS);
+        logStartupWorkflowResult("SUCCESS", true, chestPos);
 
         if (syntheticBootstrapInjected) {
-            LOGGER.info("Lumberjack {} startup completion consumed synthetic bootstrap materials fallback",
-                    villager.getUuidAsString());
+            LOGGER.info("event=lumberjack_bootstrap_synthetic_materials_used villager_uuid={} trees_chopped={} startup_countdown_ticks={}",
+                    villager.getUuidAsString(),
+                    treesChopped,
+                    STARTUP_COUNTDOWN_TICKS);
         }
         return true;
+    }
+
+    private void logBranchSelection(String branch, BlockPos targetPos) {
+        LOGGER.info("event=lumberjack_bootstrap_start branch={} villager_uuid={} target_pos={} stage={}",
+                branch,
+                villager.getUuidAsString(),
+                posOrNone(targetPos),
+                stage.name());
+    }
+
+    private void logStageTransition(Stage nextStage, BlockPos targetPos) {
+        LOGGER.info("event=lumberjack_bootstrap_stage_enter stage={} villager_uuid={} target_pos={}",
+                nextStage.name(),
+                villager.getUuidAsString(),
+                posOrNone(targetPos));
+    }
+
+    private void logMovementIdle(ServerWorld world, Stage currentStage, BlockPos targetPos) {
+        if (targetPos == null || isNear(targetPos) || world.getTime() < nextMovementIdleLogTime) {
+            return;
+        }
+        nextMovementIdleLogTime = world.getTime() + MOVEMENT_IDLE_LOG_INTERVAL_TICKS;
+        LOGGER.info("event=lumberjack_bootstrap_movement_idle stage={} villager_uuid={} villager_pos={} target_pos={} distance_sq={} nav_idle=true",
+                currentStage.name(),
+                villager.getUuidAsString(),
+                villager.getBlockPos().toShortString(),
+                targetPos.toShortString(),
+                villager.squaredDistanceTo(targetPos.getX() + 0.5D, targetPos.getY() + 0.5D, targetPos.getZ() + 0.5D));
+    }
+
+    private void logStartupWorkflowResult(String reasonCode, boolean success, BlockPos chestPos) {
+        LOGGER.info("event=lumberjack_bootstrap_complete success={} reason_code={} villager_uuid={} job_pos={} chest_pos={} trees_chopped={} startup_countdown_ticks={}",
+                success,
+                reasonCode,
+                villager.getUuidAsString(),
+                jobPos.toShortString(),
+                posOrNone(chestPos),
+                treesChopped,
+                STARTUP_COUNTDOWN_TICKS);
+    }
+
+    private String posOrNone(BlockPos pos) {
+        return pos == null ? "none" : pos.toShortString();
     }
 
     private void injectSyntheticBootstrapMaterials(Inventory inventory) {
