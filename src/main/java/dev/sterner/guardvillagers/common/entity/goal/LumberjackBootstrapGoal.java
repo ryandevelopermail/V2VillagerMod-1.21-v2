@@ -18,6 +18,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.Heightmap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +36,8 @@ public class LumberjackBootstrapGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int TREE_SCAN_RADIUS = 24;
     private static final int TREE_SCAN_Y = 10;
+    private static final int SURFACE_TREE_SCAN_RADIUS = 40;
+    private static final int SURFACE_TREE_SCAN_DEPTH = 20;
     private static final int TREE_CLUSTER_RADIUS = 10;
     private static final int MAX_LOGS_PER_TREE = 96;
     private static final int RETRY_TICKS = 80;
@@ -50,6 +53,7 @@ public class LumberjackBootstrapGoal extends Goal {
     private BlockPos currentTreeRoot;
     private int treeTarget;
     private int treesChopped;
+    private boolean syntheticBootstrapInjected;
 
     public LumberjackBootstrapGoal(VillagerEntity villager, BlockPos jobPos) {
         this.villager = villager;
@@ -90,10 +94,28 @@ public class LumberjackBootstrapGoal extends Goal {
         currentTreeRoot = findNearestTreeRoot(world).orElse(null);
         boolean hasStartupMaterials = hasStartupMaterials(inventory);
 
-        if (currentTreeRoot == null && !hasStartupMaterials) {
-            nextCheckTime = world.getTime() + RETRY_TICKS;
-            immediateStart = false;
-            return false;
+        if (currentTreeRoot != null) {
+            LOGGER.info("Lumberjack {} bootstrap branch: local tree path selected at {}",
+                    villager.getUuidAsString(),
+                    currentTreeRoot.toShortString());
+        } else {
+            currentTreeRoot = findNearestSurfaceTreeRoot(world).orElse(null);
+            if (currentTreeRoot != null) {
+                LOGGER.info("Lumberjack {} bootstrap branch: surface fallback selected at {}",
+                        villager.getUuidAsString(),
+                        currentTreeRoot.toShortString());
+            } else if (!hasStartupMaterials) {
+                injectSyntheticBootstrapMaterials(inventory);
+                syntheticBootstrapInjected = true;
+                hasStartupMaterials = true;
+                LOGGER.info("Lumberjack {} bootstrap branch: synthetic bootstrap materials fallback selected",
+                        villager.getUuidAsString());
+            }
+        }
+
+        if (currentTreeRoot == null && hasStartupMaterials) {
+            LOGGER.info("Lumberjack {} bootstrap will proceed without tree chopping using available startup materials",
+                    villager.getUuidAsString());
         }
 
         treeTarget = currentTreeRoot == null ? 0 : MathHelper.nextInt(villager.getRandom(), 1, 3);
@@ -125,6 +147,7 @@ public class LumberjackBootstrapGoal extends Goal {
         villager.getNavigation().stop();
         stage = Stage.DONE;
         currentTreeRoot = null;
+        syntheticBootstrapInjected = false;
     }
 
     @Override
@@ -254,7 +277,26 @@ public class LumberjackBootstrapGoal extends Goal {
                 treesChopped,
                 chestPos.toShortString(),
                 STARTUP_COUNTDOWN_TICKS);
+
+        if (syntheticBootstrapInjected) {
+            LOGGER.info("Lumberjack {} startup completion consumed synthetic bootstrap materials fallback",
+                    villager.getUuidAsString());
+        }
         return true;
+    }
+
+    private void injectSyntheticBootstrapMaterials(Inventory inventory) {
+        ItemStack plankRemainder = insertStack(inventory, new ItemStack(Items.OAK_PLANKS, 11));
+        if (!plankRemainder.isEmpty()) {
+            villager.dropStack(plankRemainder);
+        }
+
+        ItemStack stickRemainder = insertStack(inventory, new ItemStack(Items.STICK, 2));
+        if (!stickRemainder.isEmpty()) {
+            villager.dropStack(stickRemainder);
+        }
+
+        inventory.markDirty();
     }
 
     private void applyStartupConversions(Inventory inventory) {
@@ -394,6 +436,38 @@ public class LumberjackBootstrapGoal extends Goal {
             if (distance < bestDistance) {
                 bestDistance = distance;
                 best = candidate.toImmutable();
+            }
+        }
+
+        return Optional.ofNullable(best);
+    }
+
+    private Optional<BlockPos> findNearestSurfaceTreeRoot(ServerWorld world) {
+        double bestDistance = Double.MAX_VALUE;
+        BlockPos best = null;
+
+        for (int x = jobPos.getX() - SURFACE_TREE_SCAN_RADIUS; x <= jobPos.getX() + SURFACE_TREE_SCAN_RADIUS; x++) {
+            for (int z = jobPos.getZ() - SURFACE_TREE_SCAN_RADIUS; z <= jobPos.getZ() + SURFACE_TREE_SCAN_RADIUS; z++) {
+                int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+                int minY = Math.max(world.getBottomY(), topY - SURFACE_TREE_SCAN_DEPTH);
+                int maxY = Math.min(world.getTopYInclusive(), topY + 2);
+
+                for (int y = maxY; y >= minY; y--) {
+                    BlockPos candidate = new BlockPos(x, y, z);
+                    BlockState state = world.getBlockState(candidate);
+                    if (!state.isIn(BlockTags.LOGS)) {
+                        continue;
+                    }
+                    if (world.getBlockState(candidate.down()).isIn(BlockTags.LOGS)) {
+                        continue;
+                    }
+
+                    double distance = jobPos.getSquaredDistance(candidate);
+                    if (distance < bestDistance) {
+                        bestDistance = distance;
+                        best = candidate.toImmutable();
+                    }
+                }
             }
         }
 
