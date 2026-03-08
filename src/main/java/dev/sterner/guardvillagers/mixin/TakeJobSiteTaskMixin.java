@@ -18,8 +18,12 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 public class TakeJobSiteTaskMixin {
     private static final Logger LOGGER = LoggerFactory.getLogger(TakeJobSiteTaskMixin.class);
 
-    @Inject(method = "canUseJobSite", at = @At("HEAD"), cancellable = true)
-    private void guardvillagers$rejectReservedConvertedWorkerJobSite(RegistryEntry<PointOfInterestType> poiType, VillagerEntity villager, BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+    @Inject(
+            method = "canUseJobSite(Lnet/minecraft/registry/entry/RegistryEntry;Lnet/minecraft/entity/passive/VillagerEntity;Lnet/minecraft/util/math/BlockPos;)Z",
+            at = @At("HEAD"),
+            cancellable = true
+    )
+    private static void guardvillagers$rejectReservedConvertedWorkerJobSite(RegistryEntry<PointOfInterestType> poiType, VillagerEntity villager, BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             return;
         }
