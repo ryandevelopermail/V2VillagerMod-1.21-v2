@@ -7,18 +7,23 @@ import org.slf4j.LoggerFactory;
 
 public final class TakeJobSiteInjectDiagnostics {
     private static final Logger LOGGER = LoggerFactory.getLogger(TakeJobSiteInjectDiagnostics.class);
-    private static boolean canUseJobSiteInjectObserved;
+    private static boolean potentialJobSiteHookObserved;
+    private static boolean takeJobSiteHookObserved;
     private static boolean missingInjectWarningLogged;
 
     private TakeJobSiteInjectDiagnostics() {
     }
 
+    public static void markPotentialJobSiteHookObserved() {
+        potentialJobSiteHookObserved = true;
+    }
+
     public static void markCanUseJobSiteInjectObserved() {
-        canUseJobSiteInjectObserved = true;
+        takeJobSiteHookObserved = true;
     }
 
     public static void warnIfInjectMissing(Iterable<ServerWorld> worlds) {
-        if (canUseJobSiteInjectObserved || missingInjectWarningLogged) {
+        if (missingInjectWarningLogged || (potentialJobSiteHookObserved && takeJobSiteHookObserved)) {
             return;
         }
 
@@ -31,8 +36,10 @@ public final class TakeJobSiteInjectDiagnostics {
 
         if (villagerCount > 0 && maxWorldTime >= 200L) {
             missingInjectWarningLogged = true;
-            LOGGER.warn("TakeJobSiteTask pre-claim inject has not executed; signature may have shifted. " +
-                    "Fallback reserved-POI cleanup in VillagerEntityMixin remains active.");
+            LOGGER.warn("Reserved job-site hooks observed? potential-site={}, take-site={}. " +
+                            "Expected both hooks to run; missing hook(s) may indicate signature drift.",
+                    potentialJobSiteHookObserved,
+                    takeJobSiteHookObserved);
         }
     }
 }
