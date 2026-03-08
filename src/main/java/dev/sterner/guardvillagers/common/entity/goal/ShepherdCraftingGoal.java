@@ -18,10 +18,6 @@ public class ShepherdCraftingGoal extends AbstractCraftingGoal<ShepherdCraftingG
         super(villager, jobPos, chestPos, craftingTablePos);
     }
 
-    public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        super.setTargets(jobPos, chestPos, craftingTablePos);
-    }
-
     @Override
     protected boolean hasRequiredProfession() {
         return villager.getVillagerData().getProfession() == VillagerProfession.SHEPHERD;
