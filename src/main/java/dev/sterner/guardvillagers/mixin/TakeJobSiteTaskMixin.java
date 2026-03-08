@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
-import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import net.minecraft.entity.ai.brain.task.TakeJobSiteTask;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.registry.entry.RegistryEntry;
@@ -18,9 +18,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(TakeJobSiteTask.class)
 public class TakeJobSiteTaskMixin {
     private static final Logger LOGGER = LoggerFactory.getLogger(TakeJobSiteTaskMixin.class);
-    private static boolean guardvillagers$canUseJobSiteInjectObserved;
-    private static boolean guardvillagers$missingInjectWarningLogged;
-
     @Inject(
             method = "canUseJobSite(Lnet/minecraft/registry/entry/RegistryEntry;Lnet/minecraft/entity/passive/VillagerEntity;Lnet/minecraft/util/math/BlockPos;)Z",
             at = @At("HEAD"),
@@ -28,7 +25,7 @@ public class TakeJobSiteTaskMixin {
             require = 0
     )
     private static void guardvillagers$rejectReservedConvertedWorkerJobSite(RegistryEntry<PointOfInterestType> poiType, VillagerEntity villager, BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
-        guardvillagers$canUseJobSiteInjectObserved = true;
+        TakeJobSiteInjectDiagnostics.markCanUseJobSiteInjectObserved();
 
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             return;
@@ -43,22 +40,5 @@ public class TakeJobSiteTaskMixin {
         }
     }
 
-    public static void guardvillagers$warnIfInjectMissing(Iterable<ServerWorld> worlds) {
-        if (guardvillagers$canUseJobSiteInjectObserved || guardvillagers$missingInjectWarningLogged) {
-            return;
-        }
 
-        int villagerCount = 0;
-        long maxWorldTime = 0L;
-        for (ServerWorld world : worlds) {
-            maxWorldTime = Math.max(maxWorldTime, world.getTime());
-            villagerCount += world.getEntitiesByClass(VillagerEntity.class, JobBlockPairingHelper.getWorldBounds(world), villager -> true).size();
-        }
-
-        if (villagerCount > 0 && maxWorldTime >= 200L) {
-            guardvillagers$missingInjectWarningLogged = true;
-            LOGGER.warn("TakeJobSiteTask pre-claim inject has not executed; signature may have shifted. " +
-                    "Fallback reserved-POI cleanup in VillagerEntityMixin remains active.");
-        }
-    }
 }
