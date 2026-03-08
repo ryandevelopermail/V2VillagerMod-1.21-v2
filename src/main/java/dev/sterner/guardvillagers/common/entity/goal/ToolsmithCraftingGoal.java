@@ -36,8 +36,11 @@ public class ToolsmithCraftingGoal extends Goal {
     private static final int SHEARS_PER_SHEPHERD_CHEST = 1;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int PATH_RETRY_INTERVAL_TICKS = 20;
 
     private final VillagerEntity villager;
+    private BlockPos currentNavigationTarget;
+    private long lastPathRequestTick = Long.MIN_VALUE;
     private BlockPos jobPos;
     private BlockPos chestPos;
     private @Nullable BlockPos craftingTablePos;
@@ -118,6 +121,8 @@ public class ToolsmithCraftingGoal extends Goal {
     @Override
     public void stop() {
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         stage = Stage.DONE;
     }
 
@@ -365,7 +370,25 @@ public class ToolsmithCraftingGoal extends Goal {
     }
 
     private void moveTo(BlockPos target) {
-        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+        moveTo(target, MOVE_SPEED);
+    }
+
+    private void moveTo(BlockPos target, double speed) {
+        if (target == null) {
+            return;
+        }
+
+        long currentTick = villager.getWorld().getTime();
+        boolean shouldRequestPath = !target.equals(currentNavigationTarget)
+                || villager.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= PATH_RETRY_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+
+        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, speed);
+        currentNavigationTarget = target.toImmutable();
+        lastPathRequestTick = currentTick;
     }
 
     private boolean isNear(BlockPos target) {

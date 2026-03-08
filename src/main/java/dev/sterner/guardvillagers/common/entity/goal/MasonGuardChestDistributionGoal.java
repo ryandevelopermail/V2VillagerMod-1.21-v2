@@ -36,6 +36,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
     private static final double SOURCE_CHEST_FULLNESS_TRIGGER = 0.80D;
     private static final int DISTRIBUTION_INTERVAL_TICKS = 20;
+    private static final int PATH_RETRY_INTERVAL_TICKS = 20;
     private static final Set<String> RAW_ORE_ITEM_PATHS = Set.of("raw_iron", "raw_copper", "raw_gold");
     private static final Set<String> ADDITIONAL_ORE_ITEM_PATHS = Set.of("ancient_debris");
     private static final Set<net.minecraft.item.Item> LIBRARIAN_COLLECTED_MATERIALS = Set.of(
@@ -56,6 +57,8 @@ public class MasonGuardChestDistributionGoal extends Goal {
     );
 
     private final MasonGuardEntity guard;
+    private BlockPos currentNavigationTarget;
+    private long lastPathRequestTick = Long.MIN_VALUE;
     private final Map<DistributionType, Integer> recipientCursorByType = new EnumMap<>(DistributionType.class);
     private Stage stage = Stage.IDLE;
     private ItemStack pendingItem = ItemStack.EMPTY;
@@ -114,6 +117,8 @@ public class MasonGuardChestDistributionGoal extends Goal {
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         clearPendingState();
         this.stage = Stage.DONE;
     }
@@ -403,7 +408,18 @@ public class MasonGuardChestDistributionGoal extends Goal {
         if (target == null) {
             return;
         }
+
+        long currentTick = guard.getWorld().getTime();
+        boolean shouldRequestPath = !target.equals(currentNavigationTarget)
+                || guard.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= PATH_RETRY_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+
         guard.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+        currentNavigationTarget = target.toImmutable();
+        lastPathRequestTick = currentTick;
     }
 
     private boolean isNear(BlockPos target) {

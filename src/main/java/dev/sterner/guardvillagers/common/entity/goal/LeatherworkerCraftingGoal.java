@@ -33,11 +33,14 @@ public class LeatherworkerCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int PATH_RETRY_INTERVAL_TICKS = 20;
     private static final int CRAFT_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CRAFT_INTERVAL_MAX_TICKS = 20 * 60 * 10;
     private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerCraftingGoal.class);
 
     private final VillagerEntity villager;
+    private BlockPos currentNavigationTarget;
+    private long lastPathRequestTick = Long.MIN_VALUE;
     private BlockPos jobPos;
     private BlockPos chestPos;
     private @Nullable BlockPos craftingTablePos;
@@ -128,6 +131,8 @@ public class LeatherworkerCraftingGoal extends Goal {
     @Override
     public void stop() {
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         stage = Stage.DONE;
     }
 
@@ -374,7 +379,25 @@ public class LeatherworkerCraftingGoal extends Goal {
     }
 
     private void moveTo(BlockPos target) {
-        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+        moveTo(target, MOVE_SPEED);
+    }
+
+    private void moveTo(BlockPos target, double speed) {
+        if (target == null) {
+            return;
+        }
+
+        long currentTick = villager.getWorld().getTime();
+        boolean shouldRequestPath = !target.equals(currentNavigationTarget)
+                || villager.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= PATH_RETRY_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+
+        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, speed);
+        currentNavigationTarget = target.toImmutable();
+        lastPathRequestTick = currentTick;
     }
 
     private boolean isNear(BlockPos target) {
