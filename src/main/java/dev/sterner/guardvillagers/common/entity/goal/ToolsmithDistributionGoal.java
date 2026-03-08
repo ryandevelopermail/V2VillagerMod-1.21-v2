@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -181,8 +182,12 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         if (state.getBlock() instanceof ChestBlock chestBlock) {
             return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
         }
-        if (state.getBlock() instanceof BarrelBlock barrelBlock) {
-            return Optional.ofNullable(BarrelBlock.getInventory(barrelBlock, state, world, position));
+        if (state.getBlock() instanceof BarrelBlock) {
+            BlockEntity blockEntity = world.getBlockEntity(position);
+            if (blockEntity instanceof Inventory inventory) {
+                return Optional.of(inventory);
+            }
+            return Optional.empty();
         }
         return Optional.empty();
     }
