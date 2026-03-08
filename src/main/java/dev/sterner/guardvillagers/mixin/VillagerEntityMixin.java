@@ -17,6 +17,8 @@ import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.util.Identifier;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -31,6 +33,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private static final String WEAPONSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastWeaponsmithCrafted";
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
+    private static final Logger LOGGER = LoggerFactory.getLogger(VillagerEntityMixin.class);
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
@@ -220,7 +223,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
                 .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReserved(serverWorld, jobPos))
                 .ifPresent(jobPos -> {
                     ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos).ifPresent(guardUuid ->
-                            dev.sterner.guardvillagers.GuardVillagers.LOGGER.debug("Villager {} skipped reserved job site {} guarded by {}",
+                            LOGGER.debug("Villager {} skipped reserved job site {} guarded by {}",
                                     villager.getUuidAsString(),
                                     jobPos.toShortString(),
                                     guardUuid));
