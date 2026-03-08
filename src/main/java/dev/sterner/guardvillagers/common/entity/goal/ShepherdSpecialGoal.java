@@ -46,6 +46,7 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int SHEAR_CHECK_INTERVAL_MAX_TICKS = 12000;
     private static final int SHEEP_SENSOR_INTERVAL_TICKS = 80;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int PATH_RETRY_INTERVAL_TICKS = 20;
     private static final double SLOW_GUIDE_SPEED = 0.45D;
     private static final double FAST_GATE_CLOSE_SPEED = 0.9D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
@@ -79,6 +80,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int BACKUP_SHEAR_MAX_TARGETS = 6;
 
     private final VillagerEntity villager;
+    private BlockPos currentNavigationTarget;
+    private long lastPathRequestTick = Long.MIN_VALUE;
     private BlockPos jobPos;
     private BlockPos chestPos;
     private Stage stage = Stage.IDLE;
@@ -402,6 +405,8 @@ public class ShepherdSpecialGoal extends Goal {
     @Override
     public void stop() {
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         stage = Stage.DONE;
         taskType = null;
         sheepTargets = new ArrayList<>();
@@ -734,6 +739,8 @@ public class ShepherdSpecialGoal extends Goal {
                 if (isNear(gatherBannerPos)) {
                     gatherBannerHoldStartTick = world.getTime();
                     villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
                     LOGGER.info("Shepherd {} reached gather banner {}; holding center for {} ticks before exit",
                             villager.getUuidAsString(),
                             gatherBannerPos.toShortString(),
@@ -762,6 +769,8 @@ public class ShepherdSpecialGoal extends Goal {
                 }
 
                 villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
                 long holdElapsed = world.getTime() - gatherBannerHoldStartTick;
                 if (holdElapsed < GATHER_BANNER_HOLD_TICKS) {
                     return;
@@ -1828,6 +1837,8 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         shearsGateInsideTarget = resolveInsideGateTarget(world, penGatePos, currentShearPenCenter);
         shearsGateOutsideTarget = resolveOutsideGateTarget(world, penGatePos, currentShearPenCenter);
         shearsGateCloseDistanceSquared = calculateGateCloseDistanceSquared(penGatePos, currentShearPenCenter);
@@ -1845,6 +1856,8 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
         openGate(world, penGatePos, true);
         BlockPos retryTarget = gatherExitTarget == null ? penGatePos : gatherExitTarget;
@@ -1968,7 +1981,21 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void moveTo(BlockPos target, double speed) {
+        if (target == null) {
+            return;
+        }
+
+        long currentTick = villager.getWorld().getTime();
+        boolean shouldRequestPath = !target.equals(currentNavigationTarget)
+                || villager.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= PATH_RETRY_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+
         villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, speed);
+        currentNavigationTarget = target.toImmutable();
+        lastPathRequestTick = currentTick;
     }
 
     private boolean isNear(BlockPos target) {

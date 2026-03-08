@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.villager.behavior.*;
 import net.minecraft.block.Block;
@@ -100,11 +99,7 @@ public final class ProfessionDefinitions {
         }
     }
 
-    public static void runFallbackConversionSweep(ServerWorld world) {
-        if (!GuardVillagersConfig.villagerConversionFallbackSweepEnabled) {
-            return;
-        }
-
+    public static void markFallbackCandidates(ServerWorld world) {
         int chunkRadius = 8;
         for (PlayerEntity player : world.getPlayers()) {
             ChunkPos center = player.getChunkPos();
@@ -117,8 +112,6 @@ public final class ProfessionDefinitions {
                 }
             }
         }
-
-        runConversionHooks(world);
     }
 
     private static ProfessionDefinition definition(VillagerProfession profession, Set<Block> expectedJobBlocks, java.util.function.Supplier<VillagerProfessionBehavior> behaviorFactory) {

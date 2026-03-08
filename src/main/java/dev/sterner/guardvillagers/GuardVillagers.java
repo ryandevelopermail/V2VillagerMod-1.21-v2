@@ -10,11 +10,14 @@ import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -35,7 +38,6 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.AbstractBlock;
 import net.minecraft.block.Block;
 import net.minecraft.entity.*;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.*;
@@ -46,6 +48,7 @@ import net.minecraft.particle.ParticleEffect;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvent;
@@ -64,13 +67,20 @@ import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Predicate;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
+    private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
+    private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
+    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -175,7 +185,6 @@ public class GuardVillagers implements ModInitializer {
                 if (world instanceof ServerWorld serverWorld) {
                     JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);
                     VillagerConversionCandidateIndex.markCandidate(serverWorld, villagerEntity);
-                    ProfessionDefinitions.runConversionHooks(serverWorld);
                 }
                 if (villagerEntity.isNatural()) {
                     var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
@@ -206,18 +215,25 @@ public class GuardVillagers implements ModInitializer {
             }
             if (entity instanceof ButcherGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
                 JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity);
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedSmokerPos(), VillagerProfession.BUTCHER, "paired smoker");
+            }
+            if (entity instanceof MasonGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.MASON, "paired job");
+            }
+            if (entity instanceof FishermanGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.FISHERMAN, "paired job");
             }
         });
 
-        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
-            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z);
-            ProfessionDefinitions.runConversionHooks(world);
-        });
+        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) ->
+                VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z));
 
         ServerWorldEvents.LOAD.register((server, world) -> {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+            reconcileConvertedWorkerReservations(world, "world-load");
         });
+        ServerWorldEvents.UNLOAD.register((server, world) -> LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey()));
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -228,15 +244,116 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getTime() % 100L == 0L) {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
-                if (world.getTime() % 40L == 0L) {
-                    ProfessionDefinitions.runConversionHooks(world);
-                }
                 if (GuardVillagersConfig.villagerConversionFallbackSweepEnabled
-                        && world.getTime() % Math.max(40, GuardVillagersConfig.villagerConversionFallbackSweepIntervalTicks) == 0L) {
-                    ProfessionDefinitions.runFallbackConversionSweep(world);
+                        && world.getTime() % Math.max(20, GuardVillagersConfig.villagerConversionCandidateMarkIntervalTicks) == 0L) {
+                    ProfessionDefinitions.markFallbackCandidates(world);
+                }
+                runConversionHooksOnSchedule(world);
+                if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
+                    reconcileConvertedWorkerReservations(world, "scheduled");
                 }
             }
+            TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });
+    }
+
+
+    private static void rehydrateConvertedWorkerReservation(ServerWorld world,
+                                                            GuardEntity guard,
+                                                            @Nullable BlockPos pairedPos,
+                                                            VillagerProfession profession,
+                                                            String source) {
+        if (pairedPos == null) {
+            return;
+        }
+        ConvertedWorkerJobSiteReservationManager.reserve(world, pairedPos, guard.getUuid(), profession, "rehydrate " + source);
+        LOGGER.debug("rehydrated reservation: guard={} profession={} pos={} world={} source={}",
+                guard.getUuidAsString(),
+                profession,
+                pairedPos.toShortString(),
+                world.getRegistryKey().getValue(),
+                source);
+    }
+
+    private void runConversionHooksOnSchedule(ServerWorld world) {
+        long worldTick = world.getTime();
+        long executionInterval = Math.max(20, GuardVillagersConfig.villagerConversionExecutionIntervalTicks);
+        if (worldTick % executionInterval != 0L) {
+            return;
+        }
+
+        RegistryKey<World> worldKey = world.getRegistryKey();
+        long lastRunTick = LAST_CONVERSION_EXECUTION_TICK.getOrDefault(worldKey, Long.MIN_VALUE);
+        if (worldTick - lastRunTick < executionInterval) {
+            return;
+        }
+
+        LAST_CONVERSION_EXECUTION_TICK.put(worldKey, worldTick);
+        ProfessionDefinitions.runConversionHooks(world);
+    }
+
+    private static void reconcileConvertedWorkerReservations(ServerWorld world, String source) {
+        ReconciliationStats stats = new ReconciliationStats();
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedSmokerPos(), VillagerProfession.BUTCHER, source + " butcher", stats,
+                    () -> guard.setPairedSmokerPos(null));
+        }
+
+        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.MASON, source + " mason", stats,
+                    () -> guard.setPairedJobPos(null));
+        }
+
+        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.FISHERMAN, source + " fisherman", stats,
+                    () -> guard.setPairedJobPos(null));
+        }
+
+        LOGGER.debug("Converted worker reservation reconciliation pass (world={}, source={}): added={}, removed={}",
+                world.getRegistryKey().getValue(), source, stats.added, stats.removed);
+    }
+
+    private static void reconcileGuardReservation(ServerWorld world,
+                                                  GuardEntity guard,
+                                                  @Nullable BlockPos pairedPos,
+                                                  VillagerProfession profession,
+                                                  String source,
+                                                  ReconciliationStats stats,
+                                                  Runnable clearPairing) {
+        if (pairedPos == null) {
+            return;
+        }
+
+        if (!ProfessionDefinitions.isExpectedJobBlock(profession, world.getBlockState(pairedPos))) {
+            if (ConvertedWorkerJobSiteReservationManager.removeReservation(world, pairedPos,
+                    "reconcile invalid workstation " + source)) {
+                stats.removed++;
+            }
+            clearPairing.run();
+            return;
+        }
+
+        ConvertedWorkerJobSiteReservationManager.EnsureResult ensureResult = ConvertedWorkerJobSiteReservationManager.ensureReservation(
+                world,
+                pairedPos,
+                guard.getUuid(),
+                profession,
+                "reconcile " + source);
+
+        if (ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED
+                || ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED_AFTER_INVALID_REMOVAL) {
+            stats.added++;
+        }
+        if (ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED_AFTER_INVALID_REMOVAL
+                || ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.REPLACED_EXISTING) {
+            stats.removed++;
+        }
+    }
+
+    private static final class ReconciliationStats {
+        private int added;
+        private int removed;
     }
 
 
@@ -297,32 +414,27 @@ public class GuardVillagers implements ModInitializer {
                         villagerEntity.getZ() + (double) (villagerEntity.getRandom().nextFloat() * villagerEntity.getWidth() * 2.0F) - (double) villagerEntity.getWidth(), d0, d1, d2);
             }
         }
-        guard.copyPositionAndRotation(villagerEntity);
-        guard.headYaw = villagerEntity.headYaw;
-        guard.refreshPositionAndAngles(villagerEntity.getX(), villagerEntity.getY(), villagerEntity.getZ(), villagerEntity.getYaw(), villagerEntity.getPitch());
+        if (world instanceof ServerWorld serverWorld) {
+            GuardConversionHelper.copyVillagerIdentityAndPose(serverWorld, villagerEntity, guard);
+        } else {
+            guard.copyPositionAndRotation(villagerEntity);
+            guard.headYaw = villagerEntity.headYaw;
+            guard.refreshPositionAndAngles(villagerEntity.getX(), villagerEntity.getY(), villagerEntity.getZ(), villagerEntity.getYaw(), villagerEntity.getPitch());
+            int i = GuardEntity.getRandomTypeForBiome(guard.getWorld(), guard.getBlockPos());
+            guard.setGuardVariant(i);
+            guard.setPersistent();
+            guard.setCustomName(villagerEntity.getCustomName());
+            guard.setCustomNameVisible(villagerEntity.isCustomNameVisible());
+        }
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
         guard.equipStack(EquipmentSlot.MAINHAND, itemstack.copy());
         guard.guardInventory.setStack(5, itemstack.copy());
-
-        int i = GuardEntity.getRandomTypeForBiome(guard.getWorld(), guard.getBlockPos());
-        guard.setGuardVariant(i);
-        guard.setPersistent();
-        guard.setCustomName(villagerEntity.getCustomName());
-        guard.setCustomNameVisible(villagerEntity.isCustomNameVisible());
-        guard.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         world.spawnEntity(guard);
         if (world instanceof ServerWorld serverWorld) {
             VillageGuardStandManager.handleGuardSpawn(serverWorld, guard, villagerEntity);
         }
-        villagerEntity.releaseTicketFor(MemoryModuleType.HOME);
-        villagerEntity.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villagerEntity.releaseTicketFor(MemoryModuleType.MEETING_POINT);
-        villagerEntity.discard();
+        GuardConversionHelper.cleanupVillagerAfterConversion(villagerEntity);
     }
 
     public static boolean hotvChecker(PlayerEntity player, GuardEntity guard) {

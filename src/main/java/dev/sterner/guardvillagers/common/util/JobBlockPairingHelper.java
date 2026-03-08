@@ -116,6 +116,14 @@ public final class JobBlockPairingHelper {
             return;
         }
 
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, globalPos.pos())) {
+            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+                    villager.getUuidAsString(),
+                    globalPos.pos().toShortString(),
+                    placedPos.toShortString());
+            return;
+        }
+
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
             VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
@@ -135,6 +143,14 @@ public final class JobBlockPairingHelper {
 
         BlockPos jobPos = globalPos.pos();
         if (!jobPos.isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
+            return;
+        }
+
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, jobPos)) {
+            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    placedPos.toShortString());
             return;
         }
 
@@ -164,6 +180,14 @@ public final class JobBlockPairingHelper {
 
         BlockPos jobPos = globalPos.pos();
         if (!jobPos.isWithinDistance(placedPos, modifier.range())) {
+            return;
+        }
+
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, jobPos)) {
+            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    placedPos.toShortString());
             return;
         }
 
@@ -285,6 +309,14 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, jobPos)) {
+            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    bannerPos.toShortString());
+            return false;
+        }
+
         if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.FARMER, world.getBlockState(jobPos))) {
             return false;
         }
@@ -311,6 +343,14 @@ public final class JobBlockPairingHelper {
 
         BlockPos jobPos = globalPos.pos();
         if (villager.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > SHEPHERD_BANNER_PAIR_RANGE * SHEPHERD_BANNER_PAIR_RANGE) {
+            return false;
+        }
+
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, jobPos)) {
+            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+                    villager.getUuidAsString(),
+                    jobPos.toShortString(),
+                    bannerPos.toShortString());
             return false;
         }
 

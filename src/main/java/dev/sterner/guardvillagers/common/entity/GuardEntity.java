@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.*;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.item.v1.EnchantmentEvents;
@@ -441,6 +442,14 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     @Override
     public boolean isImmobile() {
         return this.interacting || super.isImmobile();
+    }
+
+    @Override
+    public void remove(RemovalReason reason) {
+        if (!this.getWorld().isClient && this.getWorld() instanceof ServerWorld serverWorld) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(serverWorld, this.getUuid(), "guard removed: " + reason);
+        }
+        super.remove(reason);
     }
 
     @Override
@@ -1075,17 +1084,24 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         @Override
         public boolean canStart() {
             Box box = this.guard.getBoundingBox().expand(10.0D, 8.0D, 10.0D);
-            List<VillagerEntity> list = guard.getWorld().getNonSpectatingEntities(VillagerEntity.class, box);
-            List<PlayerEntity> list1 = guard.getWorld().getNonSpectatingEntities(PlayerEntity.class, box);
-            for (VillagerEntity villager : list) {
-                for (PlayerEntity player : list1) {
-                    int i = villager.getReputation(player);
-                    if (i <= GuardVillagersConfig.reputationRequirementToBeAttacked) {
+            this.villageAggressorTarget = null;
+            List<VillagerEntity> nearbyVillagers = guard.getWorld().getNonSpectatingEntities(VillagerEntity.class, box);
+            List<PlayerEntity> candidatePlayers = guard.getWorld().getNonSpectatingEntities(PlayerEntity.class, box);
+
+            for (PlayerEntity player : candidatePlayers) {
+                if (player.isSpectator() || player.isCreative() || player.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE)) {
+                    continue;
+                }
+
+                for (VillagerEntity villager : nearbyVillagers) {
+                    if (villager.getReputation(player) <= GuardVillagersConfig.reputationRequirementToBeAttacked) {
                         this.villageAggressorTarget = player;
+                        return true;
                     }
                 }
             }
-            return villageAggressorTarget != null && !villageAggressorTarget.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE) && !this.villageAggressorTarget.isSpectator() && !((PlayerEntity) this.villageAggressorTarget).isCreative();
+
+            return false;
         }
 
         @Override
