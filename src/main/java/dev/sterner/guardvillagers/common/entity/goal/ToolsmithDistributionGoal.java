@@ -157,7 +157,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
             int stock = countItemInRecipientStorage(world, recipient.chestPos(), toolType);
             int deficit = Math.max(0, toolType.targetPerRecipient() - stock);
-            ranked.add(new RecipientDemand(recipient, deficit));
+            if (deficit > 0) {
+                ranked.add(new RecipientDemand(recipient, deficit));
+            }
         }
 
         ranked.sort(Comparator
