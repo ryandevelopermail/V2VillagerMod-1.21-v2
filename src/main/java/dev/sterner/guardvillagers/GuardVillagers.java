@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
+import dev.sterner.guardvillagers.mixin.TakeJobSiteTaskMixin;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
@@ -247,6 +248,7 @@ public class GuardVillagers implements ModInitializer {
                 }
                 runConversionHooksOnSchedule(world);
             }
+            TakeJobSiteTaskMixin.guardvillagers$warnIfInjectMissing(server.getWorlds());
         });
     }
 
