@@ -6,15 +6,14 @@ import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherToLeatherworkerDistributionGoal;
-import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -204,21 +203,8 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
-        guard.spawnWithArmor = false;
-        guard.copyPositionAndRotation(villager);
-        guard.headYaw = villager.headYaw;
-        guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
-        guard.setGuardVariant(GuardEntity.getRandomTypeForBiome(world, guard.getBlockPos()));
-        guard.setPersistent();
-        guard.setCustomName(villager.getCustomName());
-        guard.setCustomNameVisible(villager.isCustomNameVisible());
-        guard.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+        GuardConversionHelper.initializeConvertedGuard(world, villager, guard, jobPos);
+        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         clearArmorAndOffhand(guard);
         guard.equipStack(EquipmentSlot.MAINHAND, weaponStack);
         guard.setHuntOnSpawn();
@@ -228,15 +214,10 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
-        LOGGER.info("Butcher {} converted into Butcher Guard {} using weapon from chest {}",
-                villager.getUuidAsString(),
-                guard.getUuidAsString(),
-                chestPos.toShortString());
+        LOGGER.info("Butcher converted into guard using chest weapon ({})",
+                GuardConversionHelper.buildConversionMetadata(villager, guard, jobPos, chestPos, "butcher chest weapon"));
 
-        villager.releaseTicketFor(MemoryModuleType.HOME);
-        villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
-        villager.discard();
+        GuardConversionHelper.cleanupVillagerAfterConversion(villager);
     }
 
 

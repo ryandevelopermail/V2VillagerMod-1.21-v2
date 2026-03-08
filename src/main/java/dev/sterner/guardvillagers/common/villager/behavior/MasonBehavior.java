@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
@@ -9,6 +8,7 @@ import dev.sterner.guardvillagers.common.entity.goal.MasonToLibrarianDistributio
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingCheckTrigger;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
@@ -17,7 +17,6 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -351,21 +350,8 @@ public class MasonBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        guard.initialize(world, world.getLocalDifficulty(jobPos), SpawnReason.CONVERSION, null);
-        guard.spawnWithArmor = false;
-        guard.copyPositionAndRotation(villager);
-        guard.headYaw = villager.headYaw;
-        guard.refreshPositionAndAngles(villager.getX(), villager.getY(), villager.getZ(), villager.getYaw(), villager.getPitch());
-        guard.setGuardVariant(GuardEntity.getRandomTypeForBiome(world, guard.getBlockPos()));
-        guard.setPersistent();
-        guard.setCustomName(villager.getCustomName());
-        guard.setCustomNameVisible(villager.isCustomNameVisible());
-        guard.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+        GuardConversionHelper.initializeConvertedGuard(world, villager, guard, jobPos);
+        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         guard.equipStack(EquipmentSlot.MAINHAND, trigger.tool().copy());
         guard.setExpectedMiningTool(trigger.tool());
         guard.setPairedChestPos(chestPos);
@@ -374,18 +360,14 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
-        LOGGER.info("Mason {} converted into Mason Guard {} using tool {} from {} slot {} ({})",
-                villager.getUuidAsString(),
-                guard.getUuidAsString(),
+        LOGGER.info("Mason converted into guard using tool {} from {} slot {} ({}) ({})",
                 trigger.tool().getItem(),
                 trigger.sourceDescription(),
                 trigger.slot(),
-                source);
+                source,
+                GuardConversionHelper.buildConversionMetadata(villager, guard, jobPos, chestPos, source));
 
-        villager.releaseTicketFor(MemoryModuleType.HOME);
-        villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villager.releaseTicketFor(MemoryModuleType.MEETING_POINT);
-        villager.discard();
+        GuardConversionHelper.cleanupVillagerAfterConversion(villager);
     }
 
     private static Optional<StorageSlotReference> findMiningToolTriggerSlot(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
