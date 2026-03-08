@@ -1075,17 +1075,24 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
         @Override
         public boolean canStart() {
             Box box = this.guard.getBoundingBox().expand(10.0D, 8.0D, 10.0D);
-            List<VillagerEntity> list = guard.getWorld().getNonSpectatingEntities(VillagerEntity.class, box);
-            List<PlayerEntity> list1 = guard.getWorld().getNonSpectatingEntities(PlayerEntity.class, box);
-            for (VillagerEntity villager : list) {
-                for (PlayerEntity player : list1) {
-                    int i = villager.getReputation(player);
-                    if (i <= GuardVillagersConfig.reputationRequirementToBeAttacked) {
+            this.villageAggressorTarget = null;
+            List<VillagerEntity> nearbyVillagers = guard.getWorld().getNonSpectatingEntities(VillagerEntity.class, box);
+            List<PlayerEntity> candidatePlayers = guard.getWorld().getNonSpectatingEntities(PlayerEntity.class, box);
+
+            for (PlayerEntity player : candidatePlayers) {
+                if (player.isSpectator() || player.isCreative() || player.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE)) {
+                    continue;
+                }
+
+                for (VillagerEntity villager : nearbyVillagers) {
+                    if (villager.getReputation(player) <= GuardVillagersConfig.reputationRequirementToBeAttacked) {
                         this.villageAggressorTarget = player;
+                        return true;
                     }
                 }
             }
-            return villageAggressorTarget != null && !villageAggressorTarget.hasStatusEffect(StatusEffects.HERO_OF_THE_VILLAGE) && !this.villageAggressorTarget.isSpectator() && !((PlayerEntity) this.villageAggressorTarget).isCreative();
+
+            return false;
         }
 
         @Override
