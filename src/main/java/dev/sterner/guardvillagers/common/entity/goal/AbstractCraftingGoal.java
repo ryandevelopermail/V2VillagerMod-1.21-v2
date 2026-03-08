@@ -45,7 +45,7 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         setControls(EnumSet.of(Control.MOVE));
     }
 
-    protected final void setTargets(BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
+    public final void setTargets(BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         BlockPos updatedJobPos = jobPos.toImmutable();
         BlockPos updatedChestPos = chestPos.toImmutable();
         BlockPos updatedCraftingPos = craftingTablePos == null ? null : craftingTablePos.toImmutable();
