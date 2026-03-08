@@ -1,10 +1,5 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.ChestBlock;
-import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -15,159 +10,36 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.List;
-import java.util.Optional;
 import java.util.function.Predicate;
 
-public class ButcherCraftingGoal extends Goal {
-    private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
-    private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final double MOVE_SPEED = 0.6D;
-
-    private final VillagerEntity villager;
-    private BlockPos jobPos;
-    private BlockPos chestPos;
-    private BlockPos craftingTablePos;
-    private Stage stage = Stage.IDLE;
-    private long nextCheckTime;
-    private long lastCraftDay = -1L;
-    private int dailyCraftLimit;
-    private int craftedToday;
-    private int lastCheckCount;
-    private boolean immediateCheckPending;
+public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoal.Recipe> {
 
     public ButcherCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        this.villager = villager;
-        setTargets(jobPos, chestPos, craftingTablePos);
-        setControls(EnumSet.of(Control.MOVE));
+        super(villager, jobPos, chestPos, craftingTablePos);
     }
 
     public void setTargets(BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
-        this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
-        this.craftingTablePos = craftingTablePos.toImmutable();
-        this.stage = Stage.IDLE;
-    }
-
-    public void requestImmediateCraft(ServerWorld world) {
-        refreshDailyLimit(world);
-        immediateCheckPending = true;
-        nextCheckTime = 0L;
+        super.setTargets(jobPos, chestPos, craftingTablePos);
     }
 
     @Override
-    public boolean canStart() {
-        if (!(villager.getWorld() instanceof ServerWorld world)) {
-            return false;
-        }
-        if (!world.isDay()) {
-            return false;
-        }
-        if (villager.getVillagerData().getProfession() != VillagerProfession.BUTCHER) {
-            return false;
-        }
-        if (craftingTablePos == null || chestPos == null) {
-            return false;
-        }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
-            return false;
-        }
-        refreshDailyLimit(world);
-        if (craftedToday >= dailyCraftLimit) {
-            return false;
-        }
-        if (!immediateCheckPending && world.getTime() < nextCheckTime) {
-            return false;
-        }
-
-        lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Butcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
-        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-        immediateCheckPending = false;
-        return lastCheckCount > 0;
+    protected boolean hasRequiredProfession() {
+        return villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER;
     }
 
     @Override
-    public boolean shouldContinue() {
-        return stage != Stage.DONE && villager.isAlive();
+    protected String getGoalName() {
+        return "Butcher";
     }
 
     @Override
-    public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+    protected int getDailyCraftLimit(ServerWorld world) {
+        return 2;
     }
 
     @Override
-    public void stop() {
-        villager.getNavigation().stop();
-        stage = Stage.DONE;
-    }
-
-    @Override
-    public void tick() {
-        if (!(villager.getWorld() instanceof ServerWorld world)) {
-            stage = Stage.DONE;
-            return;
-        }
-
-        switch (stage) {
-            case GO_TO_TABLE -> {
-                if (isNear(craftingTablePos)) {
-                    stage = Stage.CRAFT;
-                } else {
-                    moveTo(craftingTablePos);
-                }
-            }
-            case CRAFT -> {
-                craftOnce(world);
-                stage = Stage.DONE;
-            }
-            case IDLE, DONE -> {
-            }
-        }
-    }
-
-    private void refreshDailyLimit(ServerWorld world) {
-        long day = world.getTimeOfDay() / 24000L;
-        if (day != lastCraftDay) {
-            lastCraftDay = day;
-            dailyCraftLimit = 2;
-            craftedToday = 0;
-            immediateCheckPending = false;
-        }
-    }
-
-    private int countCraftableRecipes(ServerWorld world) {
-        Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) {
-            return 0;
-        }
-        return getCraftableRecipes(inventory).size();
-    }
-
-    private void craftOnce(ServerWorld world) {
-        Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) {
-            return;
-        }
-
-        List<Recipe> craftable = getCraftableRecipes(inventory);
-        if (craftable.isEmpty()) {
-            return;
-        }
-
-        Recipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
-        if (consumeIngredients(inventory, recipe.requirements)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
-            craftedToday++;
-            CraftingCheckLogger.report(world, "Butcher", formatCraftedResult(lastCheckCount, recipe.output));
-        }
-    }
-
-    private List<Recipe> getCraftableRecipes(Inventory inventory) {
+    protected List<Recipe> discoverRecipes(ServerWorld world, Inventory inventory) {
         List<Recipe> recipes = new ArrayList<>();
         for (Recipe recipe : Recipe.values()) {
             if (hasIngredients(inventory, recipe.requirements)) {
@@ -175,6 +47,25 @@ public class ButcherCraftingGoal extends Goal {
             }
         }
         return recipes;
+    }
+
+    @Override
+    protected boolean canStillCraftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
+        return hasIngredients(inventory, recipe.requirements);
+    }
+
+    @Override
+    protected boolean craftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
+        if (!consumeIngredients(inventory, recipe.requirements)) {
+            return false;
+        }
+        insertStack(inventory, recipe.output.copy());
+        return true;
+    }
+
+    @Override
+    protected ItemStack getRecipeOutput(Recipe recipe) {
+        return recipe.output;
     }
 
     private boolean hasIngredients(Inventory inventory, IngredientRequirement[] requirements) {
@@ -224,75 +115,10 @@ public class ButcherCraftingGoal extends Goal {
         return total;
     }
 
-    private Optional<Inventory> getChestInventory(ServerWorld world) {
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-        return Optional.ofNullable(inventory);
-    }
-
-    private void moveTo(BlockPos target) {
-        villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
-    }
-
-    private boolean isNear(BlockPos target) {
-        return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
-    }
-
-    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
-        ItemStack remaining = stack.copy();
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            if (remaining.isEmpty()) {
-                return ItemStack.EMPTY;
-            }
-
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                if (!inventory.isValid(slot, remaining)) {
-                    continue;
-                }
-                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
-                ItemStack toInsert = remaining.copy();
-                toInsert.setCount(moved);
-                inventory.setStack(slot, toInsert);
-                remaining.decrement(moved);
-                continue;
-            }
-
-            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                continue;
-            }
-
-            if (!inventory.isValid(slot, remaining)) {
-                continue;
-            }
-
-            int space = existing.getMaxCount() - existing.getCount();
-            if (space <= 0) {
-                continue;
-            }
-
-            int moved = Math.min(space, remaining.getCount());
-            existing.increment(moved);
-            remaining.decrement(moved);
-        }
-
-        return remaining;
-    }
-
-    private enum Stage {
-        IDLE,
-        GO_TO_TABLE,
-        CRAFT,
-        DONE
-    }
-
     private record IngredientRequirement(Predicate<ItemStack> matcher, int count) {
     }
 
-    private enum Recipe {
+    enum Recipe {
         SMOKER(new ItemStack(Items.SMOKER),
                 new IngredientRequirement(stack -> stack.isOf(Items.FURNACE), 1),
                 new IngredientRequirement(stack -> stack.isIn(ItemTags.LOGS_THAT_BURN), 4));
@@ -306,18 +132,16 @@ public class ButcherCraftingGoal extends Goal {
         }
     }
 
-    private String formatCheckResult(int craftableCount) {
-        if (craftableCount == 1) {
-            return "1 item available to craft";
-        }
-        return craftableCount + " items available to craft";
+    @Override
+    protected String formatCheckResult(int craftableCount) {
+        return craftableCount == 1 ? "1 item available to craft" : craftableCount + " items available to craft";
     }
 
-    private String formatCraftedResult(int craftableCount, ItemStack crafted) {
+    @Override
+    protected String formatCraftedResult(int craftableCount, ItemStack crafted) {
         String craftedName = crafted.getName().getString();
-        if (craftableCount == 1) {
-            return "1 item available to craft - 1 " + craftedName + " crafted";
-        }
-        return craftableCount + " items available to craft - 1 " + craftedName + " crafted";
+        return craftableCount == 1
+                ? "1 item available to craft - 1 " + craftedName + " crafted"
+                : craftableCount + " items available to craft - 1 " + craftedName + " crafted";
     }
 }
