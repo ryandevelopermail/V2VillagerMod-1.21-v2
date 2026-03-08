@@ -213,22 +213,28 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
             return;
         }
 
-        if (villager.getVillagerData().getProfession() != VillagerProfession.NONE) {
-            return;
-        }
-
         villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                 .filter(globalPos -> globalPos.dimension() == serverWorld.getRegistryKey())
                 .map(GlobalPos::pos)
                 .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReserved(serverWorld, jobPos))
                 .ifPresent(jobPos -> {
                     ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos).ifPresent(guardUuid ->
-                            LOGGER.debug("Villager {} skipped reserved job site {} guarded by {}",
+                            LOGGER.debug("released villager from reserved POI: villager={} jobSite={} guard={}",
                                     villager.getUuidAsString(),
                                     jobPos.toShortString(),
                                     guardUuid));
                     villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
                     villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+                    villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
+
+                    VillagerProfession profession = villager.getVillagerData().getProfession();
+                    if (profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT) {
+                        villager.setVillagerData(villager.getVillagerData().withProfession(VillagerProfession.NONE));
+                        LOGGER.debug("profession reset due reserved POI: villager={} from={} jobSite={}",
+                                villager.getUuidAsString(),
+                                profession,
+                                jobPos.toShortString());
+                    }
                 });
     }
 

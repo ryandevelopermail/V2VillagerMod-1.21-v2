@@ -10,6 +10,7 @@ import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
@@ -65,6 +66,8 @@ import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -74,6 +77,7 @@ import java.util.function.Predicate;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
+    private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
@@ -209,6 +213,13 @@ public class GuardVillagers implements ModInitializer {
             }
             if (entity instanceof ButcherGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
                 JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity);
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedSmokerPos(), VillagerProfession.BUTCHER, "paired smoker");
+            }
+            if (entity instanceof MasonGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.MASON, "paired job");
+            }
+            if (entity instanceof FishermanGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.FISHERMAN, "paired job");
             }
         });
 
@@ -239,6 +250,23 @@ public class GuardVillagers implements ModInitializer {
         });
     }
 
+
+    private static void rehydrateConvertedWorkerReservation(ServerWorld world,
+                                                            GuardEntity guard,
+                                                            @Nullable BlockPos pairedPos,
+                                                            VillagerProfession profession,
+                                                            String source) {
+        if (pairedPos == null) {
+            return;
+        }
+        ConvertedWorkerJobSiteReservationManager.reserve(world, pairedPos, guard.getUuid(), profession, "rehydrate " + source);
+        LOGGER.debug("rehydrated reservation: guard={} profession={} pos={} world={} source={}",
+                guard.getUuidAsString(),
+                profession,
+                pairedPos.toShortString(),
+                world.getRegistryKey().getValue(),
+                source);
+    }
 
     private void runConversionHooksOnSchedule(ServerWorld world) {
         long worldTick = world.getTime();
