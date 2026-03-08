@@ -36,7 +36,7 @@ public class FindPointOfInterestTaskMixin {
             PointOfInterestStorage poiStorage,
             Predicate<BlockPos> poiPosPredicate,
             BlockPos pos,
-            MemoryQueryResult<?> queryResult,
+            MemoryQueryResult<?, ?> queryResult,
             ServerWorld world,
             Optional<Byte> entityStatus,
             LivingEntity entity,
