@@ -24,6 +24,9 @@ import java.util.List;
 import java.util.Optional;
 
 public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal {
+    private static final int TARGET_REFRESH_LOG_INTERVAL_TICKS = 100;
+    private long lastTargetRefreshLogTick = Long.MIN_VALUE;
+    private String lastTargetRefreshLogMessage = "";
 
     public ToolsmithDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -107,9 +110,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             for (ToolsmithDemandPlanner.RecipientDemand recipient : rankedRecipients) {
                 if (recipient.record().recipient().getUuid().equals(pendingTargetId)) {
                     pendingTargetPos = recipient.record().chestPos();
-                    CraftingCheckLogger.report(world, "Toolsmith", "distribution target refresh " + toolType.label()
-                            + " -> " + recipient.record().recipient().getVillagerData().getProfession()
-                            + " deficit " + recipient.deficit());
+                    maybeLogTargetRefresh(world, toolType, recipient);
                     return true;
                 }
             }
@@ -118,10 +119,25 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         ToolsmithDemandPlanner.RecipientDemand recipient = rankedRecipients.getFirst();
         pendingTargetId = recipient.record().recipient().getUuid();
         pendingTargetPos = recipient.record().chestPos();
-        CraftingCheckLogger.report(world, "Toolsmith", "distribution target refresh " + toolType.label()
-                + " -> " + recipient.record().recipient().getVillagerData().getProfession()
-                + " deficit " + recipient.deficit());
+        maybeLogTargetRefresh(world, toolType, recipient);
         return true;
+    }
+
+    private void maybeLogTargetRefresh(ServerWorld world,
+                                       ToolsmithDemandPlanner.ToolType toolType,
+                                       ToolsmithDemandPlanner.RecipientDemand recipient) {
+        String message = "distribution target refresh " + toolType.label()
+                + " -> " + recipient.record().recipient().getVillagerData().getProfession()
+                + " deficit " + recipient.deficit();
+        long tick = world.getTime();
+        boolean sameAsLast = message.equals(lastTargetRefreshLogMessage);
+        if (sameAsLast && tick - lastTargetRefreshLogTick < TARGET_REFRESH_LOG_INTERVAL_TICKS) {
+            return;
+        }
+
+        CraftingCheckLogger.report(world, "Toolsmith", message);
+        lastTargetRefreshLogMessage = message;
+        lastTargetRefreshLogTick = tick;
     }
 
     private List<ToolDistributionCandidate> collectCandidates(Inventory inventory, ToolsmithDemandPlanner.DemandSnapshot demandSnapshot) {
