@@ -2,7 +2,7 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
-import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.PathAwareEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.MemoryQueryResult;
 import net.minecraft.entity.ai.brain.task.FindPointOfInterestTask;
@@ -39,7 +39,7 @@ public class FindPointOfInterestTaskMixin {
             MemoryQueryResult<?, ?> queryResult,
             ServerWorld world,
             Optional<Byte> entityStatus,
-            LivingEntity entity,
+            PathAwareEntity entity,
             it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
