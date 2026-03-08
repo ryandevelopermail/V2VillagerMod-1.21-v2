@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.entity.ai.brain.task.TakeJobSiteTask;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.registry.entry.RegistryEntry;
@@ -51,7 +52,7 @@ public class TakeJobSiteTaskMixin {
         long maxWorldTime = 0L;
         for (ServerWorld world : worlds) {
             maxWorldTime = Math.max(maxWorldTime, world.getTime());
-            villagerCount += world.getEntitiesByClass(VillagerEntity.class, world.getWorldBorder().getBound(), villager -> true).size();
+            villagerCount += world.getEntitiesByClass(VillagerEntity.class, JobBlockPairingHelper.getWorldBounds(world), villager -> true).size();
         }
 
         if (villagerCount > 0 && maxWorldTime >= 200L) {
