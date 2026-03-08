@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
@@ -10,7 +10,6 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
-import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.PickaxeItem;
@@ -36,13 +35,9 @@ import java.util.Optional;
 public class ToolsmithCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final int NON_TABLE_GRID_SIZE = 2;
-    private static final int SHEARS_PER_SHEPHERD_CHEST = 1;
-    private static final int RODS_PER_FISHERMAN_STORAGE = 1;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
-    private static final int TOOLS_PER_MASON_CHEST = 1;
-    private static final int TOOLS_PER_FARMER_CHEST = 1;
 
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
@@ -209,7 +204,8 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private List<ToolRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<ToolRecipe> recipes = new ArrayList<>();
-        ToolDemand demand = calculateToolDemand(world, inventory);
+        ToolsmithDemandPlanner.DemandSnapshot demandSnapshot = ToolsmithDemandPlanner.buildSnapshot(world, villager, inventory);
+        CraftingCheckLogger.report(world, "Toolsmith", "crafting " + demandSnapshot.compactSummary());
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
@@ -219,20 +215,21 @@ public class ToolsmithCraftingGoal extends Goal {
             if (!canUseRecipeWithoutCraftingTable(recipe) && !hasValidCraftingTable(world)) {
                 continue;
             }
-            ToolType toolType = ToolType.fromOutput(result);
+            ToolsmithDemandPlanner.ToolType toolType = ToolsmithDemandPlanner.ToolType.fromStack(result);
             if (toolType == null) {
                 continue;
             }
-            int deficit = demand.deficitFor(toolType);
-            if (toolType == ToolType.SHEARS && deficit <= 0) {
+            ToolsmithDemandPlanner.ToolDemand toolDemand = demandSnapshot.demandFor(toolType);
+            int deficit = toolDemand == null ? 0 : toolDemand.demandDeficit();
+            if (toolType == ToolsmithDemandPlanner.ToolType.SHEARS && deficit <= 0) {
                 continue;
             }
-            if (toolType == ToolType.FISHING_ROD && deficit <= 0) {
-                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + demand.fishingRodStock + "/" + demand.eligibleFishermanCount + ")");
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0 && toolDemand != null) {
+                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
                 continue;
             }
             if (canCraft(inventory, recipe)) {
-                recipes.add(new ToolRecipe(recipe, result, toolType, deficit, toolType.fallbackPriority));
+                recipes.add(new ToolRecipe(recipe, result, toolType, deficit, toolType.fallbackPriority()));
             }
         }
         recipes.sort(Comparator
@@ -242,55 +239,12 @@ public class ToolsmithCraftingGoal extends Goal {
         return filterLastCrafted(recipes);
     }
 
-    private ToolDemand calculateToolDemand(ServerWorld world, Inventory inventory) {
-        int eligibleFishermanCount = DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, 24.0D).size();
-        int eligibleMasonCount = DistributionRecipientHelper.findEligibleMasonRecipients(world, villager, 24.0D).size();
-        int eligibleFarmerCount = DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, 24.0D).size();
-        int eligibleShepherdCount = DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, 24.0D).size();
-
-        int fishingRodStock = countItemInInventory(inventory, Items.FISHING_ROD);
-        int pickaxeStock = countItemInInventory(inventory, PickaxeItem.class);
-        int hoeStock = countItemInInventory(inventory, HoeItem.class);
-        int shearsStock = countItemInInventory(inventory, ShearsItem.class);
-
-        return new ToolDemand(
-                fishingRodStock,
-                eligibleFishermanCount,
-                eligibleFishermanCount - (fishingRodStock / RODS_PER_FISHERMAN_STORAGE),
-                eligibleMasonCount - (pickaxeStock / TOOLS_PER_MASON_CHEST),
-                eligibleFarmerCount - (hoeStock / TOOLS_PER_FARMER_CHEST),
-                eligibleShepherdCount - (shearsStock / SHEARS_PER_SHEPHERD_CHEST)
-        );
-    }
-
     private boolean isToolItem(ItemStack stack) {
         return stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
                 || stack.getItem() instanceof HoeItem
                 || stack.getItem() instanceof ShearsItem
                 || stack.isOf(Items.FISHING_ROD);
-    }
-
-    private int countItemInInventory(Inventory inventory, Item item) {
-        int count = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (stack.isOf(item)) {
-                count += stack.getCount();
-            }
-        }
-        return count;
-    }
-
-    private int countItemInInventory(Inventory inventory, Class<?> itemType) {
-        int count = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (itemType.isInstance(stack.getItem())) {
-                count += stack.getCount();
-            }
-        }
-        return count;
     }
 
     private boolean hasNonTableCraftableRecipe(ServerWorld world) {
@@ -534,62 +488,9 @@ public class ToolsmithCraftingGoal extends Goal {
         DONE
     }
 
-    private record ToolRecipe(CraftingRecipe recipe, ItemStack output, ToolType toolType, int demandDeficit, int tieBreakWeight) {
+    private record ToolRecipe(CraftingRecipe recipe, ItemStack output, ToolsmithDemandPlanner.ToolType toolType, int demandDeficit, int tieBreakWeight) {
         int isPositiveDemand() {
             return demandDeficit > 0 ? 1 : 0;
-        }
-    }
-
-    private record ToolDemand(
-            int fishingRodStock,
-            int eligibleFishermanCount,
-            int fishingRodDeficit,
-            int pickaxeDeficit,
-            int hoeDeficit,
-            int shearsDeficit
-    ) {
-        int deficitFor(ToolType toolType) {
-            return switch (toolType) {
-                case PICKAXE -> pickaxeDeficit;
-                case FISHING_ROD -> fishingRodDeficit;
-                case HOE -> hoeDeficit;
-                case SHEARS -> shearsDeficit;
-                case SHOVEL -> 0;
-            };
-        }
-    }
-
-    private enum ToolType {
-        PICKAXE(0),
-        FISHING_ROD(1),
-        HOE(2),
-        SHEARS(3),
-        SHOVEL(4);
-
-        private final int fallbackPriority;
-
-        ToolType(int fallbackPriority) {
-            this.fallbackPriority = fallbackPriority;
-        }
-
-        @Nullable
-        static ToolType fromOutput(ItemStack output) {
-            if (output.getItem() instanceof PickaxeItem) {
-                return PICKAXE;
-            }
-            if (output.isOf(Items.FISHING_ROD)) {
-                return FISHING_ROD;
-            }
-            if (output.getItem() instanceof HoeItem) {
-                return HOE;
-            }
-            if (output.getItem() instanceof ShearsItem) {
-                return SHEARS;
-            }
-            if (output.getItem() instanceof ShovelItem) {
-                return SHOVEL;
-            }
-            return null;
         }
     }
 
