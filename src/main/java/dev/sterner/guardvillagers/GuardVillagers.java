@@ -15,6 +15,7 @@ import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -35,7 +36,6 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.block.AbstractBlock;
 import net.minecraft.block.Block;
 import net.minecraft.entity.*;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.*;
@@ -315,32 +315,27 @@ public class GuardVillagers implements ModInitializer {
                         villagerEntity.getZ() + (double) (villagerEntity.getRandom().nextFloat() * villagerEntity.getWidth() * 2.0F) - (double) villagerEntity.getWidth(), d0, d1, d2);
             }
         }
-        guard.copyPositionAndRotation(villagerEntity);
-        guard.headYaw = villagerEntity.headYaw;
-        guard.refreshPositionAndAngles(villagerEntity.getX(), villagerEntity.getY(), villagerEntity.getZ(), villagerEntity.getYaw(), villagerEntity.getPitch());
+        if (world instanceof ServerWorld serverWorld) {
+            GuardConversionHelper.copyVillagerIdentityAndPose(serverWorld, villagerEntity, guard);
+        } else {
+            guard.copyPositionAndRotation(villagerEntity);
+            guard.headYaw = villagerEntity.headYaw;
+            guard.refreshPositionAndAngles(villagerEntity.getX(), villagerEntity.getY(), villagerEntity.getZ(), villagerEntity.getYaw(), villagerEntity.getPitch());
+            int i = GuardEntity.getRandomTypeForBiome(guard.getWorld(), guard.getBlockPos());
+            guard.setGuardVariant(i);
+            guard.setPersistent();
+            guard.setCustomName(villagerEntity.getCustomName());
+            guard.setCustomNameVisible(villagerEntity.isCustomNameVisible());
+        }
         guard.playSound(SoundEvents.ENTITY_VILLAGER_YES, 1.0F, 1.0F);
         guard.equipStack(EquipmentSlot.MAINHAND, itemstack.copy());
         guard.guardInventory.setStack(5, itemstack.copy());
-
-        int i = GuardEntity.getRandomTypeForBiome(guard.getWorld(), guard.getBlockPos());
-        guard.setGuardVariant(i);
-        guard.setPersistent();
-        guard.setCustomName(villagerEntity.getCustomName());
-        guard.setCustomNameVisible(villagerEntity.isCustomNameVisible());
-        guard.setEquipmentDropChance(EquipmentSlot.HEAD, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.CHEST, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.FEET, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.LEGS, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.MAINHAND, 100.0F);
-        guard.setEquipmentDropChance(EquipmentSlot.OFFHAND, 100.0F);
+        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         world.spawnEntity(guard);
         if (world instanceof ServerWorld serverWorld) {
             VillageGuardStandManager.handleGuardSpawn(serverWorld, guard, villagerEntity);
         }
-        villagerEntity.releaseTicketFor(MemoryModuleType.HOME);
-        villagerEntity.releaseTicketFor(MemoryModuleType.JOB_SITE);
-        villagerEntity.releaseTicketFor(MemoryModuleType.MEETING_POINT);
-        villagerEntity.discard();
+        GuardConversionHelper.cleanupVillagerAfterConversion(villagerEntity);
     }
 
     public static boolean hotvChecker(PlayerEntity player, GuardEntity guard) {
