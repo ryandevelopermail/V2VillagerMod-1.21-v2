@@ -37,6 +37,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
+    private static final int GATHER_SEEDS_TIMEOUT_TICKS = 200;
+    private static final int MIN_WHEAT_SEED_TARGET = 5;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -66,8 +68,12 @@ public class FarmerHarvestGoal extends Goal {
     private int exitDelayTicks;
     private final Deque<BlockPos> hoeTargets = new ArrayDeque<>();
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
+    private final Deque<BlockPos> gatherSeedTargets = new ArrayDeque<>();
     private BlockPos currentHoeTarget;
     private long currentHoeTargetStartTick;
+    private BlockPos currentGatherTarget;
+    private long currentGatherTargetStartTick;
+    private long gatherSeedsStageStartTick;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -82,6 +88,8 @@ public class FarmerHarvestGoal extends Goal {
         this.stage = Stage.IDLE;
         this.harvestTargets.clear();
         this.currentHoeTarget = null;
+        this.gatherSeedTargets.clear();
+        this.currentGatherTarget = null;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -141,6 +149,8 @@ public class FarmerHarvestGoal extends Goal {
         harvestTargets.clear();
         currentTarget = null;
         currentHoeTarget = null;
+        currentGatherTarget = null;
+        gatherSeedTargets.clear();
         setStage(Stage.DONE);
     }
 
@@ -303,7 +313,11 @@ public class FarmerHarvestGoal extends Goal {
                     break;
                 }
                 if (!plantTargets.isEmpty()) {
-                    setStage(Stage.PLANT_FARMLAND);
+                    if (hasPlantablesInInventory()) {
+                        setStage(Stage.PLANT_FARMLAND);
+                    } else {
+                        setStage(Stage.GATHER_SEEDS);
+                    }
                     break;
                 }
                 if (dailyHarvestRun) {
@@ -317,7 +331,12 @@ public class FarmerHarvestGoal extends Goal {
                     currentHoeTarget = null;
                     populatePlantTargets(serverWorld);
                     if (!plantTargets.isEmpty()) {
-                        setStage(Stage.PLANT_FARMLAND);
+                        pickUpPlantablesFromChest(serverWorld);
+                        if (hasPlantablesInInventory()) {
+                            setStage(Stage.PLANT_FARMLAND);
+                        } else {
+                            setStage(Stage.GATHER_SEEDS);
+                        }
                     } else {
                         if (dailyHarvestRun) {
                             notifyDailyHarvestComplete(serverWorld);
@@ -391,6 +410,74 @@ public class FarmerHarvestGoal extends Goal {
                     }
                 }
                 plantTargets.removeFirst();
+            }
+            case GATHER_SEEDS -> {
+                if (plantTargets.isEmpty()) {
+                    populatePlantTargets(serverWorld);
+                    if (plantTargets.isEmpty()) {
+                        if (dailyHarvestRun) {
+                            notifyDailyHarvestComplete(serverWorld);
+                            dailyHarvestRun = false;
+                        }
+                        setStage(Stage.DONE);
+                        return;
+                    }
+                }
+
+                pickUpPlantablesFromChest(serverWorld);
+                if (hasPlantablesForPlanting()) {
+                    setStage(Stage.PLANT_FARMLAND);
+                    return;
+                }
+
+                if (serverWorld.getTime() - gatherSeedsStageStartTick >= GATHER_SEEDS_TIMEOUT_TICKS) {
+                    if (dailyHarvestRun) {
+                        notifyDailyHarvestComplete(serverWorld);
+                        dailyHarvestRun = false;
+                    }
+                    setStage(Stage.DONE);
+                    return;
+                }
+
+                if (gatherSeedTargets.isEmpty()) {
+                    populateGatherSeedTargets(serverWorld);
+                    if (gatherSeedTargets.isEmpty()) {
+                        if (dailyHarvestRun) {
+                            notifyDailyHarvestComplete(serverWorld);
+                            dailyHarvestRun = false;
+                        }
+                        setStage(Stage.DONE);
+                        return;
+                    }
+                }
+
+                BlockPos gatherTarget = gatherSeedTargets.peekFirst();
+                if (currentGatherTarget == null || !currentGatherTarget.equals(gatherTarget)) {
+                    currentGatherTarget = gatherTarget;
+                    currentGatherTargetStartTick = serverWorld.getTime();
+                }
+
+                if (serverWorld.getTime() - currentGatherTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    gatherSeedTargets.removeFirst();
+                    currentGatherTarget = null;
+                    return;
+                }
+
+                if (!isValidSeedSource(serverWorld, gatherTarget)) {
+                    gatherSeedTargets.removeFirst();
+                    currentGatherTarget = null;
+                    return;
+                }
+
+                if (!isNear(gatherTarget)) {
+                    moveTo(gatherTarget, MOVE_SPEED);
+                    return;
+                }
+
+                serverWorld.breakBlock(gatherTarget, true, villager);
+                collectNearbyDrops(serverWorld, gatherTarget);
+                gatherSeedTargets.removeFirst();
+                currentGatherTarget = null;
             }
             case IDLE, DONE -> {
             }
@@ -630,6 +717,11 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
         stage = newStage;
+        if (newStage == Stage.GATHER_SEEDS && villager.getWorld() instanceof ServerWorld world) {
+            gatherSeedsStageStartTick = world.getTime();
+            currentGatherTarget = null;
+            gatherSeedTargets.clear();
+        }
         LOGGER.info("Farmer {} entering harvest stage {}", villager.getUuidAsString(), newStage);
     }
 
@@ -646,6 +738,7 @@ public class FarmerHarvestGoal extends Goal {
         RETURN_TO_CHEST,
         DEPOSIT,
         HOE_GROUND,
+        GATHER_SEEDS,
         PLANT_FARMLAND,
         DONE
     }
@@ -975,6 +1068,56 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private boolean hasPlantablesInInventory() {
+        return findFirstPlantableInInventory() != null;
+    }
+
+    private boolean hasPlantablesForPlanting() {
+        return countItemInInventory(Items.CARROT) > 0
+                || countItemInInventory(Items.POTATO) > 0
+                || countItemInInventory(Items.BEETROOT_SEEDS) > 0
+                || countItemInInventory(Items.WHEAT_SEEDS) >= MIN_WHEAT_SEED_TARGET;
+    }
+
+    private int countItemInInventory(Item item) {
+        int total = 0;
+        for (int slot = 0; slot < villager.getInventory().size(); slot++) {
+            ItemStack stack = villager.getInventory().getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private void populateGatherSeedTargets(ServerWorld world) {
+        gatherSeedTargets.clear();
+        List<BlockPos> candidates = new ArrayList<>();
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (!isValidSeedSource(world, pos)) {
+                continue;
+            }
+            candidates.add(pos.toImmutable());
+        }
+        candidates.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
+        gatherSeedTargets.addAll(candidates);
+    }
+
+    private boolean isValidSeedSource(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isOf(Blocks.SHORT_GRASS)
+                || state.isOf(Blocks.TALL_GRASS)
+                || state.isOf(Blocks.FERN)
+                || state.isOf(Blocks.LARGE_FERN);
     }
 
     private boolean hasNearbyWater(ServerWorld world, BlockPos farmlandCandidate) {
