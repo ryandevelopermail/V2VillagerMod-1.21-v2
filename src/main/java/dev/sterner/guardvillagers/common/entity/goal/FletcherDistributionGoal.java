@@ -41,6 +41,10 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canForwardSeeds(world, inventory)) {
+            return true;
+        }
+
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -55,6 +59,10 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (selectSeedForwardingTransfer(world, inventory)) {
+            return true;
+        }
+
         if (inventory == null) {
             return false;
         }
@@ -95,6 +103,10 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return refreshSeedForwardingTarget(world);
+        }
+
         List<RecipientRecord> recipients = findRecipientForStack(world, pendingItem);
         if (recipients.isEmpty()) {
             return false;
@@ -122,6 +134,10 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return executeSeedForwardingTransfer(world);
+        }
+
         if (pendingItem.isEmpty() || pendingTargetId == null) {
             return false;
         }

@@ -157,3 +157,20 @@ Confirm existing non-armorer smith behavior remains unchanged:
 
 - Shepherd/Butcher trigger checklist: `docs/shepherd-butcher-trigger-qa-checklist.md`
 - Behavior-package harness notes: `src/main/java/dev/sterner/guardvillagers/common/villager/behavior/QA_TEST_HARNESS_NOTES.md`
+
+## QA checklist: shared seed forwarding across profession chests
+
+Use this quick checklist to validate that seed forwarding runs before profession-specific distribution and routes seeds to eligible farmer+composter recipients.
+
+1. **Mason chest seed-forward case**
+   - Put `VILLAGER_PLANTABLE_SEEDS` items in a mason distribution chest.
+   - Ensure at least one nearby farmer has a valid composter job block and paired chest.
+   - Expected: seeds leave mason chest and are inserted into the farmer recipient chest.
+
+2. **Fletcher chest seed-forward case**
+   - Put plantable seeds in a fletcher chest alongside fletcher items (bows/arrows/crossbows).
+   - Expected: seeds are forwarded to farmer recipient chest first, while normal fletcher routing still handles fletcher-specific items.
+
+3. **Random profession chest seed-forward case**
+   - Use any non-farmer profession chest (for example cartographer, cleric, or toolsmith) containing only plantable seeds.
+   - Expected: distribution still starts and forwards seeds to farmer recipient chest even when no profession-specific item is present.

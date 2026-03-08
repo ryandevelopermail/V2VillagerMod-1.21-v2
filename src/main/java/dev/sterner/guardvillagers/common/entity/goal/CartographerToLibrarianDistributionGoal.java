@@ -31,6 +31,10 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canForwardSeeds(world, inventory)) {
+            return true;
+        }
+
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isValidFilledMap(stack, world)) {
@@ -45,6 +49,10 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (selectSeedForwardingTransfer(world, inventory)) {
+            return true;
+        }
+
         if (inventory == null) {
             return false;
         }
@@ -76,6 +84,10 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return refreshSeedForwardingTarget(world);
+        }
+
         if (!isValidFilledMap(pendingItem, world)) {
             return false;
         }
@@ -102,6 +114,10 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return executeSeedForwardingTransfer(world);
+        }
+
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }

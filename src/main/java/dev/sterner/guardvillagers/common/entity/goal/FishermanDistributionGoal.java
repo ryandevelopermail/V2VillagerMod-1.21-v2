@@ -32,6 +32,10 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canForwardSeeds(world, inventory)) {
+            return true;
+        }
+
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -46,6 +50,10 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (selectSeedForwardingTransfer(world, inventory)) {
+            return true;
+        }
+
         if (inventory == null) {
             return false;
         }
@@ -76,6 +84,10 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return refreshSeedForwardingTarget(world);
+        }
+
         List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleButcherRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
@@ -98,6 +110,10 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return executeSeedForwardingTransfer(world);
+        }
+
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }

@@ -29,6 +29,10 @@ public class FarmerDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canForwardSeeds(world, inventory)) {
+            return true;
+        }
+
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -43,6 +47,10 @@ public class FarmerDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (selectSeedForwardingTransfer(world, inventory)) {
+            return true;
+        }
+
         if (inventory == null) {
             return false;
         }
@@ -74,6 +82,10 @@ public class FarmerDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return refreshSeedForwardingTarget(world);
+        }
+
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
@@ -100,6 +112,10 @@ public class FarmerDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return executeSeedForwardingTransfer(world);
+        }
+
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }

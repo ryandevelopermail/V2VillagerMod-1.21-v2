@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -8,6 +9,7 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import org.jetbrains.annotations.Nullable;
@@ -21,6 +23,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final int PATH_RETRY_INTERVAL_TICKS = 20;
     protected static final double TARGET_REACH_SQUARED = 4.0D;
     protected static final double MOVE_SPEED = 0.6D;
+    protected static final double SEED_RECIPIENT_SCAN_RANGE = 24.0D;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -32,6 +35,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected ItemStack pendingItem = ItemStack.EMPTY;
     protected UUID pendingTargetId;
     protected BlockPos pendingTargetPos;
+    protected boolean pendingSeedForwarding;
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
 
@@ -188,11 +192,18 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (chestPos == null) {
             return Optional.empty();
         }
-        BlockState state = world.getBlockState(chestPos);
+        return getChestInventory(world, chestPos);
+    }
+
+    protected Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
+        if (position == null) {
+            return Optional.empty();
+        }
+        BlockState state = world.getBlockState(position);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, position, true);
         return Optional.ofNullable(inventory);
     }
 
@@ -285,6 +296,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingItem = ItemStack.EMPTY;
         pendingTargetId = null;
         pendingTargetPos = null;
+        pendingSeedForwarding = false;
         clearPendingTargetState();
     }
 
@@ -342,6 +354,10 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected abstract boolean isDistributableItem(ItemStack stack);
 
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canForwardSeeds(world, inventory)) {
+            return true;
+        }
+
         double fullnessTrigger = getSourceChestFullnessTrigger();
         if (fullnessTrigger > 0.0D && !isInventoryAtLeastFull(inventory, fullnessTrigger)) {
             return false;
@@ -362,6 +378,10 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
         if (inventory == null) {
             return false;
+        }
+
+        if (selectSeedForwardingTransfer(world, inventory)) {
+            return true;
         }
 
         for (int slot = 0; slot < inventory.size(); slot++) {
@@ -389,6 +409,10 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return refreshSeedForwardingTarget(world);
+        }
+
         ArmorStandEntity stand = resolveTargetStand(world);
         if (stand != null && isStandAvailableForPendingItem(world, stand)) {
             pendingTargetPos = stand.getBlockPos();
@@ -405,10 +429,112 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingSeedForwarding) {
+            return executeSeedForwardingTransfer(world);
+        }
+
         ArmorStandEntity stand = resolveTargetStand(world);
         return stand != null
                 && isStandAvailableForPendingItem(world, stand)
                 && placePendingItemOnStand(world, stand);
+    }
+
+    protected boolean canForwardSeeds(ServerWorld world, Inventory sourceInventory) {
+        if (sourceInventory == null || !hasSeeds(sourceInventory)) {
+            return false;
+        }
+        return !DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, SEED_RECIPIENT_SCAN_RANGE).isEmpty();
+    }
+
+    protected boolean selectSeedForwardingTransfer(ServerWorld world, Inventory sourceInventory) {
+        if (sourceInventory == null) {
+            return false;
+        }
+
+        java.util.List<DistributionRecipientHelper.RecipientRecord> recipients =
+                DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, SEED_RECIPIENT_SCAN_RANGE);
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        for (int slot = 0; slot < sourceInventory.size(); slot++) {
+            ItemStack stack = sourceInventory.getStack(slot);
+            if (!isSeed(stack)) {
+                continue;
+            }
+
+            DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+            ItemStack extracted = stack.split(1);
+            sourceInventory.setStack(slot, stack);
+            sourceInventory.markDirty();
+
+            pendingItem = extracted;
+            pendingTargetId = recipient.recipient().getUuid();
+            pendingTargetPos = recipient.chestPos();
+            pendingSeedForwarding = true;
+            return true;
+        }
+
+        return false;
+    }
+
+    protected boolean refreshSeedForwardingTarget(ServerWorld world) {
+        if (!pendingSeedForwarding || !isSeed(pendingItem)) {
+            return false;
+        }
+
+        java.util.List<DistributionRecipientHelper.RecipientRecord> recipients =
+                DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, SEED_RECIPIENT_SCAN_RANGE);
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        if (pendingTargetId != null) {
+            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
+                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
+                    pendingTargetPos = recipient.chestPos();
+                    return true;
+                }
+            }
+        }
+
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        pendingTargetId = recipient.recipient().getUuid();
+        pendingTargetPos = recipient.chestPos();
+        return true;
+    }
+
+    protected boolean executeSeedForwardingTransfer(ServerWorld world) {
+        if (!pendingSeedForwarding || pendingItem.isEmpty() || pendingTargetPos == null) {
+            return false;
+        }
+
+        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetPos);
+        if (targetInventory.isEmpty()) {
+            return false;
+        }
+
+        ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
+        targetInventory.get().markDirty();
+        if (remaining.isEmpty()) {
+            return true;
+        }
+
+        pendingItem = remaining;
+        return false;
+    }
+
+    protected boolean hasSeeds(Inventory inventory) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (isSeed(inventory.getStack(slot))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected boolean isSeed(ItemStack stack) {
+        return !stack.isEmpty() && stack.isIn(ItemTags.VILLAGER_PLANTABLE_SEEDS);
     }
 
     protected ArmorStandEntity resolveTargetStand(ServerWorld world) {
