@@ -6,13 +6,13 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
-import dev.sterner.guardvillagers.mixin.TakeJobSiteTaskMixin;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
@@ -248,7 +248,7 @@ public class GuardVillagers implements ModInitializer {
                 }
                 runConversionHooksOnSchedule(world);
             }
-            TakeJobSiteTaskMixin.guardvillagers$warnIfInjectMissing(server.getWorlds());
+            TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });
     }
 
