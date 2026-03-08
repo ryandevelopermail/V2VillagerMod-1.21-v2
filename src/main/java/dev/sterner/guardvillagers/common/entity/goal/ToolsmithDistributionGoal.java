@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -8,6 +10,7 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
@@ -30,7 +33,8 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         return stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
                 || stack.getItem() instanceof HoeItem
-                || stack.getItem() instanceof ShearsItem;
+                || stack.getItem() instanceof ShearsItem
+                || stack.isOf(Items.FISHING_ROD);
     }
 
     @Override
@@ -72,6 +76,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             pendingItem = extracted;
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
+            if (pendingItem.isOf(Items.FISHING_ROD)) {
+                CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
+            }
             return true;
         }
         return false;
@@ -88,6 +95,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
                 if (recipient.recipient().getUuid().equals(pendingTargetId)) {
                     pendingTargetPos = recipient.chestPos();
+                    if (pendingItem.isOf(Items.FISHING_ROD)) {
+                        CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
+                    }
                     return true;
                 }
             }
@@ -96,6 +106,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
+        if (pendingItem.isOf(Items.FISHING_ROD)) {
+            CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
+        }
         return true;
     }
 
@@ -157,14 +170,34 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         if (stack.getItem() instanceof ShearsItem) {
             return DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
+        if (stack.isOf(Items.FISHING_ROD)) {
+            return DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        }
         return List.of();
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
         BlockState state = world.getBlockState(position);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        if (state.getBlock() instanceof BarrelBlock barrelBlock) {
+            return Optional.ofNullable(BarrelBlock.getInventory(barrelBlock, state, world, position));
+        }
+        return Optional.empty();
+    }
+
+    private String describeStorageType(ServerWorld world, BlockPos position) {
+        if (position == null) {
+            return "unknown storage";
+        }
+        BlockState state = world.getBlockState(position);
+        if (state.getBlock() instanceof BarrelBlock) {
+            return "barrel";
+        }
+        if (state.getBlock() instanceof ChestBlock) {
+            return "chest";
+        }
+        return "unknown storage";
     }
 }

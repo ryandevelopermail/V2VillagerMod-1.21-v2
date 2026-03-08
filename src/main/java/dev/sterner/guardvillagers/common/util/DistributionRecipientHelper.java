@@ -45,6 +45,39 @@ public final class DistributionRecipientHelper {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.SHEPHERD, Blocks.LOOM);
     }
 
+    public static List<RecipientRecord> findEligibleFishermanRecipients(ServerWorld world, VillagerEntity source, double range) {
+        if (range <= 0.0D || !source.isAlive()) {
+            return List.of();
+        }
+
+        List<RecipientRecord> recipients = new ArrayList<>();
+        Box scanBox = new Box(source.getBlockPos()).expand(range);
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == VillagerProfession.FISHERMAN)) {
+            Optional<GlobalPos> jobSiteMemory = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSiteMemory.isEmpty()) {
+                continue;
+            }
+
+            GlobalPos globalPos = jobSiteMemory.get();
+            if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+                continue;
+            }
+
+            BlockPos jobPos = globalPos.pos();
+            if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+                continue;
+            }
+
+            double squaredDistance = source.squaredDistanceTo(villager);
+            recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), jobPos.toImmutable(), squaredDistance));
+            JobBlockPairingHelper.findNearbyChest(world, jobPos)
+                    .ifPresent(chestPos -> recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), chestPos.toImmutable(), squaredDistance)));
+        }
+
+        recipients.sort(RECIPIENT_ORDER);
+        return recipients;
+    }
+
     public static List<RecipientRecord> findEligibleButcherRecipients(ServerWorld world, VillagerEntity source, double range) {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.BUTCHER, Blocks.SMOKER);
     }
