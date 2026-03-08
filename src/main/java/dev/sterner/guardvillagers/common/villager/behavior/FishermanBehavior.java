@@ -12,6 +12,7 @@ import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
@@ -48,6 +49,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, FishermanDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<BlockPos, Set<VillagerEntity>> BARREL_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
+    private static final long STORAGE_SCAN_COOLDOWN_TICKS = 20L;
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -88,6 +92,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         }
 
         updateChestListener(world, villager, chestPos);
+        updateBarrelListener(villager, jobPos);
         tryConvertWithRod(world, villager, jobPos, chestPos);
     }
 
@@ -140,6 +145,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         distributionGoal.requestImmediateDistribution();
 
         updateChestListener(world, villager, chestPos);
+        updateBarrelListener(villager, jobPos);
         tryConvertWithRod(world, villager, jobPos, chestPos);
     }
 
@@ -163,12 +169,10 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
                 continue;
             }
 
-            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos);
-            if (chestPos.isEmpty() || !jobPos.isWithinDistance(chestPos.get(), 3.0D)) {
-                continue;
-            }
+            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos)
+                    .filter(foundChestPos -> jobPos.isWithinDistance(foundChestPos, 3.0D));
 
-            tryConvertWithRod(world, villager, jobPos, chestPos.get());
+            tryConvertWithRod(world, villager, jobPos, chestPos.orElse(null));
         }
     }
 
@@ -186,7 +190,9 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         GuardConversionHelper.initializeConvertedGuard(world, villager, guard, jobPos);
         GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         guard.equipStack(EquipmentSlot.MAINHAND, rodStack);
-        guard.setPairedChestPos(chestPos);
+        if (chestPos != null) {
+            guard.setPairedChestPos(chestPos);
+        }
         guard.setPairedJobPos(jobPos);
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.FISHERMAN, "fisherman conversion");
@@ -213,15 +219,17 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static List<Inventory> getStorageInventoriesForRodSearch(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
         List<Inventory> inventories = new ArrayList<>(2);
 
-        if (world.getBlockEntity(jobPos) instanceof Inventory barrelInventory) {
+        if (world.getBlockEntity(jobPos) instanceof BarrelBlockEntity barrelInventory) {
             inventories.add(barrelInventory);
         }
 
-        BlockState chestState = world.getBlockState(chestPos);
-        if (chestState.getBlock() instanceof ChestBlock chestBlock) {
-            Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
-            if (chestInventory != null) {
-                inventories.add(chestInventory);
+        if (chestPos != null) {
+            BlockState chestState = world.getBlockState(chestPos);
+            if (chestState.getBlock() instanceof ChestBlock chestBlock) {
+                Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
+                if (chestInventory != null) {
+                    inventories.add(chestInventory);
+                }
             }
         }
 
@@ -265,13 +273,49 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         CHEST_REGISTRATIONS.put(villager, new ChestRegistration(villager, observedChestPositions));
     }
 
+    private void updateBarrelListener(VillagerEntity villager, BlockPos jobPos) {
+        BARREL_WATCHERS_BY_POS.computeIfAbsent(jobPos.toImmutable(), ignored -> new HashSet<>()).add(villager);
+    }
+
     public static void onChestInventoryMutated(ServerWorld world, BlockPos chestPos) {
         Set<VillagerEntity> villagers = CHEST_WATCHERS_BY_POS.get(chestPos);
         if (villagers == null || villagers.isEmpty()) {
             return;
         }
 
-        Set<VillagerEntity> snapshot = Set.copyOf(villagers);
+        handleStorageMutation(world, Set.copyOf(villagers));
+    }
+
+    public static void onBarrelInventoryMutated(ServerWorld world, BlockPos barrelPos) {
+        Set<VillagerEntity> villagers = new LinkedHashSet<>();
+
+        Set<VillagerEntity> watchedVillagers = BARREL_WATCHERS_BY_POS.get(barrelPos);
+        if (watchedVillagers != null && !watchedVillagers.isEmpty()) {
+            villagers.addAll(watchedVillagers);
+        }
+
+        Box scanBox = new Box(barrelPos).expand(24.0D);
+        villagers.addAll(world.getEntitiesByClass(
+                VillagerEntity.class,
+                scanBox,
+                villager -> villager.isAlive()
+                        && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
+                        && villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(net.minecraft.util.math.GlobalPos::pos)
+                        .filter(barrelPos::equals)
+                        .isPresent()
+        ));
+
+        if (villagers.isEmpty()) {
+            return;
+        }
+
+        handleStorageMutation(world, Set.copyOf(villagers));
+    }
+
+    private static void handleStorageMutation(ServerWorld world, Set<VillagerEntity> snapshot) {
+        boolean shouldRunConversionHooks = false;
+
         for (VillagerEntity villager : snapshot) {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
@@ -288,8 +332,26 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             }
 
             VillagerConversionCandidateIndex.markCandidate(world, villager);
+
+            if (!isConversionScanOnCooldown(world, villager)) {
+                shouldRunConversionHooks = true;
+            }
+        }
+
+        if (shouldRunConversionHooks) {
             ProfessionDefinitions.runConversionHooks(world);
         }
+    }
+
+    private static boolean isConversionScanOnCooldown(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+        long nextAllowedTick = NEXT_CONVERSION_SCAN_TICK.getOrDefault(villager, 0L);
+        if (now < nextAllowedTick) {
+            return true;
+        }
+
+        NEXT_CONVERSION_SCAN_TICK.put(villager, now + STORAGE_SCAN_COOLDOWN_TICKS);
+        return false;
     }
 
     private void clearChestListener(VillagerEntity villager) {
@@ -297,6 +359,12 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             removeChestListener(existing);
         }
+
+        for (Set<VillagerEntity> watchers : BARREL_WATCHERS_BY_POS.values()) {
+            watchers.remove(villager);
+        }
+        BARREL_WATCHERS_BY_POS.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+        NEXT_CONVERSION_SCAN_TICK.remove(villager);
     }
 
     private void removeChestListener(ChestRegistration existing) {

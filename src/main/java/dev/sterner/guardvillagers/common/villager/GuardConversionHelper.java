@@ -48,7 +48,7 @@ public final class GuardConversionHelper {
         return "villager=" + villager.getUuidAsString()
                 + ", guard=" + guard.getUuidAsString()
                 + ", job=" + jobPos.toShortString()
-                + ", chest=" + chestPos.toShortString()
+                + ", chest=" + (chestPos == null ? "none" : chestPos.toShortString())
                 + ", source=" + source;
     }
 }
