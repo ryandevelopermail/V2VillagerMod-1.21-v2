@@ -43,7 +43,9 @@ public class FindPointOfInterestTaskMixin {
             it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
-        if (((MemoryQueryResultAccessor) queryResult).guardvillagers$getMemoryModuleType() != MemoryModuleType.POTENTIAL_JOB_SITE) {
+        MemoryModuleType<?> memoryType = ((MemoryQueryResultAccessor) (Object) queryResult)
+                .guardvillagers$getMemoryModuleType();
+        if (memoryType != MemoryModuleType.POTENTIAL_JOB_SITE) {
             return originalPredicate;
         }
 
