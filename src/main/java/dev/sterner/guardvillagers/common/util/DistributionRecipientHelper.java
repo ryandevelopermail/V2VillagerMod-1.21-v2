@@ -86,6 +86,16 @@ public final class DistributionRecipientHelper {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.LEATHERWORKER, Blocks.CAULDRON);
     }
 
+    public static List<RecipientRecord> findEligibleRecipients(
+            ServerWorld world,
+            VillagerEntity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock
+    ) {
+        return findEligibleVillagerRecipients(world, source, range, profession, expectedJobBlock);
+    }
+
     private static List<RecipientRecord> findEligibleVillagerRecipients(
             ServerWorld world,
             VillagerEntity source,
