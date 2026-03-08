@@ -7,7 +7,12 @@ import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandMemoryHolder;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.GlobalPos;
+import net.minecraft.village.VillagerProfession;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.util.Identifier;
@@ -197,4 +202,31 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
             nbt.remove(LEATHERWORKER_LAST_CRAFTED_KEY);
         }
     }
+
+    @Inject(method = "mobTick", at = @At("TAIL"))
+    private void guardvillagers$releaseReservedConvertedWorkerJobSites(CallbackInfo ci) {
+        VillagerEntity villager = (VillagerEntity) (Object) this;
+        if (villager.getWorld().isClient || !(villager.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        if (villager.getVillagerData().getProfession() != VillagerProfession.NONE) {
+            return;
+        }
+
+        villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                .filter(globalPos -> globalPos.dimension() == serverWorld.getRegistryKey())
+                .map(GlobalPos::pos)
+                .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReserved(serverWorld, jobPos))
+                .ifPresent(jobPos -> {
+                    ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos).ifPresent(guardUuid ->
+                            dev.sterner.guardvillagers.GuardVillagers.LOGGER.debug("Villager {} skipped reserved job site {} guarded by {}",
+                                    villager.getUuidAsString(),
+                                    jobPos.toShortString(),
+                                    guardUuid));
+                    villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
+                    villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+                });
+    }
+
 }
