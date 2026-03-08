@@ -47,6 +47,33 @@ public final class ConvertedWorkerJobSiteReservationManager {
                 .add(immutablePos);
     }
 
+    public static EnsureResult ensureReservation(ServerWorld world,
+                                                 BlockPos pos,
+                                                 UUID guardUuid,
+                                                 VillagerProfession expectedProfession,
+                                                 String source) {
+        BlockPos immutablePos = pos.toImmutable();
+        WorldKey worldKey = WorldKey.from(world);
+        Map<BlockPos, Reservation> byPos = RESERVATIONS_BY_POS.computeIfAbsent(worldKey, ignored -> new HashMap<>());
+        Reservation existing = byPos.get(immutablePos);
+
+        if (existing != null) {
+            if (!isReservationValid(world, immutablePos, existing)) {
+                clearReservation(world, worldKey, immutablePos, existing, "expected workstation block mismatch");
+                reserve(world, immutablePos, guardUuid, expectedProfession, source);
+                return EnsureResult.ADDED_AFTER_INVALID_REMOVAL;
+            }
+            if (existing.guardUuid().equals(guardUuid) && existing.expectedProfession() == expectedProfession) {
+                return EnsureResult.UNCHANGED;
+            }
+            reserve(world, immutablePos, guardUuid, expectedProfession, source);
+            return EnsureResult.REPLACED_EXISTING;
+        }
+
+        reserve(world, immutablePos, guardUuid, expectedProfession, source);
+        return EnsureResult.ADDED;
+    }
+
     public static boolean isReserved(ServerWorld world, BlockPos pos) {
         WorldKey worldKey = WorldKey.from(world);
         Map<BlockPos, Reservation> byPos = RESERVATIONS_BY_POS.get(worldKey);
@@ -115,6 +142,23 @@ public final class ConvertedWorkerJobSiteReservationManager {
         return reservation == null ? Optional.empty() : Optional.of(reservation.guardUuid());
     }
 
+    public static boolean removeReservation(ServerWorld world, BlockPos pos, String reason) {
+        WorldKey worldKey = WorldKey.from(world);
+        Map<BlockPos, Reservation> byPos = RESERVATIONS_BY_POS.get(worldKey);
+        if (byPos == null) {
+            return false;
+        }
+
+        BlockPos immutablePos = pos.toImmutable();
+        Reservation reservation = byPos.get(immutablePos);
+        if (reservation == null) {
+            return false;
+        }
+
+        clearReservation(world, worldKey, immutablePos, reservation, reason);
+        return true;
+    }
+
     private static boolean isReservationValid(ServerWorld world, BlockPos pos, Reservation reservation) {
         BlockState state = world.getBlockState(pos);
         return ProfessionDefinitions.isExpectedJobBlock(reservation.expectedProfession(), state);
@@ -155,6 +199,13 @@ public final class ConvertedWorkerJobSiteReservationManager {
     }
 
     private record Reservation(UUID guardUuid, VillagerProfession expectedProfession) {
+    }
+
+    public enum EnsureResult {
+        UNCHANGED,
+        ADDED,
+        ADDED_AFTER_INVALID_REMOVAL,
+        REPLACED_EXISTING
     }
 
     private record WorldKey(net.minecraft.registry.RegistryKey<World> worldKey) {
