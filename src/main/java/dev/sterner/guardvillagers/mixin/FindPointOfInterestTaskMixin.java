@@ -32,7 +32,7 @@ public class FindPointOfInterestTaskMixin {
             ),
             require = 0
     )
-    private static boolean guardvillagers$filterReservedPotentialSites(
+    private static boolean guardvillagers$filterReservedPotentialSites$method46880(
             Predicate<BlockPos> originalPredicate,
             Object candidatePos,
             PointOfInterestStorage poiStorage,
@@ -43,6 +43,43 @@ public class FindPointOfInterestTaskMixin {
             Optional<Byte> entityStatus,
             PathAwareEntity entity,
             it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
+            RegistryEntry<PointOfInterestType> poiType
+    ) {
+        return guardvillagers$filterReservedPotentialSites(originalPredicate, candidatePos, poiPosPredicate, queryResult, entityStatus, world, entity, poiType);
+    }
+
+    @Redirect(
+            method = "method_46881",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Ljava/util/function/Predicate;test(Ljava/lang/Object;)Z"
+            ),
+            require = 0
+    )
+    private static boolean guardvillagers$filterReservedPotentialSites$method46881(
+            Predicate<BlockPos> originalPredicate,
+            Object candidatePos,
+            PointOfInterestStorage poiStorage,
+            Predicate<BlockPos> poiPosPredicate,
+            BlockPos pos,
+            MemoryQueryResult<?, ?> queryResult,
+            ServerWorld world,
+            Optional<Byte> entityStatus,
+            PathAwareEntity entity,
+            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
+            RegistryEntry<PointOfInterestType> poiType
+    ) {
+        return guardvillagers$filterReservedPotentialSites(originalPredicate, candidatePos, poiPosPredicate, queryResult, entityStatus, world, entity, poiType);
+    }
+
+    private static boolean guardvillagers$filterReservedPotentialSites(
+            Predicate<BlockPos> originalPredicate,
+            Object candidatePos,
+            Predicate<BlockPos> poiPosPredicate,
+            MemoryQueryResult<?, ?> queryResult,
+            Optional<Byte> entityStatus,
+            ServerWorld world,
+            PathAwareEntity entity,
             RegistryEntry<PointOfInterestType> poiType
     ) {
         if (!(candidatePos instanceof BlockPos blockPos)) {
@@ -61,7 +98,7 @@ public class FindPointOfInterestTaskMixin {
         TakeJobSiteInjectDiagnostics.markPotentialJobSiteHookObserved();
 
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, blockPos)) {
-            LOGGER.debug("potential-job-site reservation reject: entity={} jobSite={} poiType={}",
+            LOGGER.debug("potential job site rejected (reserved): entity={} jobSite={} poiType={}",
                     entity.getUuidAsString(),
                     blockPos.toShortString(),
                     String.valueOf(poiType));
