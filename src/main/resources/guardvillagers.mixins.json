@@ -13,8 +13,7 @@
     "FindPointOfInterestTaskMixin",
     "TakeJobSiteTaskMixin",
     "VillagerTaskListProviderMixin",
-    "StructureTemplateMixin",
-    "MemoryQueryResultAccessor"
+    "StructureTemplateMixin"
   ],
   "injectors": {
     "defaultRequire": 1
