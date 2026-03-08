@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -39,7 +40,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
-    protected boolean pendingOverflowTransfer;
+    protected boolean pendingUniversalRoute;
 
     protected AbstractInventoryDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -90,7 +91,9 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (inventory == null) {
             return false;
         }
-        if (!canStartWithInventory(world, inventory)) {
+
+        boolean universalCandidate = supportsUniversalRouting() && hasUniversalTransferCandidate(world, inventory);
+        if (!universalCandidate && !canStartWithInventory(world, inventory)) {
             return false;
         }
 
@@ -127,7 +130,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         switch (stage) {
             case GO_TO_CHEST -> {
                 if (isNear(chestPos)) {
-                    if (!selectPendingTransfer(world, getChestInventory(world).orElse(null))) {
+                    Inventory sourceInventory = getChestInventory(world).orElse(null);
+                    if (!selectUniversalPendingTransfer(world, sourceInventory) && !selectPendingTransfer(world, sourceInventory)) {
                         stage = Stage.DONE;
                         return;
                     }
@@ -142,7 +146,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                     stage = Stage.DONE;
                     return;
                 }
-                if (!refreshTargetForPendingItem(world)) {
+                if (!refreshPendingTarget(world)) {
                     returnPendingItem(world);
                     stage = Stage.DONE;
                     return;
@@ -158,17 +162,17 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                     stage = Stage.DONE;
                     return;
                 }
-                if (!refreshTargetForPendingItem(world)) {
+                if (!refreshPendingTarget(world)) {
                     returnPendingItem(world);
                     stage = Stage.DONE;
                     return;
                 }
-                if (executeTransfer(world)) {
+                if (executePendingTransfer(world)) {
                     clearPendingState();
                     stage = Stage.DONE;
                     return;
                 }
-                if (refreshTargetForPendingItem(world)) {
+                if (refreshPendingTarget(world)) {
                     stage = Stage.GO_TO_TARGET;
                     return;
                 }
@@ -291,7 +295,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingItem = ItemStack.EMPTY;
         pendingTargetId = null;
         pendingTargetPos = null;
-        pendingOverflowTransfer = false;
+        pendingUniversalRoute = false;
         clearPendingTargetState();
     }
 
@@ -319,6 +323,10 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected boolean isInventoryAtLeastFull(Inventory inventory, double fullnessThreshold) {
+        return getInventoryFullness(inventory) >= fullnessThreshold;
+    }
+
+    protected double getInventoryFullness(Inventory inventory) {
         long maxCapacity = 0L;
         long usedCapacity = 0L;
 
@@ -331,7 +339,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             }
         }
 
-        return maxCapacity > 0L && (double) usedCapacity / (double) maxCapacity >= fullnessThreshold;
+        return maxCapacity > 0L ? (double) usedCapacity / (double) maxCapacity : 0.0D;
     }
 
     protected double getSourceChestFullnessTrigger() {
@@ -526,6 +534,101 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         return false;
     }
 
+    protected boolean supportsUniversalRouting() {
+        return true;
+    }
+
+    protected double getUniversalRecipientRange() {
+        return 24.0D;
+    }
+
+    protected Optional<UniversalDistributionRouter.ResolvedRoute> resolveUniversalRoute(ServerWorld world, Inventory inventory) {
+        return UniversalDistributionRouter.resolve(world, villager, inventory, getInventoryFullness(inventory), getUniversalRecipientRange());
+    }
+
+    protected boolean hasUniversalTransferCandidate(ServerWorld world, Inventory inventory) {
+        if (!supportsUniversalRouting() || inventory == null) {
+            return false;
+        }
+        return resolveUniversalRoute(world, inventory).isPresent();
+    }
+
+    protected boolean selectUniversalPendingTransfer(ServerWorld world, Inventory inventory) {
+        if (!supportsUniversalRouting() || inventory == null) {
+            return false;
+        }
+
+        Optional<UniversalDistributionRouter.ResolvedRoute> route = resolveUniversalRoute(world, inventory);
+        if (route.isEmpty()) {
+            return false;
+        }
+
+        UniversalDistributionRouter.ResolvedRoute resolvedRoute = route.get();
+        int sourceSlot = resolvedRoute.sourceSlot();
+        if (sourceSlot < 0 || sourceSlot >= inventory.size()) {
+            return false;
+        }
+
+        ItemStack stack = inventory.getStack(sourceSlot);
+        if (stack.isEmpty()) {
+            return false;
+        }
+
+        List<DistributionRecipientHelper.RecipientRecord> recipients = resolvedRoute.recipients();
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        ItemStack extracted = stack.split(1);
+        inventory.setStack(sourceSlot, stack);
+        inventory.markDirty();
+
+        pendingItem = extracted;
+        pendingTargetId = recipient.recipient().getUuid();
+        pendingTargetPos = recipient.chestPos();
+        pendingUniversalRoute = true;
+        return true;
+    }
+
+    protected boolean refreshPendingTarget(ServerWorld world) {
+        if (!pendingUniversalRoute) {
+            return refreshTargetForPendingItem(world);
+        }
+        if (pendingItem.isEmpty()) {
+            return false;
+        }
+
+        Optional<UniversalDistributionRouter.ResolvedRecipients> route = UniversalDistributionRouter.resolveRecipientsForItem(
+                world,
+                villager,
+                pendingItem,
+                1.0D,
+                getUniversalRecipientRange());
+        if (route.isEmpty()) {
+            return false;
+        }
+
+        List<DistributionRecipientHelper.RecipientRecord> recipients = route.get().recipients();
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        if (pendingTargetId != null) {
+            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
+                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
+                    pendingTargetPos = recipient.chestPos();
+                    return true;
+                }
+            }
+        }
+
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        pendingTargetId = recipient.recipient().getUuid();
+        pendingTargetPos = recipient.chestPos();
+        return true;
+    }
+
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
         ArmorStandEntity stand = resolveTargetStand(world);
         if (stand != null && isStandAvailableForPendingItem(world, stand)) {
@@ -540,6 +643,35 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = selectedStand.get().getUuid();
         pendingTargetPos = selectedStand.get().getBlockPos();
         return true;
+    }
+
+    protected boolean executePendingTransfer(ServerWorld world) {
+        if (!pendingUniversalRoute) {
+            return executeTransfer(world);
+        }
+
+        if (pendingItem.isEmpty() || pendingTargetPos == null) {
+            return false;
+        }
+
+        BlockState state = world.getBlockState(pendingTargetPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+
+        Inventory targetInventory = ChestBlock.getInventory(chestBlock, state, world, pendingTargetPos, true);
+        if (targetInventory == null) {
+            return false;
+        }
+
+        ItemStack remaining = insertStack(targetInventory, pendingItem);
+        targetInventory.markDirty();
+        if (remaining.isEmpty()) {
+            return true;
+        }
+
+        pendingItem = remaining;
+        return false;
     }
 
     protected boolean executeTransfer(ServerWorld world) {
