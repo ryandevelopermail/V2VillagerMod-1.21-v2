@@ -21,6 +21,7 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
+    private static final int PATH_RETRY_INTERVAL_TICKS = 20;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -35,6 +36,8 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
     protected int lastCheckCount;
     private boolean immediateCheckPending;
     private @Nullable R selectedRecipe;
+    private @Nullable BlockPos currentNavigationTarget;
+    private long lastPathRequestTick = Long.MIN_VALUE;
 
     protected AbstractCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
@@ -56,6 +59,8 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         this.craftingTablePos = updatedCraftingPos;
         this.stage = Stage.IDLE;
         this.selectedRecipe = null;
+        this.currentNavigationTarget = null;
+        this.lastPathRequestTick = Long.MIN_VALUE;
     }
 
     public @Nullable BlockPos getCraftingTablePos() {
@@ -139,6 +144,8 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
     @Override
     public final void stop() {
         villager.getNavigation().stop();
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
         stage = Stage.DONE;
         selectedRecipe = null;
     }
@@ -317,7 +324,18 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         if (target == null) {
             return;
         }
+
+        long currentTick = villager.getWorld().getTime();
+        boolean shouldRequestPath = !target.equals(currentNavigationTarget)
+                || villager.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= PATH_RETRY_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+
         villager.getNavigation().startMovingTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D, MOVE_SPEED);
+        currentNavigationTarget = target.toImmutable();
+        lastPathRequestTick = currentTick;
     }
 
     protected boolean isNear(@Nullable BlockPos target) {
