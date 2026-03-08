@@ -15,7 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
-import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Redirect;
 
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -24,15 +24,17 @@ import java.util.function.Predicate;
 public class FindPointOfInterestTaskMixin {
     private static final Logger LOGGER = LoggerFactory.getLogger(FindPointOfInterestTaskMixin.class);
 
-    @ModifyVariable(
+    @Redirect(
             method = "method_46880",
-            at = @At("HEAD"),
-            index = 1,
-            argsOnly = true,
+            at = @At(
+                    value = "INVOKE",
+                    target = "Ljava/util/function/Predicate;test(Ljava/lang/Object;)Z"
+            ),
             require = 0
     )
-    private static Predicate<BlockPos> guardvillagers$filterReservedPotentialSites(
+    private static boolean guardvillagers$filterReservedPotentialSites(
             Predicate<BlockPos> originalPredicate,
+            Object candidatePos,
             PointOfInterestStorage poiStorage,
             Predicate<BlockPos> poiPosPredicate,
             BlockPos pos,
@@ -43,23 +45,26 @@ public class FindPointOfInterestTaskMixin {
             it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
+        if (!(candidatePos instanceof BlockPos blockPos)) {
+            return ((Predicate<Object>) (Predicate<?>) originalPredicate).test(candidatePos);
+        }
+
         MemoryModuleType<?> memoryType = ((MemoryQueryResultAccessor) (Object) queryResult)
                 .guardvillagers$getMemoryModuleType();
         if (memoryType != MemoryModuleType.POTENTIAL_JOB_SITE) {
-            return originalPredicate;
+            return originalPredicate.test(blockPos);
         }
 
         TakeJobSiteInjectDiagnostics.markPotentialJobSiteHookObserved();
 
-        return candidatePos -> {
-            if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, candidatePos)) {
-                LOGGER.debug("potential-job-site reservation reject: entity={} jobSite={} poiType={}",
-                        entity.getUuidAsString(),
-                        candidatePos.toShortString(),
-                        String.valueOf(poiType));
-                return false;
-            }
-            return originalPredicate.test(candidatePos);
-        };
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, blockPos)) {
+            LOGGER.debug("potential-job-site reservation reject: entity={} jobSite={} poiType={}",
+                    entity.getUuidAsString(),
+                    blockPos.toShortString(),
+                    String.valueOf(poiType));
+            return false;
+        }
+
+        return originalPredicate.test(blockPos);
     }
 }
