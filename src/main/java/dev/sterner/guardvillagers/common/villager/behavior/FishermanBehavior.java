@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
@@ -183,6 +184,8 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         guard.equipStack(EquipmentSlot.MAINHAND, rodStack);
         guard.setPairedChestPos(chestPos);
         guard.setPairedJobPos(jobPos);
+
+        ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.FISHERMAN, "fisherman conversion");
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);

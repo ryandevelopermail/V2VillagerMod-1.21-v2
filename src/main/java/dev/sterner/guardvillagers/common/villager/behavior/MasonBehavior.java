@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingCheckTrigger;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
@@ -356,6 +357,8 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         guard.setExpectedMiningTool(trigger.tool());
         guard.setPairedChestPos(chestPos);
         guard.setPairedJobPos(jobPos);
+
+        ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.MASON, "mason conversion");
 
         world.spawnEntityAndPassengers(guard);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);

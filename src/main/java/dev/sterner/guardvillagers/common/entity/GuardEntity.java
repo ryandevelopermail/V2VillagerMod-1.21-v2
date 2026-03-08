@@ -8,6 +8,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.*;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.fabricmc.fabric.api.item.v1.EnchantmentEvents;
@@ -441,6 +442,14 @@ public class GuardEntity extends PathAwareEntity implements CrossbowUser, Ranged
     @Override
     public boolean isImmobile() {
         return this.interacting || super.isImmobile();
+    }
+
+    @Override
+    public void remove(RemovalReason reason) {
+        if (!this.getWorld().isClient && this.getWorld() instanceof ServerWorld serverWorld) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(serverWorld, this.getUuid(), "guard removed: " + reason);
+        }
+        super.remove(reason);
     }
 
     @Override
