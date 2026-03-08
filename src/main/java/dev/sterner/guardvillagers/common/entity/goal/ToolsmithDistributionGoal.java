@@ -14,7 +14,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShearsItem;
-import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -32,7 +31,6 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
         return stack.getItem() instanceof PickaxeItem
-                || stack.getItem() instanceof ShovelItem
                 || stack.getItem() instanceof HoeItem
                 || stack.getItem() instanceof ShearsItem
                 || stack.isOf(Items.FISHING_ROD);
@@ -165,7 +163,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         if (stack.getItem() instanceof HoeItem) {
             return DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
-        if (stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem) {
+        if (stack.getItem() instanceof PickaxeItem) {
             return DistributionRecipientHelper.findEligibleMasonRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         if (stack.getItem() instanceof ShearsItem) {
