@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 public final class TakeJobSiteInjectDiagnostics {
     private static final Logger LOGGER = LoggerFactory.getLogger(TakeJobSiteInjectDiagnostics.class);
     private static boolean potentialJobSiteHookObserved;
-    private static boolean takeJobSiteHookObserved;
+    private static boolean claimJobSiteHookObserved;
     private static boolean missingInjectWarningLogged;
 
     private TakeJobSiteInjectDiagnostics() {
@@ -18,12 +18,12 @@ public final class TakeJobSiteInjectDiagnostics {
         potentialJobSiteHookObserved = true;
     }
 
-    public static void markCanUseJobSiteInjectObserved() {
-        takeJobSiteHookObserved = true;
+    public static void markClaimJobSiteHookObserved() {
+        claimJobSiteHookObserved = true;
     }
 
     public static void warnIfInjectMissing(Iterable<ServerWorld> worlds) {
-        if (missingInjectWarningLogged || (potentialJobSiteHookObserved && takeJobSiteHookObserved)) {
+        if (missingInjectWarningLogged || (potentialJobSiteHookObserved && claimJobSiteHookObserved)) {
             return;
         }
 
@@ -36,10 +36,10 @@ public final class TakeJobSiteInjectDiagnostics {
 
         if (villagerCount > 0 && maxWorldTime >= 200L) {
             missingInjectWarningLogged = true;
-            LOGGER.warn("Reserved job-site hooks observed? potential-site={}, take-site={}. " +
+            LOGGER.warn("Reserved job-site hooks observed? potential-site={}, claim-site={}. " +
                             "Expected both hooks to run; missing hook(s) may indicate signature drift.",
                     potentialJobSiteHookObserved,
-                    takeJobSiteHookObserved);
+                    claimJobSiteHookObserved);
         }
     }
 }

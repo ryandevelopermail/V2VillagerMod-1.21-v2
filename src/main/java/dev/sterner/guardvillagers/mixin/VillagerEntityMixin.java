@@ -44,6 +44,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS = new AtomicLong();
     private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_SAME_POS_SKIPS = new AtomicLong();
     private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_PROFESSION_RESETS = new AtomicLong();
+    private static boolean GUARDVILLAGERS_RESERVED_POI_FALLBACK_FAILSAFE_WARNING_LOGGED;
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
@@ -282,6 +283,12 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         guardvillagers$lastReservedCleanupPos = immutableJobPos;
 
         long activations = GUARDVILLAGERS_RESERVED_POI_FALLBACK_ACTIVATIONS.incrementAndGet();
+        if (!GUARDVILLAGERS_RESERVED_POI_FALLBACK_FAILSAFE_WARNING_LOGGED) {
+            GUARDVILLAGERS_RESERVED_POI_FALLBACK_FAILSAFE_WARNING_LOGGED = true;
+            LOGGER.warn("Reserved job-site fallback cleanup activated for villager {} at {}. This path is a fail-safe and should be rare in steady state.",
+                    villager.getUuidAsString(),
+                    immutableJobPos.toShortString());
+        }
         String reservedGuard = ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, immutableJobPos)
                 .map(UUID::toString)
                 .orElse("unknown");

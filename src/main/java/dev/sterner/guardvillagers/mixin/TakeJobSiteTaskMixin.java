@@ -28,7 +28,7 @@ public class TakeJobSiteTaskMixin {
             require = 0
     )
     private static void guardvillagers$rejectReservedConvertedWorkerJobSite(RegistryEntry<PointOfInterestType> poiType, VillagerEntity villager, BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
-        TakeJobSiteInjectDiagnostics.markCanUseJobSiteInjectObserved();
+        TakeJobSiteInjectDiagnostics.markClaimJobSiteHookObserved();
 
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             return;
@@ -50,6 +50,8 @@ public class TakeJobSiteTaskMixin {
             require = 0
     )
     private void guardvillagers$rejectReservedConvertedWorkerJobSiteAtClaim(ServerWorld world, VillagerEntity villager, long time, CallbackInfo cir) {
+        TakeJobSiteInjectDiagnostics.markClaimJobSiteHookObserved();
+
         villager.getBrain().getOptionalMemory(MemoryModuleType.POTENTIAL_JOB_SITE)
                 .filter(globalPos -> globalPos.dimension() == world.getRegistryKey())
                 .map(GlobalPos::pos)

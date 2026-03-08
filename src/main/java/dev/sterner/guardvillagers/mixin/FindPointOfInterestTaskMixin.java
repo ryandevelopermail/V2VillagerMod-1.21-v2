@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
+import com.mojang.datafixers.util.Pair;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
-import dev.sterner.guardvillagers.common.util.PotentialJobSiteSelectionContext;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import net.minecraft.entity.mob.PathAwareEntity;
 import net.minecraft.entity.ai.brain.MemoryQueryResult;
@@ -19,6 +19,7 @@ import org.spongepowered.asm.mixin.injection.Redirect;
 
 import java.util.Optional;
 import java.util.function.Predicate;
+import java.util.stream.Stream;
 
 @Mixin(FindPointOfInterestTask.class)
 public class FindPointOfInterestTaskMixin {
@@ -28,83 +29,88 @@ public class FindPointOfInterestTaskMixin {
             method = "method_46880",
             at = @At(
                     value = "INVOKE",
-                    target = "Ljava/util/function/Predicate;test(Ljava/lang/Object;)Z"
+                    target = "Lnet/minecraft/world/poi/PointOfInterestStorage;getSortedTypesAndPositions(Ljava/util/function/Predicate;Ljava/util/function/Predicate;Lnet/minecraft/util/math/BlockPos;ILnet/minecraft/world/poi/PointOfInterestStorage$OccupationStatus;)Ljava/util/stream/Stream;"
             ),
             require = 0
     )
-    private static boolean guardvillagers$filterReservedPotentialSites$method46880(
-            Predicate<BlockPos> originalPredicate,
-            Object candidatePos,
+    private static Stream<Pair<RegistryEntry<PointOfInterestType>, BlockPos>> guardvillagers$filterReservedPotentialSites$method46880(
             PointOfInterestStorage poiStorage,
+            Predicate<RegistryEntry<PointOfInterestType>> typePredicate,
             Predicate<BlockPos> poiPosPredicate,
             BlockPos pos,
-            MemoryQueryResult<?, ?> queryResult,
+            int radius,
+            PointOfInterestStorage.OccupationStatus occupationStatus,
+            PointOfInterestStorage ignoredPoiStorage,
+            Predicate<BlockPos> ignoredPoiPosPredicate,
+            BlockPos ignoredPos,
+            MemoryQueryResult<?, ?> ignoredQueryResult,
             ServerWorld world,
-            Optional<Byte> entityStatus,
+            Optional<Byte> ignoredEntityStatus,
             PathAwareEntity entity,
-            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
+            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> ignoredRetryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
-        return guardvillagers$filterReservedPotentialSites(originalPredicate, candidatePos, poiPosPredicate, queryResult, entityStatus, world, entity, poiType);
+        return poiStorage.getSortedTypesAndPositions(
+                typePredicate,
+                guardvillagers$withReservationFilter(poiPosPredicate, world, entity, poiType),
+                pos,
+                radius,
+                occupationStatus
+        );
     }
 
     @Redirect(
             method = "method_46881",
             at = @At(
                     value = "INVOKE",
-                    target = "Ljava/util/function/Predicate;test(Ljava/lang/Object;)Z"
+                    target = "Lnet/minecraft/world/poi/PointOfInterestStorage;getSortedTypesAndPositions(Ljava/util/function/Predicate;Ljava/util/function/Predicate;Lnet/minecraft/util/math/BlockPos;ILnet/minecraft/world/poi/PointOfInterestStorage$OccupationStatus;)Ljava/util/stream/Stream;"
             ),
             require = 0
     )
-    private static boolean guardvillagers$filterReservedPotentialSites$method46881(
-            Predicate<BlockPos> originalPredicate,
-            Object candidatePos,
+    private static Stream<Pair<RegistryEntry<PointOfInterestType>, BlockPos>> guardvillagers$filterReservedPotentialSites$method46881(
             PointOfInterestStorage poiStorage,
+            Predicate<RegistryEntry<PointOfInterestType>> typePredicate,
             Predicate<BlockPos> poiPosPredicate,
             BlockPos pos,
-            MemoryQueryResult<?, ?> queryResult,
+            int radius,
+            PointOfInterestStorage.OccupationStatus occupationStatus,
+            PointOfInterestStorage ignoredPoiStorage,
+            Predicate<BlockPos> ignoredPoiPosPredicate,
+            BlockPos ignoredPos,
+            MemoryQueryResult<?, ?> ignoredQueryResult,
             ServerWorld world,
-            Optional<Byte> entityStatus,
+            Optional<Byte> ignoredEntityStatus,
             PathAwareEntity entity,
-            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
+            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> ignoredRetryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
-        return guardvillagers$filterReservedPotentialSites(originalPredicate, candidatePos, poiPosPredicate, queryResult, entityStatus, world, entity, poiType);
+        return poiStorage.getSortedTypesAndPositions(
+                typePredicate,
+                guardvillagers$withReservationFilter(poiPosPredicate, world, entity, poiType),
+                pos,
+                radius,
+                occupationStatus
+        );
     }
 
-    private static boolean guardvillagers$filterReservedPotentialSites(
+    private static Predicate<BlockPos> guardvillagers$withReservationFilter(
             Predicate<BlockPos> originalPredicate,
-            Object candidatePos,
-            Predicate<BlockPos> poiPosPredicate,
-            MemoryQueryResult<?, ?> queryResult,
-            Optional<Byte> entityStatus,
             ServerWorld world,
             PathAwareEntity entity,
             RegistryEntry<PointOfInterestType> poiType
     ) {
-        if (!(candidatePos instanceof BlockPos blockPos)) {
-            return ((Predicate<Object>) (Predicate<?>) originalPredicate).test(candidatePos);
-        }
+        return blockPos -> {
+            TakeJobSiteInjectDiagnostics.markPotentialJobSiteHookObserved();
 
-        if (!PotentialJobSiteSelectionContext.shouldApplyReservationFilter(
-                originalPredicate,
-                poiPosPredicate,
-                queryResult,
-                entityStatus,
-                LOGGER)) {
+            if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, blockPos)) {
+                LOGGER.debug("potential job site rejected (reserved): entity={} jobSite={} poiType={}",
+                        entity.getUuidAsString(),
+                        blockPos.toShortString(),
+                        String.valueOf(poiType));
+                return false;
+            }
+
             return originalPredicate.test(blockPos);
-        }
-
-        TakeJobSiteInjectDiagnostics.markPotentialJobSiteHookObserved();
-
-        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, blockPos)) {
-            LOGGER.debug("potential job site rejected (reserved): entity={} jobSite={} poiType={}",
-                    entity.getUuidAsString(),
-                    blockPos.toShortString(),
-                    String.valueOf(poiType));
-            return false;
-        }
-
-        return originalPredicate.test(blockPos);
+        };
     }
 }
