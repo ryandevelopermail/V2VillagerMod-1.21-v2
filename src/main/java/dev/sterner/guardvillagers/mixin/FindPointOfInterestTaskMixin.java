@@ -1,9 +1,9 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.util.PotentialJobSiteSelectionContext;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import net.minecraft.entity.mob.PathAwareEntity;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.MemoryQueryResult;
 import net.minecraft.entity.ai.brain.task.FindPointOfInterestTask;
 import net.minecraft.registry.entry.RegistryEntry;
@@ -49,9 +49,12 @@ public class FindPointOfInterestTaskMixin {
             return ((Predicate<Object>) (Predicate<?>) originalPredicate).test(candidatePos);
         }
 
-        MemoryModuleType<?> memoryType = ((MemoryQueryResultAccessor) (Object) queryResult)
-                .guardvillagers$getMemoryModuleType();
-        if (memoryType != MemoryModuleType.POTENTIAL_JOB_SITE) {
+        if (!PotentialJobSiteSelectionContext.shouldApplyReservationFilter(
+                originalPredicate,
+                poiPosPredicate,
+                queryResult,
+                entityStatus,
+                LOGGER)) {
             return originalPredicate.test(blockPos);
         }
 
