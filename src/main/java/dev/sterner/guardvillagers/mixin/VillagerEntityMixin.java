@@ -29,6 +29,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Mixin(VillagerEntity.class)
 public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder {
@@ -36,7 +37,12 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerEntityMixin.class);
-    private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_COOLDOWN_TICKS = 100L;
+    private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_BASE_COOLDOWN_TICKS = 100L;
+    private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_COOLDOWN_TICKS = 1600L;
+    private static final int GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_BACKOFF_STEPS = 4;
+    private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_ACTIVATIONS = new AtomicLong();
+    private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS = new AtomicLong();
+    private static final AtomicLong GUARDVILLAGERS_RESERVED_POI_FALLBACK_PROFESSION_RESETS = new AtomicLong();
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
@@ -46,10 +52,9 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Nullable
     private Identifier guardvillagers$lastLeatherworkerCrafted;
     @Unique
-    @Nullable
-    private BlockPos guardvillagers$lastReservedCleanupPos;
+    private final Map<BlockPos, Long> guardvillagers$nextReservedCleanupTickByPos = new HashMap<>();
     @Unique
-    private long guardvillagers$lastReservedCleanupTick = Long.MIN_VALUE;
+    private final Map<BlockPos, Integer> guardvillagers$reservedCleanupBackoffByPos = new HashMap<>();
 
     @Override
     public Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$getArmorerStandMemory() {
@@ -226,34 +231,69 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
                 .map(GlobalPos::pos)
                 .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(serverWorld, jobPos))
                 .ifPresent(jobPos -> {
+                    BlockPos immutableJobPos = jobPos.toImmutable();
                     long gameTime = serverWorld.getTime();
-                    if (guardvillagers$lastReservedCleanupPos != null
-                            && guardvillagers$lastReservedCleanupPos.equals(jobPos)
-                            && gameTime - guardvillagers$lastReservedCleanupTick < GUARDVILLAGERS_RESERVED_POI_CLEANUP_COOLDOWN_TICKS) {
+                    long nextAllowedTick = guardvillagers$nextReservedCleanupTickByPos.getOrDefault(immutableJobPos, Long.MIN_VALUE);
+                    if (gameTime < nextAllowedTick) {
+                        long skipped = GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS.incrementAndGet();
+                        if (skipped % 25L == 0L) {
+                            LOGGER.debug("fallback cleanup cooldown skip metrics: activations={} cooldownSkips={} professionResets={}",
+                                    GUARDVILLAGERS_RESERVED_POI_FALLBACK_ACTIVATIONS.get(),
+                                    skipped,
+                                    GUARDVILLAGERS_RESERVED_POI_FALLBACK_PROFESSION_RESETS.get());
+                        }
                         return;
                     }
 
-                    guardvillagers$lastReservedCleanupPos = jobPos.toImmutable();
-                    guardvillagers$lastReservedCleanupTick = gameTime;
+                    int backoffStep = guardvillagers$reservedCleanupBackoffByPos.getOrDefault(immutableJobPos, 0);
+                    long cooldownTicks = Math.min(
+                            GUARDVILLAGERS_RESERVED_POI_CLEANUP_BASE_COOLDOWN_TICKS << Math.min(backoffStep, GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_BACKOFF_STEPS),
+                            GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_COOLDOWN_TICKS);
+                    guardvillagers$nextReservedCleanupTickByPos.put(immutableJobPos, gameTime + cooldownTicks);
+                    guardvillagers$reservedCleanupBackoffByPos.put(immutableJobPos,
+                            Math.min(backoffStep + 1, GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_BACKOFF_STEPS));
 
-                    String reservedGuard = ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos)
+                    long activations = GUARDVILLAGERS_RESERVED_POI_FALLBACK_ACTIVATIONS.incrementAndGet();
+                    String reservedGuard = ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, immutableJobPos)
                             .map(UUID::toString)
                             .orElse("unknown");
-                    LOGGER.debug("fallback cleanup triggered: villager={} jobSite={} guard={}",
+                    VillagerProfession reservedProfession = ConvertedWorkerJobSiteReservationManager.getReservedProfession(serverWorld, immutableJobPos)
+                            .orElse(VillagerProfession.NONE);
+
+                    LOGGER.debug("fallback cleanup triggered: villager={} jobSite={} guard={} reservedProfession={} activation={} cooldown={} backoffStep={}",
                             villager.getUuidAsString(),
-                            jobPos.toShortString(),
-                            reservedGuard);
+                            immutableJobPos.toShortString(),
+                            reservedGuard,
+                            reservedProfession,
+                            activations,
+                            cooldownTicks,
+                            backoffStep);
                     villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
                     villager.getBrain().forget(MemoryModuleType.JOB_SITE);
                     villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
 
                     VillagerProfession profession = villager.getVillagerData().getProfession();
-                    if (profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT) {
+                    if (profession != VillagerProfession.NONE
+                            && profession != VillagerProfession.NITWIT
+                            && profession == reservedProfession) {
                         villager.setVillagerData(villager.getVillagerData().withProfession(VillagerProfession.NONE));
-                        LOGGER.debug("profession reset due reserved POI: villager={} from={} jobSite={}",
+                        long professionResets = GUARDVILLAGERS_RESERVED_POI_FALLBACK_PROFESSION_RESETS.incrementAndGet();
+                        LOGGER.debug("profession reset due reserved POI: villager={} from={} reservedProfession={} jobSite={} resets={} activations={} cooldownSkips={}",
                                 villager.getUuidAsString(),
                                 profession,
-                                jobPos.toShortString());
+                                reservedProfession,
+                                immutableJobPos.toShortString(),
+                                professionResets,
+                                activations,
+                                GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS.get());
+                    } else {
+                        LOGGER.debug("profession reset skipped for reserved POI cleanup: villager={} currentProfession={} reservedProfession={} jobSite={} activations={} cooldownSkips={}",
+                                villager.getUuidAsString(),
+                                profession,
+                                reservedProfession,
+                                immutableJobPos.toShortString(),
+                                activations,
+                                GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS.get());
                     }
                 });
     }

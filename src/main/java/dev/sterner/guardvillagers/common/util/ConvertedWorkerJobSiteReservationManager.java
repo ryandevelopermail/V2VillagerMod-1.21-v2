@@ -142,6 +142,15 @@ public final class ConvertedWorkerJobSiteReservationManager {
         return reservation == null ? Optional.empty() : Optional.of(reservation.guardUuid());
     }
 
+    public static Optional<VillagerProfession> getReservedProfession(ServerWorld world, BlockPos pos) {
+        if (!isReserved(world, pos)) {
+            return Optional.empty();
+        }
+
+        Reservation reservation = RESERVATIONS_BY_POS.getOrDefault(WorldKey.from(world), Map.of()).get(pos.toImmutable());
+        return reservation == null ? Optional.empty() : Optional.of(reservation.expectedProfession());
+    }
+
     public static boolean removeReservation(ServerWorld world, BlockPos pos, String reason) {
         WorldKey worldKey = WorldKey.from(world);
         Map<BlockPos, Reservation> byPos = RESERVATIONS_BY_POS.get(worldKey);
