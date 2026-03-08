@@ -24,7 +24,6 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
-import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -415,7 +414,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && (stack.getItem() instanceof PickaxeItem || stack.getItem() instanceof ShovelItem)) {
+            if (!stack.isEmpty() && stack.getItem() instanceof PickaxeItem) {
                 return Optional.of(new StorageSlotReference(inventory, sourceDescription, slot));
             }
         }
@@ -425,7 +424,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
     private static Optional<MiningToolTrigger> extractTriggerFromSlot(StorageSlotReference reference) {
         ItemStack stack = reference.inventory().getStack(reference.slot());
-        if (stack.isEmpty() || (!(stack.getItem() instanceof PickaxeItem) && !(stack.getItem() instanceof ShovelItem))) {
+        if (stack.isEmpty() || !(stack.getItem() instanceof PickaxeItem)) {
             return Optional.empty();
         }
 
