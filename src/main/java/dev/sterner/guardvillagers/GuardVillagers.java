@@ -80,6 +80,7 @@ public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
     private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
+    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -230,6 +231,7 @@ public class GuardVillagers implements ModInitializer {
         ServerWorldEvents.LOAD.register((server, world) -> {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
+            reconcileConvertedWorkerReservations(world, "world-load");
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey()));
 
@@ -247,6 +249,9 @@ public class GuardVillagers implements ModInitializer {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
                 runConversionHooksOnSchedule(world);
+                if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
+                    reconcileConvertedWorkerReservations(world, "scheduled");
+                }
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });
@@ -285,6 +290,70 @@ public class GuardVillagers implements ModInitializer {
 
         LAST_CONVERSION_EXECUTION_TICK.put(worldKey, worldTick);
         ProfessionDefinitions.runConversionHooks(world);
+    }
+
+    private static void reconcileConvertedWorkerReservations(ServerWorld world, String source) {
+        ReconciliationStats stats = new ReconciliationStats();
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedSmokerPos(), VillagerProfession.BUTCHER, source + " butcher", stats,
+                    () -> guard.setPairedSmokerPos(null));
+        }
+
+        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.MASON, source + " mason", stats,
+                    () -> guard.setPairedJobPos(null));
+        }
+
+        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+            reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.FISHERMAN, source + " fisherman", stats,
+                    () -> guard.setPairedJobPos(null));
+        }
+
+        LOGGER.debug("Converted worker reservation reconciliation pass (world={}, source={}): added={}, removed={}",
+                world.getRegistryKey().getValue(), source, stats.added, stats.removed);
+    }
+
+    private static void reconcileGuardReservation(ServerWorld world,
+                                                  GuardEntity guard,
+                                                  @Nullable BlockPos pairedPos,
+                                                  VillagerProfession profession,
+                                                  String source,
+                                                  ReconciliationStats stats,
+                                                  Runnable clearPairing) {
+        if (pairedPos == null) {
+            return;
+        }
+
+        if (!ProfessionDefinitions.isExpectedJobBlock(profession, world.getBlockState(pairedPos))) {
+            if (ConvertedWorkerJobSiteReservationManager.removeReservation(world, pairedPos,
+                    "reconcile invalid workstation " + source)) {
+                stats.removed++;
+            }
+            clearPairing.run();
+            return;
+        }
+
+        ConvertedWorkerJobSiteReservationManager.EnsureResult ensureResult = ConvertedWorkerJobSiteReservationManager.ensureReservation(
+                world,
+                pairedPos,
+                guard.getUuid(),
+                profession,
+                "reconcile " + source);
+
+        if (ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED
+                || ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED_AFTER_INVALID_REMOVAL) {
+            stats.added++;
+        }
+        if (ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.ADDED_AFTER_INVALID_REMOVAL
+                || ensureResult == ConvertedWorkerJobSiteReservationManager.EnsureResult.REPLACED_EXISTING) {
+            stats.removed++;
+        }
+    }
+
+    private static final class ReconciliationStats {
+        private int added;
+        private int removed;
     }
 
 
