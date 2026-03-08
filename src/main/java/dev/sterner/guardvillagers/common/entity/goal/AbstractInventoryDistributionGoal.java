@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -13,14 +14,18 @@ import net.minecraft.util.math.BlockPos;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     protected static final int PATH_RETRY_INTERVAL_TICKS = 20;
     protected static final double TARGET_REACH_SQUARED = 4.0D;
     protected static final double MOVE_SPEED = 0.6D;
+    protected static final double DEFAULT_OVERFLOW_FULLNESS_TRIGGER = 0.825D;
+    protected static final double DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE = 24.0D;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -34,6 +39,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
+    protected boolean pendingOverflowTransfer;
 
     protected AbstractInventoryDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -285,6 +291,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingItem = ItemStack.EMPTY;
         pendingTargetId = null;
         pendingTargetPos = null;
+        pendingOverflowTransfer = false;
         clearPendingTargetState();
     }
 
@@ -331,12 +338,143 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         return 0.0D;
     }
 
+    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
+        return Optional.empty();
+    }
+
+    protected double getOverflowFullnessTrigger() {
+        return DEFAULT_OVERFLOW_FULLNESS_TRIGGER;
+    }
+
+    protected double getOverflowRecipientScanRange() {
+        return DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
+    }
+
+    protected boolean isOverflowModeActive(ServerWorld world, Inventory sourceInventory) {
+        Optional<OverflowRecipientType> recipientType = getOverflowRecipientType();
+        return recipientType.isPresent() && isInventoryAtLeastFull(sourceInventory, getOverflowFullnessTrigger());
+    }
+
+    protected List<DistributionRecipientHelper.RecipientRecord> getOverflowRecipients(ServerWorld world) {
+        Optional<OverflowRecipientType> recipientType = getOverflowRecipientType();
+        if (recipientType.isEmpty()) {
+            return List.of();
+        }
+        if (recipientType.get() == OverflowRecipientType.LIBRARIAN) {
+            return DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, getOverflowRecipientScanRange());
+        }
+        return List.of();
+    }
+
+    protected boolean canStartOverflowTransfer(ServerWorld world, Inventory sourceInventory, Predicate<ItemStack> selector) {
+        if (!isOverflowModeActive(world, sourceInventory)) {
+            return false;
+        }
+        if (getOverflowRecipients(world).isEmpty()) {
+            return false;
+        }
+
+        for (int slot = 0; slot < sourceInventory.size(); slot++) {
+            if (selector.test(sourceInventory.getStack(slot))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    protected boolean trySelectOverflowTransfer(ServerWorld world, Inventory sourceInventory, Predicate<ItemStack> selector) {
+        if (!isOverflowModeActive(world, sourceInventory)) {
+            return false;
+        }
+
+        List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        for (int slot = 0; slot < sourceInventory.size(); slot++) {
+            ItemStack stack = sourceInventory.getStack(slot);
+            if (!selector.test(stack)) {
+                continue;
+            }
+
+            DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+            ItemStack extracted = stack.split(1);
+            sourceInventory.setStack(slot, stack);
+            sourceInventory.markDirty();
+
+            pendingItem = extracted;
+            pendingTargetId = recipient.recipient().getUuid();
+            pendingTargetPos = recipient.chestPos();
+            pendingOverflowTransfer = true;
+            return true;
+        }
+        return false;
+    }
+
+    protected boolean refreshOverflowTarget(ServerWorld world, Predicate<ItemStack> selector) {
+        if (!pendingOverflowTransfer || !selector.test(pendingItem)) {
+            return false;
+        }
+
+        List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
+        if (recipients.isEmpty()) {
+            return false;
+        }
+
+        if (pendingTargetId != null) {
+            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
+                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
+                    pendingTargetPos = recipient.chestPos();
+                    return true;
+                }
+            }
+        }
+
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        pendingTargetId = recipient.recipient().getUuid();
+        pendingTargetPos = recipient.chestPos();
+        return true;
+    }
+
+    protected boolean executeOverflowTransfer(ServerWorld world) {
+        if (!pendingOverflowTransfer || pendingItem.isEmpty() || pendingTargetPos == null) {
+            return false;
+        }
+
+        Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
+        if (targetInventory.isEmpty()) {
+            return false;
+        }
+
+        ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
+        targetInventory.get().markDirty();
+        if (remaining.isEmpty()) {
+            return true;
+        }
+
+        pendingItem = remaining;
+        return false;
+    }
+
+    protected Optional<Inventory> getChestInventoryAt(ServerWorld world, BlockPos position) {
+        BlockState state = world.getBlockState(position);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+    }
+
     protected enum Stage {
         IDLE,
         GO_TO_CHEST,
         GO_TO_TARGET,
         EXECUTE_TRANSFER,
         DONE
+    }
+
+    protected enum OverflowRecipientType {
+        LIBRARIAN
     }
 
     protected abstract boolean isDistributableItem(ItemStack stack);
