@@ -1,6 +1,5 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
@@ -17,13 +16,10 @@ import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShearsItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
-import java.util.UUID;
 
 public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
@@ -66,18 +62,18 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
                 continue;
             }
 
-            List<RecipientTarget> recipients = findRecipientForStack(world, stack);
+            List<DistributionRecipientHelper.RecipientRecord> recipients = findRecipientForStack(world, stack);
             if (recipients.isEmpty()) {
                 continue;
             }
 
-            RecipientTarget recipient = recipients.getFirst();
+            DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
             ItemStack extracted = stack.split(1);
             inventory.setStack(slot, stack);
             inventory.markDirty();
 
             pendingItem = extracted;
-            pendingTargetId = recipient.recipientId();
+            pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
             if (pendingItem.isOf(Items.FISHING_ROD)) {
                 CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
@@ -89,14 +85,14 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        List<RecipientTarget> recipients = findRecipientForStack(world, pendingItem);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = findRecipientForStack(world, pendingItem);
         if (recipients.isEmpty()) {
             return false;
         }
 
         if (pendingTargetId != null) {
-            for (RecipientTarget recipient : recipients) {
-                if (recipient.recipientId().equals(pendingTargetId)) {
+            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
+                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
                     pendingTargetPos = recipient.chestPos();
                     if (pendingItem.isOf(Items.FISHING_ROD)) {
                         CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
@@ -106,8 +102,8 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             }
         }
 
-        RecipientTarget recipient = recipients.getFirst();
-        pendingTargetId = recipient.recipientId();
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         if (pendingItem.isOf(Items.FISHING_ROD)) {
             CraftingCheckLogger.report(world, "Toolsmith", "distributing fishing rod to " + describeStorageType(world, pendingTargetPos));
@@ -160,48 +156,23 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         return false;
     }
 
-    private List<RecipientTarget> findRecipientForStack(ServerWorld world, ItemStack stack) {
+    private List<DistributionRecipientHelper.RecipientRecord> findRecipientForStack(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return List.of();
         }
         if (stack.getItem() instanceof HoeItem) {
-            return DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream()
-                    .map(recipient -> new RecipientTarget(recipient.recipient().getUuid(), recipient.chestPos()))
-                    .toList();
+            return DistributionRecipientHelper.findEligibleFarmerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         if (stack.getItem() instanceof PickaxeItem) {
-            return findEligibleMasonGuardRecipients(world);
+            return DistributionRecipientHelper.findEligibleMasonRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         if (stack.getItem() instanceof ShearsItem) {
-            return DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream()
-                    .map(recipient -> new RecipientTarget(recipient.recipient().getUuid(), recipient.chestPos()))
-                    .toList();
+            return DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         if (stack.isOf(Items.FISHING_ROD)) {
-            return DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream()
-                    .map(recipient -> new RecipientTarget(recipient.recipient().getUuid(), recipient.chestPos()))
-                    .toList();
+            return DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
         return List.of();
-    }
-
-
-    private List<RecipientTarget> findEligibleMasonGuardRecipients(ServerWorld world) {
-        Box scanBox = new Box(villager.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
-        return world.getEntitiesByClass(
-                        MasonGuardEntity.class,
-                        scanBox,
-                        candidate -> candidate.isAlive() && candidate.getPairedChestPos() != null
-                ).stream()
-                .map(guard -> new RecipientTarget(guard.getUuid(), guard.getPairedChestPos()))
-                .sorted(Comparator
-                        .comparingDouble((RecipientTarget target) -> villager.squaredDistanceTo(
-                                target.chestPos().getX() + 0.5D,
-                                target.chestPos().getY() + 0.5D,
-                                target.chestPos().getZ() + 0.5D
-                        ))
-                        .thenComparing(RecipientTarget::recipientId, UUID::compareTo))
-                .toList();
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
@@ -217,9 +188,6 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             return Optional.empty();
         }
         return Optional.empty();
-    }
-
-    private record RecipientTarget(UUID recipientId, BlockPos chestPos) {
     }
 
     private String describeStorageType(ServerWorld world, BlockPos position) {
