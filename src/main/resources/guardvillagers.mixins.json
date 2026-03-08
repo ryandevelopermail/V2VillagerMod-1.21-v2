@@ -10,9 +10,11 @@
     "MobEntityMixin",
     "ServerWorldMixin",
     "VillagerEntityMixin",
+    "FindPointOfInterestTaskMixin",
     "TakeJobSiteTaskMixin",
     "VillagerTaskListProviderMixin",
-    "StructureTemplateMixin"
+    "StructureTemplateMixin",
+    "MemoryQueryResultAccessor"
   ],
   "injectors": {
     "defaultRequire": 1

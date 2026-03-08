@@ -1,0 +1,63 @@
+package dev.sterner.guardvillagers.mixin;
+
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.ai.brain.MemoryQueryResult;
+import net.minecraft.entity.ai.brain.task.FindPointOfInterestTask;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.poi.PointOfInterestStorage;
+import net.minecraft.world.poi.PointOfInterestType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
+
+import java.util.Optional;
+import java.util.function.Predicate;
+
+@Mixin(FindPointOfInterestTask.class)
+public class FindPointOfInterestTaskMixin {
+    private static final Logger LOGGER = LoggerFactory.getLogger(FindPointOfInterestTaskMixin.class);
+
+    @ModifyVariable(
+            method = "method_46880",
+            at = @At("HEAD"),
+            index = 1,
+            argsOnly = true,
+            require = 0
+    )
+    private static Predicate<BlockPos> guardvillagers$filterReservedPotentialSites(
+            Predicate<BlockPos> originalPredicate,
+            PointOfInterestStorage poiStorage,
+            Predicate<BlockPos> poiPosPredicate,
+            BlockPos pos,
+            MemoryQueryResult<?> queryResult,
+            ServerWorld world,
+            Optional<Byte> entityStatus,
+            LivingEntity entity,
+            it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
+            RegistryEntry<PointOfInterestType> poiType
+    ) {
+        if (((MemoryQueryResultAccessor) queryResult).guardvillagers$getMemoryModuleType() != MemoryModuleType.POTENTIAL_JOB_SITE) {
+            return originalPredicate;
+        }
+
+        TakeJobSiteInjectDiagnostics.markPotentialJobSiteHookObserved();
+
+        return candidatePos -> {
+            if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, candidatePos)) {
+                LOGGER.debug("potential-job-site reservation reject: entity={} jobSite={} poiType={}",
+                        entity.getUuidAsString(),
+                        candidatePos.toShortString(),
+                        String.valueOf(poiType));
+                return false;
+            }
+            return originalPredicate.test(candidatePos);
+        };
+    }
+}
