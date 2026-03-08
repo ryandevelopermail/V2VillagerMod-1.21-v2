@@ -67,8 +67,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static float spawnChancePerVillager = 0.5f;
     @Entry
     public static boolean villagerConversionFallbackSweepEnabled = false;
-    @Entry(min=40)
-    public static int villagerConversionFallbackSweepIntervalTicks = 1200;
+    @Entry(min=20)
+    public static int villagerConversionCandidateMarkIntervalTicks = 1200;
+    @Entry(min=20)
+    public static int villagerConversionExecutionIntervalTicks = 40;
     @Entry
     public static int bellReportChestFallbackRadius = 6;
     @Entry

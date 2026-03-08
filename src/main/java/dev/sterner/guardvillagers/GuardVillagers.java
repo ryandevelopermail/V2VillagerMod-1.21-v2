@@ -46,6 +46,7 @@ import net.minecraft.particle.ParticleEffect;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvent;
@@ -66,11 +67,14 @@ import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Predicate;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
+    private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -175,7 +179,6 @@ public class GuardVillagers implements ModInitializer {
                 if (world instanceof ServerWorld serverWorld) {
                     JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);
                     VillagerConversionCandidateIndex.markCandidate(serverWorld, villagerEntity);
-                    ProfessionDefinitions.runConversionHooks(serverWorld);
                 }
                 if (villagerEntity.isNatural()) {
                     var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
@@ -209,15 +212,14 @@ public class GuardVillagers implements ModInitializer {
             }
         });
 
-        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
-            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z);
-            ProfessionDefinitions.runConversionHooks(world);
-        });
+        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) ->
+                VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z));
 
         ServerWorldEvents.LOAD.register((server, world) -> {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
         });
+        ServerWorldEvents.UNLOAD.register((server, world) -> LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey()));
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -228,15 +230,31 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getTime() % 100L == 0L) {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
-                if (world.getTime() % 40L == 0L) {
-                    ProfessionDefinitions.runConversionHooks(world);
-                }
                 if (GuardVillagersConfig.villagerConversionFallbackSweepEnabled
-                        && world.getTime() % Math.max(40, GuardVillagersConfig.villagerConversionFallbackSweepIntervalTicks) == 0L) {
-                    ProfessionDefinitions.runFallbackConversionSweep(world);
+                        && world.getTime() % Math.max(20, GuardVillagersConfig.villagerConversionCandidateMarkIntervalTicks) == 0L) {
+                    ProfessionDefinitions.markFallbackCandidates(world);
                 }
+                runConversionHooksOnSchedule(world);
             }
         });
+    }
+
+
+    private void runConversionHooksOnSchedule(ServerWorld world) {
+        long worldTick = world.getTime();
+        long executionInterval = Math.max(20, GuardVillagersConfig.villagerConversionExecutionIntervalTicks);
+        if (worldTick % executionInterval != 0L) {
+            return;
+        }
+
+        RegistryKey<World> worldKey = world.getRegistryKey();
+        long lastRunTick = LAST_CONVERSION_EXECUTION_TICK.getOrDefault(worldKey, Long.MIN_VALUE);
+        if (worldTick - lastRunTick < executionInterval) {
+            return;
+        }
+
+        LAST_CONVERSION_EXECUTION_TICK.put(worldKey, worldTick);
+        ProfessionDefinitions.runConversionHooks(world);
     }
 
 
