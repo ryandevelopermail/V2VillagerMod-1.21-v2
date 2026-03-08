@@ -10,7 +10,9 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
@@ -34,6 +36,7 @@ public class ToolsmithCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final int NON_TABLE_GRID_SIZE = 2;
     private static final int SHEARS_PER_SHEPHERD_CHEST = 1;
+    private static final int RODS_PER_FISHERMAN_STORAGE = 1;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
@@ -195,6 +198,9 @@ public class ToolsmithCraftingGoal extends Goal {
             craftedToday++;
             recordLastCrafted(recipe.output);
             CraftingCheckLogger.report(world, "Toolsmith", formatCraftedResult(lastCheckCount, recipe.output));
+            if (recipe.output.isOf(Items.FISHING_ROD)) {
+                CraftingCheckLogger.report(world, "Toolsmith", "crafted fishing rod due to fisherman recipient demand");
+            }
         }
     }
 
@@ -202,6 +208,8 @@ public class ToolsmithCraftingGoal extends Goal {
         List<ToolRecipe> recipes = new ArrayList<>();
         int eligibleShepherdChestCount = DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, 24.0D).size();
         int currentShearsStock = countItemInInventory(inventory, ShearsItem.class);
+        int eligibleFishermanStorageCount = DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, 24.0D).size();
+        int currentRodStock = countItemInInventory(inventory, Items.FISHING_ROD);
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
@@ -212,6 +220,10 @@ public class ToolsmithCraftingGoal extends Goal {
                 continue;
             }
             if (result.getItem() instanceof ShearsItem && currentShearsStock >= eligibleShepherdChestCount * SHEARS_PER_SHEPHERD_CHEST) {
+                continue;
+            }
+            if (result.isOf(Items.FISHING_ROD) && currentRodStock >= eligibleFishermanStorageCount * RODS_PER_FISHERMAN_STORAGE) {
+                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + currentRodStock + "/" + (eligibleFishermanStorageCount * RODS_PER_FISHERMAN_STORAGE) + ")");
                 continue;
             }
             if (canCraft(inventory, recipe)) {
@@ -225,7 +237,19 @@ public class ToolsmithCraftingGoal extends Goal {
         return stack.getItem() instanceof PickaxeItem
                 || stack.getItem() instanceof ShovelItem
                 || stack.getItem() instanceof HoeItem
-                || stack.getItem() instanceof ShearsItem;
+                || stack.getItem() instanceof ShearsItem
+                || stack.isOf(Items.FISHING_ROD);
+    }
+
+    private int countItemInInventory(Inventory inventory, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private int countItemInInventory(Inventory inventory, Class<?> itemType) {
