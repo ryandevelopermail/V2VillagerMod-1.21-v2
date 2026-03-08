@@ -9,6 +9,7 @@
     "MobEntityMixin",
     "ServerWorldMixin",
     "VillagerEntityMixin",
+    "TakeJobSiteTaskMixin",
     "VillagerTaskListProviderMixin",
     "StructureTemplateMixin"
   ],

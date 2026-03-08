@@ -68,6 +68,10 @@ public final class ConvertedWorkerJobSiteReservationManager {
         return true;
     }
 
+    public static boolean isReservedForAnyConvertedWorker(ServerWorld world, BlockPos pos) {
+        return isReserved(world, pos);
+    }
+
     public static void unreserveByGuard(ServerWorld world, UUID guardUuid, String reason) {
         WorldKey worldKey = WorldKey.from(world);
         Map<UUID, Set<BlockPos>> byGuard = RESERVED_POS_BY_GUARD.get(worldKey);
