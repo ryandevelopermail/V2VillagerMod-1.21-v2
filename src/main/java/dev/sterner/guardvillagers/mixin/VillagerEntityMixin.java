@@ -11,6 +11,7 @@ import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationM
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.nbt.NbtCompound;
@@ -20,6 +21,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -34,6 +36,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerEntityMixin.class);
+    private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_COOLDOWN_TICKS = 100L;
     private final Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$armorerStandMemory = new HashMap<>();
     private final Map<UUID, WeaponsmithStandManager.StandProgress> guardvillagers$weaponsmithStandMemory = new HashMap<>();
     @Nullable
@@ -42,6 +45,11 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private Identifier guardvillagers$lastToolsmithCrafted;
     @Nullable
     private Identifier guardvillagers$lastLeatherworkerCrafted;
+    @Unique
+    @Nullable
+    private BlockPos guardvillagers$lastReservedCleanupPos;
+    @Unique
+    private long guardvillagers$lastReservedCleanupTick = Long.MIN_VALUE;
 
     @Override
     public Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$getArmorerStandMemory() {
@@ -216,13 +224,25 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                 .filter(globalPos -> globalPos.dimension() == serverWorld.getRegistryKey())
                 .map(GlobalPos::pos)
-                .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReserved(serverWorld, jobPos))
+                .filter(jobPos -> ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(serverWorld, jobPos))
                 .ifPresent(jobPos -> {
-                    ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos).ifPresent(guardUuid ->
-                            LOGGER.debug("released villager from reserved POI: villager={} jobSite={} guard={}",
-                                    villager.getUuidAsString(),
-                                    jobPos.toShortString(),
-                                    guardUuid));
+                    long gameTime = serverWorld.getTime();
+                    if (guardvillagers$lastReservedCleanupPos != null
+                            && guardvillagers$lastReservedCleanupPos.equals(jobPos)
+                            && gameTime - guardvillagers$lastReservedCleanupTick < GUARDVILLAGERS_RESERVED_POI_CLEANUP_COOLDOWN_TICKS) {
+                        return;
+                    }
+
+                    guardvillagers$lastReservedCleanupPos = jobPos.toImmutable();
+                    guardvillagers$lastReservedCleanupTick = gameTime;
+
+                    String reservedGuard = ConvertedWorkerJobSiteReservationManager.getReservedGuard(serverWorld, jobPos)
+                            .map(UUID::toString)
+                            .orElse("unknown");
+                    LOGGER.debug("fallback cleanup triggered: villager={} jobSite={} guard={}",
+                            villager.getUuidAsString(),
+                            jobPos.toShortString(),
+                            reservedGuard);
                     villager.releaseTicketFor(MemoryModuleType.JOB_SITE);
                     villager.getBrain().forget(MemoryModuleType.JOB_SITE);
                     villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
