@@ -2,7 +2,7 @@ package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
-import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.PathAwareEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.brain.MemoryQueryResult;
 import net.minecraft.entity.ai.brain.task.FindPointOfInterestTask;
@@ -36,14 +36,16 @@ public class FindPointOfInterestTaskMixin {
             PointOfInterestStorage poiStorage,
             Predicate<BlockPos> poiPosPredicate,
             BlockPos pos,
-            MemoryQueryResult<?> queryResult,
+            MemoryQueryResult<?, ?> queryResult,
             ServerWorld world,
             Optional<Byte> entityStatus,
-            LivingEntity entity,
+            PathAwareEntity entity,
             it.unimi.dsi.fastutil.longs.Long2ObjectMap<?> retryMarkers,
             RegistryEntry<PointOfInterestType> poiType
     ) {
-        if (((MemoryQueryResultAccessor) queryResult).guardvillagers$getMemoryModuleType() != MemoryModuleType.POTENTIAL_JOB_SITE) {
+        MemoryModuleType<?> memoryType = ((MemoryQueryResultAccessor) (Object) queryResult)
+                .guardvillagers$getMemoryModuleType();
+        if (memoryType != MemoryModuleType.POTENTIAL_JOB_SITE) {
             return originalPredicate;
         }
 
