@@ -41,6 +41,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
     protected boolean pendingUniversalRoute;
+    protected boolean pendingOverflowTransfer;
 
     protected AbstractInventoryDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -296,6 +297,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = null;
         pendingTargetPos = null;
         pendingUniversalRoute = false;
+        pendingOverflowTransfer = false;
         clearPendingTargetState();
     }
 
@@ -529,6 +531,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             onPendingItemSelected(extracted);
             pendingTargetId = stand.get().getUuid();
             pendingTargetPos = stand.get().getBlockPos();
+            pendingUniversalRoute = false;
+            pendingOverflowTransfer = false;
             return true;
         }
         return false;
@@ -588,6 +592,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         pendingUniversalRoute = true;
+        pendingOverflowTransfer = false;
         return true;
     }
 
