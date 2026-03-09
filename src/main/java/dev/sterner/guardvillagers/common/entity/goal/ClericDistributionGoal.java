@@ -1,8 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -37,6 +35,9 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
+            return true;
+        }
         List<DistributionRecipientHelper.RecipientRecord> recipients =
                 DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
@@ -56,6 +57,14 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
         if (inventory == null) {
             return false;
+        }
+        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
+            LOGGER.info("Cleric {} started overflow distribution of {} to librarian {} at {}",
+                    villager.getUuidAsString(),
+                    pendingItem.getItem(),
+                    pendingTargetId,
+                    pendingTargetPos.toShortString());
+            return true;
         }
 
         List<DistributionRecipientHelper.RecipientRecord> recipients =
@@ -93,6 +102,9 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (refreshOverflowTarget(world, this::isDistributableItem)) {
+            return true;
+        }
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
@@ -123,11 +135,14 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingOverflowTransfer) {
+            return executeOverflowTransfer(world);
+        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
 
-        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetPos);
+        Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
         if (targetInventory.isEmpty()) {
             LOGGER.debug("Cleric {} failed potion transfer: recipient chest at {} is unavailable",
                     villager.getUuidAsString(),
@@ -185,6 +200,11 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     }
 
     @Override
+    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
+        return Optional.of(OverflowRecipientType.LIBRARIAN);
+    }
+
+    @Override
     protected boolean matchesProfession(VillagerEntity villager) {
         return villager.getVillagerData().getProfession() == VillagerProfession.CLERIC;
     }
@@ -204,11 +224,4 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         return false;
     }
 
-    private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
-        BlockState state = world.getBlockState(position);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
-    }
 }
