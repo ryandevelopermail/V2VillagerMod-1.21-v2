@@ -44,6 +44,8 @@ public class MasonMiningStairGoal extends Goal {
     private static final int RECOVERY_TRIGGER_TICKS = 50;
     private static final int RECOVERY_MAX_TICKS = 80;
     private static final int FAILURE_REASON_RESET_THRESHOLD = 3;
+    private static final int MIN_RESERVED_COBBLESTONE = 8;
+    private static final int MIN_RESERVED_DIRT = 8;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -689,6 +691,9 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
+        int cobblestoneReserveRemaining = Math.max(0, MIN_RESERVED_COBBLESTONE - countInventoryItem(Blocks.COBBLESTONE.asItem()));
+        int dirtReserveRemaining = Math.max(0, MIN_RESERVED_DIRT - countInventoryItem(Blocks.DIRT.asItem()));
+
         for (int i = 0; i < guard.guardInventory.size(); i++) {
             ItemStack stack = guard.guardInventory.getStack(i);
             if (stack.isEmpty()) {
@@ -698,14 +703,48 @@ public class MasonMiningStairGoal extends Goal {
                 continue;
             }
 
-            int beforeCount = stack.getCount();
-            ItemStack remaining = insertStack(chestInventory, stack);
-            depositedItemCount += beforeCount - remaining.getCount();
-            guard.guardInventory.setStack(i, remaining);
+            int reserveToKeep = 0;
+            if (stack.isOf(Blocks.COBBLESTONE.asItem()) && cobblestoneReserveRemaining > 0) {
+                reserveToKeep = Math.min(stack.getCount(), cobblestoneReserveRemaining);
+                cobblestoneReserveRemaining -= reserveToKeep;
+            } else if (stack.isOf(Blocks.DIRT.asItem()) && dirtReserveRemaining > 0) {
+                reserveToKeep = Math.min(stack.getCount(), dirtReserveRemaining);
+                dirtReserveRemaining -= reserveToKeep;
+            }
+
+            int depositCount = stack.getCount() - reserveToKeep;
+            if (depositCount <= 0) {
+                continue;
+            }
+
+            ItemStack toDeposit = stack.copy();
+            toDeposit.setCount(depositCount);
+            ItemStack remaining = insertStack(chestInventory, toDeposit);
+            depositedItemCount += depositCount - remaining.getCount();
+
+            int finalCount = reserveToKeep + remaining.getCount();
+            if (finalCount <= 0) {
+                guard.guardInventory.setStack(i, ItemStack.EMPTY);
+            } else {
+                ItemStack finalStack = stack.copy();
+                finalStack.setCount(finalCount);
+                guard.guardInventory.setStack(i, finalStack);
+            }
         }
 
         guard.guardInventory.markDirty();
         chestInventory.markDirty();
+    }
+
+    private int countInventoryItem(net.minecraft.item.Item item) {
+        int total = 0;
+        for (int i = 0; i < guard.guardInventory.size(); i++) {
+            ItemStack stack = guard.guardInventory.getStack(i);
+            if (stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {
@@ -992,12 +1031,17 @@ public class MasonMiningStairGoal extends Goal {
             default -> "NONE";
         };
 
-        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, nextEligibleStartTick={}, mainHand={} ",
+        int reservedCobblestone = countInventoryItem(Blocks.COBBLESTONE.asItem());
+        int reservedDirt = countInventoryItem(Blocks.DIRT.asItem());
+
+        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, nextEligibleStartTick={}, reservedCobblestone={}, reservedDirt={}, mainHand={} ",
                 guard.getUuidAsString(),
                 minedBlockCount,
                 depositedItemCount,
                 returnReasonText,
                 nextSessionStartTick,
+                reservedCobblestone,
+                reservedDirt,
                 guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
     }
 
