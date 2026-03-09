@@ -2,11 +2,13 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.PickaxeItem;
 import net.minecraft.item.ShovelItem;
@@ -367,7 +369,7 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
 
-        if (!hasSafeSupport(world, footTarget)) {
+        if (!ensureOrPlaceSupport(world, footTarget)) {
             return false;
         }
 
@@ -396,6 +398,62 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
         return !supportState.getFluidState().isIn(FluidTags.WATER) && !supportState.getFluidState().isIn(FluidTags.LAVA);
+    }
+
+    private boolean ensureOrPlaceSupport(ServerWorld world, BlockPos footTarget) {
+        if (hasSafeSupport(world, footTarget)) {
+            return true;
+        }
+
+        BlockPos supportPos = footTarget.down();
+        BlockState supportState = world.getBlockState(supportPos);
+        if ((!supportState.isAir() && !supportState.isReplaceable())
+                || !supportState.getFluidState().isEmpty()
+                || !world.getOtherEntities(null, new Box(supportPos), entity -> entity.isAlive()).isEmpty()) {
+            return false;
+        }
+
+        SupportPlacementChoice placementChoice = findSupportPlacementChoice();
+        if (placementChoice == null) {
+            return false;
+        }
+
+        if (!world.setBlockState(supportPos, placementChoice.block.getDefaultState())) {
+            return false;
+        }
+
+        placementChoice.stack.decrement(1);
+        guard.guardInventory.markDirty();
+        LOGGER.info("Mason guard {} support-placement pos={} block={}",
+                guard.getUuidAsString(),
+                supportPos.toShortString(),
+                Registries.BLOCK.getId(placementChoice.block));
+        return true;
+    }
+
+    private SupportPlacementChoice findSupportPlacementChoice() {
+        SupportPlacementChoice cobblestone = findSupportBlockInInventory(Blocks.COBBLESTONE);
+        if (cobblestone != null) {
+            return cobblestone;
+        }
+        return findSupportBlockInInventory(Blocks.DIRT);
+    }
+
+    private SupportPlacementChoice findSupportBlockInInventory(net.minecraft.block.Block block) {
+        Inventory inventory = guard.guardInventory;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !(stack.getItem() instanceof BlockItem blockItem)) {
+                continue;
+            }
+            if (blockItem.getBlock() == block) {
+                return new SupportPlacementChoice(block, stack);
+            }
+        }
+        return null;
+    }
+
+    private record SupportPlacementChoice(net.minecraft.block.Block block, ItemStack stack) {
     }
 
     private boolean clearBlockIfNeeded(ServerWorld world, BlockPos pos) {
