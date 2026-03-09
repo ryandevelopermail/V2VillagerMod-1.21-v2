@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.entity.ItemEntity;
@@ -61,6 +62,7 @@ public class MasonMiningStairGoal extends Goal {
     private long cooldownThreeQuarterLogTick;
     private long cooldownProgressLoggedForStartTick = -1L;
     private BlockPos recoveryMoveTarget;
+    private BlockPos returnStepTarget;
     private int recoveryTicks;
     private boolean recoveryAttemptedForStep;
     private ReturnReason lastFailureReason = ReturnReason.NONE;
@@ -155,6 +157,7 @@ public class MasonMiningStairGoal extends Goal {
         this.sessionStepTarget = MathHelper.nextInt(guard.getRandom(), BATCH_MIN_STEPS, BATCH_MAX_STEPS);
         this.stage = this.rejoinStepTarget != null ? Stage.REJOIN_LAST_STEP : Stage.MINING;
         this.recoveryMoveTarget = null;
+        this.returnStepTarget = null;
         this.recoveryTicks = 0;
         this.recoveryAttemptedForStep = false;
         return true;
@@ -232,6 +235,30 @@ public class MasonMiningStairGoal extends Goal {
                 stage = Stage.DONE;
                 return;
             }
+            if (returnStepTarget == null && stepIndex > 0) {
+                returnStepTarget = computeStepTarget(stepIndex - 1);
+            }
+
+            if (returnStepTarget != null) {
+                BlockPos guardFeet = guard.getBlockPos();
+                if (!repairStairTransitionIfNeeded(world, guardFeet, returnStepTarget) || !ensureStepClear(world, returnStepTarget)) {
+                    beginReturn(ReturnReason.CANNOT_ADVANCE);
+                    return;
+                }
+
+                guard.getNavigation().startMovingTo(returnStepTarget.getX() + 0.5D, returnStepTarget.getY(), returnStepTarget.getZ() + 0.5D, MOVE_SPEED);
+                if (guard.squaredDistanceTo(Vec3d.ofBottomCenter(returnStepTarget)) <= TARGET_REACH_SQUARED) {
+                    if (stepIndex > 1) {
+                        stepIndex--;
+                        returnStepTarget = computeStepTarget(stepIndex - 1);
+                    } else {
+                        stepIndex = 0;
+                        returnStepTarget = null;
+                    }
+                }
+                return;
+            }
+
             guard.getNavigation().startMovingTo(chestPos.getX() + 0.5D, chestPos.getY(), chestPos.getZ() + 0.5D, MOVE_SPEED);
             if (guard.squaredDistanceTo(Vec3d.ofCenter(chestPos)) <= 4.0D) {
                 stage = Stage.DEPOSIT;
@@ -262,8 +289,10 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (!ensureStepClear(world, rejoinStepTarget)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
-            return;
+            if (!repairStairTransitionIfNeeded(world, guard.getBlockPos(), rejoinStepTarget) || !ensureStepClear(world, rejoinStepTarget)) {
+                beginReturn(ReturnReason.CANNOT_ADVANCE);
+                return;
+            }
         }
 
         if (tickRecoveryMove(world)) {
@@ -355,11 +384,84 @@ public class MasonMiningStairGoal extends Goal {
                 beginReturn(ReturnReason.BATCH_COMPLETE);
                 return;
             }
-            currentStepTarget = computeStepTarget(stepIndex);
+            BlockPos nextStepTarget = computeStepTarget(stepIndex);
+            if (!repairStairTransitionIfNeeded(world, reachedStepPos, nextStepTarget) || !ensureStepClear(world, nextStepTarget)) {
+                beginReturn(ReturnReason.CANNOT_ADVANCE);
+                return;
+            }
+            currentStepTarget = nextStepTarget;
             noProgressTicks = 0;
             lastDistanceToTarget = Double.MAX_VALUE;
             recoveryAttemptedForStep = false;
         }
+    }
+
+    private boolean repairStairTransitionIfNeeded(ServerWorld world, BlockPos fromStep, BlockPos toStep) {
+        boolean attemptedRepair = false;
+
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            BlockPos clearancePos = toStep.up(i);
+            BlockState clearanceState = world.getBlockState(clearancePos);
+            if (!clearanceState.isAir() && !clearanceState.getCollisionShape(world, clearancePos).isEmpty()) {
+                if (!clearBlockIfNeeded(world, clearancePos)) {
+                    return false;
+                }
+                attemptedRepair = true;
+                LOGGER.info("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
+                        guard.getUuidAsString(),
+                        clearancePos.toShortString(),
+                        fromStep.toShortString(),
+                        toStep.toShortString());
+            }
+        }
+
+        BlockPos supportPos = toStep.down();
+        if (!hasSafeSupport(world, toStep)) {
+            BlockState supportState = world.getBlockState(supportPos);
+            if (!supportState.isAir() && !supportState.getCollisionShape(world, supportPos).isEmpty()) {
+                if (!clearBlockIfNeeded(world, supportPos)) {
+                    return false;
+                }
+            }
+
+            BlockState fillState = guard.getRandom().nextBoolean() ? Blocks.COBBLESTONE.getDefaultState() : Blocks.DIRT.getDefaultState();
+            if (!world.setBlockState(supportPos, fillState)) {
+                return false;
+            }
+            attemptedRepair = true;
+            LOGGER.info("Mason guard {} stair transition repaired by placed support block {} at {} (from={} -> to={})",
+                    guard.getUuidAsString(),
+                    fillState.getBlock().getName().getString(),
+                    supportPos.toShortString(),
+                    fromStep.toShortString(),
+                    toStep.toShortString());
+        }
+
+        if (toStep.getY() > fromStep.getY()) {
+            Direction transitionDirection = Direction.getFacing(toStep.getX() - fromStep.getX(), 0, toStep.getZ() - fromStep.getZ());
+            if (!transitionDirection.getAxis().isHorizontal()) {
+                transitionDirection = miningDirection != null && miningDirection.getAxis().isHorizontal() ? miningDirection : guard.getHorizontalFacing();
+            }
+
+            for (int i = 1; i <= 2; i++) {
+                BlockPos ascentEdgePos = fromStep.offset(transitionDirection).up(i);
+                BlockState ascentEdgeState = world.getBlockState(ascentEdgePos);
+                if (ascentEdgeState.isAir() || ascentEdgeState.getCollisionShape(world, ascentEdgePos).isEmpty()) {
+                    continue;
+                }
+                if (!clearBlockIfNeeded(world, ascentEdgePos)) {
+                    return false;
+                }
+                attemptedRepair = true;
+                LOGGER.info("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
+                        guard.getUuidAsString(),
+                        ascentEdgePos.toShortString(),
+                        fromStep.toShortString(),
+                        toStep.toShortString());
+            }
+        }
+
+        return !attemptedRepair || ensureStepClear(world, toStep);
     }
 
     private boolean ensureStepClear(ServerWorld world, BlockPos footTarget) {
@@ -642,6 +744,7 @@ public class MasonMiningStairGoal extends Goal {
         this.rejoinStepTarget = null;
         this.rejoinDeepTarget = null;
         this.stepIndex = 0;
+        this.returnStepTarget = null;
         this.miningSessionEndTick = 0L;
         this.sessionStepTarget = 0;
         this.recoveryMoveTarget = null;
