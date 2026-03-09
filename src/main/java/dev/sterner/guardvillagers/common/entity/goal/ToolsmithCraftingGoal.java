@@ -1,6 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
@@ -10,7 +10,6 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
-import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.PickaxeItem;
@@ -28,6 +27,7 @@ import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -35,8 +35,6 @@ import java.util.Optional;
 public class ToolsmithCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     private static final int NON_TABLE_GRID_SIZE = 2;
-    private static final int SHEARS_PER_SHEPHERD_CHEST = 1;
-    private static final int RODS_PER_FISHERMAN_STORAGE = 1;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
@@ -188,7 +186,7 @@ public class ToolsmithCraftingGoal extends Goal {
             return;
         }
 
-        ToolRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        ToolRecipe recipe = craftable.getFirst();
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -206,10 +204,8 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private List<ToolRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<ToolRecipe> recipes = new ArrayList<>();
-        int eligibleShepherdChestCount = DistributionRecipientHelper.findEligibleShepherdRecipients(world, villager, 24.0D).size();
-        int currentShearsStock = countItemInInventory(inventory, ShearsItem.class);
-        int eligibleFishermanStorageCount = DistributionRecipientHelper.findEligibleFishermanRecipients(world, villager, 24.0D).size();
-        int currentRodStock = countItemInInventory(inventory, Items.FISHING_ROD);
+        ToolsmithDemandPlanner.DemandSnapshot demandSnapshot = ToolsmithDemandPlanner.buildSnapshot(world, villager, inventory);
+        CraftingCheckLogger.report(world, "Toolsmith", "crafting " + demandSnapshot.compactSummary());
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
@@ -219,17 +215,27 @@ public class ToolsmithCraftingGoal extends Goal {
             if (!canUseRecipeWithoutCraftingTable(recipe) && !hasValidCraftingTable(world)) {
                 continue;
             }
-            if (result.getItem() instanceof ShearsItem && currentShearsStock >= eligibleShepherdChestCount * SHEARS_PER_SHEPHERD_CHEST) {
+            ToolsmithDemandPlanner.ToolType toolType = ToolsmithDemandPlanner.ToolType.fromStack(result);
+            if (toolType == null) {
                 continue;
             }
-            if (result.isOf(Items.FISHING_ROD) && currentRodStock >= eligibleFishermanStorageCount * RODS_PER_FISHERMAN_STORAGE) {
-                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + currentRodStock + "/" + (eligibleFishermanStorageCount * RODS_PER_FISHERMAN_STORAGE) + ")");
+            ToolsmithDemandPlanner.ToolDemand toolDemand = demandSnapshot.demandFor(toolType);
+            int deficit = toolDemand == null ? 0 : toolDemand.demandDeficit();
+            if (toolType == ToolsmithDemandPlanner.ToolType.SHEARS && deficit <= 0) {
+                continue;
+            }
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0 && toolDemand != null) {
+                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
                 continue;
             }
             if (canCraft(inventory, recipe)) {
-                recipes.add(new ToolRecipe(recipe, result));
+                recipes.add(new ToolRecipe(recipe, result, toolType, deficit, toolType.fallbackPriority()));
             }
         }
+        recipes.sort(Comparator
+                .comparingInt(ToolRecipe::isPositiveDemand).reversed()
+                .thenComparing(Comparator.comparingInt(ToolRecipe::demandDeficit).reversed())
+                .thenComparingInt(ToolRecipe::tieBreakWeight));
         return filterLastCrafted(recipes);
     }
 
@@ -239,28 +245,6 @@ public class ToolsmithCraftingGoal extends Goal {
                 || stack.getItem() instanceof HoeItem
                 || stack.getItem() instanceof ShearsItem
                 || stack.isOf(Items.FISHING_ROD);
-    }
-
-    private int countItemInInventory(Inventory inventory, Item item) {
-        int count = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (stack.isOf(item)) {
-                count += stack.getCount();
-            }
-        }
-        return count;
-    }
-
-    private int countItemInInventory(Inventory inventory, Class<?> itemType) {
-        int count = 0;
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (itemType.isInstance(stack.getItem())) {
-                count += stack.getCount();
-            }
-        }
-        return count;
     }
 
     private boolean hasNonTableCraftableRecipe(ServerWorld world) {
@@ -504,7 +488,10 @@ public class ToolsmithCraftingGoal extends Goal {
         DONE
     }
 
-    private record ToolRecipe(CraftingRecipe recipe, ItemStack output) {
+    private record ToolRecipe(CraftingRecipe recipe, ItemStack output, ToolsmithDemandPlanner.ToolType toolType, int demandDeficit, int tieBreakWeight) {
+        int isPositiveDemand() {
+            return demandDeficit > 0 ? 1 : 0;
+        }
     }
 
     private String formatCheckResult(int craftableCount) {

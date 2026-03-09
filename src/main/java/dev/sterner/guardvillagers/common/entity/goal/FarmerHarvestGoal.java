@@ -37,6 +37,9 @@ public class FarmerHarvestGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
     private static final int TARGET_TIMEOUT_TICKS = 200;
+    private static final int GATHER_SEEDS_TIMEOUT_TICKS = 200;
+    private static final int GATHER_SEEDS_NO_TARGET_LIMIT = 3;
+    private static final int MIN_WHEAT_SEED_TARGET = 5;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -66,8 +69,16 @@ public class FarmerHarvestGoal extends Goal {
     private int exitDelayTicks;
     private final Deque<BlockPos> hoeTargets = new ArrayDeque<>();
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
+    private final Deque<BlockPos> gatherSeedTargets = new ArrayDeque<>();
     private BlockPos currentHoeTarget;
     private long currentHoeTargetStartTick;
+    private BlockPos currentGatherTarget;
+    private long currentGatherTargetStartTick;
+    private long gatherSeedsStageStartTick;
+    private boolean bootstrapSeedGatherRequested;
+    private boolean wheatSeedForagingRequested;
+    private boolean prioritizeWheatSeedsForPlanting;
+    private int gatherNoTargetPasses;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -82,6 +93,11 @@ public class FarmerHarvestGoal extends Goal {
         this.stage = Stage.IDLE;
         this.harvestTargets.clear();
         this.currentHoeTarget = null;
+        this.gatherSeedTargets.clear();
+        this.currentGatherTarget = null;
+        this.wheatSeedForagingRequested = false;
+        this.prioritizeWheatSeedsForPlanting = false;
+        this.gatherNoTargetPasses = 0;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -113,13 +129,21 @@ public class FarmerHarvestGoal extends Goal {
             return true;
         }
 
-        int matureCount = countMatureCrops(world);
-        boolean canRunForHoeing = hasHoeableGroundInRange(world) && (hasHoeInInventory() || hasHoeInChest(world));
+        BootstrapPreflight bootstrapPreflight = evaluateBootstrapPreflight(world, false);
+        int matureCount = bootstrapPreflight.matureCropCount;
+        boolean canRunForHoeing = bootstrapPreflight.canHoeGround;
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         if (immediateRunRequested) {
             immediateRunRequested = false;
         }
-        return matureCount >= 1 || canRunForHoeing;
+        if (matureCount >= 1 || canRunForHoeing) {
+            return true;
+        }
+        if (bootstrapPreflight.shouldRun()) {
+            logBootstrapReason(bootstrapPreflight.reason);
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -141,6 +165,8 @@ public class FarmerHarvestGoal extends Goal {
         harvestTargets.clear();
         currentTarget = null;
         currentHoeTarget = null;
+        currentGatherTarget = null;
+        gatherSeedTargets.clear();
         setStage(Stage.DONE);
     }
 
@@ -296,33 +322,17 @@ public class FarmerHarvestGoal extends Goal {
                 } else {
                     hoeTargets.clear();
                 }
-                pickUpPlantablesFromChest(serverWorld);
-                populatePlantTargets(serverWorld);
-                if (!hoeTargets.isEmpty()) {
-                    setStage(Stage.HOE_GROUND);
+                if (routePostDepositFlow(serverWorld, false)) {
                     break;
                 }
-                if (!plantTargets.isEmpty()) {
-                    setStage(Stage.PLANT_FARMLAND);
-                    break;
-                }
-                if (dailyHarvestRun) {
-                    notifyDailyHarvestComplete(serverWorld);
-                    dailyHarvestRun = false;
-                }
+                finishDailyRunIfNeeded(serverWorld);
                 setStage(Stage.DONE);
             }
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
                     currentHoeTarget = null;
-                    populatePlantTargets(serverWorld);
-                    if (!plantTargets.isEmpty()) {
-                        setStage(Stage.PLANT_FARMLAND);
-                    } else {
-                        if (dailyHarvestRun) {
-                            notifyDailyHarvestComplete(serverWorld);
-                            dailyHarvestRun = false;
-                        }
+                    if (!routePostDepositFlow(serverWorld, true)) {
+                        finishDailyRunIfNeeded(serverWorld);
                         setStage(Stage.DONE);
                     }
                     return;
@@ -370,7 +380,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (serverWorld.getBlockState(above).isAir()) {
-                    Item seedItem = findFirstPlantableInInventory();
+                    Item seedItem = findFirstPlantableInInventory(prioritizeWheatSeedsForPlanting);
                     if (seedItem == null) {
                         plantTargets.clear();
                         if (dailyHarvestRun) {
@@ -386,11 +396,96 @@ public class FarmerHarvestGoal extends Goal {
                         if (plantedState.canPlaceAt(serverWorld, above)) {
                             if (consumeSeed(villager.getInventory(), seedItem)) {
                                 serverWorld.setBlockState(above, plantedState);
+                                if (prioritizeWheatSeedsForPlanting && seedItem == Items.WHEAT_SEEDS && !hasRequiredWheatSeeds()) {
+                                    prioritizeWheatSeedsForPlanting = false;
+                                }
                             }
                         }
                     }
                 }
                 plantTargets.removeFirst();
+            }
+            case GATHER_WHEAT_SEEDS -> {
+                if (!bootstrapSeedGatherRequested && plantTargets.isEmpty()) {
+                    populatePlantTargets(serverWorld);
+                    if (plantTargets.isEmpty()) {
+                        logWheatSeedForageStop("no plant targets remain");
+                        finishDailyRunIfNeeded(serverWorld);
+                        setStage(Stage.DONE);
+                        return;
+                    }
+                }
+
+                if (!wheatSeedForagingRequested && !ensureWheatSeedStartup(serverWorld)) {
+                    return;
+                }
+
+                if (hasRequiredWheatSeeds()) {
+                    logWheatSeedThresholdReached();
+                    prioritizeWheatSeedsForPlanting = true;
+                    if (plantTargets.isEmpty()) {
+                        logWheatSeedForageStop("wheat seed threshold reached without pending farmland");
+                        finishDailyRunIfNeeded(serverWorld);
+                        setStage(Stage.DONE);
+                    } else {
+                        logWheatSeedForageStop("returning to planting stage");
+                        setStage(Stage.PLANT_FARMLAND);
+                    }
+                    return;
+                }
+
+                if (serverWorld.getTime() - gatherSeedsStageStartTick >= GATHER_SEEDS_TIMEOUT_TICKS) {
+                    logWheatSeedForageStop("timed out while gathering wheat seeds");
+                    finishDailyRunIfNeeded(serverWorld);
+                    setStage(Stage.DONE);
+                    return;
+                }
+
+                if (gatherSeedTargets.isEmpty()) {
+                    populateGatherSeedTargets(serverWorld);
+                    if (gatherSeedTargets.isEmpty()) {
+                        gatherNoTargetPasses++;
+                        if (gatherNoTargetPasses >= GATHER_SEEDS_NO_TARGET_LIMIT) {
+                            logWheatSeedForageStop("no valid wheat seed sources found");
+                            finishDailyRunIfNeeded(serverWorld);
+                            setStage(Stage.DONE);
+                            return;
+                        }
+                        LOGGER.info("Farmer {} wheat seed forage paused after chest retry {} of {} with no valid source", villager.getUuidAsString(), gatherNoTargetPasses, GATHER_SEEDS_NO_TARGET_LIMIT);
+                        setStage(Stage.RETURN_TO_CHEST);
+                        moveTo(chestPos);
+                        return;
+                    }
+                    gatherNoTargetPasses = 0;
+                }
+
+                BlockPos gatherTarget = gatherSeedTargets.peekFirst();
+                if (currentGatherTarget == null || !currentGatherTarget.equals(gatherTarget)) {
+                    currentGatherTarget = gatherTarget;
+                    currentGatherTargetStartTick = serverWorld.getTime();
+                }
+
+                if (serverWorld.getTime() - currentGatherTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    gatherSeedTargets.removeFirst();
+                    currentGatherTarget = null;
+                    return;
+                }
+
+                if (!isValidSeedSource(serverWorld, gatherTarget)) {
+                    gatherSeedTargets.removeFirst();
+                    currentGatherTarget = null;
+                    return;
+                }
+
+                if (!isNear(gatherTarget)) {
+                    moveTo(gatherTarget, MOVE_SPEED);
+                    return;
+                }
+
+                serverWorld.breakBlock(gatherTarget, true, villager);
+                collectNearbyDrops(serverWorld, gatherTarget);
+                gatherSeedTargets.removeFirst();
+                currentGatherTarget = null;
             }
             case IDLE, DONE -> {
             }
@@ -433,6 +528,26 @@ public class FarmerHarvestGoal extends Goal {
                 continue;
             }
             if (isMatureCrop(world.getBlockState(pos))) {
+                count++;
+                if (count > 1) {
+                    return count;
+                }
+            }
+        }
+        return count;
+    }
+
+    private int countPlantedCropBlocks(ServerWorld world) {
+        int count = 0;
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (world.getBlockState(pos).getBlock() instanceof CropBlock) {
                 count++;
                 if (count > 1) {
                     return count;
@@ -630,7 +745,120 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
         stage = newStage;
+        if (newStage != Stage.GATHER_WHEAT_SEEDS) {
+            bootstrapSeedGatherRequested = false;
+            wheatSeedForagingRequested = false;
+            gatherNoTargetPasses = 0;
+        }
+        if (newStage == Stage.GATHER_WHEAT_SEEDS && villager.getWorld() instanceof ServerWorld world) {
+            gatherSeedsStageStartTick = world.getTime();
+            currentGatherTarget = null;
+            gatherSeedTargets.clear();
+            gatherNoTargetPasses = 0;
+            logWheatSeedForageStart();
+        }
         LOGGER.info("Farmer {} entering harvest stage {}", villager.getUuidAsString(), newStage);
+    }
+
+    private boolean routePostDepositFlow(ServerWorld world, boolean afterHoeing) {
+        populatePlantTargets(world);
+        BootstrapPreflight bootstrapPreflight = evaluateBootstrapPreflight(world, afterHoeing);
+
+        if (!hoeTargets.isEmpty()) {
+            setStage(Stage.HOE_GROUND);
+            return true;
+        }
+
+        prioritizeWheatSeedsForPlanting = false;
+        pickUpPlantablesFromChest(world);
+        if (!plantTargets.isEmpty()) {
+            if (hasPlantablesInInventory() && !requiresWheatSeedStartup()) {
+                if (hasRequiredWheatSeeds()) {
+                    LOGGER.info("Farmer {} wheat seed threshold already satisfied with {} seeds", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS));
+                }
+                setStage(Stage.PLANT_FARMLAND);
+            } else {
+                if (ensureWheatSeedStartup(world)) {
+                    setStage(Stage.PLANT_FARMLAND);
+                } else {
+                    wheatSeedForagingRequested = true;
+                    setStage(Stage.GATHER_WHEAT_SEEDS);
+                }
+            }
+            return true;
+        }
+
+        if (bootstrapPreflight.shouldGatherSeedsAfterChestCheck()) {
+            bootstrapSeedGatherRequested = true;
+            logBootstrapReason(bootstrapPreflight.reason);
+            if (ensureWheatSeedStartup(world)) {
+                setStage(Stage.PLANT_FARMLAND);
+            } else {
+                wheatSeedForagingRequested = true;
+                setStage(Stage.GATHER_WHEAT_SEEDS);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    private BootstrapPreflight evaluateBootstrapPreflight(ServerWorld world, boolean afterHoeing) {
+        int matureCropCount = countMatureCrops(world);
+        int plantedCropCount = countPlantedCropBlocks(world);
+        boolean canHoeGround = hasHoeableGroundInRange(world) && (hasHoeInInventory() || hasHoeInChest(world));
+        boolean hasPlantTargets = !plantTargets.isEmpty();
+        boolean hasSeedsForPlanting = hasPlantablesForPlanting();
+
+        String reason = null;
+        if (matureCropCount == 0 && plantedCropCount == 0 && (canHoeGround || hasPlantTargets || !hasSeedsForPlanting)) {
+            reason = "no mature or planted crops near job site";
+        }
+        if (reason == null && afterHoeing && !hasPlantTargets && !hasSeedsForPlanting) {
+            reason = "no plant targets after hoeing and no seeds acquired";
+        }
+
+        return new BootstrapPreflight(matureCropCount, plantedCropCount, canHoeGround, hasPlantTargets, hasSeedsForPlanting, reason);
+    }
+
+    private void finishDailyRunIfNeeded(ServerWorld world) {
+        if (dailyHarvestRun) {
+            notifyDailyHarvestComplete(world);
+            dailyHarvestRun = false;
+        }
+    }
+
+    private void logBootstrapReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return;
+        }
+        LOGGER.info("Farmer {} bootstrap preflight: {}", villager.getUuidAsString(), reason);
+    }
+
+    private static final class BootstrapPreflight {
+        private final int matureCropCount;
+        private final int plantedCropCount;
+        private final boolean canHoeGround;
+        private final boolean hasPlantTargets;
+        private final boolean hasSeedsForPlanting;
+        private final String reason;
+
+        private BootstrapPreflight(int matureCropCount, int plantedCropCount, boolean canHoeGround, boolean hasPlantTargets, boolean hasSeedsForPlanting, String reason) {
+            this.matureCropCount = matureCropCount;
+            this.plantedCropCount = plantedCropCount;
+            this.canHoeGround = canHoeGround;
+            this.hasPlantTargets = hasPlantTargets;
+            this.hasSeedsForPlanting = hasSeedsForPlanting;
+            this.reason = reason;
+        }
+
+        private boolean shouldRun() {
+            return reason != null;
+        }
+
+        private boolean shouldGatherSeedsAfterChestCheck() {
+            return reason != null && !hasPlantTargets && !hasSeedsForPlanting;
+        }
     }
 
     private enum Stage {
@@ -646,6 +874,7 @@ public class FarmerHarvestGoal extends Goal {
         RETURN_TO_CHEST,
         DEPOSIT,
         HOE_GROUND,
+        GATHER_WHEAT_SEEDS,
         PLANT_FARMLAND,
         DONE
     }
@@ -959,13 +1188,10 @@ public class FarmerHarvestGoal extends Goal {
         villager.getInventory().markDirty();
     }
 
-    private Item findFirstPlantableInInventory() {
-        Item[] candidates = new Item[] {
-                Items.WHEAT_SEEDS,
-                Items.CARROT,
-                Items.POTATO,
-                Items.BEETROOT_SEEDS
-        };
+    private Item findFirstPlantableInInventory(boolean prioritizeWheatSeeds) {
+        Item[] candidates = prioritizeWheatSeeds
+                ? new Item[] {Items.WHEAT_SEEDS, Items.CARROT, Items.POTATO, Items.BEETROOT_SEEDS}
+                : new Item[] {Items.CARROT, Items.POTATO, Items.BEETROOT_SEEDS, Items.WHEAT_SEEDS};
         for (Item candidate : candidates) {
             for (int slot = 0; slot < villager.getInventory().size(); slot++) {
                 ItemStack stack = villager.getInventory().getStack(slot);
@@ -975,6 +1201,91 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private boolean hasPlantablesInInventory() {
+        return findFirstPlantableInInventory(false) != null;
+    }
+
+    private boolean hasRequiredWheatSeeds() {
+        return countItemInInventory(Items.WHEAT_SEEDS) >= MIN_WHEAT_SEED_TARGET;
+    }
+
+    private boolean requiresWheatSeedStartup() {
+        boolean hasOtherPlantables = countItemInInventory(Items.CARROT) > 0
+                || countItemInInventory(Items.POTATO) > 0
+                || countItemInInventory(Items.BEETROOT_SEEDS) > 0;
+        return !hasOtherPlantables && !hasRequiredWheatSeeds();
+    }
+
+    private boolean ensureWheatSeedStartup(ServerWorld world) {
+        if (hasRequiredWheatSeeds()) {
+            return true;
+        }
+
+        LOGGER.info("Farmer {} detected missing wheat seeds for planting startup ({} / {})", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS), MIN_WHEAT_SEED_TARGET);
+        pickUpPlantablesFromChest(world);
+        int wheatSeedCount = countItemInInventory(Items.WHEAT_SEEDS);
+        LOGGER.info("Farmer {} chest wheat seed check result: {} / {}", villager.getUuidAsString(), wheatSeedCount, MIN_WHEAT_SEED_TARGET);
+        return wheatSeedCount >= MIN_WHEAT_SEED_TARGET;
+    }
+
+    private void logWheatSeedForageStart() {
+        LOGGER.info("Farmer {} starting wheat seed forage near {}", villager.getUuidAsString(), jobPos.toShortString());
+    }
+
+    private void logWheatSeedForageStop(String reason) {
+        LOGGER.info("Farmer {} stopping wheat seed forage: {}", villager.getUuidAsString(), reason);
+    }
+
+    private void logWheatSeedThresholdReached() {
+        LOGGER.info("Farmer {} reached wheat seed threshold with {} seeds", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS));
+    }
+
+    private boolean hasPlantablesForPlanting() {
+        return countItemInInventory(Items.CARROT) > 0
+                || countItemInInventory(Items.POTATO) > 0
+                || countItemInInventory(Items.BEETROOT_SEEDS) > 0
+                || countItemInInventory(Items.WHEAT_SEEDS) >= MIN_WHEAT_SEED_TARGET;
+    }
+
+    private int countItemInInventory(Item item) {
+        int total = 0;
+        for (int slot = 0; slot < villager.getInventory().size(); slot++) {
+            ItemStack stack = villager.getInventory().getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private void populateGatherSeedTargets(ServerWorld world) {
+        gatherSeedTargets.clear();
+        List<BlockPos> candidates = new ArrayList<>();
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -radius, -radius);
+        BlockPos end = jobPos.add(radius, radius, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
+                continue;
+            }
+            if (!isValidSeedSource(world, pos)) {
+                continue;
+            }
+            candidates.add(pos.toImmutable());
+        }
+        candidates.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
+        gatherSeedTargets.addAll(candidates);
+    }
+
+    private boolean isValidSeedSource(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isOf(Blocks.SHORT_GRASS)
+                || state.isOf(Blocks.TALL_GRASS)
+                || state.isOf(Blocks.FERN)
+                || state.isOf(Blocks.LARGE_FERN);
     }
 
     private boolean hasNearbyWater(ServerWorld world, BlockPos farmlandCandidate) {

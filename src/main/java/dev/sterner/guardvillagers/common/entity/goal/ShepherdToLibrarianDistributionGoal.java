@@ -1,8 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -35,6 +33,9 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
+            return true;
+        }
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -51,6 +52,9 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
         if (inventory == null) {
             return false;
+        }
+        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
+            return true;
         }
 
         List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
@@ -80,6 +84,9 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
+        if (refreshOverflowTarget(world, this::isDistributableItem)) {
+            return true;
+        }
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
@@ -106,11 +113,14 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
+        if (pendingOverflowTransfer) {
+            return executeOverflowTransfer(world);
+        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
 
-        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetPos);
+        Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
         if (targetInventory.isEmpty()) {
             return false;
         }
@@ -127,6 +137,11 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
 
     @Override
     protected void clearPendingTargetState() {
+    }
+
+    @Override
+    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
+        return Optional.of(OverflowRecipientType.LIBRARIAN);
     }
 
     @Override
@@ -149,11 +164,4 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
         return false;
     }
 
-    private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
-        BlockState state = world.getBlockState(position);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
-    }
 }
