@@ -16,6 +16,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 public final class DistributionRecipientHelper {
     private static final Comparator<RecipientRecord> RECIPIENT_ORDER =
@@ -93,7 +94,22 @@ public final class DistributionRecipientHelper {
             VillagerProfession profession,
             Block expectedJobBlock
     ) {
-        return findEligibleVillagerRecipients(world, source, range, profession, expectedJobBlock);
+        return findEligibleRecipients(world, source, range, profession, expectedJobBlock, recipient -> true);
+    }
+
+    public static List<RecipientRecord> findEligibleRecipients(
+            ServerWorld world,
+            VillagerEntity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock,
+            Predicate<RecipientRecord> filter
+    ) {
+        List<RecipientRecord> recipients = findEligibleVillagerRecipients(world, source, range, profession, expectedJobBlock);
+        if (recipients.isEmpty()) {
+            return recipients;
+        }
+        return recipients.stream().filter(filter).sorted(RECIPIENT_ORDER).toList();
     }
 
     private static List<RecipientRecord> findEligibleVillagerRecipients(
