@@ -4,11 +4,16 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
@@ -28,6 +33,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
     private static final int SESSION_TARGET_MIN = 3;
     private static final int SESSION_TARGET_MAX = 5;
+    private static final int SESSION_MIN_PLANKS = 11;
+    private static final int SESSION_MIN_STICKS = 4;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
     private static final int TREE_SEARCH_RADIUS = 20;
@@ -39,6 +46,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
 
     private final LumberjackGuardEntity guard;
+    private final Set<BlockPos> completedSessionRoots = new HashSet<>();
+    private final Set<BlockPos> failedSessionRoots = new HashSet<>();
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
     private int stallRecoveryAttempts;
@@ -122,12 +131,66 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
         teardownTree(world, targetRoot);
+        this.completedSessionRoots.add(targetRoot.toImmutable());
         this.guard.getSelectedTreeTargets().remove(0);
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
 
         if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().isEmpty()) {
-            beginReturnToBase();
+            if (!extendSessionIfMaterialThresholdUnmet(world)) {
+                beginReturnToBase();
+            }
         }
+    }
+
+    private boolean extendSessionIfMaterialThresholdUnmet(ServerWorld world) {
+        Inventory chestInventory = resolveChestInventory(world);
+        int plankCount = countByPredicate(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countByPredicate(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+        int stickCount = countByItem(chestInventory, Items.STICK)
+                + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+
+        if (plankCount >= SESSION_MIN_PLANKS && stickCount >= SESSION_MIN_STICKS) {
+            return false;
+        }
+
+        Set<BlockPos> excludedRoots = new HashSet<>(this.completedSessionRoots);
+        excludedRoots.addAll(this.failedSessionRoots);
+        excludedRoots.addAll(this.guard.getSelectedTreeTargets());
+
+        List<BlockPos> candidates = findTreeTargets(world);
+        int addedTargets = 0;
+        for (BlockPos candidate : candidates) {
+            if (excludedRoots.contains(candidate)) {
+                continue;
+            }
+            this.guard.getSelectedTreeTargets().add(candidate);
+            excludedRoots.add(candidate);
+            addedTargets++;
+            if (addedTargets >= SESSION_TARGET_MAX) {
+                break;
+            }
+        }
+
+        if (addedTargets <= 0) {
+            LOGGER.info("Lumberjack Guard {} did not meet material threshold (planks {}, sticks {}), but no additional tree targets were found",
+                    this.guard.getUuidAsString(),
+                    plankCount,
+                    stickCount);
+            return false;
+        }
+
+        this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() + addedTargets);
+        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
+        this.stalledTicks = 0;
+        this.stallRecoveryAttempts = 0;
+        this.lastTreeDistanceSq = Double.MAX_VALUE;
+
+        LOGGER.info("Lumberjack Guard {} extending active session for material threshold (planks {}, sticks {}); added {} new target(s)",
+                this.guard.getUuidAsString(),
+                plankCount,
+                stickCount,
+                addedTargets);
+        return true;
     }
 
     private void updateChopCountdown(ServerWorld world) {
@@ -160,6 +223,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.getSelectedTreeTargets().clear();
         this.guard.getSelectedTreeTargets().addAll(targets.subList(0, selectedCount));
         this.guard.setSessionTargetsRemaining(selectedCount);
+        this.completedSessionRoots.clear();
+        this.failedSessionRoots.clear();
         this.guard.setActiveSession(true);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
 
@@ -198,6 +263,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CRAFTING);
         this.guard.getSelectedTreeTargets().clear();
         this.guard.setSessionTargetsRemaining(0);
+        this.completedSessionRoots.clear();
+        this.failedSessionRoots.clear();
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
@@ -369,6 +436,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void recordFailedTargetAttempt(BlockPos targetRoot, String reason) {
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
+        this.failedSessionRoots.add(targetRoot.toImmutable());
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
@@ -585,4 +653,52 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             buffer.add(incoming);
         }
     }
+
+    private Inventory resolveChestInventory(ServerWorld world) {
+        BlockPos chestPos = this.guard.getPairedChestPos();
+        if (chestPos == null || !world.getBlockState(chestPos).isOf(Blocks.CHEST)) {
+            return null;
+        }
+
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
+        }
+
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private int countByPredicate(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
+        if (inventory == null) {
+            return 0;
+        }
+
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int countByPredicate(List<ItemStack> stacks, java.util.function.Predicate<ItemStack> predicate) {
+        int total = 0;
+        for (ItemStack stack : stacks) {
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int countByItem(Inventory inventory, Item item) {
+        return countByPredicate(inventory, stack -> stack.isOf(item));
+    }
+
+    private int countByItem(List<ItemStack> stacks, Item item) {
+        return countByPredicate(stacks, stack -> stack.isOf(item));
+    }
+
 }
