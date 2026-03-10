@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.GearGradeComparator;
+import dev.sterner.guardvillagers.common.util.IngredientDemandResolver;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -9,6 +10,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.CrossbowItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.item.RangedWeaponItem;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
@@ -21,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(FletcherDistributionGoal.class);
@@ -36,7 +39,10 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return stack.getItem() instanceof BowItem || stack.getItem() instanceof CrossbowItem || stack.isIn(ItemTags.ARROWS);
+        return stack.getItem() instanceof BowItem
+                || stack.getItem() instanceof CrossbowItem
+                || stack.isIn(ItemTags.ARROWS)
+                || stack.isOf(Items.STICK);
     }
 
     @Override
@@ -78,25 +84,26 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
                 continue;
             }
 
-            List<RecipientRecord> recipients = findRecipientForStack(world, stack);
+            List<TransferTarget> recipients = findRecipientForStack(world, stack);
             if (recipients.isEmpty()) {
                 continue;
             }
 
-            RecipientRecord recipient = recipients.get(0);
+            TransferTarget recipient = recipients.getFirst();
             ItemStack extracted = stack.split(1);
             inventory.setStack(slot, stack);
             inventory.markDirty();
 
             pendingItem = extracted;
-            pendingTargetId = recipient.guard().getUuid();
-            pendingTargetPos = recipient.guard().getBlockPos();
+            pendingTargetId = recipient.targetId();
+            pendingTargetPos = recipient.targetPos();
 
-            LOGGER.info("Fletcher {} selected {} for guard {} at {} [{}]",
+            LOGGER.info("Fletcher {} selected {} for {} {} at {} [{}]",
                     villager.getUuidAsString(),
                     pendingItem.getItem().toString(),
-                    recipient.guard().getUuidAsString(),
-                    recipient.guard().getBlockPos().toShortString(),
+                    recipient.type(),
+                    recipient.targetId(),
+                    recipient.targetPos().toShortString(),
                     RECIPIENT_SCOPE);
             return true;
         }
@@ -108,27 +115,28 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         if (refreshOverflowTarget(world, this::isDistributableItem)) {
             return true;
         }
-        List<RecipientRecord> recipients = findRecipientForStack(world, pendingItem);
+        List<TransferTarget> recipients = findRecipientForStack(world, pendingItem);
         if (recipients.isEmpty()) {
             return false;
         }
 
         if (pendingTargetId != null) {
-            for (RecipientRecord recipient : recipients) {
-                if (recipient.guard().getUuid().equals(pendingTargetId)) {
-                    pendingTargetPos = recipient.guard().getBlockPos();
+            for (TransferTarget recipient : recipients) {
+                if (recipient.targetId().equals(pendingTargetId)) {
+                    pendingTargetPos = recipient.targetPos();
                     return true;
                 }
             }
         }
 
-        RecipientRecord recipient = recipients.get(0);
-        pendingTargetId = recipient.guard().getUuid();
-        pendingTargetPos = recipient.guard().getBlockPos();
-        LOGGER.debug("Fletcher {} retargeted pending {} to guard {} at {}",
+        TransferTarget recipient = recipients.getFirst();
+        pendingTargetId = recipient.targetId();
+        pendingTargetPos = recipient.targetPos();
+        LOGGER.debug("Fletcher {} retargeted pending {} to {} {} at {}",
                 villager.getUuidAsString(),
                 pendingItem.getItem(),
-                recipient.guard().getUuidAsString(),
+                recipient.type(),
+                recipient.targetId(),
                 pendingTargetPos.toShortString());
         return true;
     }
@@ -141,6 +149,20 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         if (pendingItem.isEmpty() || pendingTargetId == null) {
             return false;
         }
+        if (pendingItem.isOf(Items.STICK)) {
+            Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
+            if (targetInventory.isEmpty()) {
+                return false;
+            }
+            ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
+            targetInventory.get().markDirty();
+            if (remaining.isEmpty()) {
+                return true;
+            }
+            pendingItem = remaining;
+            return false;
+        }
+
         if (!(world.getEntity(pendingTargetId) instanceof GuardEntity guard) || !guard.isAlive()) {
             return false;
         }
@@ -191,6 +213,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             return false;
         }
 
+
         return false;
     }
 
@@ -234,9 +257,20 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         return villager.getVillagerData().getProfession() == VillagerProfession.FLETCHER;
     }
 
-    private List<RecipientRecord> findRecipientForStack(ServerWorld world, ItemStack stack) {
+    private List<TransferTarget> findRecipientForStack(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return List.of();
+        }
+
+        if (stack.isOf(Items.STICK)) {
+            return IngredientDemandResolver.findVillagersNeedingSticks(world, villager, RECIPIENT_SCAN_RANGE, pos -> getChestInventoryAt(world, pos))
+                    .stream()
+                    .map(recipient -> new TransferTarget(
+                            recipient.recipient().recipient().getUuid(),
+                            recipient.recipient().chestPos(),
+                            recipient.recipient().sourceSquaredDistance(),
+                            "villager"))
+                    .toList();
         }
 
         if (RECIPIENT_SCOPE == RecipientScope.GUARDS_AND_VILLAGERS) {
@@ -249,9 +283,9 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         return world.getEntitiesByClass(GuardEntity.class, scanBox, this::isValidGuardRecipient)
                 .stream()
                 .filter(guard -> canReceiveStack(guard, stack))
-                .map(guard -> new RecipientRecord(guard, villager.squaredDistanceTo(guard)))
-                .sorted(Comparator.comparingDouble(RecipientRecord::sourceSquaredDistance)
-                        .thenComparing(record -> record.guard().getUuid(), java.util.UUID::compareTo))
+                .map(guard -> new TransferTarget(guard.getUuid(), guard.getBlockPos(), villager.squaredDistanceTo(guard), "guard"))
+                .sorted(Comparator.comparingDouble(TransferTarget::sourceSquaredDistance)
+                        .thenComparing(TransferTarget::targetId, UUID::compareTo))
                 .toList();
     }
 
@@ -314,6 +348,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         GUARDS_AND_VILLAGERS
     }
 
-    private record RecipientRecord(GuardEntity guard, double sourceSquaredDistance) {
+    private record TransferTarget(UUID targetId, BlockPos targetPos, double sourceSquaredDistance, String type) {
     }
 }
