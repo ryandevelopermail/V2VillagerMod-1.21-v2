@@ -441,12 +441,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             }
         }
 
-        DistributionRecipientHelper.RecipientRecord recipient = resolvedRecipients.splitPlan() != null
-                ? resolvedRecipients.splitPlan().selectedRecipient()
-                : null;
-        if (recipient == null) {
-            recipient = recipients.getFirst();
-        }
+        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         return true;

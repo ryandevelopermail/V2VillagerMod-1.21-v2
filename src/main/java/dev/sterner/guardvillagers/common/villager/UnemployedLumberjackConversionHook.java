@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -110,7 +110,7 @@ public final class UnemployedLumberjackConversionHook {
     }
 
     private static void convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
-        AxeGuardEntity guard = GuardVillagers.AXE_GUARD_VILLAGER.create(world);
+        LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
         if (guard == null) {
             return;
         }
@@ -118,15 +118,19 @@ public final class UnemployedLumberjackConversionHook {
         GuardConversionHelper.initializeConvertedGuard(world, villager, guard, tablePos);
         GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         clearAllEquipment(guard);
+        guard.setPairedCraftingTablePos(tablePos);
+        JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
+        guard.startChopCountdown(world.getTime(), 0L);
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(), VillagerProfession.NONE, "unemployed lumberjack conversion");
 
         world.spawnEntityAndPassengers(guard);
+        JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
     }
 
-    private static void clearAllEquipment(AxeGuardEntity guard) {
+    private static void clearAllEquipment(LumberjackGuardEntity guard) {
         guard.equipStack(EquipmentSlot.HEAD, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.CHEST, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.LEGS, ItemStack.EMPTY);
