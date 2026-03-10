@@ -43,8 +43,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     public boolean canStart() {
         return this.guard.getWorld() instanceof ServerWorld
                 && this.guard.isAlive()
-                && this.guard.getPairedCraftingTablePos() != null
-                && this.guard.getPairedChestPos() != null;
+                && this.guard.getPairedCraftingTablePos() != null;
     }
 
     @Override
@@ -140,17 +139,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void moveBackToBaseAndHandoff() {
-        BlockPos chest = this.guard.getPairedChestPos();
         BlockPos table = this.guard.getPairedCraftingTablePos();
-        if (chest == null || table == null) {
+        BlockPos chest = this.guard.getPairedChestPos();
+        if (table == null) {
             completeSession("pairing lost");
             return;
         }
 
-        BlockPos baseTarget = chest;
-        double chestDistance = this.guard.squaredDistanceTo(Vec3d.ofCenter(chest));
-        double tableDistance = this.guard.squaredDistanceTo(Vec3d.ofCenter(table));
-        if (chestDistance > 9.0D && tableDistance > 9.0D) {
+        BlockPos baseTarget = chest != null ? chest : table;
+        if (this.guard.squaredDistanceTo(Vec3d.ofCenter(baseTarget)) > 9.0D) {
             this.guard.getNavigation().startMovingTo(baseTarget.getX() + 0.5D, baseTarget.getY(), baseTarget.getZ() + 0.5D, 0.8D);
             return;
         }
@@ -161,7 +158,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private void completeSession(String reason) {
         this.guard.getNavigation().stop();
         this.guard.setActiveSession(false);
-        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CRAFTING);
         this.guard.getSelectedTreeTargets().clear();
         this.guard.setSessionTargetsRemaining(0);
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
@@ -201,7 +198,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private List<BlockPos> findTreeTargets(ServerWorld world) {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();
-        BlockPos center = new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+        BlockPos center = chest == null
+                ? table
+                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
         Set<BlockPos> uniqueRoots = new HashSet<>();
 
         BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);

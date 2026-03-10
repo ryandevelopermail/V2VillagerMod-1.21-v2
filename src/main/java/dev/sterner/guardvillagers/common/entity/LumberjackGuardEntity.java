@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.entity.goal.GuardLookAtAndStopMovingWhe
 import dev.sterner.guardvillagers.common.entity.goal.GuardRunToEatGoal;
 import dev.sterner.guardvillagers.common.entity.goal.KickGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardDepositLogsGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
@@ -172,7 +173,8 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.goalSelector.add(1, new RespondToHornGoal(this, 1.0D));
         this.goalSelector.add(1, new GuardRunToEatGoal(this));
         this.goalSelector.add(2, new LumberjackGuardChopTreesGoal(this));
-        this.goalSelector.add(3, new LumberjackGuardDepositLogsGoal(this));
+        this.goalSelector.add(3, new LumberjackGuardCraftingGoal(this));
+        this.goalSelector.add(4, new LumberjackGuardDepositLogsGoal(this));
         if (GuardVillagersConfig.guardEntitysRunFromPolarBears) {
             this.goalSelector.add(3, new FleeEntityGoal<>(this, PolarBearEntity.class, 12.0F, 1.0D, 1.2D));
         }
@@ -296,6 +298,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         MOVING_TO_TREE,
         CHOPPING,
         RETURNING_TO_BASE,
+        CRAFTING,
         MOVING_TO_CHEST,
         DEPOSITING;
 
