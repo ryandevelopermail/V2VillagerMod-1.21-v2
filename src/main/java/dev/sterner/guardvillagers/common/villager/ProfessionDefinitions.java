@@ -41,6 +41,10 @@ public final class ProfessionDefinitions {
             definition(VillagerProfession.WEAPONSMITH, Set.of(Blocks.GRINDSTONE), WeaponsmithBehavior::new)
     );
 
+    private static final List<Consumer<ServerWorld>> UNEMPLOYED_CONVERSION_HOOKS = List.of(
+            UnemployedLumberjackConversionHook::tryConvertUnemployedVillagersNearCraftingTables
+    );
+
     private static final Map<VillagerProfession, ProfessionDefinition> DEFINITIONS_BY_PROFESSION = DEFINITIONS.stream()
             .collect(Collectors.toUnmodifiableMap(ProfessionDefinition::profession, definition -> definition));
 
@@ -76,6 +80,10 @@ public final class ProfessionDefinitions {
     }
 
     public static boolean isExpectedJobBlock(VillagerProfession profession, BlockState blockState) {
+        if (profession == VillagerProfession.NONE) {
+            return blockState.isOf(Blocks.CRAFTING_TABLE);
+        }
+
         return get(profession)
                 .map(definition -> definition.expectedJobBlocks().contains(blockState.getBlock()))
                 .orElse(false);
@@ -96,6 +104,13 @@ public final class ProfessionDefinitions {
             if (conversionHook != null) {
                 conversionHook.accept(world);
             }
+        }
+        runUnemployedConversionHooks(world);
+    }
+
+    public static void runUnemployedConversionHooks(ServerWorld world) {
+        for (Consumer<ServerWorld> conversionHook : UNEMPLOYED_CONVERSION_HOOKS) {
+            conversionHook.accept(world);
         }
     }
 

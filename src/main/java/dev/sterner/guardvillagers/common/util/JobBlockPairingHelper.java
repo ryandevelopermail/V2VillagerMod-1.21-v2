@@ -93,6 +93,7 @@ public final class JobBlockPairingHelper {
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
         world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
+        ProfessionDefinitions.runUnemployedConversionHooks(world);
     }
 
     public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
