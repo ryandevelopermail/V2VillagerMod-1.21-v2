@@ -1,11 +1,15 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.behavior.LumberjackChestTriggerBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.FurnaceBlockEntity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.Item;
@@ -13,16 +17,22 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 
 public final class LumberjackChestTriggerController {
     private static final long EVALUATION_INTERVAL_TICKS = 100L;
     private static final long RULE_COOLDOWN_TICKS = 40L;
+    private static final double VILLAGE_EXPANSION_SCAN_RADIUS = 300.0D;
+    private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 400L;
+    private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
 
     private static final List<TriggerRule> RULES = List.of(
             new TriggerRule("craft_equip_best_axe", 100,
@@ -53,6 +63,12 @@ public final class LumberjackChestTriggerController {
         }
 
         long now = world.getTime();
+        if (now >= guard.getNextVillageExpansionScanTick()) {
+            runVillageExpansionScan(world, guard);
+            long jitter = world.random.nextInt((int) VILLAGE_EXPANSION_SCAN_JITTER_TICKS + 1);
+            guard.setNextVillageExpansionScanTick(now + VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS + jitter);
+        }
+
         if (!guard.isTriggerEvaluationRequested() && now < guard.getNextTriggerEvaluationTick()) {
             return;
         }
@@ -201,6 +217,190 @@ public final class LumberjackChestTriggerController {
             furnace.markDirty();
         }
         return changed;
+    }
+
+    private static void runVillageExpansionScan(ServerWorld world, LumberjackGuardEntity guard) {
+        TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
+        if (tryPlaceChestForEligibleV1Villager(context)) {
+            guard.recordTriggerAction(world.getTime(), "scan_place_chest_for_v1");
+            return;
+        }
+        if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
+            guard.recordTriggerAction(world.getTime(), "scan_place_crafting_table_for_v2");
+        }
+    }
+
+    private static boolean tryPlaceChestForEligibleV1Villager(TriggerContext context) {
+        if (countByItem(context, Items.CHEST) <= 0 && countByItem(context, Items.TRAPPED_CHEST) <= 0) {
+            return false;
+        }
+
+        for (VillagerEntity villager : collectNearbyVillagers(context.world(), context.guard())) {
+            if (!isEligibleV1Villager(context.world(), villager)) {
+                continue;
+            }
+            BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
+            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(context.world(), jobPos).isPresent()) {
+                continue;
+            }
+
+            BlockPos placePos = findPlacementNear(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+            if (placePos == null) {
+                continue;
+            }
+
+            if (countByItem(context, Items.CHEST) > 0 && consumeByItem(context, Items.CHEST, 1)) {
+                if (context.world().setBlockState(placePos, Blocks.CHEST.getDefaultState())) {
+                    JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                    return true;
+                }
+                addToInventoryOrBuffer(context, new ItemStack(Items.CHEST));
+            }
+
+            if (countByItem(context, Items.TRAPPED_CHEST) > 0 && consumeByItem(context, Items.TRAPPED_CHEST, 1)) {
+                if (context.world().setBlockState(placePos, Blocks.TRAPPED_CHEST.getDefaultState())) {
+                    JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                    return true;
+                }
+                addToInventoryOrBuffer(context, new ItemStack(Items.TRAPPED_CHEST));
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
+        if (countByItem(context, Items.CRAFTING_TABLE) <= 0 && countMatching(context, stack -> stack.isIn(ItemTags.PLANKS)) < 4) {
+            return false;
+        }
+
+        for (VillagerEntity villager : collectNearbyVillagers(context.world(), context.guard())) {
+            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager)) {
+                continue;
+            }
+
+            BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
+            if (jobPos == null) {
+                continue;
+            }
+
+            BlockPos placePos = findPlacementNear(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+            if (placePos == null || !hasEligibleUnemployedVillagerNearby(context.world(), placePos, 8.0D)) {
+                continue;
+            }
+
+            ItemStack tableStack = takeOneByItem(context, Items.CRAFTING_TABLE);
+            if (tableStack.isEmpty()) {
+                if (!consumeMatching(context, stack -> stack.isIn(ItemTags.PLANKS), 4)) {
+                    continue;
+                }
+                tableStack = new ItemStack(Items.CRAFTING_TABLE);
+            }
+
+            if (context.world().setBlockState(placePos, Blocks.CRAFTING_TABLE.getDefaultState())) {
+                JobBlockPairingHelper.handleCraftingTablePlacement(context.world(), placePos);
+                return true;
+            }
+
+            addToInventoryOrBuffer(context, tableStack);
+        }
+
+        return false;
+    }
+
+    private static ArrayList<VillagerEntity> collectNearbyVillagers(ServerWorld world, LumberjackGuardEntity guard) {
+        return new ArrayList<>(world.getEntitiesByClass(
+                VillagerEntity.class,
+                new Box(guard.getBlockPos()).expand(VILLAGE_EXPANSION_SCAN_RADIUS),
+                VillagerEntity::isAlive
+        ));
+    }
+
+    private static boolean isEligibleV1Villager(ServerWorld world, VillagerEntity villager) {
+        if (!villager.isAlive() || villager.isBaby()) {
+            return false;
+        }
+        if (villager.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.NONE
+                || villager.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.NITWIT) {
+            return false;
+        }
+
+        BlockPos jobPos = resolveVillagerJobSite(world, villager);
+        if (jobPos == null) {
+            return false;
+        }
+        return ProfessionDefinitions.isExpectedJobBlock(villager.getVillagerData().getProfession(), world.getBlockState(jobPos));
+    }
+
+    private static boolean isEligibleV2VillagerMissingCraftingTable(ServerWorld world, VillagerEntity villager) {
+        if (!isEligibleV1Villager(world, villager)) {
+            return false;
+        }
+
+        BlockPos jobPos = resolveVillagerJobSite(world, villager);
+        if (jobPos == null) {
+            return false;
+        }
+
+        return JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+                && findNearbyCraftingTable(world, jobPos) == null;
+    }
+
+    private static BlockPos resolveVillagerJobSite(ServerWorld world, VillagerEntity villager) {
+        return villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                .filter(globalPos -> globalPos.dimension() == world.getRegistryKey())
+                .map(GlobalPos::pos)
+                .map(BlockPos::toImmutable)
+                .orElse(null);
+    }
+
+    private static BlockPos findNearbyCraftingTable(ServerWorld world, BlockPos center) {
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            if (center.isWithinDistance(checkPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
+                    && world.getBlockState(checkPos).isOf(Blocks.CRAFTING_TABLE)) {
+                return checkPos.toImmutable();
+            }
+        }
+        return null;
+    }
+
+    private static BlockPos findPlacementNear(ServerWorld world, BlockPos center, double range) {
+        int blockRange = (int) Math.ceil(range);
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (BlockPos candidate : BlockPos.iterate(center.add(-blockRange, -1, -blockRange), center.add(blockRange, 1, blockRange))) {
+            if (!center.isWithinDistance(candidate, range)) {
+                continue;
+            }
+            if (!world.getBlockState(candidate).isAir()) {
+                continue;
+            }
+
+            BlockPos below = candidate.down();
+            if (!world.getBlockState(below).isSolidBlock(world, below)) {
+                continue;
+            }
+
+            double distance = center.getSquaredDistance(candidate);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = candidate.toImmutable();
+            }
+        }
+
+        return best;
+    }
+
+    private static boolean hasEligibleUnemployedVillagerNearby(ServerWorld world, BlockPos center, double range) {
+        return !world.getEntitiesByClass(
+                VillagerEntity.class,
+                new Box(center).expand(range),
+                villager -> villager.isAlive()
+                        && !villager.isBaby()
+                        && villager.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.NONE
+        ).isEmpty();
     }
 
     private static boolean hasAnyAxeAvailable(TriggerContext context) {
@@ -405,6 +605,33 @@ public final class LumberjackChestTriggerController {
         }
         buffer.removeIf(ItemStack::isEmpty);
         return remaining;
+    }
+
+    private static void addToInventoryOrBuffer(TriggerContext context, ItemStack incoming) {
+        Inventory inventory = context.chestInventory();
+        if (inventory != null) {
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                ItemStack existing = inventory.getStack(slot);
+                if (existing.isEmpty()) {
+                    inventory.setStack(slot, incoming.copy());
+                    inventory.markDirty();
+                    return;
+                }
+                if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
+                    int move = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
+                    existing.increment(move);
+                    incoming.decrement(move);
+                    if (incoming.isEmpty()) {
+                        inventory.markDirty();
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (!incoming.isEmpty()) {
+            addToBuffer(context.guard(), incoming);
+        }
     }
 
     private static void addToBuffer(LumberjackGuardEntity guard, ItemStack incoming) {

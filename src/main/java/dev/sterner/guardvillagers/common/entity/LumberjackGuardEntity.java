@@ -58,6 +58,7 @@ public class LumberjackGuardEntity extends GuardEntity {
     private String lastTriggerRuleId = "";
     private long nextTriggerEvaluationTick;
     private boolean triggerEvaluationRequested;
+    private long nextVillageExpansionScanTick;
 
     public LumberjackGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -198,6 +199,14 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.triggerEvaluationRequested = false;
     }
 
+    public long getNextVillageExpansionScanTick() {
+        return this.nextVillageExpansionScanTick;
+    }
+
+    public void setNextVillageExpansionScanTick(long nextVillageExpansionScanTick) {
+        this.nextVillageExpansionScanTick = nextVillageExpansionScanTick;
+    }
+
     @Override
     protected void initEquipment(Random random, LocalDifficulty localDifficulty) {
         super.initEquipment(random, localDifficulty);
@@ -300,6 +309,9 @@ public class LumberjackGuardEntity extends GuardEntity {
                 ? nbt.getLong("LumberjackNextTriggerEvaluationTick")
                 : 0L;
         this.triggerEvaluationRequested = nbt.getBoolean("LumberjackTriggerEvaluationRequested");
+        this.nextVillageExpansionScanTick = nbt.contains("LumberjackNextVillageExpansionScanTick")
+                ? nbt.getLong("LumberjackNextVillageExpansionScanTick")
+                : 0L;
 
         this.selectedTreeTargets.clear();
         NbtList targetList = nbt.getList("LumberjackSelectedTreeTargets", 10);
@@ -351,6 +363,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         nbt.putString("LumberjackLastTriggerRuleId", this.lastTriggerRuleId);
         nbt.putLong("LumberjackNextTriggerEvaluationTick", this.nextTriggerEvaluationTick);
         nbt.putBoolean("LumberjackTriggerEvaluationRequested", this.triggerEvaluationRequested);
+        nbt.putLong("LumberjackNextVillageExpansionScanTick", this.nextVillageExpansionScanTick);
 
         NbtList targetList = new NbtList();
         for (BlockPos pos : this.selectedTreeTargets) {
