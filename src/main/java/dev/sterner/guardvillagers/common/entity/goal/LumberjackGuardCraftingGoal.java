@@ -70,11 +70,19 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         Inventory chestInventory = resolveChestInventory(world);
-        performWoodConversion(world, chestInventory);
-        craftPriorityOutputs(chestInventory);
-        tryPlaceAndBindChest(world);
+        boolean woodConversionSucceeded = performWoodConversion(world, chestInventory);
+        boolean priorityOutputCrafted = craftPriorityOutputs(chestInventory);
+        boolean chestPlacedAndBound = tryPlaceAndBindChest(world);
 
-        craftedToday++;
+        boolean meaningfulActionSucceeded = priorityOutputCrafted || chestPlacedAndBound;
+        // Wood conversion is tracked for clarity, but only completed priority crafting or chest placement
+        // should count against the daily crafting budget.
+        if (meaningfulActionSucceeded) {
+            craftedToday++;
+        } else if (woodConversionSucceeded) {
+            // Intentionally do not count this toward DAILY_CRAFT_LIMIT.
+        }
+
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
     }
 
@@ -83,12 +91,15 @@ public class LumberjackGuardCraftingGoal extends Goal {
         this.guard.getNavigation().stop();
     }
 
-    private void performWoodConversion(ServerWorld world, Inventory chestInventory) {
+    private boolean performWoodConversion(ServerWorld world, Inventory chestInventory) {
+        boolean converted = false;
+
         int availableLogs = countMatching(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS));
         int logsToConvert = availableLogs / 2;
         if (logsToConvert > 0 && consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS), logsToConvert)) {
             addToBuffer(new ItemStack(Items.OAK_PLANKS, logsToConvert * 4));
+            converted = true;
         }
 
         int availablePlanks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
@@ -96,59 +107,69 @@ public class LumberjackGuardCraftingGoal extends Goal {
         int planksToConvert = availablePlanks / 2;
         if (planksToConvert > 0 && consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), planksToConvert)) {
             addToBuffer(new ItemStack(Items.STICK, planksToConvert * 2));
+            converted = true;
         }
 
         if (chestInventory != null) {
             chestInventory.markDirty();
         }
+
+        return converted;
     }
 
-    private void craftPriorityOutputs(Inventory chestInventory) {
+    private boolean craftPriorityOutputs(Inventory chestInventory) {
+        boolean crafted = false;
+
         boolean chestMissing = this.guard.getPairedChestPos() == null;
         if (chestMissing) {
-            craftIfPossible(chestInventory, 8, 0, Items.CHEST);
+            crafted |= craftIfPossible(chestInventory, 8, 0, Items.CHEST);
         }
 
         BlockPos tablePos = this.guard.getPairedCraftingTablePos();
         boolean tableMissing = tablePos == null || !this.guard.getWorld().getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
         if (tableMissing) {
-            craftIfPossible(chestInventory, 4, 0, Items.CRAFTING_TABLE);
+            crafted |= craftIfPossible(chestInventory, 4, 0, Items.CRAFTING_TABLE);
         }
 
         int axesOnHand = countByItem(chestInventory, Items.WOODEN_AXE) + countByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
         if (axesOnHand < 1) {
-            craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE);
+            crafted |= craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE);
         }
 
         if (chestInventory != null) {
             chestInventory.markDirty();
         }
+
+        return crafted;
     }
 
-    private void craftIfPossible(Inventory chestInventory, int planksCost, int stickCost, Item output) {
+    private boolean craftIfPossible(Inventory chestInventory, int planksCost, int stickCost, Item output) {
         int planks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int sticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
         if (planks < planksCost || sticks < stickCost) {
-            return;
+            return false;
         }
 
         boolean consumedPlanks = consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), planksCost);
         boolean consumedSticks = stickCost == 0 || consumeByItem(chestInventory, this.guard.getGatheredStackBuffer(), Items.STICK, stickCost);
         if (consumedPlanks && consumedSticks) {
             addToBuffer(new ItemStack(output, 1));
+            return true;
         }
+
+        return false;
     }
 
-    private void tryPlaceAndBindChest(ServerWorld world) {
+    private boolean tryPlaceAndBindChest(ServerWorld world) {
         if (this.guard.getPairedChestPos() != null || !consumeByItem(null, this.guard.getGatheredStackBuffer(), Items.CHEST, 1)) {
-            return;
+            return false;
         }
 
         BlockPos tablePos = this.guard.getPairedCraftingTablePos();
         if (tablePos == null) {
             addToBuffer(new ItemStack(Items.CHEST, 1));
-            return;
+            return false;
         }
 
         for (Direction direction : Direction.Type.HORIZONTAL) {
@@ -164,11 +185,12 @@ public class LumberjackGuardCraftingGoal extends Goal {
             BlockState chestState = Blocks.CHEST.getDefaultState();
             if (world.setBlockState(candidate, chestState)) {
                 this.guard.setPairedChestPos(candidate);
-                return;
+                return true;
             }
         }
 
         addToBuffer(new ItemStack(Items.CHEST, 1));
+        return false;
     }
 
     private Inventory resolveChestInventory(ServerWorld world) {
