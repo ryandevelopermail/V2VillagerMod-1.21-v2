@@ -44,6 +44,10 @@ public final class UnemployedLumberjackConversionHook {
         }
 
         for (VillagerEntity villager : candidates) {
+            if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, villager.getBlockPos(), "scheduled-unemployed-conversion")) {
+                continue;
+            }
+
             if (!isEligibleUnemployed(villager) || villager.getWorld() != world) {
                 continue;
             }
@@ -54,6 +58,9 @@ public final class UnemployedLumberjackConversionHook {
             }
 
             BlockPos tablePos = craftingTablePos.get();
+            if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "crafting-table-candidate")) {
+                continue;
+            }
             if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
                 continue;
             }

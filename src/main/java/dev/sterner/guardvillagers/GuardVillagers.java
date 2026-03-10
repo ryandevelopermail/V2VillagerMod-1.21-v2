@@ -19,6 +19,7 @@ import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageRep
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
+import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -245,7 +246,10 @@ public class GuardVillagers implements ModInitializer {
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
             reconcileConvertedWorkerReservations(world, "world-load");
         });
-        ServerWorldEvents.UNLOAD.register((server, world) -> LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey()));
+        ServerWorldEvents.UNLOAD.register((server, world) -> {
+            LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
+            LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
+        });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -260,6 +264,7 @@ public class GuardVillagers implements ModInitializer {
                         && world.getTime() % Math.max(20, GuardVillagersConfig.villagerConversionCandidateMarkIntervalTicks) == 0L) {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
+                LumberjackPopulationBalancingService.tick(world);
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
