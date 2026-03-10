@@ -42,6 +42,11 @@ public class LumberjackGuardEntity extends GuardEntity {
     private BlockPos pairedChestPos;
     private long nextChopTick;
     private boolean activeSession;
+    private int sessionTargetsRemaining;
+    private long chopCountdownTotalTicks;
+    private long chopCountdownStartTick;
+    private int chopCountdownLastLogStep;
+    private boolean chopCountdownActive;
     private final List<BlockPos> selectedTreeTargets = new ArrayList<>();
     private final List<ItemStack> gatheredStackBuffer = new ArrayList<>();
     private WorkflowStage workflowStage = WorkflowStage.IDLE;
@@ -84,6 +89,49 @@ public class LumberjackGuardEntity extends GuardEntity {
 
     public List<BlockPos> getSelectedTreeTargets() {
         return this.selectedTreeTargets;
+    }
+
+    public int getSessionTargetsRemaining() {
+        return this.sessionTargetsRemaining;
+    }
+
+    public void setSessionTargetsRemaining(int sessionTargetsRemaining) {
+        this.sessionTargetsRemaining = Math.max(sessionTargetsRemaining, 0);
+    }
+
+    public long getChopCountdownTotalTicks() {
+        return this.chopCountdownTotalTicks;
+    }
+
+    public long getChopCountdownStartTick() {
+        return this.chopCountdownStartTick;
+    }
+
+    public int getChopCountdownLastLogStep() {
+        return this.chopCountdownLastLogStep;
+    }
+
+    public void setChopCountdownLastLogStep(int chopCountdownLastLogStep) {
+        this.chopCountdownLastLogStep = Math.max(chopCountdownLastLogStep, 0);
+    }
+
+    public boolean isChopCountdownActive() {
+        return this.chopCountdownActive;
+    }
+
+    public void startChopCountdown(long startTick, long totalTicks) {
+        this.chopCountdownStartTick = startTick;
+        this.chopCountdownTotalTicks = Math.max(totalTicks, 0L);
+        this.nextChopTick = startTick + this.chopCountdownTotalTicks;
+        this.chopCountdownLastLogStep = 0;
+        this.chopCountdownActive = true;
+    }
+
+    public void clearChopCountdown() {
+        this.chopCountdownStartTick = 0L;
+        this.chopCountdownTotalTicks = 0L;
+        this.chopCountdownLastLogStep = 0;
+        this.chopCountdownActive = false;
     }
 
     public List<ItemStack> getGatheredStackBuffer() {
@@ -173,6 +221,11 @@ public class LumberjackGuardEntity extends GuardEntity {
 
         this.nextChopTick = nbt.contains("LumberjackNextChopTick") ? nbt.getLong("LumberjackNextChopTick") : 0L;
         this.activeSession = nbt.getBoolean("LumberjackActiveSession");
+        this.sessionTargetsRemaining = nbt.contains("LumberjackSessionTargetsRemaining") ? nbt.getInt("LumberjackSessionTargetsRemaining") : 0;
+        this.chopCountdownTotalTicks = nbt.contains("LumberjackChopCountdownTotalTicks") ? nbt.getLong("LumberjackChopCountdownTotalTicks") : 0L;
+        this.chopCountdownStartTick = nbt.contains("LumberjackChopCountdownStartTick") ? nbt.getLong("LumberjackChopCountdownStartTick") : 0L;
+        this.chopCountdownLastLogStep = nbt.contains("LumberjackChopCountdownLastLogStep") ? nbt.getInt("LumberjackChopCountdownLastLogStep") : 0;
+        this.chopCountdownActive = nbt.getBoolean("LumberjackChopCountdownActive");
         this.workflowStage = WorkflowStage.fromSerialized(nbt.getString("LumberjackWorkflowStage"));
 
         this.selectedTreeTargets.clear();
@@ -210,6 +263,11 @@ public class LumberjackGuardEntity extends GuardEntity {
         }
         nbt.putLong("LumberjackNextChopTick", this.nextChopTick);
         nbt.putBoolean("LumberjackActiveSession", this.activeSession);
+        nbt.putInt("LumberjackSessionTargetsRemaining", this.sessionTargetsRemaining);
+        nbt.putLong("LumberjackChopCountdownTotalTicks", this.chopCountdownTotalTicks);
+        nbt.putLong("LumberjackChopCountdownStartTick", this.chopCountdownStartTick);
+        nbt.putInt("LumberjackChopCountdownLastLogStep", this.chopCountdownLastLogStep);
+        nbt.putBoolean("LumberjackChopCountdownActive", this.chopCountdownActive);
         nbt.putString("LumberjackWorkflowStage", this.workflowStage.getSerializedName());
 
         NbtList targetList = new NbtList();
@@ -237,6 +295,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         IDLE,
         MOVING_TO_TREE,
         CHOPPING,
+        RETURNING_TO_BASE,
         MOVING_TO_CHEST,
         DEPOSITING;
 
