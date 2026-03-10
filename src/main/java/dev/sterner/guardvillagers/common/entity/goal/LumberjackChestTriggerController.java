@@ -285,7 +285,7 @@ public final class LumberjackChestTriggerController {
             }
 
             BlockPos placePos = findPlacementNear(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
-            if (placePos == null || !hasEligibleUnemployedVillagerNearby(context.world(), placePos, 8.0D)) {
+            if (placePos == null) {
                 continue;
             }
 
@@ -391,16 +391,6 @@ public final class LumberjackChestTriggerController {
         }
 
         return best;
-    }
-
-    private static boolean hasEligibleUnemployedVillagerNearby(ServerWorld world, BlockPos center, double range) {
-        return !world.getEntitiesByClass(
-                VillagerEntity.class,
-                new Box(center).expand(range),
-                villager -> villager.isAlive()
-                        && !villager.isBaby()
-                        && villager.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.NONE
-        ).isEmpty();
     }
 
     private static boolean hasAnyAxeAvailable(TriggerContext context) {
