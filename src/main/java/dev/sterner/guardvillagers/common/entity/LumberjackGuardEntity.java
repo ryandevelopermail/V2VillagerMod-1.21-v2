@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.entity.goal.GuardLookAtAndStopMovingWhe
 import dev.sterner.guardvillagers.common.entity.goal.GuardRunToEatGoal;
 import dev.sterner.guardvillagers.common.entity.goal.KickGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackChestTriggerController;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardDepositLogsGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
@@ -41,6 +42,7 @@ import java.util.List;
 public class LumberjackGuardEntity extends GuardEntity {
     private BlockPos pairedCraftingTablePos;
     private BlockPos pairedChestPos;
+    private BlockPos pairedFurnaceModifierPos;
     private long nextChopTick;
     private boolean activeSession;
     private int sessionTargetsRemaining;
@@ -51,6 +53,10 @@ public class LumberjackGuardEntity extends GuardEntity {
     private final List<BlockPos> selectedTreeTargets = new ArrayList<>();
     private final List<ItemStack> gatheredStackBuffer = new ArrayList<>();
     private WorkflowStage workflowStage = WorkflowStage.IDLE;
+    private long lastTriggerActionTick = Long.MIN_VALUE;
+    private String lastTriggerRuleId = "";
+    private long nextTriggerEvaluationTick;
+    private boolean triggerEvaluationRequested;
 
     public LumberjackGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -58,6 +64,7 @@ public class LumberjackGuardEntity extends GuardEntity {
 
     public void setPairedCraftingTablePos(BlockPos pos) {
         this.pairedCraftingTablePos = pos == null ? null : pos.toImmutable();
+        this.requestTriggerEvaluation();
     }
 
     public BlockPos getPairedCraftingTablePos() {
@@ -66,10 +73,20 @@ public class LumberjackGuardEntity extends GuardEntity {
 
     public void setPairedChestPos(BlockPos pos) {
         this.pairedChestPos = pos == null ? null : pos.toImmutable();
+        this.requestTriggerEvaluation();
     }
 
     public BlockPos getPairedChestPos() {
         return this.pairedChestPos;
+    }
+
+    public void setPairedFurnaceModifierPos(BlockPos pos) {
+        this.pairedFurnaceModifierPos = pos == null ? null : pos.toImmutable();
+        this.requestTriggerEvaluation();
+    }
+
+    public BlockPos getPairedFurnaceModifierPos() {
+        return this.pairedFurnaceModifierPos;
     }
 
     public long getNextChopTick() {
@@ -147,6 +164,39 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.workflowStage = workflowStage == null ? WorkflowStage.IDLE : workflowStage;
     }
 
+    public long getLastTriggerActionTick() {
+        return this.lastTriggerActionTick;
+    }
+
+    public void recordTriggerAction(long tick, String ruleId) {
+        this.lastTriggerActionTick = tick;
+        this.lastTriggerRuleId = ruleId == null ? "" : ruleId;
+    }
+
+    public String getLastTriggerRuleId() {
+        return this.lastTriggerRuleId;
+    }
+
+    public long getNextTriggerEvaluationTick() {
+        return this.nextTriggerEvaluationTick;
+    }
+
+    public void setNextTriggerEvaluationTick(long nextTriggerEvaluationTick) {
+        this.nextTriggerEvaluationTick = nextTriggerEvaluationTick;
+    }
+
+    public boolean isTriggerEvaluationRequested() {
+        return this.triggerEvaluationRequested;
+    }
+
+    public void requestTriggerEvaluation() {
+        this.triggerEvaluationRequested = true;
+    }
+
+    public void clearTriggerEvaluationRequest() {
+        this.triggerEvaluationRequested = false;
+    }
+
     @Override
     protected void initEquipment(Random random, LocalDifficulty localDifficulty) {
         super.initEquipment(random, localDifficulty);
@@ -204,6 +254,9 @@ public class LumberjackGuardEntity extends GuardEntity {
     public void tick() {
         super.tick();
         this.setTarget(null);
+        if (this.getWorld() instanceof ServerWorld world) {
+            LumberjackChestTriggerController.tick(world, this);
+        }
     }
 
     @Override
@@ -221,6 +274,12 @@ public class LumberjackGuardEntity extends GuardEntity {
             this.pairedChestPos = null;
         }
 
+        if (nbt.contains("LumberjackPairedFurnaceModifierX")) {
+            this.pairedFurnaceModifierPos = new BlockPos(nbt.getInt("LumberjackPairedFurnaceModifierX"), nbt.getInt("LumberjackPairedFurnaceModifierY"), nbt.getInt("LumberjackPairedFurnaceModifierZ"));
+        } else {
+            this.pairedFurnaceModifierPos = null;
+        }
+
         this.nextChopTick = nbt.contains("LumberjackNextChopTick") ? nbt.getLong("LumberjackNextChopTick") : 0L;
         this.activeSession = nbt.getBoolean("LumberjackActiveSession");
         this.sessionTargetsRemaining = nbt.contains("LumberjackSessionTargetsRemaining") ? nbt.getInt("LumberjackSessionTargetsRemaining") : 0;
@@ -229,6 +288,16 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.chopCountdownLastLogStep = nbt.contains("LumberjackChopCountdownLastLogStep") ? nbt.getInt("LumberjackChopCountdownLastLogStep") : 0;
         this.chopCountdownActive = nbt.getBoolean("LumberjackChopCountdownActive");
         this.workflowStage = WorkflowStage.fromSerialized(nbt.getString("LumberjackWorkflowStage"));
+        this.lastTriggerActionTick = nbt.contains("LumberjackLastTriggerActionTick")
+                ? nbt.getLong("LumberjackLastTriggerActionTick")
+                : Long.MIN_VALUE;
+        this.lastTriggerRuleId = nbt.contains("LumberjackLastTriggerRuleId")
+                ? nbt.getString("LumberjackLastTriggerRuleId")
+                : "";
+        this.nextTriggerEvaluationTick = nbt.contains("LumberjackNextTriggerEvaluationTick")
+                ? nbt.getLong("LumberjackNextTriggerEvaluationTick")
+                : 0L;
+        this.triggerEvaluationRequested = nbt.getBoolean("LumberjackTriggerEvaluationRequested");
 
         this.selectedTreeTargets.clear();
         NbtList targetList = nbt.getList("LumberjackSelectedTreeTargets", 10);
@@ -263,6 +332,11 @@ public class LumberjackGuardEntity extends GuardEntity {
             nbt.putInt("LumberjackPairedChestY", this.pairedChestPos.getY());
             nbt.putInt("LumberjackPairedChestZ", this.pairedChestPos.getZ());
         }
+        if (this.pairedFurnaceModifierPos != null) {
+            nbt.putInt("LumberjackPairedFurnaceModifierX", this.pairedFurnaceModifierPos.getX());
+            nbt.putInt("LumberjackPairedFurnaceModifierY", this.pairedFurnaceModifierPos.getY());
+            nbt.putInt("LumberjackPairedFurnaceModifierZ", this.pairedFurnaceModifierPos.getZ());
+        }
         nbt.putLong("LumberjackNextChopTick", this.nextChopTick);
         nbt.putBoolean("LumberjackActiveSession", this.activeSession);
         nbt.putInt("LumberjackSessionTargetsRemaining", this.sessionTargetsRemaining);
@@ -271,6 +345,10 @@ public class LumberjackGuardEntity extends GuardEntity {
         nbt.putInt("LumberjackChopCountdownLastLogStep", this.chopCountdownLastLogStep);
         nbt.putBoolean("LumberjackChopCountdownActive", this.chopCountdownActive);
         nbt.putString("LumberjackWorkflowStage", this.workflowStage.getSerializedName());
+        nbt.putLong("LumberjackLastTriggerActionTick", this.lastTriggerActionTick);
+        nbt.putString("LumberjackLastTriggerRuleId", this.lastTriggerRuleId);
+        nbt.putLong("LumberjackNextTriggerEvaluationTick", this.nextTriggerEvaluationTick);
+        nbt.putBoolean("LumberjackTriggerEvaluationRequested", this.triggerEvaluationRequested);
 
         NbtList targetList = new NbtList();
         for (BlockPos pos : this.selectedTreeTargets) {
