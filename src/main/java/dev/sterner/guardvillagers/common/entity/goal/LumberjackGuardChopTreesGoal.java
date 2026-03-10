@@ -12,6 +12,7 @@ import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3i;
 import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,8 +33,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TREE_SEARCH_RADIUS = 20;
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
+    private static final int PATH_STALL_TICKS = 30;
 
     private final LumberjackGuardEntity guard;
+    private double lastTreeDistanceSq = Double.MAX_VALUE;
+    private int stalledTicks;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -81,10 +85,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
-        if (this.guard.squaredDistanceTo(Vec3d.ofCenter(targetRoot)) > 6.25D) {
+        double treeDistanceSq = this.guard.squaredDistanceTo(Vec3d.ofCenter(targetRoot));
+        if (treeDistanceSq > 6.25D) {
             this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D);
+            updateStallState(world, targetRoot, treeDistanceSq);
             return;
         }
+
+        this.stalledTicks = 0;
+        this.lastTreeDistanceSq = treeDistanceSq;
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
         teardownTree(world, targetRoot);
@@ -136,6 +145,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void beginReturnToBase() {
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.RETURNING_TO_BASE);
+        this.stalledTicks = 0;
+        this.lastTreeDistanceSq = Double.MAX_VALUE;
     }
 
     private void moveBackToBaseAndHandoff() {
@@ -162,10 +173,86 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.getSelectedTreeTargets().clear();
         this.guard.setSessionTargetsRemaining(0);
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
+        this.stalledTicks = 0;
+        this.lastTreeDistanceSq = Double.MAX_VALUE;
         LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
                 this.guard.getUuidAsString(),
                 reason,
                 this.guard.getGatheredStackBuffer().size());
+    }
+
+    private void updateStallState(ServerWorld world, BlockPos targetRoot, double treeDistanceSq) {
+        if (treeDistanceSq + 0.1D < this.lastTreeDistanceSq) {
+            this.stalledTicks = 0;
+            this.lastTreeDistanceSq = treeDistanceSq;
+            return;
+        }
+
+        this.stalledTicks++;
+        this.lastTreeDistanceSq = treeDistanceSq;
+
+        if (this.stalledTicks >= PATH_STALL_TICKS || this.guard.getNavigation().isIdle()) {
+            boolean cleared = clearAxeBreakableObstruction(world, targetRoot);
+            if (cleared) {
+                this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D);
+            }
+            this.stalledTicks = 0;
+        }
+    }
+
+    private boolean clearAxeBreakableObstruction(ServerWorld world, BlockPos targetRoot) {
+        Vec3d from = this.guard.getPos().add(0.0D, this.guard.getHeight() * 0.5D, 0.0D);
+        Vec3d to = Vec3d.ofCenter(targetRoot);
+        Vec3d delta = to.subtract(from);
+        if (delta.lengthSquared() < 0.0001D) {
+            return false;
+        }
+
+        Vec3d step = delta.normalize().multiply(0.9D);
+        for (int i = 1; i <= 4; i++) {
+            Vec3d sample = from.add(step.multiply(i));
+            BlockPos samplePos = BlockPos.ofFloored(sample);
+            if (tryBreakObstacleAt(world, samplePos)) {
+                return true;
+            }
+            if (tryBreakObstacleAt(world, samplePos.up())) {
+                return true;
+            }
+        }
+
+        for (Vec3i offset : List.of(new Vec3i(1, 0, 0), new Vec3i(-1, 0, 0), new Vec3i(0, 0, 1), new Vec3i(0, 0, -1), new Vec3i(0, 1, 0))) {
+            if (tryBreakObstacleAt(world, this.guard.getBlockPos().add(offset))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean tryBreakObstacleAt(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (!isAxeBreakablePathObstacle(state)) {
+            return false;
+        }
+        if (isProtectedPairedBlock(pos)) {
+            return false;
+        }
+
+        return world.breakBlock(pos, true, this.guard);
+    }
+
+    private boolean isAxeBreakablePathObstacle(BlockState state) {
+        return !state.isAir()
+                && (state.isIn(BlockTags.LEAVES)
+                || state.isIn(BlockTags.LOGS)
+                || state.isIn(BlockTags.AXE_MINEABLE));
+    }
+
+    private boolean isProtectedPairedBlock(BlockPos pos) {
+        BlockPos craftingTable = this.guard.getPairedCraftingTablePos();
+        BlockPos chest = this.guard.getPairedChestPos();
+        BlockPos furnaceModifier = this.guard.getPairedFurnaceModifierPos();
+        return pos.equals(craftingTable) || pos.equals(chest) || pos.equals(furnaceModifier);
     }
 
     private void startChopCountdown(ServerWorld world, String reason) {
