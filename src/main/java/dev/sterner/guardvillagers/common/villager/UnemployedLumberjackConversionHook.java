@@ -129,11 +129,23 @@ public final class UnemployedLumberjackConversionHook {
                     .filter(globalPos -> globalPos.dimension() == world.getRegistryKey())
                     .map(GlobalPos::pos)
                     .orElse(null);
-            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()) {
+            if (jobPos == null) {
                 continue;
             }
 
-            BlockPos pairedCrafting = findNearbyCraftingTable(world, jobPos);
+            BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+            if (chestPos == null) {
+                continue;
+            }
+
+            // Only treat this as an already-paired table when it satisfies the same pairing geometry:
+            // table must be near both the villager's job block and paired chest.
+            if (!jobPos.isWithinDistance(tablePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
+                    || !chestPos.isWithinDistance(tablePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                continue;
+            }
+
+            BlockPos pairedCrafting = findNearbyCraftingTable(world, jobPos, chestPos);
             if (tablePos.equals(pairedCrafting)) {
                 return true;
             }
@@ -147,10 +159,11 @@ public final class UnemployedLumberjackConversionHook {
         return villager.isAlive() && !villager.isBaby() && profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT;
     }
 
-    private static BlockPos findNearbyCraftingTable(ServerWorld world, BlockPos center) {
+    private static BlockPos findNearbyCraftingTable(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {
         int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
-        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
-            if (center.isWithinDistance(checkPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
+        for (BlockPos checkPos : BlockPos.iterate(jobPos.add(-range, -range, -range), jobPos.add(range, range, range))) {
+            if (jobPos.isWithinDistance(checkPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
+                    && chestPos.isWithinDistance(checkPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
                     && world.getBlockState(checkPos).isOf(Blocks.CRAFTING_TABLE)) {
                 return checkPos.toImmutable();
             }
