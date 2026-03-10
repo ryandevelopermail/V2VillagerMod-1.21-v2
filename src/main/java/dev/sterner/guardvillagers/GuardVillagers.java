@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
@@ -109,6 +110,11 @@ public class GuardVillagers implements ModInitializer {
             FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, FishermanGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
 
     public static final Item FISHERMAN_GUARD_SPAWN_EGG = new SpawnEggItem(FISHERMAN_GUARD_VILLAGER, 5651507, 3368652, new Item.Settings());
+
+    public static final EntityType<LumberjackGuardEntity> LUMBERJACK_GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("lumberjack_guard"),
+            FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, LumberjackGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
+
+    public static final Item LUMBERJACK_GUARD_SPAWN_EGG = new SpawnEggItem(LUMBERJACK_GUARD_VILLAGER, 5651507, 8553352, new Item.Settings());
     public static final Block GUARD_STAND_MODIFIER = new Block(AbstractBlock.Settings.create().strength(2.0F).sounds(BlockSoundGroup.STONE));
     public static final Item GUARD_STAND_MODIFIER_ITEM = new BlockItem(GUARD_STAND_MODIFIER, new Item.Settings());
     public static final Block GUARD_STAND_ANCHOR = new Block(AbstractBlock.Settings.create().strength(2.0F).sounds(BlockSoundGroup.STONE));
@@ -141,6 +147,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(MASON_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(LUMBERJACK_GUARD_VILLAGER, GuardEntity.createAttributes());
         ProfessionDefinitions.registerAll();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
@@ -148,6 +155,7 @@ public class GuardVillagers implements ModInitializer {
         Registry.register(Registries.ITEM, id("butcher_guard_spawn_egg"), BUTCHER_GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("mason_guard_spawn_egg"), MASON_GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("fisherman_guard_spawn_egg"), FISHERMAN_GUARD_SPAWN_EGG);
+        Registry.register(Registries.ITEM, id("lumberjack_guard_spawn_egg"), LUMBERJACK_GUARD_SPAWN_EGG);
         Registry.register(Registries.BLOCK, id("guard_stand_modifier"), GUARD_STAND_MODIFIER);
         Registry.register(Registries.ITEM, id("guard_stand_modifier"), GUARD_STAND_MODIFIER_ITEM);
         Registry.register(Registries.BLOCK, id("guard_stand_anchor"), GUARD_STAND_ANCHOR);
@@ -172,6 +180,7 @@ public class GuardVillagers implements ModInitializer {
             entries.add(BUTCHER_GUARD_SPAWN_EGG);
             entries.add(MASON_GUARD_SPAWN_EGG);
             entries.add(FISHERMAN_GUARD_SPAWN_EGG);
+            entries.add(LUMBERJACK_GUARD_SPAWN_EGG);
             entries.add(GUARD_STAND_MODIFIER_ITEM);
             entries.add(GUARD_STAND_ANCHOR_ITEM);
         });
@@ -222,6 +231,9 @@ public class GuardVillagers implements ModInitializer {
             }
             if (entity instanceof FishermanGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
                 rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.FISHERMAN, "paired job");
+            }
+            if (entity instanceof LumberjackGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedCraftingTablePos(), VillagerProfession.NONE, "paired crafting table");
             }
         });
 
