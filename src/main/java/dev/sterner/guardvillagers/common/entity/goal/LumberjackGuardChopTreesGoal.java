@@ -34,10 +34,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
     private static final int PATH_STALL_TICKS = 30;
+    private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
+    private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
+    private static final double STALL_JITTER_DELTA_SQ = 0.03D;
 
     private final LumberjackGuardEntity guard;
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
+    private int stallRecoveryAttempts;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -80,6 +84,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         BlockPos targetRoot = this.guard.getSelectedTreeTargets().get(0);
         if (!isEligibleLog(world, targetRoot)) {
+            BlockPos replacementRoot = resolveReplacementRoot(world, targetRoot);
+            if (replacementRoot != null) {
+                LOGGER.debug("Lumberjack Guard {} replacing invalid root {} with {}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        replacementRoot);
+                this.guard.getSelectedTreeTargets().set(0, replacementRoot);
+                targetRoot = replacementRoot;
+            } else {
+                recordFailedTargetAttempt(targetRoot, "invalid root and no replacement");
+                this.guard.getSelectedTreeTargets().remove(0);
+                return;
+            }
+        }
+
+        if (!isEligibleLog(world, targetRoot)) {
+            recordFailedTargetAttempt(targetRoot, "replacement root became invalid");
             this.guard.getSelectedTreeTargets().remove(0);
             return;
         }
@@ -88,11 +109,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         double treeDistanceSq = this.guard.squaredDistanceTo(Vec3d.ofCenter(targetRoot));
         if (treeDistanceSq > 6.25D) {
             this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D);
-            updateStallState(world, targetRoot, treeDistanceSq);
+            if (!updateStallState(world, targetRoot, treeDistanceSq)) {
+                recordFailedTargetAttempt(targetRoot, "stalled while pathing");
+                this.guard.getSelectedTreeTargets().remove(0);
+            }
             return;
         }
 
         this.stalledTicks = 0;
+        this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = treeDistanceSq;
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
@@ -146,6 +171,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private void beginReturnToBase() {
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.RETURNING_TO_BASE);
         this.stalledTicks = 0;
+        this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
     }
 
@@ -174,6 +200,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(0);
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
+        this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
         LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
                 this.guard.getUuidAsString(),
@@ -181,23 +208,69 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 this.guard.getGatheredStackBuffer().size());
     }
 
-    private void updateStallState(ServerWorld world, BlockPos targetRoot, double treeDistanceSq) {
-        if (treeDistanceSq + 0.1D < this.lastTreeDistanceSq) {
+    private boolean updateStallState(ServerWorld world, BlockPos targetRoot, double treeDistanceSq) {
+        if (treeDistanceSq + STALL_PROGRESS_DELTA_SQ < this.lastTreeDistanceSq) {
+            LOGGER.debug("Lumberjack Guard {} target {} progress recovered (distanceSq {} -> {})",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    this.lastTreeDistanceSq,
+                    treeDistanceSq);
             this.stalledTicks = 0;
+            this.stallRecoveryAttempts = 0;
             this.lastTreeDistanceSq = treeDistanceSq;
-            return;
+            return true;
         }
 
-        this.stalledTicks++;
+        double delta = Math.abs(this.lastTreeDistanceSq - treeDistanceSq);
+        if (delta <= STALL_JITTER_DELTA_SQ) {
+            LOGGER.debug("Lumberjack Guard {} target {} jitter detected (deltaSq {}, stalledTicks {})",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    delta,
+                    this.stalledTicks);
+        } else {
+            this.stalledTicks++;
+        }
+
         this.lastTreeDistanceSq = treeDistanceSq;
 
         if (this.stalledTicks >= PATH_STALL_TICKS || this.guard.getNavigation().isIdle()) {
+            LOGGER.debug("Lumberjack Guard {} target {} entering stall recovery (stalledTicks {}, recoveries {})",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    this.stalledTicks,
+                    this.stallRecoveryAttempts);
             boolean cleared = clearAxeBreakableObstruction(world, targetRoot);
             if (cleared) {
+                LOGGER.debug("Lumberjack Guard {} target {} cleared obstruction and repathing",
+                        this.guard.getUuidAsString(),
+                        targetRoot);
                 this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D);
+                this.stalledTicks = 0;
+                return true;
             }
+
+            if (attemptFallbackApproach(targetRoot)) {
+                LOGGER.debug("Lumberjack Guard {} target {} using alternate approach point",
+                        this.guard.getUuidAsString(),
+                        targetRoot);
+                this.stalledTicks = 0;
+                return true;
+            }
+
+            this.stallRecoveryAttempts++;
             this.stalledTicks = 0;
+            if (this.stallRecoveryAttempts >= MAX_STALL_RECOVERY_ATTEMPTS) {
+                LOGGER.debug("Lumberjack Guard {} target {} exhausted stall recovery after {} attempts",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        this.stallRecoveryAttempts);
+                this.stallRecoveryAttempts = 0;
+                return false;
+            }
         }
+
+        return true;
     }
 
     private boolean clearAxeBreakableObstruction(ServerWorld world, BlockPos targetRoot) {
@@ -213,20 +286,102 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             Vec3d sample = from.add(step.multiply(i));
             BlockPos samplePos = BlockPos.ofFloored(sample);
             if (tryBreakObstacleAt(world, samplePos)) {
+                LOGGER.debug("Lumberjack Guard {} target {} broke obstruction at {}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        samplePos);
                 return true;
             }
             if (tryBreakObstacleAt(world, samplePos.up())) {
+                LOGGER.debug("Lumberjack Guard {} target {} broke obstruction at {}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        samplePos.up());
                 return true;
             }
         }
 
         for (Vec3i offset : List.of(new Vec3i(1, 0, 0), new Vec3i(-1, 0, 0), new Vec3i(0, 0, 1), new Vec3i(0, 0, -1), new Vec3i(0, 1, 0))) {
             if (tryBreakObstacleAt(world, this.guard.getBlockPos().add(offset))) {
+                LOGGER.debug("Lumberjack Guard {} target {} broke nearby obstruction at {}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        this.guard.getBlockPos().add(offset));
+                return true;
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} target {} found no breakable obstruction",
+                this.guard.getUuidAsString(),
+                targetRoot);
+        return false;
+    }
+
+    private boolean attemptFallbackApproach(BlockPos targetRoot) {
+        if (this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D)) {
+            return true;
+        }
+
+        for (Vec3i offset : List.of(new Vec3i(1, 0, 0), new Vec3i(-1, 0, 0), new Vec3i(0, 0, 1), new Vec3i(0, 0, -1), new Vec3i(1, 0, 1), new Vec3i(1, 0, -1), new Vec3i(-1, 0, 1), new Vec3i(-1, 0, -1))) {
+            BlockPos approach = targetRoot.add(offset);
+            if (this.guard.getNavigation().startMovingTo(approach.getX() + 0.5D, approach.getY(), approach.getZ() + 0.5D, 0.8D)) {
+                LOGGER.debug("Lumberjack Guard {} target {} fallback approach {}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        approach);
                 return true;
             }
         }
 
         return false;
+    }
+
+    private BlockPos resolveReplacementRoot(ServerWorld world, BlockPos originalRoot) {
+        BlockPos min = originalRoot.add(-2, -3, -2);
+        BlockPos max = originalRoot.add(2, 3, 2);
+        BlockPos replacement = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockPos candidate = cursor.toImmutable();
+            if (!isEligibleLog(world, candidate)) {
+                continue;
+            }
+
+            BlockPos normalized = normalizeRoot(world, candidate);
+            if (!isEligibleRoot(world, normalized)) {
+                continue;
+            }
+
+            double distanceSq = normalized.getSquaredDistance(originalRoot);
+            if (distanceSq < bestDistance) {
+                bestDistance = distanceSq;
+                replacement = normalized;
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} target {} replacement resolution result: {}",
+                this.guard.getUuidAsString(),
+                originalRoot,
+                replacement);
+        return replacement;
+    }
+
+    private void recordFailedTargetAttempt(BlockPos targetRoot, String reason) {
+        this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
+        this.stalledTicks = 0;
+        this.stallRecoveryAttempts = 0;
+        this.lastTreeDistanceSq = Double.MAX_VALUE;
+        LOGGER.debug("Lumberjack Guard {} failed target {} (reason: {}, remaining targets {}, stallTicks {})",
+                this.guard.getUuidAsString(),
+                targetRoot,
+                reason,
+                this.guard.getSessionTargetsRemaining(),
+                this.stalledTicks);
+
+        if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().size() <= 1) {
+            beginReturnToBase();
+        }
     }
 
     private boolean tryBreakObstacleAt(ServerWorld world, BlockPos pos) {
