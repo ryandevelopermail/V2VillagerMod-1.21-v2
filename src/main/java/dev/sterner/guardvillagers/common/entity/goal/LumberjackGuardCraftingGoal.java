@@ -116,6 +116,13 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory) {
+        if (isBootstrapSession()) {
+            if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
+                return true;
+            }
+            return false;
+        }
+
         LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
         if (demand != null && countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem()) <= 0) {
             if (craftIfPossible(chestInventory, demand.planksCost(), 0, demand.outputItem())) {
@@ -124,10 +131,6 @@ public class LumberjackGuardCraftingGoal extends Goal {
                 return true;
             }
             return false;
-        }
-
-        if (isBootstrapSession() && shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
-            return true;
         }
 
         return false;
