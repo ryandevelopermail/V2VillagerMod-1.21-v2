@@ -42,6 +42,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TREE_SEARCH_RADIUS = 20;
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
+    private static final int TREE_CROWN_RADIUS = 4;
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
@@ -575,22 +576,38 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         Set<BlockPos> attachedLeaves = new HashSet<>();
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         queue.add(root);
+        int rejectedCrossTreeCandidates = 0;
 
         while (!queue.isEmpty() && logs.size() < MAX_LOGS_PER_TREE) {
             BlockPos pos = queue.poll();
+            if (!isWithinCrownRadius(root, pos)) {
+                rejectedCrossTreeCandidates++;
+                continue;
+            }
             if (!logs.add(pos)) {
                 continue;
             }
 
-            for (BlockPos adjacent : BlockPos.iterate(pos.add(-1, -1, -1), pos.add(1, 1, 1))) {
-                BlockPos candidate = adjacent.toImmutable();
+            for (BlockPos candidate : getTrunkAdjacent(pos)) {
                 if (logs.contains(candidate)) {
                     continue;
                 }
                 BlockState candidateState = world.getBlockState(candidate);
                 if (candidateState.isIn(BlockTags.LOGS)) {
-                    queue.add(candidate);
-                } else if (candidateState.getBlock() instanceof LeavesBlock
+                    if (isWithinCrownRadius(root, candidate)) {
+                        queue.add(candidate.toImmutable());
+                    } else {
+                        rejectedCrossTreeCandidates++;
+                    }
+                }
+            }
+        }
+
+        for (BlockPos logPos : logs) {
+            for (BlockPos adjacent : BlockPos.iterate(logPos.add(-1, -1, -1), logPos.add(1, 1, 1))) {
+                BlockPos candidate = adjacent.toImmutable();
+                BlockState candidateState = world.getBlockState(candidate);
+                if (candidateState.getBlock() instanceof LeavesBlock
                         && !candidateState.get(LeavesBlock.PERSISTENT)
                         && candidateState.contains(LeavesBlock.DISTANCE)
                         && candidateState.get(LeavesBlock.DISTANCE) <= 2) {
@@ -598,6 +615,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 }
             }
         }
+
+        LOGGER.debug("Lumberjack Guard {} tree teardown at {} accepted {} logs and rejected {} cross-tree log candidates",
+                this.guard.getUuidAsString(),
+                root,
+                logs.size(),
+                rejectedCrossTreeCandidates);
 
         int brokenLogs = 0;
         int brokenLeaves = 0;
@@ -618,6 +641,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 root,
                 brokenLogs,
                 brokenLeaves);
+    }
+
+    private boolean isWithinCrownRadius(BlockPos root, BlockPos candidate) {
+        return Math.abs(candidate.getX() - root.getX()) <= TREE_CROWN_RADIUS
+                && Math.abs(candidate.getZ() - root.getZ()) <= TREE_CROWN_RADIUS;
+    }
+
+    private List<BlockPos> getTrunkAdjacent(BlockPos pos) {
+        return List.of(
+                pos.up(),
+                pos.down(),
+                pos.north(),
+                pos.south(),
+                pos.east(),
+                pos.west());
     }
 
     private boolean breakAndCollect(ServerWorld world, BlockPos pos) {
