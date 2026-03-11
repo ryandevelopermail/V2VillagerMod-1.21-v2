@@ -1,27 +1,35 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 
-import net.minecraft.item.Items;
-
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
+    private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
+    private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
 
     private final LumberjackGuardEntity guard;
+    private long nextDistributionAttemptTick;
+    private int distributionAttempts;
 
     public LumberjackGuardDepositLogsGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -39,6 +47,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     @Override
     public void start() {
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_CHEST);
+        this.nextDistributionAttemptTick = Long.MIN_VALUE;
+        this.distributionAttempts = 0;
     }
 
     @Override
@@ -87,7 +97,92 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             this.guard.requestTriggerEvaluation();
             LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
+            return;
         }
+
+        tryDemandDrivenDistribution(world, chestInventory, chestPos);
+
+        if (buffer.isEmpty()) {
+            this.guard.requestTriggerEvaluation();
+            LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
+        }
+    }
+
+    private void tryDemandDrivenDistribution(ServerWorld world, Inventory sourceInventory, BlockPos sourceChestPos) {
+        long now = world.getTime();
+        if (now < nextDistributionAttemptTick) {
+            return;
+        }
+        if (distributionAttempts >= MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT) {
+            return;
+        }
+
+        distributionAttempts++;
+        nextDistributionAttemptTick = now + DISTRIBUTION_ATTEMPT_INTERVAL_TICKS;
+
+        LumberjackDemandPlanner.DemandSnapshot demandSnapshot = LumberjackDemandPlanner.buildSnapshot(world, this.guard, sourceInventory);
+        List<DistributionCandidate> candidates = collectCandidates(sourceInventory, demandSnapshot);
+        if (candidates.isEmpty()) {
+            return;
+        }
+
+        DistributionCandidate selected = candidates.getFirst();
+        ItemStack sourceStack = sourceInventory.getStack(selected.slot());
+        if (sourceStack.isEmpty()) {
+            return;
+        }
+
+        ItemStack moved = sourceStack.split(1);
+        sourceInventory.setStack(selected.slot(), sourceStack);
+        sourceInventory.markDirty();
+
+        Optional<Inventory> recipientInventory = Optional.ofNullable(getChestInventory(world, selected.recipient().record().chestPos()));
+        if (recipientInventory.isEmpty()) {
+            ItemStack putBack = insertIntoInventory(sourceInventory, moved);
+            if (!putBack.isEmpty()) {
+                dropStackAt(world, sourceChestPos, putBack);
+            }
+            return;
+        }
+
+        ItemStack remaining = insertIntoInventory(recipientInventory.get(), moved);
+        recipientInventory.get().markDirty();
+        if (remaining.isEmpty()) {
+            return;
+        }
+
+        ItemStack putBack = insertIntoInventory(sourceInventory, remaining);
+        if (!putBack.isEmpty()) {
+            dropStackAt(world, sourceChestPos, putBack);
+        }
+    }
+
+    private List<DistributionCandidate> collectCandidates(Inventory sourceInventory, LumberjackDemandPlanner.DemandSnapshot demandSnapshot) {
+        List<DistributionCandidate> candidates = new ArrayList<>();
+        for (int slot = 0; slot < sourceInventory.size(); slot++) {
+            ItemStack stack = sourceInventory.getStack(slot);
+            LumberjackDemandPlanner.MaterialType materialType = LumberjackDemandPlanner.MaterialType.fromStack(stack);
+            if (materialType == null) {
+                continue;
+            }
+
+            List<LumberjackDemandPlanner.RecipientDemand> rankedRecipients = demandSnapshot.rankedRecipientsFor(materialType);
+            if (rankedRecipients.isEmpty()) {
+                continue;
+            }
+
+            int demandScore = demandSnapshot.deficitFor(materialType);
+            LumberjackDemandPlanner.RecipientDemand topRecipient = rankedRecipients.getFirst();
+            candidates.add(new DistributionCandidate(slot, materialType, topRecipient, demandScore));
+        }
+
+        candidates.sort(Comparator
+                .comparingInt(DistributionCandidate::demandScore).reversed()
+                .thenComparing(Comparator.comparingInt((DistributionCandidate candidate) -> candidate.recipient().deficit()).reversed())
+                .thenComparingDouble(candidate -> candidate.recipient().record().sourceSquaredDistance())
+                .thenComparing(candidate -> candidate.recipient().record().recipient().getUuid(), UUID::compareTo));
+        return candidates;
     }
 
     @Override
@@ -105,6 +200,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
     }
+
 
     private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
         ItemStack remaining = stack.copy();
@@ -171,5 +267,17 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             }
         }
         this.guard.getGatheredStackBuffer().clear();
+    }
+
+    private void dropStackAt(ServerWorld world, BlockPos pos, ItemStack stack) {
+        if (!stack.isEmpty()) {
+            world.spawnEntity(new ItemEntity(world, pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, stack));
+        }
+    }
+
+    private record DistributionCandidate(int slot,
+                                         LumberjackDemandPlanner.MaterialType materialType,
+                                         LumberjackDemandPlanner.RecipientDemand recipient,
+                                         int demandScore) {
     }
 }

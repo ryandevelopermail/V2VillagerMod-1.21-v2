@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.util;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -99,7 +100,32 @@ public final class DistributionRecipientHelper {
 
     public static List<RecipientRecord> findEligibleRecipients(
             ServerWorld world,
+            Entity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock
+    ) {
+        return findEligibleRecipients(world, source, range, profession, expectedJobBlock, recipient -> true);
+    }
+
+    public static List<RecipientRecord> findEligibleRecipients(
+            ServerWorld world,
             VillagerEntity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock,
+            Predicate<RecipientRecord> filter
+    ) {
+        List<RecipientRecord> recipients = findEligibleVillagerRecipients(world, source, range, profession, expectedJobBlock);
+        if (recipients.isEmpty()) {
+            return recipients;
+        }
+        return recipients.stream().filter(filter).sorted(RECIPIENT_ORDER).toList();
+    }
+
+    public static List<RecipientRecord> findEligibleRecipients(
+            ServerWorld world,
+            Entity source,
             double range,
             VillagerProfession profession,
             Block expectedJobBlock,
@@ -134,7 +160,33 @@ public final class DistributionRecipientHelper {
         return recipients;
     }
 
+    private static List<RecipientRecord> findEligibleVillagerRecipients(
+            ServerWorld world,
+            Entity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock
+    ) {
+        if (range <= 0.0D || !source.isAlive()) {
+            return List.of();
+        }
+
+        List<RecipientRecord> recipients = new ArrayList<>();
+        Box scanBox = new Box(source.getBlockPos()).expand(range);
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == profession)) {
+            Optional<RecipientRecord> recipient = validateRecipient(world, source, villager, expectedJobBlock);
+            recipient.ifPresent(recipients::add);
+        }
+
+        recipients.sort(RECIPIENT_ORDER);
+        return recipients;
+    }
+
     private static Optional<RecipientRecord> validateRecipient(ServerWorld world, VillagerEntity source, VillagerEntity recipient, Block expectedJobBlock) {
+        return validateRecipient(world, (Entity) source, recipient, expectedJobBlock);
+    }
+
+    private static Optional<RecipientRecord> validateRecipient(ServerWorld world, Entity source, VillagerEntity recipient, Block expectedJobBlock) {
         Optional<GlobalPos> jobSiteMemory = recipient.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSiteMemory.isEmpty()) {
             return Optional.empty();
