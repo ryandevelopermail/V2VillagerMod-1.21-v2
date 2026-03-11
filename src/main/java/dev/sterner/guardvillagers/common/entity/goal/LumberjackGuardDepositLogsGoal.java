@@ -94,7 +94,9 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         buffer.removeIf(ItemStack::isEmpty);
 
         if (buffer.isEmpty()) {
-            this.guard.setBootstrapComplete(true);
+            if (LumberjackChestTriggerController.isBootstrapSatisfied(world, this.guard)) {
+                this.guard.setBootstrapComplete(true);
+            }
             this.guard.requestTriggerEvaluation();
             LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
