@@ -20,7 +20,8 @@ import java.util.EnumSet;
 import java.util.List;
 
 public class LumberjackGuardCraftingGoal extends Goal {
-    private static final int DAILY_CRAFT_LIMIT = 2;
+    // Per-day cap for priority outputs only (raw wood/plank conversion does not consume this limit).
+    private static final int DAILY_CRAFT_LIMIT = 4;
     private static final int BOOTSTRAP_CHEST_PLANK_REQUIREMENT = 8;
     private static final int BOOTSTRAP_AXE_PLANK_REQUIREMENT = 3;
     private static final int BOOTSTRAP_AXE_STICK_REQUIREMENT = 2;
