@@ -7,14 +7,20 @@ import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
+
+import net.minecraft.item.Items;
 
 import java.util.EnumSet;
 import java.util.List;
 
 public class LumberjackGuardDepositLogsGoal extends Goal {
+    private static final double ITEM_PICKUP_RADIUS = 2.5D;
+
     private final LumberjackGuardEntity guard;
 
     public LumberjackGuardDepositLogsGoal(LumberjackGuardEntity guard) {
@@ -54,6 +60,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
 
         if (this.guard.squaredDistanceTo(Vec3d.ofCenter(chestPos)) > 9.0D) {
+            collectNearbyWoodDrops(world);
             this.guard.getNavigation().startMovingTo(chestPos.getX() + 0.5D, chestPos.getY(), chestPos.getZ() + 0.5D, 0.8D);
             return;
         }
@@ -115,6 +122,44 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
         inventory.markDirty();
         return remaining;
+    }
+
+
+    private void collectNearbyWoodDrops(ServerWorld world) {
+        Box pickupBox = this.guard.getBoundingBox().expand(ITEM_PICKUP_RADIUS, 1.0D, ITEM_PICKUP_RADIUS);
+        List<ItemEntity> nearbyItems = world.getEntitiesByClass(ItemEntity.class,
+                pickupBox,
+                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableWoodDrop(entity.getStack()));
+
+        for (ItemEntity itemEntity : nearbyItems) {
+            bufferStack(itemEntity.getStack().copy());
+            itemEntity.discard();
+        }
+    }
+
+    private void bufferStack(ItemStack incoming) {
+        List<ItemStack> buffer = this.guard.getGatheredStackBuffer();
+        for (ItemStack existing : buffer) {
+            if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
+                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
+                existing.increment(transfer);
+                incoming.decrement(transfer);
+                if (incoming.isEmpty()) {
+                    return;
+                }
+            }
+        }
+
+        if (!incoming.isEmpty()) {
+            buffer.add(incoming);
+        }
+    }
+
+    private boolean isGatherableWoodDrop(ItemStack stack) {
+        return stack.isIn(ItemTags.LOGS)
+                || stack.isIn(ItemTags.PLANKS)
+                || stack.isOf(Items.STICK)
+                || stack.isOf(Items.CHARCOAL);
     }
 
     private void dropAll(ServerWorld world, BlockPos pos) {
