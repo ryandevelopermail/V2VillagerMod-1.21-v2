@@ -116,6 +116,15 @@ public final class UniversalDistributionRouter {
                         ),
                         85,
                         RoutingMode.ALWAYS
+                ),
+                new DistributionRouteRule(
+                        "planks-to-plank-consuming-professions",
+                        stack -> stack.isIn(ItemTags.PLANKS),
+                        List.of(
+                                RecipientTarget.of(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE)
+                        ),
+                        80,
+                        RoutingMode.ALWAYS
                 )
         ).stream().sorted(RULE_ORDER).toList();
     }
