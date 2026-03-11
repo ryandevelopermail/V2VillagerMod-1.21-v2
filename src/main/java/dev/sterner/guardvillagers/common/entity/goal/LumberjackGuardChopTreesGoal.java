@@ -528,6 +528,152 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 Math.max(remaining, 0L));
     }
 
+
+    public static boolean scheduleSingleTreeRecoverySession(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos recoveryTarget = findSingleRecoveryTarget(world, guard);
+        if (recoveryTarget == null) {
+            return false;
+        }
+
+        guard.getSelectedTreeTargets().clear();
+        guard.getSelectedTreeTargets().add(recoveryTarget);
+        guard.setSessionTargetsRemaining(1);
+        guard.setActiveSession(true);
+        guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
+        guard.clearChopCountdown();
+
+        LOGGER.info("Lumberjack Guard {} entering constrained recovery chopping mode with single target {}",
+                guard.getUuidAsString(),
+                recoveryTarget);
+        return true;
+    }
+
+    private static BlockPos findSingleRecoveryTarget(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos table = guard.getPairedCraftingTablePos();
+        if (table == null) {
+            return null;
+        }
+
+        BlockPos chest = guard.getPairedChestPos();
+        BlockPos center = chest == null
+                ? table
+                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+
+        Set<BlockPos> excluded = new HashSet<>(guard.getSelectedTreeTargets());
+        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
+        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockPos pos = cursor.toImmutable();
+            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+
+            BlockPos root = normalizeRootStatic(world, pos);
+            if (excluded.contains(root)) {
+                continue;
+            }
+            if (!isEligibleRootStatic(world, root)) {
+                continue;
+            }
+
+            double distance = center.getSquaredDistance(root);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = root;
+            }
+        }
+
+        return nearest;
+    }
+
+    private static BlockPos normalizeRootStatic(ServerWorld world, BlockPos pos) {
+        BlockPos.Mutable mutable = pos.mutableCopy();
+        while (mutable.getY() > world.getBottomY() && world.getBlockState(mutable.down()).isIn(BlockTags.LOGS)) {
+            mutable.move(0, -1, 0);
+        }
+        return mutable.toImmutable();
+    }
+
+    private static boolean isEligibleRootStatic(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (!state.isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        BlockState below = world.getBlockState(pos.down());
+        if (below.isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        if (!(below.isOf(Blocks.DIRT)
+                || below.isOf(Blocks.GRASS_BLOCK)
+                || below.isOf(Blocks.PODZOL)
+                || below.isOf(Blocks.COARSE_DIRT)
+                || below.isOf(Blocks.ROOTED_DIRT)
+                || below.isOf(Blocks.MOSS_BLOCK)
+                || below.isOf(Blocks.MYCELIUM))) {
+            return false;
+        }
+
+        return hasMinimumTreeStructureStatic(world, pos);
+    }
+
+    private static boolean hasMinimumTreeStructureStatic(ServerWorld world, BlockPos root) {
+        if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeavesStatic(world, root)) {
+            return false;
+        }
+
+        Set<BlockPos> visited = new HashSet<>();
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        queue.add(root);
+
+        int minY = root.getY();
+        int maxY = root.getY() + ROOT_STRUCTURE_MAX_HEIGHT;
+
+        while (!queue.isEmpty()) {
+            BlockPos current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            if (visited.size() >= MIN_ROOT_STRUCTURE_LOGS) {
+                return true;
+            }
+
+            for (BlockPos adjacent : List.of(current.up(), current.down(), current.north(), current.south(), current.east(), current.west())) {
+                if (adjacent.getY() < minY || adjacent.getY() > maxY) {
+                    continue;
+                }
+                if (Math.abs(adjacent.getX() - root.getX()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS
+                        || Math.abs(adjacent.getZ() - root.getZ()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS) {
+                    continue;
+                }
+                if (visited.contains(adjacent) || !world.getBlockState(adjacent).isIn(BlockTags.LOGS)) {
+                    continue;
+                }
+                queue.add(adjacent.toImmutable());
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean hasNearbyNaturalLeavesStatic(ServerWorld world, BlockPos root) {
+        BlockPos min = root.add(-ROOT_CANOPY_SEARCH_RADIUS, 1, -ROOT_CANOPY_SEARCH_RADIUS);
+        BlockPos max = root.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_HEIGHT, ROOT_CANOPY_SEARCH_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (!(state.getBlock() instanceof LeavesBlock) || state.get(LeavesBlock.PERSISTENT)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
     private List<BlockPos> findTreeTargets(ServerWorld world) {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();

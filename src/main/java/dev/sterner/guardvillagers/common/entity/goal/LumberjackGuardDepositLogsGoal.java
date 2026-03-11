@@ -22,8 +22,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class LumberjackGuardDepositLogsGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardDepositLogsGoal.class);
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
+    private static final int RECOVERY_CHEST_PLANK_REQUIREMENT = 8;
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
 
@@ -64,7 +69,10 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
         BlockPos chestPos = this.guard.getPairedChestPos();
         if (chestPos == null) {
-            dropAll(world, this.guard.getBlockPos());
+            if (attemptChestRecovery(world, "paired chest missing", false, null)) {
+                return;
+            }
+            lastResortDropAll(world, this.guard.getBlockPos(), "no paired chest and recovery could not proceed");
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
             return;
         }
@@ -77,7 +85,10 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
 
         Inventory chestInventory = getChestInventory(world, chestPos);
         if (chestInventory == null) {
-            dropAll(world, chestPos);
+            if (attemptChestRecovery(world, "paired chest inventory unavailable", true, chestPos)) {
+                return;
+            }
+            lastResortDropAll(world, chestPos, "paired chest inventory unavailable and recovery could not proceed");
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
             return;
         }
@@ -271,6 +282,88 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                 || stack.isIn(ItemTags.PLANKS)
                 || stack.isOf(Items.STICK)
                 || stack.isOf(Items.CHARCOAL);
+    }
+
+
+    private boolean attemptChestRecovery(ServerWorld world, String reason, boolean clearInvalidPairing, BlockPos previousChestPos) {
+        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        if (tablePos == null) {
+            LOGGER.warn("Lumberjack Guard {} cannot recover chest during deposit: {} (no paired crafting table)",
+                    this.guard.getUuidAsString(), reason);
+            return false;
+        }
+
+        if (clearInvalidPairing) {
+            this.guard.setPairedChestPos(null);
+        }
+
+        Inventory pairedChestInventory = LumberjackGuardCraftingGoal.resolveChestInventoryForGuard(world, this.guard);
+        LumberjackGuardCraftingGoal.ensureChestCraftingSuppliesForRecovery(this.guard, pairedChestInventory);
+
+        int availablePlanks = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS));
+        boolean hasChest = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isOf(Items.CHEST)) > 0;
+
+        if ((!hasChest && availablePlanks >= RECOVERY_CHEST_PLANK_REQUIREMENT)
+                || (hasChest && this.guard.getPairedChestPos() == null)) {
+            if (LumberjackGuardCraftingGoal.craftChestForRecovery(this.guard, pairedChestInventory)
+                    && LumberjackGuardCraftingGoal.tryPlaceAndBindChestForRecovery(world, this.guard, pairedChestInventory)) {
+                LOGGER.info("Lumberjack Guard {} recovered chest during deposit after {}",
+                        this.guard.getUuidAsString(), reason);
+                this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_CHEST);
+                return true;
+            }
+        }
+
+        int planksAfterConversion = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS));
+        if (planksAfterConversion < RECOVERY_CHEST_PLANK_REQUIREMENT && this.guard.getPairedChestPos() == null) {
+            if (!this.guard.isActiveSession()
+                    && LumberjackGuardChopTreesGoal.scheduleSingleTreeRecoverySession(world, this.guard)) {
+                LOGGER.info("Lumberjack Guard {} lacks recovery planks ({} / {}) after {}; scheduled constrained single-tree cycle",
+                        this.guard.getUuidAsString(), planksAfterConversion, RECOVERY_CHEST_PLANK_REQUIREMENT, reason);
+                return true;
+            }
+
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+            LOGGER.info("Lumberjack Guard {} awaiting constrained recovery cycle after {} (planks {} / {})",
+                    this.guard.getUuidAsString(), reason, planksAfterConversion, RECOVERY_CHEST_PLANK_REQUIREMENT);
+            return true;
+        }
+
+        if (this.guard.getPairedChestPos() != null) {
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_CHEST);
+            return true;
+        }
+
+        if (previousChestPos != null) {
+            LOGGER.warn("Lumberjack Guard {} recovery stalled after {} at {}",
+                    this.guard.getUuidAsString(), reason, previousChestPos);
+        }
+        return false;
+    }
+
+    private int countInInventoryAndBuffer(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
+        int total = 0;
+        if (inventory != null) {
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                ItemStack stack = inventory.getStack(slot);
+                if (!stack.isEmpty() && predicate.test(stack)) {
+                    total += stack.getCount();
+                }
+            }
+        }
+
+        for (ItemStack stack : this.guard.getGatheredStackBuffer()) {
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+
+        return total;
+    }
+
+    private void lastResortDropAll(ServerWorld world, BlockPos pos, String reason) {
+        LOGGER.warn("Lumberjack Guard {} dropping buffered items as last resort: {}", this.guard.getUuidAsString(), reason);
+        dropAll(world, pos);
     }
 
     private void dropAll(ServerWorld world, BlockPos pos) {
