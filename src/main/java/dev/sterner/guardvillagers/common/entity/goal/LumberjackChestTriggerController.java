@@ -35,15 +35,15 @@ public final class LumberjackChestTriggerController {
     private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
 
     private static final List<TriggerRule> RULES = List.of(
-            new TriggerRule("craft_equip_best_axe", 100,
-                    LumberjackChestTriggerController::shouldCraftOrEquipAxe,
-                    LumberjackChestTriggerController::craftOrEquipBestAxe),
-            new TriggerRule("craft_place_furnace_modifier", 200,
+            new TriggerRule("craft_place_furnace_modifier", 100,
                     LumberjackChestTriggerController::shouldCraftOrPlaceFurnace,
                     LumberjackChestTriggerController::craftOrPlaceFurnace),
-            new TriggerRule("feed_furnace_workflow", 300,
+            new TriggerRule("feed_furnace_workflow", 200,
                     LumberjackChestTriggerController::shouldFeedFurnaceWorkflow,
-                    LumberjackChestTriggerController::feedFurnaceWorkflow)
+                    LumberjackChestTriggerController::feedFurnaceWorkflow),
+            new TriggerRule("craft_equip_best_axe", 300,
+                    LumberjackChestTriggerController::shouldCraftOrEquipAxe,
+                    LumberjackChestTriggerController::craftOrEquipBestAxe)
     ).stream().sorted(Comparator.comparingInt(TriggerRule::priority)).toList();
 
     private LumberjackChestTriggerController() {
@@ -144,6 +144,16 @@ public final class LumberjackChestTriggerController {
         if (isAxe(context.guard().getMainHandStack())) {
             return false;
         }
+
+        boolean hasPendingUpgradeDemand = resolveNextUpgradeDemand(context.world(), context.guard()) != null;
+        if (context.guard().isBootstrapComplete() && hasPendingUpgradeDemand) {
+            return false;
+        }
+
+        if (context.guard().isBootstrapComplete() && !hasPendingUpgradeDemand && hasAnyAxeAvailable(context)) {
+            return true;
+        }
+
         if (hasAnyAxeAvailable(context)) {
             return true;
         }
@@ -525,6 +535,7 @@ public final class LumberjackChestTriggerController {
             return false;
         }
         context.guard().equipStack(net.minecraft.entity.EquipmentSlot.MAINHAND, new ItemStack(axeOutput));
+        context.guard().setBootstrapComplete(true);
         return true;
     }
 
@@ -542,6 +553,7 @@ public final class LumberjackChestTriggerController {
             addToBuffer(context.guard(), previous.copy());
         }
         context.guard().equipStack(net.minecraft.entity.EquipmentSlot.MAINHAND, pulled);
+        context.guard().setBootstrapComplete(true);
         return true;
     }
 
