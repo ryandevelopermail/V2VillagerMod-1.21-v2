@@ -7,6 +7,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
@@ -17,6 +18,7 @@ import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
@@ -40,6 +42,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TREE_SEARCH_RADIUS = 20;
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
+    private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
@@ -131,6 +134,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
         teardownTree(world, targetRoot);
+        collectNearbyWoodDrops(world);
         this.completedSessionRoots.add(targetRoot.toImmutable());
         this.guard.getSelectedTreeTargets().remove(0);
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
@@ -634,6 +638,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
         }
         return true;
+    }
+
+    private void collectNearbyWoodDrops(ServerWorld world) {
+        Box pickupBox = this.guard.getBoundingBox().expand(ITEM_PICKUP_RADIUS, 1.0D, ITEM_PICKUP_RADIUS);
+        List<ItemEntity> nearbyItems = world.getEntitiesByClass(ItemEntity.class,
+                pickupBox,
+                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableWoodDrop(entity.getStack()));
+
+        for (ItemEntity itemEntity : nearbyItems) {
+            bufferStack(itemEntity.getStack().copy());
+            itemEntity.discard();
+        }
+    }
+
+    private boolean isGatherableWoodDrop(ItemStack stack) {
+        return stack.isIn(ItemTags.LOGS)
+                || stack.isIn(ItemTags.PLANKS)
+                || stack.isOf(Items.STICK)
+                || stack.isOf(Items.CHARCOAL);
     }
 
     private void bufferStack(ItemStack incoming) {
