@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -13,6 +12,7 @@ import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
@@ -165,13 +165,61 @@ public class LumberjackGuardCraftingGoal extends Goal {
             return false;
         }
 
-        BlockPos nearbyChest = JobBlockPairingHelper.findNearbyChest(world, tablePos).orElse(null);
-        if (nearbyChest == null) {
+        Inventory chestInventory = resolveChestInventory(world);
+        ItemStack chestStack = takeOneChestForPlacement(chestInventory);
+        if (chestStack.isEmpty()) {
             return false;
         }
 
-        this.guard.setPairedChestPos(nearbyChest);
-        return true;
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos candidate = tablePos.offset(direction);
+            BlockPos below = candidate.down();
+            if (!world.getBlockState(candidate).isAir()) {
+                continue;
+            }
+            if (!world.getBlockState(below).isSolidBlock(world, below)) {
+                continue;
+            }
+            if (!world.setBlockState(candidate, Blocks.CHEST.getDefaultState())) {
+                continue;
+            }
+
+            this.guard.setPairedChestPos(candidate);
+            this.guard.setBootstrapComplete(false);
+            return true;
+        }
+
+        if (chestInventory != null) {
+            ItemStack remainder = insertIntoInventory(chestInventory, chestStack);
+            if (remainder.isEmpty()) {
+                chestInventory.markDirty();
+                return false;
+            }
+            chestStack = remainder;
+        }
+
+        addToBuffer(chestStack);
+        return false;
+    }
+
+    private ItemStack takeOneChestForPlacement(Inventory chestInventory) {
+        if (chestInventory != null) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                ItemStack stack = chestInventory.getStack(slot);
+                if (stack.isEmpty() || !stack.isOf(Items.CHEST)) {
+                    continue;
+                }
+
+                ItemStack split = stack.split(1);
+                if (stack.isEmpty()) {
+                    chestInventory.setStack(slot, ItemStack.EMPTY);
+                }
+                chestInventory.markDirty();
+                return split;
+            }
+        }
+
+        return takeOneByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
     }
 
     private boolean shouldCraftBootstrapAxe(Inventory chestInventory) {
