@@ -43,6 +43,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
     private static final int TREE_CROWN_RADIUS = 4;
+    private static final int MIN_ROOT_STRUCTURE_LOGS = 4;
+    private static final int ROOT_STRUCTURE_MAX_HEIGHT = 12;
+    private static final int ROOT_STRUCTURE_HORIZONTAL_RADIUS = 2;
+    private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
+    private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
@@ -531,6 +536,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 continue;
             }
             BlockPos root = normalizeRoot(world, pos);
+            if (!hasMinimumTreeStructure(world, root)) {
+                continue;
+            }
             if (isEligibleRoot(world, root)) {
                 uniqueRoots.add(root);
             }
@@ -558,13 +566,70 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         if (below.isIn(BlockTags.LOGS)) {
             return false;
         }
-        return below.isOf(Blocks.DIRT)
+        if (!(below.isOf(Blocks.DIRT)
                 || below.isOf(Blocks.GRASS_BLOCK)
                 || below.isOf(Blocks.PODZOL)
                 || below.isOf(Blocks.COARSE_DIRT)
                 || below.isOf(Blocks.ROOTED_DIRT)
                 || below.isOf(Blocks.MOSS_BLOCK)
-                || below.isOf(Blocks.MYCELIUM);
+                || below.isOf(Blocks.MYCELIUM))) {
+            return false;
+        }
+
+        return hasMinimumTreeStructure(world, pos);
+    }
+
+    private boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
+        if (!isEligibleLog(world, root.up()) && !hasNearbyNaturalLeaves(world, root)) {
+            return false;
+        }
+
+        Set<BlockPos> visited = new HashSet<>();
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        queue.add(root);
+
+        int minY = root.getY();
+        int maxY = root.getY() + ROOT_STRUCTURE_MAX_HEIGHT;
+
+        while (!queue.isEmpty()) {
+            BlockPos current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            if (visited.size() >= MIN_ROOT_STRUCTURE_LOGS) {
+                return true;
+            }
+
+            for (BlockPos adjacent : getTrunkAdjacent(current)) {
+                if (adjacent.getY() < minY || adjacent.getY() > maxY) {
+                    continue;
+                }
+                if (Math.abs(adjacent.getX() - root.getX()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS
+                        || Math.abs(adjacent.getZ() - root.getZ()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS) {
+                    continue;
+                }
+                if (visited.contains(adjacent) || !isEligibleLog(world, adjacent)) {
+                    continue;
+                }
+                queue.add(adjacent.toImmutable());
+            }
+        }
+
+        return false;
+    }
+
+    private boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
+        BlockPos min = root.add(-ROOT_CANOPY_SEARCH_RADIUS, 1, -ROOT_CANOPY_SEARCH_RADIUS);
+        BlockPos max = root.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_HEIGHT, ROOT_CANOPY_SEARCH_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (!(state.getBlock() instanceof LeavesBlock) || state.get(LeavesBlock.PERSISTENT)) {
+                continue;
+            }
+            return true;
+        }
+
+        return false;
     }
 
     private boolean isEligibleLog(ServerWorld world, BlockPos pos) {
