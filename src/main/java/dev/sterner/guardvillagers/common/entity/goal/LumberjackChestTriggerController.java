@@ -78,6 +78,19 @@ public final class LumberjackChestTriggerController {
         guard.setNextTriggerEvaluationTick(now + EVALUATION_INTERVAL_TICKS);
     }
 
+    public static boolean runImmediateVillageUpgradePass(ServerWorld world, LumberjackGuardEntity guard) {
+        TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
+        if (tryPlaceChestForEligibleV1Villager(context)) {
+            guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
+            return true;
+        }
+        if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
+            guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
+            return true;
+        }
+        return false;
+    }
+
     private static void evaluateRules(ServerWorld world, LumberjackGuardEntity guard) {
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
         long now = world.getTime();
@@ -269,14 +282,7 @@ public final class LumberjackChestTriggerController {
     }
 
     private static void runVillageExpansionScan(ServerWorld world, LumberjackGuardEntity guard) {
-        TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
-        if (tryPlaceChestForEligibleV1Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "scan_place_chest_for_v1");
-            return;
-        }
-        if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "scan_place_crafting_table_for_v2");
-        }
+        runImmediateVillageUpgradePass(world, guard);
     }
 
     private static boolean tryPlaceChestForEligibleV1Villager(TriggerContext context) {
