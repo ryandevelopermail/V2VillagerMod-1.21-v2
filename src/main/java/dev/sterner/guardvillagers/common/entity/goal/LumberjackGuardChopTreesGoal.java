@@ -35,8 +35,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
     private static final int SESSION_TARGET_MIN = 3;
     private static final int SESSION_TARGET_MAX = 5;
-    private static final int SESSION_MIN_PLANKS = 11;
-    private static final int SESSION_MIN_STICKS = 4;
+    private static final int BOOTSTRAP_MIN_PLANKS = 11;
+    private static final int BOOTSTRAP_MIN_STICKS = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
     private static final int TREE_SEARCH_RADIUS = 20;
@@ -60,6 +60,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
     private int stallRecoveryAttempts;
+    private boolean bootstrapRetryTreeScheduled;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -146,20 +147,24 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
 
         if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().isEmpty()) {
-            if (!extendSessionIfMaterialThresholdUnmet(world)) {
+            if (this.bootstrapRetryTreeScheduled) {
+                LOGGER.info("Lumberjack Guard {} completed bootstrap retry tree; returning to base for crafting retry",
+                        this.guard.getUuidAsString());
+                beginReturnToBase();
+            } else if (!extendSessionIfBootstrapThresholdUnmet(world)) {
                 beginReturnToBase();
             }
         }
     }
 
-    private boolean extendSessionIfMaterialThresholdUnmet(ServerWorld world) {
+    private boolean extendSessionIfBootstrapThresholdUnmet(ServerWorld world) {
         Inventory chestInventory = resolveChestInventory(world);
         int plankCount = countByPredicate(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countByPredicate(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int stickCount = countByItem(chestInventory, Items.STICK)
                 + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
 
-        if (plankCount >= SESSION_MIN_PLANKS && stickCount >= SESSION_MIN_STICKS) {
+        if (plankCount >= BOOTSTRAP_MIN_PLANKS && stickCount >= BOOTSTRAP_MIN_STICKS) {
             return false;
         }
 
@@ -167,36 +172,32 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         excludedRoots.addAll(this.failedSessionRoots);
         excludedRoots.addAll(this.guard.getSelectedTreeTargets());
 
-        BlockPos nextRetryRoot = null;
-        for (BlockPos candidate : findTreeTargets(world)) {
+        List<BlockPos> candidates = findTreeTargets(world);
+        for (BlockPos candidate : candidates) {
             if (excludedRoots.contains(candidate)) {
                 continue;
             }
-            nextRetryRoot = candidate;
-            break;
+            this.guard.getSelectedTreeTargets().add(candidate);
+            this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() + 1);
+            this.bootstrapRetryTreeScheduled = true;
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
+            this.stalledTicks = 0;
+            this.stallRecoveryAttempts = 0;
+            this.lastTreeDistanceSq = Double.MAX_VALUE;
+
+            LOGGER.info("Lumberjack Guard {} below bootstrap minimum (planks {}, sticks {}); scheduled one retry tree {} before returning to base",
+                    this.guard.getUuidAsString(),
+                    plankCount,
+                    stickCount,
+                    candidate);
+            return true;
         }
 
-        if (nextRetryRoot == null) {
-            LOGGER.info("Lumberjack Guard {} did not meet material threshold (planks {}, sticks {}), retry cycle selected root: none",
+        LOGGER.info("Lumberjack Guard {} did not meet bootstrap minimum (planks {}, sticks {}), but no retry tree target was found",
                     this.guard.getUuidAsString(),
                     plankCount,
                     stickCount);
-            return false;
-        }
-
-        this.guard.getSelectedTreeTargets().add(nextRetryRoot);
-        this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() + 1);
-        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
-        this.stalledTicks = 0;
-        this.stallRecoveryAttempts = 0;
-        this.lastTreeDistanceSq = Double.MAX_VALUE;
-
-        LOGGER.info("Lumberjack Guard {} extending active session for material threshold (planks {}, sticks {}); retry cycle selected root {}",
-                this.guard.getUuidAsString(),
-                plankCount,
-                stickCount,
-                nextRetryRoot);
-        return true;
+        return false;
     }
 
     private void updateChopCountdown(ServerWorld world) {
@@ -231,6 +232,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(selectedCount);
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
+        this.bootstrapRetryTreeScheduled = false;
         this.guard.setActiveSession(true);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
 
@@ -271,6 +273,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(0);
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
+        this.bootstrapRetryTreeScheduled = false;
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
