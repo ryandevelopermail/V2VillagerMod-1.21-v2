@@ -167,39 +167,35 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         excludedRoots.addAll(this.failedSessionRoots);
         excludedRoots.addAll(this.guard.getSelectedTreeTargets());
 
-        List<BlockPos> candidates = findTreeTargets(world);
-        int addedTargets = 0;
-        for (BlockPos candidate : candidates) {
+        BlockPos nextRetryRoot = null;
+        for (BlockPos candidate : findTreeTargets(world)) {
             if (excludedRoots.contains(candidate)) {
                 continue;
             }
-            this.guard.getSelectedTreeTargets().add(candidate);
-            excludedRoots.add(candidate);
-            addedTargets++;
-            if (addedTargets >= SESSION_TARGET_MAX) {
-                break;
-            }
+            nextRetryRoot = candidate;
+            break;
         }
 
-        if (addedTargets <= 0) {
-            LOGGER.info("Lumberjack Guard {} did not meet material threshold (planks {}, sticks {}), but no additional tree targets were found",
+        if (nextRetryRoot == null) {
+            LOGGER.info("Lumberjack Guard {} did not meet material threshold (planks {}, sticks {}), retry cycle selected root: none",
                     this.guard.getUuidAsString(),
                     plankCount,
                     stickCount);
             return false;
         }
 
-        this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() + addedTargets);
+        this.guard.getSelectedTreeTargets().add(nextRetryRoot);
+        this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() + 1);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
 
-        LOGGER.info("Lumberjack Guard {} extending active session for material threshold (planks {}, sticks {}); added {} new target(s)",
+        LOGGER.info("Lumberjack Guard {} extending active session for material threshold (planks {}, sticks {}); retry cycle selected root {}",
                 this.guard.getUuidAsString(),
                 plankCount,
                 stickCount,
-                addedTargets);
+                nextRetryRoot);
         return true;
     }
 
