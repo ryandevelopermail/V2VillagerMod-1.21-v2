@@ -97,6 +97,16 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             if (LumberjackChestTriggerController.isBootstrapSatisfied(world, this.guard)) {
                 this.guard.setBootstrapComplete(true);
             }
+            for (int attempt = 0; attempt < MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT; attempt++) {
+                long attemptsBefore = this.distributionAttempts;
+                tryDemandDrivenDistribution(world, chestInventory, chestPos);
+                if (this.distributionAttempts == attemptsBefore) {
+                    break;
+                }
+                if (world.getTime() < this.nextDistributionAttemptTick) {
+                    break;
+                }
+            }
             this.guard.requestTriggerEvaluation();
             LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
