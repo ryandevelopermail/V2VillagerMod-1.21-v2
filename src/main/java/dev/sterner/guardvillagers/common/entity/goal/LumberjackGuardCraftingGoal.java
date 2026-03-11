@@ -20,6 +20,8 @@ import java.util.List;
 
 public class LumberjackGuardCraftingGoal extends Goal {
     private static final int DAILY_CRAFT_LIMIT = 2;
+    private static final int BOOTSTRAP_MIN_PLANKS = 11;
+    private static final int BOOTSTRAP_MIN_STICKS = 2;
 
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
@@ -123,6 +125,9 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
     private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
+            if (!hasBootstrapMaterials(chestInventory)) {
+                return false;
+            }
             if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
                 return true;
             }
@@ -144,6 +149,14 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         return false;
+    }
+
+
+    private boolean hasBootstrapMaterials(Inventory chestInventory) {
+        int planks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+        int sticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+        return planks >= BOOTSTRAP_MIN_PLANKS && sticks >= BOOTSTRAP_MIN_STICKS;
     }
 
     private boolean isBootstrapSession() {
