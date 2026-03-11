@@ -35,8 +35,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
     private static final int SESSION_TARGET_MIN = 3;
     private static final int SESSION_TARGET_MAX = 5;
-    private static final int BOOTSTRAP_MIN_PLANKS = 11;
-    private static final int BOOTSTRAP_MIN_STICKS = 2;
+    private static final int SESSION_MIN_PLANKS = 11;
+    private static final int SESSION_MIN_STICKS = 2;
+    private static final int PLANKS_PER_LOG = 4;
+    private static final int STICKS_PER_PLANK = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
     private static final int TREE_SEARCH_RADIUS = 20;
@@ -151,20 +153,26 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 LOGGER.info("Lumberjack Guard {} completed bootstrap retry tree; returning to base for crafting retry",
                         this.guard.getUuidAsString());
                 beginReturnToBase();
-            } else if (!extendSessionIfBootstrapThresholdUnmet(world)) {
+            } else if (!extendSessionIfMaterialThresholdUnmet(world)) {
                 beginReturnToBase();
             }
         }
     }
 
-    private boolean extendSessionIfBootstrapThresholdUnmet(ServerWorld world) {
+    private boolean extendSessionIfMaterialThresholdUnmet(ServerWorld world) {
         Inventory chestInventory = resolveChestInventory(world);
         int plankCount = countByPredicate(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countByPredicate(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int stickCount = countByItem(chestInventory, Items.STICK)
                 + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+        int logCount = countByPredicate(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
+                + countByPredicate(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS));
 
-        if (plankCount >= BOOTSTRAP_MIN_PLANKS && stickCount >= BOOTSTRAP_MIN_STICKS) {
+        int effectivePlankCount = plankCount + (logCount * PLANKS_PER_LOG);
+        int convertiblePlanksToSticks = Math.max(0, effectivePlankCount - SESSION_MIN_PLANKS);
+        int effectiveStickCount = stickCount + (convertiblePlanksToSticks * STICKS_PER_PLANK);
+
+        if (effectivePlankCount >= SESSION_MIN_PLANKS && effectiveStickCount >= SESSION_MIN_STICKS) {
             return false;
         }
 
@@ -185,18 +193,24 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.stallRecoveryAttempts = 0;
             this.lastTreeDistanceSq = Double.MAX_VALUE;
 
-            LOGGER.info("Lumberjack Guard {} below bootstrap minimum (planks {}, sticks {}); scheduled one retry tree {} before returning to base",
+            LOGGER.info("Lumberjack Guard {} below material minimum (raw: logs {}, planks {}, sticks {}; effective: planks {}, sticks {}); scheduled one retry tree {} before returning to base",
                     this.guard.getUuidAsString(),
+                    logCount,
                     plankCount,
                     stickCount,
+                    effectivePlankCount,
+                    effectiveStickCount,
                     candidate);
             return true;
         }
 
-        LOGGER.info("Lumberjack Guard {} did not meet bootstrap minimum (planks {}, sticks {}), but no retry tree target was found",
-                    this.guard.getUuidAsString(),
-                    plankCount,
-                    stickCount);
+        LOGGER.info("Lumberjack Guard {} did not meet material minimum (raw: logs {}, planks {}, sticks {}; effective: planks {}, sticks {}), but no retry tree target was found",
+                this.guard.getUuidAsString(),
+                logCount,
+                plankCount,
+                stickCount,
+                effectivePlankCount,
+                effectiveStickCount);
         return false;
     }
 
