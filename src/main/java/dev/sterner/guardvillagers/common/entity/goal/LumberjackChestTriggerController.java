@@ -79,6 +79,9 @@ public final class LumberjackChestTriggerController {
     }
 
     public static boolean runImmediateVillageUpgradePass(ServerWorld world, LumberjackGuardEntity guard) {
+        if (guard.getPairedChestPos() == null) {
+            return false;
+        }
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
         if (tryPlaceChestForEligibleV1Villager(context)) {
             guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
@@ -92,6 +95,10 @@ public final class LumberjackChestTriggerController {
     }
 
     public static UpgradeDemand resolveNextUpgradeDemand(ServerWorld world, LumberjackGuardEntity guard) {
+        if (guard.getPairedChestPos() == null) {
+            return null;
+        }
+
         for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
             if (!isEligibleV1Villager(world, villager)) {
                 continue;
@@ -327,6 +334,10 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceChestForEligibleV1Villager(TriggerContext context) {
+        if (context.guard().getPairedChestPos() == null) {
+            return false;
+        }
+
         if (countByItem(context, Items.CHEST) <= 0 && countByItem(context, Items.TRAPPED_CHEST) <= 0) {
             return false;
         }
