@@ -190,12 +190,7 @@ public final class LumberjackChestTriggerController {
         }
 
         boolean changed = false;
-        ItemStack output = furnace.getStack(2);
-        if (!output.isEmpty()) {
-            addToBuffer(context.guard(), output.copy());
-            furnace.setStack(2, ItemStack.EMPTY);
-            changed = true;
-        }
+        changed |= routeCharcoalOutput(context, furnace);
 
         if (furnace.getStack(0).isEmpty()) {
             ItemStack logs = takeOneMatching(context, stack -> stack.isIn(ItemTags.LOGS));
@@ -217,6 +212,60 @@ public final class LumberjackChestTriggerController {
             furnace.markDirty();
         }
         return changed;
+    }
+
+    private static boolean routeCharcoalOutput(TriggerContext context, FurnaceBlockEntity furnace) {
+        ItemStack output = furnace.getStack(2);
+        if (output.isEmpty() || !output.isOf(Items.CHARCOAL)) {
+            return false;
+        }
+
+        int remainingLogs = countMatching(context, stack -> stack.isIn(ItemTags.LOGS));
+        ItemStack furnaceInput = furnace.getStack(0);
+        if (!furnaceInput.isEmpty() && furnaceInput.isIn(ItemTags.LOGS)) {
+            remainingLogs += furnaceInput.getCount();
+        }
+
+        ItemStack fuel = furnace.getStack(1);
+        int fuelSpace;
+        if (fuel.isEmpty()) {
+            fuelSpace = output.getMaxCount();
+        } else if (fuel.isOf(Items.CHARCOAL)) {
+            fuelSpace = fuel.getMaxCount() - fuel.getCount();
+        } else {
+            fuelSpace = 0;
+        }
+
+        if (remainingLogs > 0 && fuelSpace > 0) {
+            int moved = Math.min(output.getCount(), fuelSpace);
+            if (moved <= 0) {
+                return false;
+            }
+
+            if (fuel.isEmpty()) {
+                furnace.setStack(1, new ItemStack(Items.CHARCOAL, moved));
+            } else {
+                fuel.increment(moved);
+                furnace.setStack(1, fuel);
+            }
+
+            output.decrement(moved);
+            if (output.isEmpty()) {
+                furnace.setStack(2, ItemStack.EMPTY);
+            } else {
+                furnace.setStack(2, output);
+            }
+            return true;
+        }
+
+        boolean pendingBurnCycle = !furnace.getStack(0).isEmpty() || !furnace.getStack(1).isEmpty();
+        if (remainingLogs <= 0 && !pendingBurnCycle) {
+            addToInventoryOrBuffer(context, output.copy());
+            furnace.setStack(2, ItemStack.EMPTY);
+            return true;
+        }
+
+        return false;
     }
 
     private static void runVillageExpansionScan(ServerWorld world, LumberjackGuardEntity guard) {

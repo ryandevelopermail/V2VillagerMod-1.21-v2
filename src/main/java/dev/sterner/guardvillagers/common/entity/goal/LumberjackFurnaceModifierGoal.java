@@ -96,11 +96,11 @@ public class LumberjackFurnaceModifierGoal extends Goal {
 
     private void serviceFurnace(Inventory chestInventory, AbstractFurnaceBlockEntity furnace) {
         moveHalfLogsToInput(chestInventory, furnace);
-        refillFuelFromCharcoalOutput(furnace);
+        refillFuelFromCharcoalOutput(chestInventory, furnace);
         if (furnace.getStack(1).isEmpty()) {
             moveLogsToFuel(chestInventory, furnace, 3);
         }
-        refillFuelFromCharcoalOutput(furnace);
+        refillFuelFromCharcoalOutput(chestInventory, furnace);
         recoverFuelFromInputIfStalled(furnace);
     }
 
@@ -156,20 +156,54 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
     }
 
-    private void refillFuelFromCharcoalOutput(AbstractFurnaceBlockEntity furnace) {
+    private void refillFuelFromCharcoalOutput(Inventory chestInventory, AbstractFurnaceBlockEntity furnace) {
         ItemStack fuel = furnace.getStack(1);
         ItemStack output = furnace.getStack(2);
-        if (!fuel.isEmpty() || output.isEmpty() || !output.isOf(Items.CHARCOAL)) {
+        if (output.isEmpty() || !output.isOf(Items.CHARCOAL)) {
             return;
         }
 
-        int moved = Math.min(output.getCount(), output.getMaxCount());
-        furnace.setStack(1, new ItemStack(Items.CHARCOAL, moved));
-        output.decrement(moved);
-        if (output.isEmpty()) {
-            furnace.setStack(2, ItemStack.EMPTY);
+        int remainingLogs = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
+        ItemStack input = furnace.getStack(0);
+        if (!input.isEmpty() && input.isIn(ItemTags.LOGS)) {
+            remainingLogs += input.getCount();
+        }
+
+        int fuelSpace;
+        if (fuel.isEmpty()) {
+            fuelSpace = output.getMaxCount();
+        } else if (fuel.isOf(Items.CHARCOAL)) {
+            fuelSpace = fuel.getMaxCount() - fuel.getCount();
         } else {
-            furnace.setStack(2, output);
+            fuelSpace = 0;
+        }
+
+        if (remainingLogs > 0 && fuelSpace > 0) {
+            int moved = Math.min(output.getCount(), fuelSpace);
+            if (moved <= 0) {
+                return;
+            }
+
+            if (fuel.isEmpty()) {
+                furnace.setStack(1, new ItemStack(Items.CHARCOAL, moved));
+            } else {
+                fuel.increment(moved);
+                furnace.setStack(1, fuel);
+            }
+
+            output.decrement(moved);
+            if (output.isEmpty()) {
+                furnace.setStack(2, ItemStack.EMPTY);
+            } else {
+                furnace.setStack(2, output);
+            }
+            return;
+        }
+
+        boolean pendingBurnCycle = !furnace.getStack(0).isEmpty() || !furnace.getStack(1).isEmpty();
+        if (remainingLogs <= 0 && !pendingBurnCycle) {
+            returnLogs(chestInventory, output.copy());
+            furnace.setStack(2, ItemStack.EMPTY);
         }
     }
 
@@ -346,11 +380,13 @@ public class LumberjackFurnaceModifierGoal extends Goal {
 
         if (chestInventory != null) {
             ItemStack remaining = stack.copy();
+            boolean chestChanged = false;
             for (int slot = 0; slot < chestInventory.size() && !remaining.isEmpty(); slot++) {
                 ItemStack existing = chestInventory.getStack(slot);
                 if (existing.isEmpty()) {
                     chestInventory.setStack(slot, remaining.copy());
                     remaining = ItemStack.EMPTY;
+                    chestChanged = true;
                     break;
                 }
                 if (!ItemStack.areItemsAndComponentsEqual(existing, remaining) || existing.getCount() >= existing.getMaxCount()) {
@@ -359,6 +395,10 @@ public class LumberjackFurnaceModifierGoal extends Goal {
                 int moved = Math.min(existing.getMaxCount() - existing.getCount(), remaining.getCount());
                 existing.increment(moved);
                 remaining.decrement(moved);
+                chestChanged = true;
+            }
+            if (chestChanged) {
+                chestInventory.markDirty();
             }
             if (remaining.isEmpty()) {
                 return;
