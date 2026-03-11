@@ -152,16 +152,18 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
+        boolean bootstrapSatisfied = isBootstrapSatisfied(context);
+
         boolean hasPendingUpgradeDemand = resolveNextUpgradeDemand(context.world(), context.guard()) != null;
         if (context.guard().isBootstrapComplete() && hasPendingUpgradeDemand) {
             return false;
         }
 
-        if (context.guard().isBootstrapComplete() && !hasPendingUpgradeDemand && hasAnyAxeAvailable(context)) {
+        if (context.guard().isBootstrapComplete() && !hasPendingUpgradeDemand && bootstrapSatisfied) {
             return true;
         }
 
-        if (hasAnyAxeAvailable(context)) {
+        if (bootstrapSatisfied) {
             return true;
         }
         return canCraftAxe(context, Items.NETHERITE_INGOT)
@@ -522,6 +524,22 @@ public final class LumberjackChestTriggerController {
             }
         }
         return false;
+    }
+
+    static boolean isBootstrapSatisfied(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) {
+            return false;
+        }
+        Inventory chestInventory = resolveChestInventory(world, guard);
+        if (chestInventory == null) {
+            return false;
+        }
+        return isBootstrapSatisfied(new TriggerContext(world, guard, chestInventory));
+    }
+
+    private static boolean isBootstrapSatisfied(TriggerContext context) {
+        return isAxe(context.guard().getMainHandStack()) || hasAnyAxeAvailable(context);
     }
 
     private static boolean canCraftAxe(TriggerContext context, Item material) {
