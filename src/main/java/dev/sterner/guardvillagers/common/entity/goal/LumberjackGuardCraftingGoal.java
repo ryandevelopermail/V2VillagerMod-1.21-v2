@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -23,6 +24,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
     private int craftedToday;
+    private boolean basePairingEstablished;
 
     public LumberjackGuardCraftingGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -68,9 +70,13 @@ public class LumberjackGuardCraftingGoal extends Goal {
             return;
         }
 
+        if (!basePairingEstablished) {
+            basePairingEstablished = tryPlaceAndBindChest(world);
+        }
+
         Inventory chestInventory = resolveChestInventory(world);
         boolean woodConversionSucceeded = performWoodConversion(chestInventory);
-        boolean priorityOutputCrafted = craftPriorityOutputs(world, chestInventory);
+        boolean priorityOutputCrafted = craftPriorityOutputs(world, chestInventory, isBasePairingReadyForDemand());
 
         boolean meaningfulActionSucceeded = priorityOutputCrafted;
         // Wood conversion is tracked for clarity, but only completed priority crafting or chest placement
@@ -115,11 +121,15 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return converted;
     }
 
-    private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory) {
+    private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
             if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
                 return true;
             }
+            return false;
+        }
+
+        if (!demandEnabled) {
             return false;
         }
 
@@ -140,12 +150,40 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return this.guard.getPairedChestPos() == null;
     }
 
+    private boolean isBasePairingReadyForDemand() {
+        return basePairingEstablished && !isBootstrapSession();
+    }
+
+    private boolean tryPlaceAndBindChest(ServerWorld world) {
+        BlockPos pairedChestPos = this.guard.getPairedChestPos();
+        if (pairedChestPos != null) {
+            return resolveChestInventory(world) != null;
+        }
+
+        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        if (tablePos == null) {
+            return false;
+        }
+
+        BlockPos nearbyChest = JobBlockPairingHelper.findNearbyChest(world, tablePos).orElse(null);
+        if (nearbyChest == null) {
+            return false;
+        }
+
+        this.guard.setPairedChestPos(nearbyChest);
+        return true;
+    }
+
     private boolean shouldCraftBootstrapAxe(Inventory chestInventory) {
         int axesOnHand = countByItem(chestInventory, Items.WOODEN_AXE) + countByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
         return axesOnHand < 1;
     }
 
     private void stashCraftedOutput(Inventory chestInventory, Item item) {
+        if (!isBasePairingReadyForDemand()) {
+            return;
+        }
+
         ItemStack craftedStack = takeOneByItem(this.guard.getGatheredStackBuffer(), item);
         if (craftedStack.isEmpty()) {
             return;
