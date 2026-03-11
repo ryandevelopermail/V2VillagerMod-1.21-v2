@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
@@ -123,13 +124,23 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
     private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
-            if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
-                return true;
+            if (shouldCraftBootstrapChest(chestInventory)) {
+                return craftIfPossible(chestInventory, 8, 0, Items.CHEST);
             }
+
+            if (shouldCraftBootstrapAxe(chestInventory)) {
+                if (craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
+                    equipBootstrapAxeFromSupplies(chestInventory);
+                    return true;
+                }
+                return false;
+            }
+
+            equipBootstrapAxeFromSupplies(chestInventory);
             return false;
         }
 
-        if (!demandEnabled) {
+        if (!demandEnabled || !isBasePairingReadyForDemand()) {
             return false;
         }
 
@@ -175,8 +186,32 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private boolean shouldCraftBootstrapAxe(Inventory chestInventory) {
-        int axesOnHand = countByItem(chestInventory, Items.WOODEN_AXE) + countByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
+        int equippedAxes = this.guard.getMainHandStack().isOf(Items.WOODEN_AXE) ? 1 : 0;
+        int axesOnHand = equippedAxes + countByItem(chestInventory, Items.WOODEN_AXE) + countByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
         return axesOnHand < 1;
+    }
+
+    private boolean shouldCraftBootstrapChest(Inventory chestInventory) {
+        int chestsOnHand = countByItem(chestInventory, Items.CHEST) + countByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
+        return chestsOnHand < 1;
+    }
+
+    private void equipBootstrapAxeFromSupplies(Inventory chestInventory) {
+        if (this.guard.getMainHandStack().isOf(Items.WOODEN_AXE)) {
+            return;
+        }
+
+        ItemStack bufferAxe = takeOneByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
+        if (!bufferAxe.isEmpty()) {
+            this.guard.equipStack(EquipmentSlot.MAINHAND, bufferAxe);
+            return;
+        }
+
+        ItemStack chestAxe = takeOneByItem(chestInventory, Items.WOODEN_AXE);
+        if (!chestAxe.isEmpty()) {
+            this.guard.equipStack(EquipmentSlot.MAINHAND, chestAxe);
+            chestInventory.markDirty();
+        }
     }
 
     private void stashCraftedOutput(Inventory chestInventory, Item item) {
@@ -250,6 +285,27 @@ public class LumberjackGuardCraftingGoal extends Goal {
                 stacks.set(i, ItemStack.EMPTY);
             }
             stacks.removeIf(ItemStack::isEmpty);
+            return split;
+        }
+
+        return ItemStack.EMPTY;
+    }
+
+    private ItemStack takeOneByItem(Inventory inventory, Item item) {
+        if (inventory == null) {
+            return ItemStack.EMPTY;
+        }
+
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(item)) {
+                continue;
+            }
+
+            ItemStack split = stack.split(1);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
             return split;
         }
 
