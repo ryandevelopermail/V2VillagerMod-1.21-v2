@@ -91,6 +91,37 @@ public final class LumberjackChestTriggerController {
         return false;
     }
 
+    public static UpgradeDemand resolveNextUpgradeDemand(ServerWorld world, LumberjackGuardEntity guard) {
+        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+            if (!isEligibleV1Villager(world, villager)) {
+                continue;
+            }
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null) {
+                continue;
+            }
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()
+                    && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
+                return UpgradeDemand.v1Chest();
+            }
+        }
+
+        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+            if (!isEligibleV2VillagerMissingCraftingTable(world, villager)) {
+                continue;
+            }
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null) {
+                continue;
+            }
+            if (findPlacementNearJobAndPairedChest(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
+                return UpgradeDemand.v2CraftingTable();
+            }
+        }
+
+        return null;
+    }
+
     private static void evaluateRules(ServerWorld world, LumberjackGuardEntity guard) {
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
         long now = world.getTime();
@@ -299,7 +330,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            BlockPos placePos = findPlacementNear(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+            BlockPos placePos = findPlacementNearJob(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
             if (placePos == null) {
                 continue;
             }
@@ -339,7 +370,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            BlockPos placePos = findPlacementNear(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+            BlockPos placePos = findPlacementNearJobAndPairedChest(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
             if (placePos == null) {
                 continue;
             }
@@ -420,13 +451,28 @@ public final class LumberjackChestTriggerController {
         return null;
     }
 
-    private static BlockPos findPlacementNear(ServerWorld world, BlockPos center, double range) {
+    private static BlockPos findPlacementNearJob(ServerWorld world, BlockPos center, double range) {
+        return findPlacementNear(world, center, range, null);
+    }
+
+    private static BlockPos findPlacementNearJobAndPairedChest(ServerWorld world, BlockPos jobPos, double range) {
+        BlockPos pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        if (pairedChestPos == null) {
+            return null;
+        }
+        return findPlacementNear(world, jobPos, range, pairedChestPos);
+    }
+
+    private static BlockPos findPlacementNear(ServerWorld world, BlockPos center, double range, BlockPos secondaryAnchor) {
         int blockRange = (int) Math.ceil(range);
         BlockPos best = null;
         double bestDistance = Double.MAX_VALUE;
 
         for (BlockPos candidate : BlockPos.iterate(center.add(-blockRange, -1, -blockRange), center.add(blockRange, 1, blockRange))) {
             if (!center.isWithinDistance(candidate, range)) {
+                continue;
+            }
+            if (secondaryAnchor != null && !secondaryAnchor.isWithinDistance(candidate, range)) {
                 continue;
             }
             if (!world.getBlockState(candidate).isAir()) {
@@ -694,6 +740,16 @@ public final class LumberjackChestTriggerController {
 
         if (!incoming.isEmpty()) {
             buffer.add(incoming);
+        }
+    }
+
+    public record UpgradeDemand(Item outputItem, int planksCost) {
+        public static UpgradeDemand v1Chest() {
+            return new UpgradeDemand(Items.CHEST, 8);
+        }
+
+        public static UpgradeDemand v2CraftingTable() {
+            return new UpgradeDemand(Items.CRAFTING_TABLE, 4);
         }
     }
 

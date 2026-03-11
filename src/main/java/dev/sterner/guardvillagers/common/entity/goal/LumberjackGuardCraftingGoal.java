@@ -12,7 +12,6 @@ import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
@@ -70,11 +69,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         Inventory chestInventory = resolveChestInventory(world);
-        boolean woodConversionSucceeded = performWoodConversion(world, chestInventory);
-        boolean priorityOutputCrafted = craftPriorityOutputs(chestInventory);
-        boolean chestPlacedAndBound = tryPlaceAndBindChest(world);
+        boolean woodConversionSucceeded = performWoodConversion(chestInventory);
+        boolean priorityOutputCrafted = craftPriorityOutputs(world, chestInventory);
 
-        boolean meaningfulActionSucceeded = priorityOutputCrafted || chestPlacedAndBound;
+        boolean meaningfulActionSucceeded = priorityOutputCrafted;
         // Wood conversion is tracked for clarity, but only completed priority crafting or chest placement
         // should count against the daily crafting budget.
         if (meaningfulActionSucceeded) {
@@ -91,7 +89,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
         this.guard.getNavigation().stop();
     }
 
-    private boolean performWoodConversion(ServerWorld world, Inventory chestInventory) {
+    private boolean performWoodConversion(Inventory chestInventory) {
         boolean converted = false;
 
         int availableLogs = countMatching(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
@@ -117,30 +115,49 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return converted;
     }
 
-    private boolean craftPriorityOutputs(Inventory chestInventory) {
-        boolean crafted = false;
-
-        boolean chestMissing = this.guard.getPairedChestPos() == null;
-        if (chestMissing) {
-            crafted |= craftIfPossible(chestInventory, 8, 0, Items.CHEST);
+    private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory) {
+        LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
+        if (demand != null && countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem()) <= 0) {
+            if (craftIfPossible(chestInventory, demand.planksCost(), 0, demand.outputItem())) {
+                stashCraftedOutput(chestInventory, demand.outputItem());
+                LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
+                return true;
+            }
+            return false;
         }
 
-        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
-        boolean tableMissing = tablePos == null || !this.guard.getWorld().getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
-        if (tableMissing) {
-            crafted |= craftIfPossible(chestInventory, 4, 0, Items.CRAFTING_TABLE);
+        if (isBootstrapSession() && shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
+            return true;
         }
 
+        return false;
+    }
+
+    private boolean isBootstrapSession() {
+        return this.guard.getPairedChestPos() == null;
+    }
+
+    private boolean shouldCraftBootstrapAxe(Inventory chestInventory) {
         int axesOnHand = countByItem(chestInventory, Items.WOODEN_AXE) + countByItem(this.guard.getGatheredStackBuffer(), Items.WOODEN_AXE);
-        if (axesOnHand < 1) {
-            crafted |= craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE);
+        return axesOnHand < 1;
+    }
+
+    private void stashCraftedOutput(Inventory chestInventory, Item item) {
+        ItemStack craftedStack = takeOneByItem(this.guard.getGatheredStackBuffer(), item);
+        if (craftedStack.isEmpty()) {
+            return;
         }
 
         if (chestInventory != null) {
-            chestInventory.markDirty();
+            ItemStack remaining = insertIntoInventory(chestInventory, craftedStack);
+            if (remaining.isEmpty()) {
+                chestInventory.markDirty();
+                return;
+            }
+            craftedStack = remaining;
         }
 
-        return crafted;
+        addToBuffer(craftedStack);
     }
 
     private boolean craftIfPossible(Inventory chestInventory, int planksCost, int stickCost, Item output) {
@@ -161,36 +178,41 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return false;
     }
 
-    private boolean tryPlaceAndBindChest(ServerWorld world) {
-        if (this.guard.getPairedChestPos() != null || !consumeByItem(null, this.guard.getGatheredStackBuffer(), Items.CHEST, 1)) {
-            return false;
+    private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                inventory.setStack(slot, remaining);
+                remaining = ItemStack.EMPTY;
+            } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), remaining.getCount());
+                if (transfer > 0) {
+                    existing.increment(transfer);
+                    remaining.decrement(transfer);
+                    inventory.setStack(slot, existing);
+                }
+            }
         }
+        return remaining;
+    }
 
-        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
-        if (tablePos == null) {
-            addToBuffer(new ItemStack(Items.CHEST, 1));
-            return false;
-        }
-
-        for (Direction direction : Direction.Type.HORIZONTAL) {
-            BlockPos candidate = tablePos.offset(direction);
-            BlockPos below = candidate.down();
-            if (!world.getBlockState(candidate).isAir()) {
+    private ItemStack takeOneByItem(List<ItemStack> stacks, Item item) {
+        for (int i = 0; i < stacks.size(); i++) {
+            ItemStack stack = stacks.get(i);
+            if (stack.isEmpty() || !stack.isOf(item)) {
                 continue;
             }
-            if (!world.getBlockState(below).isSolidBlock(world, below)) {
-                continue;
-            }
 
-            BlockState chestState = Blocks.CHEST.getDefaultState();
-            if (world.setBlockState(candidate, chestState)) {
-                this.guard.setPairedChestPos(candidate);
-                return true;
+            ItemStack split = stack.split(1);
+            if (stack.isEmpty()) {
+                stacks.set(i, ItemStack.EMPTY);
             }
+            stacks.removeIf(ItemStack::isEmpty);
+            return split;
         }
 
-        addToBuffer(new ItemStack(Items.CHEST, 1));
-        return false;
+        return ItemStack.EMPTY;
     }
 
     private Inventory resolveChestInventory(ServerWorld world) {
