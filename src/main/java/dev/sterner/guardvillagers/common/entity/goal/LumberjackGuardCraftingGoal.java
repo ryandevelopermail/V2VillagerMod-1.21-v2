@@ -214,18 +214,21 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private boolean tryPlaceAndBindChest(ServerWorld world) {
-        BlockPos pairedChestPos = this.guard.getPairedChestPos();
+        return tryPlaceAndBindChestForRecovery(world, this.guard, resolveChestInventory(world));
+    }
+
+    public static boolean tryPlaceAndBindChestForRecovery(ServerWorld world, LumberjackGuardEntity guard, Inventory chestInventory) {
+        BlockPos pairedChestPos = guard.getPairedChestPos();
         if (pairedChestPos != null) {
-            return resolveChestInventory(world) != null;
+            return resolveChestInventoryForGuard(world, guard) != null;
         }
 
-        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        BlockPos tablePos = guard.getPairedCraftingTablePos();
         if (tablePos == null) {
             return false;
         }
 
-        Inventory chestInventory = resolveChestInventory(world);
-        ItemStack chestStack = takeOneChestForPlacement(chestInventory);
+        ItemStack chestStack = takeOneChestForPlacement(guard, chestInventory);
         if (chestStack.isEmpty()) {
             return false;
         }
@@ -243,13 +246,13 @@ public class LumberjackGuardCraftingGoal extends Goal {
                 continue;
             }
 
-            this.guard.setPairedChestPos(candidate);
-            this.guard.setBootstrapComplete(false);
+            guard.setPairedChestPos(candidate);
+            guard.setBootstrapComplete(false);
             return true;
         }
 
         if (chestInventory != null) {
-            ItemStack remainder = insertIntoInventory(chestInventory, chestStack);
+            ItemStack remainder = insertIntoInventoryStatic(chestInventory, chestStack);
             if (remainder.isEmpty()) {
                 chestInventory.markDirty();
                 return false;
@@ -257,11 +260,59 @@ public class LumberjackGuardCraftingGoal extends Goal {
             chestStack = remainder;
         }
 
-        addToBuffer(chestStack);
+        addToBufferStatic(guard, chestStack);
         return false;
     }
 
-    private ItemStack takeOneChestForPlacement(Inventory chestInventory) {
+    public static boolean ensureChestCraftingSuppliesForRecovery(LumberjackGuardEntity guard, Inventory chestInventory) {
+        int availableLogs = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
+                + countMatchingStatic(guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS));
+        int logsToConvert = availableLogs / 2;
+        if (logsToConvert <= 0) {
+            return false;
+        }
+
+        if (!consumeMatchingStatic(chestInventory, guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS), logsToConvert)) {
+            return false;
+        }
+
+        addToBufferStatic(guard, new ItemStack(Items.OAK_PLANKS, logsToConvert * 4));
+        return true;
+    }
+
+    public static boolean craftChestForRecovery(LumberjackGuardEntity guard, Inventory chestInventory) {
+        int chestCount = countByItemStatic(chestInventory, Items.CHEST) + countByItemStatic(guard.getGatheredStackBuffer(), Items.CHEST);
+        if (chestCount > 0) {
+            return true;
+        }
+
+        int planks = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatchingStatic(guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+        if (planks < BOOTSTRAP_CHEST_PLANK_REQUIREMENT) {
+            return false;
+        }
+
+        if (!consumeMatchingStatic(chestInventory, guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), BOOTSTRAP_CHEST_PLANK_REQUIREMENT)) {
+            return false;
+        }
+
+        addToBufferStatic(guard, new ItemStack(Items.CHEST, 1));
+        return true;
+    }
+
+    public static Inventory resolveChestInventoryForGuard(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null || !world.getBlockState(chestPos).isOf(Blocks.CHEST)) {
+            return null;
+        }
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return null;
+        }
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private static ItemStack takeOneChestForPlacement(LumberjackGuardEntity guard, Inventory chestInventory) {
         if (chestInventory != null) {
             for (int slot = 0; slot < chestInventory.size(); slot++) {
                 ItemStack stack = chestInventory.getStack(slot);
@@ -278,7 +329,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
             }
         }
 
-        return takeOneByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
+        return takeOneByItemStatic(guard.getGatheredStackBuffer(), Items.CHEST);
     }
 
     private boolean shouldCraftBootstrapAxe(Inventory chestInventory) {
@@ -409,15 +460,142 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private Inventory resolveChestInventory(ServerWorld world) {
-        BlockPos chestPos = this.guard.getPairedChestPos();
-        if (chestPos == null || !world.getBlockState(chestPos).isOf(Blocks.CHEST)) {
-            return null;
+        return resolveChestInventoryForGuard(world, this.guard);
+    }
+
+    private static ItemStack insertIntoInventoryStatic(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                inventory.setStack(slot, remaining);
+                remaining = ItemStack.EMPTY;
+            } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), remaining.getCount());
+                if (transfer > 0) {
+                    existing.increment(transfer);
+                    remaining.decrement(transfer);
+                    inventory.setStack(slot, existing);
+                }
+            }
         }
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
+        return remaining;
+    }
+
+    private static void addToBufferStatic(LumberjackGuardEntity guard, ItemStack incoming) {
+        List<ItemStack> buffer = guard.getGatheredStackBuffer();
+        for (ItemStack existing : buffer) {
+            if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
+                int move = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
+                existing.increment(move);
+                incoming.decrement(move);
+                if (incoming.isEmpty()) {
+                    return;
+                }
+            }
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+
+        if (!incoming.isEmpty()) {
+            buffer.add(incoming);
+        }
+    }
+
+    private static int countMatchingStatic(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
+        if (inventory == null) {
+            return 0;
+        }
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static int countMatchingStatic(List<ItemStack> stacks, java.util.function.Predicate<ItemStack> predicate) {
+        int total = 0;
+        for (ItemStack stack : stacks) {
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static int countByItemStatic(Inventory inventory, Item item) {
+        return countMatchingStatic(inventory, stack -> stack.isOf(item));
+    }
+
+    private static int countByItemStatic(List<ItemStack> stacks, Item item) {
+        return countMatchingStatic(stacks, stack -> stack.isOf(item));
+    }
+
+    private static boolean consumeMatchingStatic(Inventory inventory, List<ItemStack> buffer, java.util.function.Predicate<ItemStack> predicate, int amount) {
+        int remaining = consumeFromInventoryStatic(inventory, predicate, amount);
+        remaining = consumeFromBufferStatic(buffer, predicate, remaining);
+        return remaining <= 0;
+    }
+
+    private static int consumeFromInventoryStatic(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, int amount) {
+        if (inventory == null) {
+            return amount;
+        }
+
+        int remaining = amount;
+        for (int slot = 0; slot < inventory.size() && remaining > 0; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !predicate.test(stack)) {
+                continue;
+            }
+
+            int moved = Math.min(stack.getCount(), remaining);
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            remaining -= moved;
+        }
+        return remaining;
+    }
+
+    private static int consumeFromBufferStatic(List<ItemStack> buffer, java.util.function.Predicate<ItemStack> predicate, int amount) {
+        int remaining = amount;
+        for (int i = 0; i < buffer.size() && remaining > 0; i++) {
+            ItemStack stack = buffer.get(i);
+            if (stack.isEmpty() || !predicate.test(stack)) {
+                continue;
+            }
+
+            int moved = Math.min(stack.getCount(), remaining);
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                buffer.set(i, ItemStack.EMPTY);
+            }
+            remaining -= moved;
+        }
+
+        buffer.removeIf(ItemStack::isEmpty);
+        return remaining;
+    }
+
+    private static ItemStack takeOneByItemStatic(List<ItemStack> stacks, Item item) {
+        for (int i = 0; i < stacks.size(); i++) {
+            ItemStack stack = stacks.get(i);
+            if (stack.isEmpty() || !stack.isOf(item)) {
+                continue;
+            }
+
+            ItemStack split = stack.split(1);
+            if (stack.isEmpty()) {
+                stacks.set(i, ItemStack.EMPTY);
+            }
+            stacks.removeIf(ItemStack::isEmpty);
+            return split;
+        }
+
+        return ItemStack.EMPTY;
     }
 
     private void addToBuffer(ItemStack incoming) {
