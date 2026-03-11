@@ -59,6 +59,7 @@ public class LumberjackGuardEntity extends GuardEntity {
     private long nextTriggerEvaluationTick;
     private boolean triggerEvaluationRequested;
     private long nextVillageExpansionScanTick;
+    private boolean bootstrapComplete;
 
     public LumberjackGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -207,6 +208,14 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.nextVillageExpansionScanTick = nextVillageExpansionScanTick;
     }
 
+    public boolean isBootstrapComplete() {
+        return this.bootstrapComplete;
+    }
+
+    public void setBootstrapComplete(boolean bootstrapComplete) {
+        this.bootstrapComplete = bootstrapComplete;
+    }
+
     @Override
     protected void initEquipment(Random random, LocalDifficulty localDifficulty) {
         super.initEquipment(random, localDifficulty);
@@ -312,6 +321,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.nextVillageExpansionScanTick = nbt.contains("LumberjackNextVillageExpansionScanTick")
                 ? nbt.getLong("LumberjackNextVillageExpansionScanTick")
                 : 0L;
+        this.bootstrapComplete = nbt.getBoolean("LumberjackBootstrapComplete");
 
         this.selectedTreeTargets.clear();
         NbtList targetList = nbt.getList("LumberjackSelectedTreeTargets", 10);
@@ -364,6 +374,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         nbt.putLong("LumberjackNextTriggerEvaluationTick", this.nextTriggerEvaluationTick);
         nbt.putBoolean("LumberjackTriggerEvaluationRequested", this.triggerEvaluationRequested);
         nbt.putLong("LumberjackNextVillageExpansionScanTick", this.nextVillageExpansionScanTick);
+        nbt.putBoolean("LumberjackBootstrapComplete", this.bootstrapComplete);
 
         NbtList targetList = new NbtList();
         for (BlockPos pos : this.selectedTreeTargets) {
