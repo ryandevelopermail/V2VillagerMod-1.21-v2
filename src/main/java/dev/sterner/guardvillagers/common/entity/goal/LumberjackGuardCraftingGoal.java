@@ -45,11 +45,32 @@ public class LumberjackGuardCraftingGoal extends Goal {
         if (this.guard.getWorkflowStage() != LumberjackGuardEntity.WorkflowStage.CRAFTING || !this.guard.isAlive()) {
             return false;
         }
-        if (!world.isDay() || craftedToday >= DAILY_CRAFT_LIMIT || this.guard.getGatheredStackBuffer().isEmpty()) {
+        if (!world.isDay() || craftedToday >= DAILY_CRAFT_LIMIT || !hasCraftingInputs(world)) {
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
             return false;
         }
         return true;
+    }
+
+    private boolean hasCraftingInputs(ServerWorld world) {
+        Inventory chestInventory = resolveChestInventory(world);
+        return hasAnyCraftingInput(this.guard.getGatheredStackBuffer()) || hasAnyCraftingInput(chestInventory);
+    }
+
+    private boolean hasAnyCraftingInput(List<ItemStack> stacks) {
+        return countMatching(stacks, this::isCraftingInput) > 0;
+    }
+
+    private boolean hasAnyCraftingInput(Inventory inventory) {
+        return countMatching(inventory, this::isCraftingInput) > 0;
+    }
+
+    private boolean isCraftingInput(ItemStack stack) {
+        return stack.isIn(ItemTags.LOGS)
+                || stack.isIn(ItemTags.PLANKS)
+                || stack.isOf(Items.STICK)
+                || stack.isOf(Items.CHEST)
+                || stack.isOf(Items.WOODEN_AXE);
     }
 
     @Override
