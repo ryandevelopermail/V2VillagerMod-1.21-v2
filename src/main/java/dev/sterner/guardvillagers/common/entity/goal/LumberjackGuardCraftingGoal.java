@@ -21,8 +21,9 @@ import java.util.List;
 
 public class LumberjackGuardCraftingGoal extends Goal {
     private static final int DAILY_CRAFT_LIMIT = 2;
-    private static final int BOOTSTRAP_MIN_PLANKS = 11;
-    private static final int BOOTSTRAP_MIN_STICKS = 2;
+    private static final int BOOTSTRAP_CHEST_PLANK_REQUIREMENT = 8;
+    private static final int BOOTSTRAP_AXE_PLANK_REQUIREMENT = 3;
+    private static final int BOOTSTRAP_AXE_STICK_REQUIREMENT = 2;
 
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
@@ -111,7 +112,27 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
         int availablePlanks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
-        int planksToConvert = availablePlanks / 2;
+        int planksToConvert;
+        if (isBootstrapSession()) {
+            int plankReserve = 0;
+            if (shouldCraftBootstrapChest(chestInventory)) {
+                plankReserve += BOOTSTRAP_CHEST_PLANK_REQUIREMENT;
+            }
+            if (shouldCraftBootstrapAxe(chestInventory)) {
+                plankReserve += BOOTSTRAP_AXE_PLANK_REQUIREMENT;
+            }
+
+            int requiredSticks = shouldCraftBootstrapAxe(chestInventory) ? BOOTSTRAP_AXE_STICK_REQUIREMENT : 0;
+            int availableSticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+            int stickDeficit = Math.max(0, requiredSticks - availableSticks);
+
+            int planksAvailableAfterReserve = Math.max(0, availablePlanks - plankReserve);
+            int planksNeededForSticks = (stickDeficit + 1) / 2;
+            planksToConvert = Math.min(planksAvailableAfterReserve, planksNeededForSticks);
+        } else {
+            planksToConvert = availablePlanks / 2;
+        }
+
         if (planksToConvert > 0 && consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), planksToConvert)) {
             addToBuffer(new ItemStack(Items.STICK, planksToConvert * 2));
             converted = true;
@@ -159,7 +180,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
         int planks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int sticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
-        return planks >= BOOTSTRAP_MIN_PLANKS && sticks >= BOOTSTRAP_MIN_STICKS;
+        return planks >= BOOTSTRAP_CHEST_PLANK_REQUIREMENT + BOOTSTRAP_AXE_PLANK_REQUIREMENT && sticks >= BOOTSTRAP_AXE_STICK_REQUIREMENT;
     }
 
     private boolean isBootstrapSession() {
