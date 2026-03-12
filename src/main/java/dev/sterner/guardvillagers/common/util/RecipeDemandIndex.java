@@ -44,6 +44,10 @@ public final class RecipeDemandIndex {
         CACHE.remove(world.getRegistryKey().getValue().toString());
     }
 
+    public static void clearAll() {
+        CACHE.clear();
+    }
+
     private static RouteIndex build(ServerWorld world) {
         EnumMap<DemandMaterial, EnumMap<VillagerProfession, MutableDemand>> aggregate = new EnumMap<>(DemandMaterial.class);
         for (DemandMaterial material : DemandMaterial.values()) {
