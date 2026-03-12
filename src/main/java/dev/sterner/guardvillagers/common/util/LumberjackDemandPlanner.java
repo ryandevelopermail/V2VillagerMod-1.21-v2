@@ -41,7 +41,7 @@ public final class LumberjackDemandPlanner {
             if (inventory.isEmpty()) {
                 continue;
             }
-            DistributionRouteEngine.ProfessionRoute route = routeFor(routes, recipient.record().recipient().getVillagerData().getProfession());
+            DistributionRouteEngine.ProfessionRoute route = routeFor(routes, recipient.recipient().getVillagerData().getProfession());
             if (route == null) {
                 continue;
             }
@@ -62,8 +62,8 @@ public final class LumberjackDemandPlanner {
                 .comparingDouble(RecipientDemand::weightedDeficit).reversed()
                 .thenComparing(Comparator.comparingInt(RecipientDemand::deficit).reversed())
                 .thenComparingDouble(RecipientDemand::chestFullness)
-                .thenComparingDouble(recipient -> recipient.record().sourceSquaredDistance())
-                .thenComparing(recipient -> recipient.record().recipient().getUuid(), java.util.UUID::compareTo));
+                .thenComparingDouble(recipient -> recipient.sourceSquaredDistance())
+                .thenComparing(recipient -> recipient.recipient().getUuid(), java.util.UUID::compareTo));
         return List.copyOf(ranked);
     }
 
