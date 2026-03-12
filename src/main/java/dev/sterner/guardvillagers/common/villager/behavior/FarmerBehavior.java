@@ -20,6 +20,10 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public class FarmerBehavior extends AbstractPairedProfessionBehavior {
+    private static final long HARVEST_WAKE_DEBOUNCE_TICKS = 10L;
+    private static final long HARVEST_WAKE_MAX_COALESCE_DELAY_TICKS = 40L;
+    private static final long CRAFT_WAKE_DEBOUNCE_TICKS = 10L;
+    private static final long CRAFT_WAKE_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final int HARVEST_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
@@ -29,6 +33,8 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Set<BlockPos>> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_HARVEST_WAKE_TICKS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_CRAFT_WAKE_TICKS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -49,6 +55,7 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
                 () -> new FarmerDistributionGoal(villager, jobPos, chestPos, null));
         distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
         distributionGoal.requestImmediateDistribution();
+        LAST_HARVEST_WAKE_TICKS.put(villager, world.getTime());
 
         FarmerCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
         if (craftingGoal != null) {
@@ -79,6 +86,7 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
                 () -> new FarmerCraftingGoal(villager, jobPos, chestPos, craftingTablePos));
         craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
         craftingGoal.requestImmediateCraft(world);
+        LAST_CRAFT_WAKE_TICKS.put(villager, world.getTime());
 
         FarmerDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new FarmerDistributionGoal(villager, jobPos, chestPos, craftingTablePos));
@@ -118,20 +126,37 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
             }
+            triggerChestWakeups(world, villager);
+        }
+    }
 
-            FarmerHarvestGoal harvest = GOALS.get(villager);
-            if (harvest != null) {
+    private static void triggerChestWakeups(ServerWorld world, VillagerEntity villager) {
+        long now = world.getTime();
+
+        FarmerHarvestGoal harvest = GOALS.get(villager);
+        if (harvest != null) {
+            long lastWakeTick = LAST_HARVEST_WAKE_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+            if (now - lastWakeTick >= HARVEST_WAKE_DEBOUNCE_TICKS) {
                 harvest.requestImmediateWorkCheck();
+                LAST_HARVEST_WAKE_TICKS.put(villager, now);
+            } else {
+                harvest.requestCheckNoSoonerThan(lastWakeTick + HARVEST_WAKE_MAX_COALESCE_DELAY_TICKS);
             }
+        }
 
-            FarmerDistributionGoal distribution = DISTRIBUTION_GOALS.get(villager);
-            if (distribution != null) {
-                distribution.requestImmediateDistribution();
-            }
+        FarmerDistributionGoal distribution = DISTRIBUTION_GOALS.get(villager);
+        if (distribution != null) {
+            distribution.requestImmediateDistribution();
+        }
 
-            FarmerCraftingGoal crafting = CRAFTING_GOALS.get(villager);
-            if (crafting != null) {
+        FarmerCraftingGoal crafting = CRAFTING_GOALS.get(villager);
+        if (crafting != null) {
+            long lastWakeTick = LAST_CRAFT_WAKE_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+            if (now - lastWakeTick >= CRAFT_WAKE_DEBOUNCE_TICKS) {
                 crafting.requestImmediateCraft(world);
+                LAST_CRAFT_WAKE_TICKS.put(villager, now);
+            } else {
+                crafting.requestCraftNoSoonerThan(lastWakeTick + CRAFT_WAKE_MAX_COALESCE_DELAY_TICKS);
             }
         }
     }
@@ -157,6 +182,8 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
 
     private void clearChestWatcher(VillagerEntity villager) {
         Set<BlockPos> existing = CHEST_REGISTRATIONS.remove(villager);
+        LAST_HARVEST_WAKE_TICKS.remove(villager);
+        LAST_CRAFT_WAKE_TICKS.remove(villager);
         if (existing == null) {
             return;
         }

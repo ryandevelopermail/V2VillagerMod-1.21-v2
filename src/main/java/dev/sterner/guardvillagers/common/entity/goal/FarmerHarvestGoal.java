@@ -115,6 +115,12 @@ public class FarmerHarvestGoal extends Goal {
         nextCheckTime = 0L;
     }
 
+    public void requestCheckNoSoonerThan(long targetTick) {
+        if (nextCheckTime == 0L || nextCheckTime > targetTick) {
+            nextCheckTime = targetTick;
+        }
+    }
+
     @Override
     public boolean canStart() {
         if (!enabled || !villager.isAlive() || jobPos == null || chestPos == null) {
