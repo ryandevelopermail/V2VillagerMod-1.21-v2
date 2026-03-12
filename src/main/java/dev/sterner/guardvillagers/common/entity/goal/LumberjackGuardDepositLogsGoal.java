@@ -17,6 +17,7 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -31,10 +32,13 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final int RECOVERY_CHEST_PLANK_REQUIREMENT = 8;
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
+    private static final int HOE_COMPONENT_BATCH_SIZE = 2;
 
     private final LumberjackGuardEntity guard;
     private long nextDistributionAttemptTick;
     private int distributionAttempts;
+    private final EnumMap<LumberjackDemandPlanner.MaterialType, Integer> materialRecipientCursor =
+            new EnumMap<>(LumberjackDemandPlanner.MaterialType.class);
 
     public LumberjackGuardDepositLogsGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -146,7 +150,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         nextDistributionAttemptTick = now + DISTRIBUTION_ATTEMPT_INTERVAL_TICKS;
 
         LumberjackDemandPlanner.DemandSnapshot demandSnapshot = LumberjackDemandPlanner.buildSnapshot(world, this.guard, sourceInventory);
-        List<DistributionCandidate> candidates = collectCandidates(sourceInventory, demandSnapshot);
+        List<DistributionCandidate> candidates = collectCandidates(world, sourceInventory, demandSnapshot);
         if (candidates.isEmpty()) {
             return;
         }
@@ -163,7 +167,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return;
         }
 
-        ItemStack moved = sourceStack.split(1);
+        int transferAmount = Math.min(sourceStack.getCount(), Math.max(1, selected.transferAmount()));
+        ItemStack moved = sourceStack.split(transferAmount);
         sourceInventory.setStack(selected.slot(), sourceStack);
         sourceInventory.markDirty();
 
@@ -188,7 +193,9 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
     }
 
-    private List<DistributionCandidate> collectCandidates(Inventory sourceInventory, LumberjackDemandPlanner.DemandSnapshot demandSnapshot) {
+    private List<DistributionCandidate> collectCandidates(ServerWorld world,
+                                                          Inventory sourceInventory,
+                                                          LumberjackDemandPlanner.DemandSnapshot demandSnapshot) {
         List<DistributionCandidate> candidates = new ArrayList<>();
         for (int slot = 0; slot < sourceInventory.size(); slot++) {
             ItemStack stack = sourceInventory.getStack(slot);
@@ -203,8 +210,11 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             }
 
             double demandScore = demandSnapshot.weightedDeficitFor(materialType);
-            LumberjackDemandPlanner.RecipientDemand topRecipient = rankedRecipients.getFirst();
-            candidates.add(new DistributionCandidate(slot, materialType, topRecipient, demandScore));
+            LumberjackDemandPlanner.RecipientDemand selectedRecipient =
+                    selectRecipientForMaterial(world, sourceInventory, stack, materialType, rankedRecipients);
+            int transferAmount =
+                    determineTransferAmount(world, sourceInventory, stack, materialType, selectedRecipient, rankedRecipients);
+            candidates.add(new DistributionCandidate(slot, materialType, selectedRecipient, demandScore, transferAmount));
         }
 
         candidates.sort(Comparator
@@ -213,6 +223,138 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                 .thenComparingDouble(candidate -> candidate.recipient().record().sourceSquaredDistance())
                 .thenComparing(candidate -> candidate.recipient().record().recipient().getUuid(), UUID::compareTo));
         return candidates;
+    }
+
+    private LumberjackDemandPlanner.RecipientDemand selectRecipientForMaterial(ServerWorld world,
+                                                                                Inventory sourceInventory,
+                                                                                ItemStack sourceStack,
+                                                                                LumberjackDemandPlanner.MaterialType materialType,
+                                                                                List<LumberjackDemandPlanner.RecipientDemand> rankedRecipients) {
+        if (materialType == LumberjackDemandPlanner.MaterialType.CHARCOAL) {
+            return pickRoundRobinRecipient(materialType, rankedRecipients);
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS
+                || materialType == LumberjackDemandPlanner.MaterialType.STICK) {
+            Optional<LumberjackDemandPlanner.RecipientDemand> hoeReadyRecipient =
+                    findHoeRecipeReadyRecipient(world, sourceInventory, sourceStack, materialType, rankedRecipients);
+            if (hoeReadyRecipient.isPresent()) {
+                return hoeReadyRecipient.get();
+            }
+        }
+
+        return rankedRecipients.getFirst();
+    }
+
+    private LumberjackDemandPlanner.RecipientDemand pickRoundRobinRecipient(LumberjackDemandPlanner.MaterialType materialType,
+                                                                             List<LumberjackDemandPlanner.RecipientDemand> recipients) {
+        int cursor = materialRecipientCursor.getOrDefault(materialType, 0);
+        int index = Math.floorMod(cursor, recipients.size());
+        materialRecipientCursor.put(materialType, cursor + 1);
+        return recipients.get(index);
+    }
+
+    private int determineTransferAmount(ServerWorld world,
+                                        Inventory sourceInventory,
+                                        ItemStack sourceStack,
+                                        LumberjackDemandPlanner.MaterialType materialType,
+                                        LumberjackDemandPlanner.RecipientDemand recipient,
+                                        List<LumberjackDemandPlanner.RecipientDemand> allRecipients) {
+        if (materialType == LumberjackDemandPlanner.MaterialType.CHARCOAL) {
+            int divisor = Math.max(1, allRecipients.size());
+            return Math.max(1, sourceStack.getCount() / divisor);
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS
+                || materialType == LumberjackDemandPlanner.MaterialType.STICK) {
+            int hoeBatch = determineHoeBatchTransferAmount(world, sourceInventory, materialType, recipient);
+            if (hoeBatch > 0) {
+                return hoeBatch;
+            }
+        }
+
+        return 1;
+    }
+
+    private Optional<LumberjackDemandPlanner.RecipientDemand> findHoeRecipeReadyRecipient(ServerWorld world,
+                                                                                            Inventory sourceInventory,
+                                                                                            ItemStack sourceStack,
+                                                                                            LumberjackDemandPlanner.MaterialType materialType,
+                                                                                            List<LumberjackDemandPlanner.RecipientDemand> rankedRecipients) {
+        int sourceMaterialCount = sourceStack.getCount();
+        for (LumberjackDemandPlanner.RecipientDemand recipient : rankedRecipients) {
+            if (!isFarmerRecipient(recipient)) {
+                continue;
+            }
+            int transfer = determineHoeBatchTransferAmount(world, sourceInventory, materialType, recipient);
+            if (transfer <= 0 || sourceMaterialCount < transfer) {
+                continue;
+            }
+            return Optional.of(recipient);
+        }
+        return Optional.empty();
+    }
+
+    private int determineHoeBatchTransferAmount(ServerWorld world,
+                                                Inventory sourceInventory,
+                                                LumberjackDemandPlanner.MaterialType materialType,
+                                                LumberjackDemandPlanner.RecipientDemand recipient) {
+        if (!isFarmerRecipient(recipient)) {
+            return 0;
+        }
+
+        Inventory recipientInventory = getChestInventory(world, recipient.record().chestPos());
+        if (recipientInventory == null) {
+            return 0;
+        }
+
+        int recipientPlanks = countMaterialInInventory(recipientInventory, LumberjackDemandPlanner.MaterialType.PLANKS);
+        int recipientSticks = countMaterialInInventory(recipientInventory, LumberjackDemandPlanner.MaterialType.STICK);
+        int sourcePlanks = countMaterialInInventory(sourceInventory, LumberjackDemandPlanner.MaterialType.PLANKS);
+        int sourceSticks = countMaterialInInventory(sourceInventory, LumberjackDemandPlanner.MaterialType.STICK);
+
+        int missingPlanks = Math.max(0, HOE_COMPONENT_BATCH_SIZE - recipientPlanks);
+        int missingSticks = Math.max(0, HOE_COMPONENT_BATCH_SIZE - recipientSticks);
+        if (missingPlanks == 0 && missingSticks == 0) {
+            return 0;
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS) {
+            if (missingPlanks <= 0 || sourcePlanks <= 0) {
+                return 0;
+            }
+            if (recipientSticks >= HOE_COMPONENT_BATCH_SIZE || sourceSticks >= missingSticks) {
+                return Math.min(HOE_COMPONENT_BATCH_SIZE, missingPlanks);
+            }
+            return 0;
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.STICK) {
+            if (missingSticks <= 0 || sourceSticks <= 0) {
+                return 0;
+            }
+            if (recipientPlanks >= HOE_COMPONENT_BATCH_SIZE || sourcePlanks >= missingPlanks) {
+                return Math.min(HOE_COMPONENT_BATCH_SIZE, missingSticks);
+            }
+            return 0;
+        }
+
+        return 0;
+    }
+
+    private boolean isFarmerRecipient(LumberjackDemandPlanner.RecipientDemand recipient) {
+        return recipient.record().recipient().getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.FARMER;
+    }
+
+    private int countMaterialInInventory(Inventory inventory, LumberjackDemandPlanner.MaterialType materialType) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (materialType.matches(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     @Override
@@ -390,6 +532,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private record DistributionCandidate(int slot,
                                          LumberjackDemandPlanner.MaterialType materialType,
                                          LumberjackDemandPlanner.RecipientDemand recipient,
-                                         double demandScore) {
+                                         double demandScore,
+                                         int transferAmount) {
     }
 }
