@@ -22,6 +22,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -157,7 +158,15 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return;
         }
 
-        DistributionCandidate selected = candidates.getFirst();
+        int selectedIndex = firstActionableCandidateIndexForCounts(
+                candidates.stream().map(DistributionCandidate::transferAmount).collect(Collectors.toList()),
+                candidates.stream().map(candidate -> sourceInventory.getStack(candidate.slot()).getCount()).collect(Collectors.toList())
+        );
+        if (selectedIndex < 0) {
+            return;
+        }
+
+        DistributionCandidate selected = candidates.get(selectedIndex);
         LOGGER.debug("lumberjack distribution summary: material={} recipientProfession={} deficitScore={} targetJobPos={} targetChestPos={}",
                 selected.materialType().label(),
                 selected.recipient().record().recipient().getVillagerData().getProfession(),
@@ -219,7 +228,9 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                     selectRecipientForMaterial(world, sourceInventory, stack, materialType, rankedRecipients);
             int transferAmount =
                     determineTransferAmount(world, sourceInventory, stack, materialType, selectedRecipient, rankedRecipients);
-            candidates.add(new DistributionCandidate(slot, materialType, selectedRecipient, demandScore, transferAmount));
+            if (transferAmount > 0) {
+                candidates.add(new DistributionCandidate(slot, materialType, selectedRecipient, demandScore, transferAmount));
+            }
         }
 
         candidates.sort(Comparator
@@ -443,6 +454,21 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return 0;
         }
         return Math.min(requestedTransferAmount, sourceStackCount);
+    }
+
+    static int firstActionableCandidateIndexForCounts(List<Integer> requestedTransfers, List<Integer> sourceCounts) {
+        if (requestedTransfers.size() != sourceCounts.size()) {
+            throw new IllegalArgumentException("requestedTransfers and sourceCounts must have matching sizes");
+        }
+
+        for (int index = 0; index < requestedTransfers.size(); index++) {
+            int transferAmount = resolveTransferAmount(requestedTransfers.get(index), sourceCounts.get(index));
+            if (transferAmount > 0) {
+                return index;
+            }
+        }
+
+        return -1;
     }
 
     private boolean isFarmerRecipient(LumberjackDemandPlanner.RecipientDemand recipient) {

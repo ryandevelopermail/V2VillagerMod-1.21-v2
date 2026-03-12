@@ -3,6 +3,8 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class LumberjackGuardDepositLogsGoalTest {
@@ -73,6 +75,26 @@ class LumberjackGuardDepositLogsGoalTest {
         int transfer = LumberjackGuardDepositLogsGoal.resolveTransferAmount(64, 5);
 
         assertEquals(5, transfer);
+    }
+
+    @Test
+    void firstActionableCandidateIndex_skipsZeroTransferAndSelectsNextCandidate() {
+        int candidateIndex = LumberjackGuardDepositLogsGoal.firstActionableCandidateIndexForCounts(
+                List.of(0, 3),
+                List.of(32, 32)
+        );
+
+        assertEquals(1, candidateIndex);
+    }
+
+    @Test
+    void firstActionableCandidateIndex_returnsNoCandidateWhenAllTransfersAreZero() {
+        int candidateIndex = LumberjackGuardDepositLogsGoal.firstActionableCandidateIndexForCounts(
+                List.of(0, -2, 0),
+                List.of(16, 16, 16)
+        );
+
+        assertEquals(-1, candidateIndex);
     }
 
 }
