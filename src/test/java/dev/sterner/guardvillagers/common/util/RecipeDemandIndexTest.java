@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.util;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.recipe.Ingredient;
+import net.minecraft.village.VillagerProfession;
 import org.junit.jupiter.api.Test;
 
 import java.util.EnumSet;
@@ -51,4 +52,46 @@ class RecipeDemandIndexTest {
         assertEquals(4, RecipeDemandIndex.strengthForOutput(new ItemStack(Items.ARROW, 4)));
         assertEquals(4, RecipeDemandIndex.strengthForOutput(new ItemStack(Items.ARROW, 16)));
     }
+
+    @Test
+    void resolveDynamicCap_limitsToolsmithPlankDemandToComponentBatch() {
+        int capped = RecipeDemandIndex.resolveDynamicCap(
+                VillagerProfession.TOOLSMITH,
+                RecipeDemandIndex.DemandMaterial.PLANKS,
+                24
+        );
+
+        assertEquals(3, capped);
+    }
+
+    @Test
+    void resolveDynamicCap_keepsFarmerPlankDemandPathIntact() {
+        int farmerCap = RecipeDemandIndex.resolveDynamicCap(
+                VillagerProfession.FARMER,
+                RecipeDemandIndex.DemandMaterial.PLANKS,
+                28
+        );
+
+        assertEquals(28, farmerCap);
+    }
+
+
+    @Test
+    void resolveDynamicCap_keepsPlankCapsForOtherProfessions() {
+        assertEquals(48, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.LIBRARIAN, RecipeDemandIndex.DemandMaterial.PLANKS, 48));
+        assertEquals(40, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.FISHERMAN, RecipeDemandIndex.DemandMaterial.PLANKS, 40));
+        assertEquals(32, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.FLETCHER, RecipeDemandIndex.DemandMaterial.PLANKS, 32));
+    }
+
+    @Test
+    void resolveDynamicCap_leavesNonPlankToolsmithDemandUnchanged() {
+        int stickCap = RecipeDemandIndex.resolveDynamicCap(
+                VillagerProfession.TOOLSMITH,
+                RecipeDemandIndex.DemandMaterial.STICK,
+                24
+        );
+
+        assertEquals(24, stickCap);
+    }
+
 }
