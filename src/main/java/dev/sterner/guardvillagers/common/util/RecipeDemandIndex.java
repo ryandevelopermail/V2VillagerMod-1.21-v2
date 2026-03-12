@@ -25,6 +25,7 @@ import java.util.function.Predicate;
 public final class RecipeDemandIndex {
     private static final Logger LOGGER = LoggerFactory.getLogger(RecipeDemandIndex.class);
     private static final Map<String, RouteIndex> CACHE = new HashMap<>();
+    private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 3;
 
     private RecipeDemandIndex() {
     }
@@ -91,9 +92,16 @@ public final class RecipeDemandIndex {
             EnumSet<DemandMaterial> recipeMaterials = collectMaterialsForRecipe(recipe.getIngredients());
             int recipeStrength = strengthForOutput(output);
             for (DemandMaterial material : recipeMaterials) {
-                add(aggregate, material, profession, recipeStrength, defaultCap, defaultWeight, false);
+                add(aggregate, material, profession, recipeStrength, resolveDynamicCap(profession, material, defaultCap), defaultWeight, false);
             }
         }
+    }
+
+    static int resolveDynamicCap(VillagerProfession profession, DemandMaterial material, int defaultCap) {
+        if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.PLANKS) {
+            return Math.min(defaultCap, TOOLSMITH_PLANK_COMPONENT_CAP);
+        }
+        return defaultCap;
     }
 
     static EnumSet<DemandMaterial> collectMaterialsForRecipe(List<Ingredient> ingredients) {
