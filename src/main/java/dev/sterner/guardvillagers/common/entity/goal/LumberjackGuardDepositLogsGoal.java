@@ -152,6 +152,14 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
 
         DistributionCandidate selected = candidates.getFirst();
+        if (selected.materialType() == LumberjackDemandPlanner.MaterialType.LOGS) {
+            LOGGER.debug("lumberjack logs route selected: targetProfession={} targetJobPos={} targetChestPos={} demandScore={} recipientDeficit={}",
+                    selected.recipient().record().recipient().getVillagerData().getProfession(),
+                    selected.recipient().record().jobPos(),
+                    selected.recipient().record().chestPos(),
+                    selected.demandScore(),
+                    selected.recipient().deficit());
+        }
         ItemStack sourceStack = sourceInventory.getStack(selected.slot());
         if (sourceStack.isEmpty()) {
             return;

@@ -125,6 +125,15 @@ public final class UniversalDistributionRouter {
                         ),
                         80,
                         RoutingMode.ALWAYS
+                ),
+                new DistributionRouteRule(
+                        "logs-to-furnace-capable-cooking-professions",
+                        stack -> stack.isIn(ItemTags.LOGS),
+                        List.of(
+                                RecipientTarget.withCapability(VillagerProfession.BUTCHER, Blocks.SMOKER, RecipientCapability.PAIRED_FURNACE_MODIFIER)
+                        ),
+                        78,
+                        RoutingMode.ALWAYS
                 )
         ).stream().sorted(RULE_ORDER).toList();
     }
