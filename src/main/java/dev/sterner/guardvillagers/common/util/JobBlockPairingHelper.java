@@ -94,11 +94,6 @@ public final class JobBlockPairingHelper {
         world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
 
-        if (!dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, placedPos, "crafting-table-placement")) {
-            LOGGER.debug("Skipping unemployed lumberjack conversion hooks for crafting-table placement at {} due to balancing gate", placedPos.toShortString());
-            return;
-        }
-
         ProfessionDefinitions.runUnemployedConversionHooks(world);
     }
 
