@@ -73,6 +73,12 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         nextCheckTime = 0L;
     }
 
+    public void requestCraftNoSoonerThan(long targetTick) {
+        if (nextCheckTime == 0L || nextCheckTime > targetTick) {
+            nextCheckTime = targetTick;
+        }
+    }
+
     @Override
     public final boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
