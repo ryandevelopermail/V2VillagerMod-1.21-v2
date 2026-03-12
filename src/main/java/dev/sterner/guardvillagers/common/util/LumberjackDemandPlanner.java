@@ -32,7 +32,8 @@ public final class LumberjackDemandPlanner {
             List<RecipientDemand> rankedRecipients = rankRecipients(world, recipients, materialType);
             int sourceStock = countMaterialInInventory(sourceInventory, materialType);
             int demandDeficit = rankedRecipients.stream().mapToInt(RecipientDemand::deficit).sum();
-            demandByType.put(materialType, new MaterialDemand(materialType, sourceStock, recipients.size(), demandDeficit, rankedRecipients));
+            double weightedDemandDeficit = rankedRecipients.stream().mapToDouble(RecipientDemand::weightedDeficit).sum();
+            demandByType.put(materialType, new MaterialDemand(materialType, sourceStock, recipients.size(), demandDeficit, weightedDemandDeficit, rankedRecipients));
         }
         return new DemandSnapshot(demandByType);
     }
@@ -72,15 +73,35 @@ public final class LumberjackDemandPlanner {
             }
 
             double chestFullness = getInventoryFullness(inventory.get());
-            ranked.add(new RecipientDemand(recipient, stock, deficit, chestFullness));
+            double demandWeight = recipientDemandWeight(materialType, recipient.record().recipient().getVillagerData().getProfession());
+            double weightedDeficit = deficit * demandWeight;
+            ranked.add(new RecipientDemand(recipient, stock, deficit, weightedDeficit, chestFullness));
         }
 
         ranked.sort(Comparator
-                .comparingInt(RecipientDemand::deficit).reversed()
+                .comparingDouble(RecipientDemand::weightedDeficit).reversed()
+                .thenComparing(Comparator.comparingInt(RecipientDemand::deficit).reversed())
                 .thenComparingDouble(RecipientDemand::chestFullness)
                 .thenComparingDouble(recipient -> recipient.record().sourceSquaredDistance())
                 .thenComparing(recipient -> recipient.record().recipient().getUuid(), java.util.UUID::compareTo));
         return List.copyOf(ranked);
+    }
+
+    private static double recipientDemandWeight(MaterialType materialType, VillagerProfession profession) {
+        if (materialType == MaterialType.PLANKS) {
+            return WoodRecipientRegistry.plankDemandWeight(profession);
+        }
+        return 1.0D;
+    }
+
+    private static RecipientTarget[] plankRecipientTargets() {
+        return WoodRecipientRegistry.plankRecipients().stream()
+                .map(profile -> new RecipientTarget(
+                        profile.profession(),
+                        profile.expectedJobBlock(),
+                        profile.requiresCraftingTable(),
+                        profile.targetStockCap()))
+                .toArray(RecipientTarget[]::new);
     }
 
     private static boolean isStrictlyPaired(ServerWorld world,
@@ -164,9 +185,7 @@ public final class LumberjackDemandPlanner {
                 return stack.isOf(Items.STICK);
             }
         },
-        PLANKS("planks", 32, new RecipientTarget[]{
-                new RecipientTarget(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, false)
-        }) {
+        PLANKS("planks", 32, plankRecipientTargets()) {
             @Override
             public boolean matches(ItemStack stack) {
                 return stack.isIn(ItemTags.PLANKS);
@@ -226,10 +245,11 @@ public final class LumberjackDemandPlanner {
     }
 
     public record RecipientDemand(DistributionRecipientHelper.RecipientRecord record, int currentStock, int deficit,
-                                  double chestFullness) {
+                                  double weightedDeficit, double chestFullness) {
     }
 
     public record MaterialDemand(MaterialType materialType, int sourceStock, int recipientCount, int demandDeficit,
+                                 double weightedDemandDeficit,
                                  List<RecipientDemand> rankedRecipients) {
     }
 
@@ -241,6 +261,11 @@ public final class LumberjackDemandPlanner {
         public int deficitFor(MaterialType materialType) {
             MaterialDemand demand = demandFor(materialType);
             return demand == null ? 0 : demand.demandDeficit();
+        }
+
+        public double weightedDeficitFor(MaterialType materialType) {
+            MaterialDemand demand = demandFor(materialType);
+            return demand == null ? 0.0D : demand.weightedDemandDeficit();
         }
 
         public List<RecipientDemand> rankedRecipientsFor(MaterialType materialType) {

@@ -202,13 +202,13 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                 continue;
             }
 
-            int demandScore = demandSnapshot.deficitFor(materialType);
+            double demandScore = demandSnapshot.weightedDeficitFor(materialType);
             LumberjackDemandPlanner.RecipientDemand topRecipient = rankedRecipients.getFirst();
             candidates.add(new DistributionCandidate(slot, materialType, topRecipient, demandScore));
         }
 
         candidates.sort(Comparator
-                .comparingInt(DistributionCandidate::demandScore).reversed()
+                .comparingDouble(DistributionCandidate::demandScore).reversed()
                 .thenComparing(Comparator.comparingInt((DistributionCandidate candidate) -> candidate.recipient().deficit()).reversed())
                 .thenComparingDouble(candidate -> candidate.recipient().record().sourceSquaredDistance())
                 .thenComparing(candidate -> candidate.recipient().record().recipient().getUuid(), UUID::compareTo));
@@ -390,6 +390,6 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private record DistributionCandidate(int slot,
                                          LumberjackDemandPlanner.MaterialType materialType,
                                          LumberjackDemandPlanner.RecipientDemand recipient,
-                                         int demandScore) {
+                                         double demandScore) {
     }
 }
