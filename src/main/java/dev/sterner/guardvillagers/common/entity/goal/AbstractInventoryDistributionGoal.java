@@ -578,12 +578,17 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             return false;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = resolvedRoute.recipients();
-        if (recipients.isEmpty()) {
-            return false;
+        UniversalDistributionRouter.SplitPlan splitPlan = resolvedRoute.splitPlan();
+        DistributionRecipientHelper.RecipientRecord recipient = splitPlan != null
+                ? splitPlan.selectedRecipient()
+                : null;
+        if (recipient == null) {
+            List<DistributionRecipientHelper.RecipientRecord> recipients = resolvedRoute.recipients();
+            if (recipients.isEmpty()) {
+                return false;
+            }
+            recipient = recipients.getFirst();
         }
-
-        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
         ItemStack extracted = stack.split(1);
         inventory.setStack(sourceSlot, stack);
         inventory.markDirty();
@@ -614,7 +619,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             return false;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = route.get().recipients();
+        UniversalDistributionRouter.ResolvedRecipients resolvedRecipients = route.get();
+        List<DistributionRecipientHelper.RecipientRecord> recipients = resolvedRecipients.recipients();
         if (recipients.isEmpty()) {
             return false;
         }
@@ -628,7 +634,12 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             }
         }
 
-        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+        DistributionRecipientHelper.RecipientRecord recipient = resolvedRecipients.splitPlan() != null
+                ? resolvedRecipients.splitPlan().selectedRecipient()
+                : null;
+        if (recipient == null) {
+            recipient = recipients.getFirst();
+        }
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         return true;

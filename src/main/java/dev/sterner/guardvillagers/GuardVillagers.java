@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
@@ -12,12 +13,14 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
+import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -25,6 +28,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
@@ -109,6 +113,11 @@ public class GuardVillagers implements ModInitializer {
             FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, FishermanGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
 
     public static final Item FISHERMAN_GUARD_SPAWN_EGG = new SpawnEggItem(FISHERMAN_GUARD_VILLAGER, 5651507, 3368652, new Item.Settings());
+
+    public static final EntityType<LumberjackGuardEntity> LUMBERJACK_GUARD_VILLAGER = Registry.register(Registries.ENTITY_TYPE, id("lumberjack_guard"),
+            FabricEntityTypeBuilder.create(SpawnGroup.CREATURE, LumberjackGuardEntity::new).dimensions(EntityDimensions.fixed(0.6f, 1.8f)).build());
+
+    public static final Item LUMBERJACK_GUARD_SPAWN_EGG = new SpawnEggItem(LUMBERJACK_GUARD_VILLAGER, 5651507, 8553352, new Item.Settings());
     public static final Block GUARD_STAND_MODIFIER = new Block(AbstractBlock.Settings.create().strength(2.0F).sounds(BlockSoundGroup.STONE));
     public static final Item GUARD_STAND_MODIFIER_ITEM = new BlockItem(GUARD_STAND_MODIFIER, new Item.Settings());
     public static final Block GUARD_STAND_ANCHOR = new Block(AbstractBlock.Settings.create().strength(2.0F).sounds(BlockSoundGroup.STONE));
@@ -141,6 +150,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(MASON_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
+        FabricDefaultAttributeRegistry.register(LUMBERJACK_GUARD_VILLAGER, GuardEntity.createAttributes());
         ProfessionDefinitions.registerAll();
 
         Registry.register(Registries.ITEM, id("guard_spawn_egg"), GUARD_SPAWN_EGG);
@@ -148,6 +158,7 @@ public class GuardVillagers implements ModInitializer {
         Registry.register(Registries.ITEM, id("butcher_guard_spawn_egg"), BUTCHER_GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("mason_guard_spawn_egg"), MASON_GUARD_SPAWN_EGG);
         Registry.register(Registries.ITEM, id("fisherman_guard_spawn_egg"), FISHERMAN_GUARD_SPAWN_EGG);
+        Registry.register(Registries.ITEM, id("lumberjack_guard_spawn_egg"), LUMBERJACK_GUARD_SPAWN_EGG);
         Registry.register(Registries.BLOCK, id("guard_stand_modifier"), GUARD_STAND_MODIFIER);
         Registry.register(Registries.ITEM, id("guard_stand_modifier"), GUARD_STAND_MODIFIER_ITEM);
         Registry.register(Registries.BLOCK, id("guard_stand_anchor"), GUARD_STAND_ANCHOR);
@@ -172,6 +183,7 @@ public class GuardVillagers implements ModInitializer {
             entries.add(BUTCHER_GUARD_SPAWN_EGG);
             entries.add(MASON_GUARD_SPAWN_EGG);
             entries.add(FISHERMAN_GUARD_SPAWN_EGG);
+            entries.add(LUMBERJACK_GUARD_SPAWN_EGG);
             entries.add(GUARD_STAND_MODIFIER_ITEM);
             entries.add(GUARD_STAND_ANCHOR_ITEM);
         });
@@ -223,6 +235,9 @@ public class GuardVillagers implements ModInitializer {
             if (entity instanceof FishermanGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
                 rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedJobPos(), VillagerProfession.FISHERMAN, "paired job");
             }
+            if (entity instanceof LumberjackGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
+                rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedCraftingTablePos(), VillagerProfession.NONE, "paired crafting table");
+            }
         });
 
         ServerChunkEvents.CHUNK_LOAD.register((world, chunk) ->
@@ -232,8 +247,22 @@ public class GuardVillagers implements ModInitializer {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
             reconcileConvertedWorkerReservations(world, "world-load");
+            RecipeDemandIndex.forWorld(world);
         });
-        ServerWorldEvents.UNLOAD.register((server, world) -> LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey()));
+        ServerWorldEvents.UNLOAD.register((server, world) -> {
+            LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
+            LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
+            RecipeDemandIndex.clearWorld(world);
+        });
+
+        ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
+            int invalidatedWorlds = 0;
+            for (ServerWorld world : server.getWorlds()) {
+                RecipeDemandIndex.clearWorld(world);
+                invalidatedWorlds++;
+            }
+            LOGGER.info("[recipe-demand-index] invalidated {} world cache entries after datapack reload (success={})", invalidatedWorlds, success);
+        });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             for (ServerWorld world : server.getWorlds()) {
@@ -248,6 +277,7 @@ public class GuardVillagers implements ModInitializer {
                         && world.getTime() % Math.max(20, GuardVillagersConfig.villagerConversionCandidateMarkIntervalTicks) == 0L) {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
+                LumberjackPopulationBalancingService.tick(world);
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");

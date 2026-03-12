@@ -84,15 +84,17 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+        findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE)
                 .forEach(villager -> tryPlayPairingAnimation(world, villager, placedPos));
         VillagerConversionCandidateIndex.markCandidatesNear(world, placedPos, NEARBY_VILLAGER_SCAN_RANGE);
         ProfessionDefinitions.runConversionHooks(world);
     }
 
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+        findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
+
+        ProfessionDefinitions.runUnemployedConversionHooks(world);
     }
 
     public static void handleSpecialModifierPlacement(ServerWorld world, BlockPos placedPos, BlockState placedState) {
@@ -101,8 +103,31 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
-                .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, modifier.get()));
+        SpecialModifier resolvedModifier = modifier.get();
+
+        findEmployedVillagersWithJobSiteNear(world, placedPos, resolvedModifier.range())
+                .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, resolvedModifier));
+    }
+
+    private static Collection<VillagerEntity> findEmployedVillagersWithJobSiteNear(ServerWorld world, BlockPos placedPos, double range) {
+        Box worldBounds = getWorldBounds(world);
+        return world.getEntitiesByClass(VillagerEntity.class, worldBounds, villager -> {
+            if (!isEmployedVillager(villager)) {
+                return false;
+            }
+
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isEmpty()) {
+                return false;
+            }
+
+            GlobalPos globalPos = jobSite.get();
+            if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+                return false;
+            }
+
+            return globalPos.pos().isWithinDistance(placedPos, range);
+        });
     }
 
     private static void tryPlayPairingAnimation(ServerWorld world, VillagerEntity villager, BlockPos placedPos) {
@@ -154,12 +179,8 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE);
         if (nearbyChest.isEmpty()) {
-            return;
-        }
-
-        if (!nearbyChest.get().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             return;
         }
 
@@ -551,5 +572,29 @@ public final class JobBlockPairingHelper {
             }
         }
         return Optional.empty();
+    }
+
+
+    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range) {
+        int blockRange = (int) Math.ceil(range);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos checkPos : BlockPos.iterate(primaryCenter.add(-blockRange, -blockRange, -blockRange), primaryCenter.add(blockRange, blockRange, blockRange))) {
+            if (!primaryCenter.isWithinDistance(checkPos, range) || !secondaryCenter.isWithinDistance(checkPos, range)) {
+                continue;
+            }
+            if (!isPairingBlock(world.getBlockState(checkPos))) {
+                continue;
+            }
+
+            double distance = primaryCenter.getSquaredDistance(checkPos);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = checkPos.toImmutable();
+            }
+        }
+
+        return Optional.ofNullable(nearest);
     }
 }
