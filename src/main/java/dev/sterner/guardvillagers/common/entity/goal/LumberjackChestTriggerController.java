@@ -24,15 +24,22 @@ import net.minecraft.util.math.Direction;
 
 import java.util.Comparator;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 public final class LumberjackChestTriggerController {
     private static final long EVALUATION_INTERVAL_TICKS = 100L;
     private static final long RULE_COOLDOWN_TICKS = 40L;
+    private static final long V2_AFTER_CHEST_DELAY_TICKS = 40L;
     private static final double VILLAGE_EXPANSION_SCAN_RADIUS = 300.0D;
     private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 400L;
     private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
+    private static final Map<UUID, Long> V2_CHEST_PLACED_TICKS_BY_VILLAGER = new HashMap<>();
+    private static final Map<BlockPos, Long> V2_CHEST_PLACED_TICKS_BY_JOB_SITE = new HashMap<>();
 
     private static final List<TriggerRule> RULES = List.of(
             new TriggerRule("craft_place_furnace_modifier", 100,
@@ -54,6 +61,8 @@ public final class LumberjackChestTriggerController {
             LumberjackChestTriggerBehavior.clearChestWatcher(guard);
             return;
         }
+
+        cleanupInvalidV2ChestDelayEntries(world, guard);
 
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos != null) {
@@ -361,6 +370,7 @@ public final class LumberjackChestTriggerController {
             if (countByItem(context, Items.CHEST) > 0 && consumeByItem(context, Items.CHEST, 1)) {
                 if (context.world().setBlockState(placePos, Blocks.CHEST.getDefaultState())) {
                     JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                    recordV2ChestPlacementTick(context.world(), villager, jobPos);
                     return true;
                 }
                 addToInventoryOrBuffer(context, new ItemStack(Items.CHEST));
@@ -369,6 +379,7 @@ public final class LumberjackChestTriggerController {
             if (countByItem(context, Items.TRAPPED_CHEST) > 0 && consumeByItem(context, Items.TRAPPED_CHEST, 1)) {
                 if (context.world().setBlockState(placePos, Blocks.TRAPPED_CHEST.getDefaultState())) {
                     JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                    recordV2ChestPlacementTick(context.world(), villager, jobPos);
                     return true;
                 }
                 addToInventoryOrBuffer(context, new ItemStack(Items.TRAPPED_CHEST));
@@ -443,16 +454,78 @@ public final class LumberjackChestTriggerController {
 
     private static boolean isEligibleV2VillagerMissingCraftingTable(ServerWorld world, VillagerEntity villager) {
         if (!isEligibleV1Villager(world, villager)) {
+            clearV2ChestPlacementTick(villager.getUuid(), null);
             return false;
         }
 
         BlockPos jobPos = resolveVillagerJobSite(world, villager);
         if (jobPos == null) {
+            clearV2ChestPlacementTick(villager.getUuid(), null);
             return false;
         }
 
-        return JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
-                && findNearbyCraftingTable(world, jobPos) == null;
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        if (chestPos == null) {
+            clearV2ChestPlacementTick(villager.getUuid(), jobPos);
+            return false;
+        }
+
+        if (findNearbyCraftingTable(world, jobPos) != null) {
+            clearV2ChestPlacementTick(villager.getUuid(), jobPos);
+            return false;
+        }
+
+        if (!hasMetV2ChestDelay(world, villager.getUuid(), jobPos)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void cleanupInvalidV2ChestDelayEntries(ServerWorld world, LumberjackGuardEntity guard) {
+        if (V2_CHEST_PLACED_TICKS_BY_VILLAGER.isEmpty()) {
+            return;
+        }
+
+        Iterator<VillagerEntity> iterator = collectNearbyVillagers(world, guard).iterator();
+        while (iterator.hasNext()) {
+            VillagerEntity villager = iterator.next();
+            UUID villagerId = villager.getUuid();
+            if (!V2_CHEST_PLACED_TICKS_BY_VILLAGER.containsKey(villagerId)) {
+                continue;
+            }
+
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null
+                    || !JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+                    || findNearbyCraftingTable(world, jobPos) != null) {
+                clearV2ChestPlacementTick(villagerId, jobPos);
+            }
+        }
+    }
+
+    private static void recordV2ChestPlacementTick(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        long now = world.getTime();
+        V2_CHEST_PLACED_TICKS_BY_VILLAGER.put(villager.getUuid(), now);
+        V2_CHEST_PLACED_TICKS_BY_JOB_SITE.put(jobPos.toImmutable(), now);
+    }
+
+    private static boolean hasMetV2ChestDelay(ServerWorld world, UUID villagerId, BlockPos jobPos) {
+        Long placedTick = V2_CHEST_PLACED_TICKS_BY_VILLAGER.get(villagerId);
+        if (placedTick == null) {
+            placedTick = V2_CHEST_PLACED_TICKS_BY_JOB_SITE.get(jobPos);
+        }
+        if (placedTick == null) {
+            return true;
+        }
+        return world.getTime() - placedTick >= V2_AFTER_CHEST_DELAY_TICKS;
+    }
+
+    private static void clearV2ChestPlacementTick(UUID villagerId, BlockPos jobPos) {
+        V2_CHEST_PLACED_TICKS_BY_VILLAGER.remove(villagerId);
+        if (jobPos != null) {
+            V2_CHEST_PLACED_TICKS_BY_JOB_SITE.remove(jobPos);
+        }
     }
 
     private static BlockPos resolveVillagerJobSite(ServerWorld world, VillagerEntity villager) {
