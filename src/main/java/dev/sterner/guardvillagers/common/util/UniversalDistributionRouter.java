@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.ToDoubleFunction;
 
 public final class UniversalDistributionRouter {
     private static final Comparator<DistributionRouteRule> RULE_ORDER =
@@ -51,7 +52,7 @@ public final class UniversalDistributionRouter {
                     continue;
                 }
 
-                SplitPlan splitPlan = SplitPlanner.plan(stack.getCount(), recipients);
+                SplitPlan splitPlan = SplitPlanner.plan(stack.getCount(), recipients, recipient -> recipientWeight(rule, recipient));
                 return Optional.of(new ResolvedRoute(rule, slot, recipients, splitPlan));
             }
         }
@@ -77,7 +78,7 @@ public final class UniversalDistributionRouter {
 
             List<DistributionRecipientHelper.RecipientRecord> recipients = resolveEligibleRecipients(world, source, recipientRange, rule);
             if (!recipients.isEmpty()) {
-                SplitPlan splitPlan = SplitPlanner.plan(pendingItem.getCount(), recipients);
+                SplitPlan splitPlan = SplitPlanner.plan(pendingItem.getCount(), recipients, recipient -> recipientWeight(rule, recipient));
                 return Optional.of(new ResolvedRecipients(rule, recipients, splitPlan));
             }
         }
@@ -124,9 +125,9 @@ public final class UniversalDistributionRouter {
                 new DistributionRouteRule(
                         "planks-to-plank-consuming-professions",
                         stack -> stack.isIn(ItemTags.PLANKS),
-                        List.of(
-                                RecipientTarget.of(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE)
-                        ),
+                        WoodRecipientRegistry.plankRecipients().stream()
+                                .map(profile -> RecipientTarget.of(profile.profession(), profile.expectedJobBlock()))
+                                .toList(),
                         80,
                         RoutingMode.ALWAYS
                 ),
@@ -163,6 +164,13 @@ public final class UniversalDistributionRouter {
         return recipients.stream().distinct().sorted(Comparator
                 .comparingDouble(DistributionRecipientHelper.RecipientRecord::sourceSquaredDistance)
                 .thenComparing(record -> record.recipient().getUuid(), java.util.UUID::compareTo)).toList();
+    }
+
+    private static double recipientWeight(DistributionRouteRule rule, DistributionRecipientHelper.RecipientRecord recipient) {
+        if ("planks-to-plank-consuming-professions".equals(rule.id())) {
+            return WoodRecipientRegistry.plankDemandWeight(recipient.recipient().getVillagerData().getProfession());
+        }
+        return 1.0D;
     }
 
 
@@ -207,19 +215,33 @@ public final class UniversalDistributionRouter {
         private SplitPlanner() {
         }
 
-        private static SplitPlan plan(int sourceStackCount, List<DistributionRecipientHelper.RecipientRecord> recipients) {
+        private static SplitPlan plan(int sourceStackCount,
+                                      List<DistributionRecipientHelper.RecipientRecord> recipients,
+                                      ToDoubleFunction<DistributionRecipientHelper.RecipientRecord> weightProvider) {
             if (sourceStackCount <= 0 || recipients.isEmpty()) {
                 return new SplitPlan(List.of(), null, -1);
             }
 
             int recipientCount = recipients.size();
-            int baseShare = sourceStackCount / recipientCount;
-            int remainder = sourceStackCount % recipientCount;
             int selectedIndex = Math.floorMod(sourceStackCount - 1, recipientCount);
+            List<Double> weights = new ArrayList<>(recipientCount);
+            double totalWeight = 0.0D;
+            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
+                double weight = Math.max(0.01D, weightProvider.applyAsDouble(recipient));
+                weights.add(weight);
+                totalWeight += weight;
+            }
 
             List<RecipientShare> shares = new ArrayList<>(recipientCount);
+            int distributed = 0;
             for (int i = 0; i < recipientCount; i++) {
-                int share = baseShare + (i < remainder ? 1 : 0);
+                int share;
+                if (i == recipientCount - 1) {
+                    share = Math.max(0, sourceStackCount - distributed);
+                } else {
+                    share = (int) Math.floor((weights.get(i) / totalWeight) * sourceStackCount);
+                    distributed += share;
+                }
                 shares.add(new RecipientShare(recipients.get(i), share));
             }
 
