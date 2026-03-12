@@ -13,6 +13,7 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
@@ -245,10 +246,12 @@ public class GuardVillagers implements ModInitializer {
             JobBlockPairingHelper.refreshWorldPairings(world);
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
             reconcileConvertedWorkerReservations(world, "world-load");
+            RecipeDemandIndex.forWorld(world);
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
+            RecipeDemandIndex.clearWorld(world);
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {

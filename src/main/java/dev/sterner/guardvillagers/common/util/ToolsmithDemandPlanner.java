@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -15,6 +16,7 @@ import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -42,13 +44,21 @@ public final class ToolsmithDemandPlanner {
     }
 
     private static List<DistributionRecipientHelper.RecipientRecord> findRecipients(ServerWorld world, VillagerEntity toolsmith, ToolType toolType) {
-        return switch (toolType) {
-            case HOE -> DistributionRecipientHelper.findEligibleFarmerRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE);
-            case PICKAXE -> DistributionRecipientHelper.findEligibleMasonRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE);
-            case SHEARS -> DistributionRecipientHelper.findEligibleShepherdRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE);
-            case FISHING_ROD -> DistributionRecipientHelper.findEligibleFishermanRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE);
+        List<DistributionRouteEngine.ProfessionRoute> routes = switch (toolType) {
+            case HOE -> List.of(route(VillagerProfession.FARMER));
+            case PICKAXE -> List.of(route(VillagerProfession.MASON));
+            case SHEARS -> List.of(route(VillagerProfession.SHEPHERD));
+            case FISHING_ROD -> List.of(route(VillagerProfession.FISHERMAN));
             case SHOVEL -> List.of();
         };
+        return DistributionRouteEngine.findEligibleRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE, routes);
+    }
+
+    private static DistributionRouteEngine.ProfessionRoute route(VillagerProfession profession) {
+        return ProfessionDefinitions.get(profession)
+                .flatMap(def -> def.expectedJobBlocks().stream().findFirst())
+                .map(block -> new DistributionRouteEngine.ProfessionRoute(profession, block, false))
+                .orElseThrow(() -> new IllegalStateException("Missing profession definition for " + profession));
     }
 
     private static List<RecipientDemand> rankRecipients(ServerWorld world, List<DistributionRecipientHelper.RecipientRecord> recipients, ToolType toolType) {
