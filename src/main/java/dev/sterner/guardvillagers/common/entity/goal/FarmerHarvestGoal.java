@@ -39,6 +39,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_NO_TARGET_LIMIT = 3;
+    private static final int SEED_FORAGE_RETRY_BASE_COOLDOWN_TICKS = 100;
+    private static final int SEED_FORAGE_RETRY_MAX_COOLDOWN_TICKS = 600;
     private static final int MIN_WHEAT_SEED_TARGET = 5;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
@@ -79,6 +81,8 @@ public class FarmerHarvestGoal extends Goal {
     private boolean wheatSeedForagingRequested;
     private boolean prioritizeWheatSeedsForPlanting;
     private int gatherNoTargetPasses;
+    private long nextSeedForageRetryTick;
+    private int seedForageRetryCount;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -98,6 +102,8 @@ public class FarmerHarvestGoal extends Goal {
         this.wheatSeedForagingRequested = false;
         this.prioritizeWheatSeedsForPlanting = false;
         this.gatherNoTargetPasses = 0;
+        this.nextSeedForageRetryTick = 0L;
+        this.seedForageRetryCount = 0;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -406,6 +412,13 @@ public class FarmerHarvestGoal extends Goal {
                 plantTargets.removeFirst();
             }
             case GATHER_WHEAT_SEEDS -> {
+                if (isSeedForageRetryCoolingDown(serverWorld)) {
+                    logSeedForageCooldownBlocked(serverWorld, "tick-stage-check");
+                    setStage(Stage.RETURN_TO_CHEST);
+                    moveTo(chestPos);
+                    return;
+                }
+
                 if (!bootstrapSeedGatherRequested && plantTargets.isEmpty()) {
                     populatePlantTargets(serverWorld);
                     if (plantTargets.isEmpty()) {
@@ -422,6 +435,7 @@ public class FarmerHarvestGoal extends Goal {
 
                 if (hasRequiredWheatSeeds()) {
                     logWheatSeedThresholdReached();
+                    clearSeedForageRetryCooldown(serverWorld, "wheat seed threshold reached");
                     prioritizeWheatSeedsForPlanting = true;
                     if (plantTargets.isEmpty()) {
                         logWheatSeedForageStop("wheat seed threshold reached without pending farmland");
@@ -445,6 +459,7 @@ public class FarmerHarvestGoal extends Goal {
                     populateGatherSeedTargets(serverWorld);
                     if (gatherSeedTargets.isEmpty()) {
                         gatherNoTargetPasses++;
+                        scheduleSeedForageRetryCooldown(serverWorld, "no valid gather targets", gatherNoTargetPasses);
                         if (gatherNoTargetPasses >= GATHER_SEEDS_NO_TARGET_LIMIT) {
                             logWheatSeedForageStop("no valid wheat seed sources found");
                             finishDailyRunIfNeeded(serverWorld);
@@ -457,6 +472,7 @@ public class FarmerHarvestGoal extends Goal {
                         return;
                     }
                     gatherNoTargetPasses = 0;
+                    clearSeedForageRetryCooldown(serverWorld, "new gather targets found");
                 }
 
                 BlockPos gatherTarget = gatherSeedTargets.peekFirst();
@@ -744,6 +760,7 @@ public class FarmerHarvestGoal extends Goal {
         if (stage == newStage) {
             return;
         }
+        Stage previousStage = stage;
         stage = newStage;
         if (newStage != Stage.GATHER_WHEAT_SEEDS) {
             bootstrapSeedGatherRequested = false;
@@ -756,6 +773,9 @@ public class FarmerHarvestGoal extends Goal {
             gatherSeedTargets.clear();
             gatherNoTargetPasses = 0;
             logWheatSeedForageStart();
+        }
+        if (previousStage == Stage.GATHER_WHEAT_SEEDS && newStage == Stage.DONE && villager.getWorld() instanceof ServerWorld world) {
+            clearSeedForageRetryCooldown(world, "gather stage completed with DONE");
         }
         LOGGER.info("Farmer {} entering harvest stage {}", villager.getUuidAsString(), newStage);
     }
@@ -782,7 +802,11 @@ public class FarmerHarvestGoal extends Goal {
                     setStage(Stage.PLANT_FARMLAND);
                 } else {
                     wheatSeedForagingRequested = true;
-                    setStage(Stage.GATHER_WHEAT_SEEDS);
+                    if (canEnterSeedForageStage(world, "post-deposit planting bootstrap")) {
+                        setStage(Stage.GATHER_WHEAT_SEEDS);
+                    } else {
+                        return false;
+                    }
                 }
             }
             return true;
@@ -795,7 +819,11 @@ public class FarmerHarvestGoal extends Goal {
                 setStage(Stage.PLANT_FARMLAND);
             } else {
                 wheatSeedForagingRequested = true;
-                setStage(Stage.GATHER_WHEAT_SEEDS);
+                if (canEnterSeedForageStage(world, "post-deposit bootstrap preflight")) {
+                    setStage(Stage.GATHER_WHEAT_SEEDS);
+                } else {
+                    return false;
+                }
             }
             return true;
         }
@@ -1240,6 +1268,44 @@ public class FarmerHarvestGoal extends Goal {
 
     private void logWheatSeedThresholdReached() {
         LOGGER.info("Farmer {} reached wheat seed threshold with {} seeds", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS));
+    }
+
+    private boolean canEnterSeedForageStage(ServerWorld world, String context) {
+        if (!isSeedForageRetryCoolingDown(world)) {
+            return true;
+        }
+        logSeedForageCooldownBlocked(world, context);
+        return false;
+    }
+
+    private boolean isSeedForageRetryCoolingDown(ServerWorld world) {
+        return world.getTime() < nextSeedForageRetryTick;
+    }
+
+    private void scheduleSeedForageRetryCooldown(ServerWorld world, String reason, int retryCount) {
+        int exponent = Math.max(0, Math.min(retryCount - 1, 3));
+        int cooldownTicks = Math.min(SEED_FORAGE_RETRY_MAX_COOLDOWN_TICKS, SEED_FORAGE_RETRY_BASE_COOLDOWN_TICKS << exponent);
+        seedForageRetryCount = Math.max(seedForageRetryCount, retryCount);
+        nextSeedForageRetryTick = world.getTime() + cooldownTicks;
+        LOGGER.info("Farmer {} wheat seed forage cooldown scheduled (reason: {}, retry: {}, cooldownTicks: {}, resumesIn: {})",
+                villager.getUuidAsString(), reason, seedForageRetryCount, cooldownTicks, cooldownTicks);
+    }
+
+    private void clearSeedForageRetryCooldown(ServerWorld world, String reason) {
+        if (nextSeedForageRetryTick <= world.getTime() && seedForageRetryCount == 0) {
+            return;
+        }
+        long remaining = Math.max(0L, nextSeedForageRetryTick - world.getTime());
+        LOGGER.info("Farmer {} wheat seed forage cooldown cleared (reason: {}, remainingTicks: {}, retries: {})",
+                villager.getUuidAsString(), reason, remaining, seedForageRetryCount);
+        nextSeedForageRetryTick = 0L;
+        seedForageRetryCount = 0;
+    }
+
+    private void logSeedForageCooldownBlocked(ServerWorld world, String context) {
+        long remaining = Math.max(0L, nextSeedForageRetryTick - world.getTime());
+        LOGGER.info("Farmer {} wheat seed forage re-entry blocked by cooldown (context: {}, remainingTicks: {}, retries: {})",
+                villager.getUuidAsString(), context, remaining, seedForageRetryCount);
     }
 
     private boolean hasPlantablesForPlanting() {
