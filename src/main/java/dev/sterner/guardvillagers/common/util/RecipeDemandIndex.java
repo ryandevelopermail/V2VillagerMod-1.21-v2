@@ -47,7 +47,7 @@ public final class RecipeDemandIndex {
     private static RouteIndex build(ServerWorld world) {
         EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate = new EnumMap<>(DemandMaterial.class);
         for (DemandMaterial material : DemandMaterial.values()) {
-            aggregate.put(material, new EnumMap<>(VillagerProfession.class));
+            aggregate.put(material, new HashMap<>());
         }
 
         // fixed-goal enum requirements
