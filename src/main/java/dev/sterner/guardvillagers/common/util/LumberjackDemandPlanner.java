@@ -159,7 +159,7 @@ public final class LumberjackDemandPlanner {
             }
         },
         LOGS("logs", 32, new RecipientTarget[]{
-                new RecipientTarget(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, false)
+                new RecipientTarget(VillagerProfession.BUTCHER, Blocks.SMOKER, false)
         }) {
             @Override
             public boolean matches(ItemStack stack) {
