@@ -84,14 +84,14 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+        findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE)
                 .forEach(villager -> tryPlayPairingAnimation(world, villager, placedPos));
         VillagerConversionCandidateIndex.markCandidatesNear(world, placedPos, NEARBY_VILLAGER_SCAN_RANGE);
         ProfessionDefinitions.runConversionHooks(world);
     }
 
     public static void handleCraftingTablePlacement(ServerWorld world, BlockPos placedPos) {
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+        findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE)
                 .forEach(villager -> tryPlayPairingAnimationWithCrafting(world, villager, placedPos));
 
         ProfessionDefinitions.runUnemployedConversionHooks(world);
@@ -103,8 +103,29 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        world.getEntitiesByClass(VillagerEntity.class, new Box(placedPos).expand(NEARBY_VILLAGER_SCAN_RANGE), JobBlockPairingHelper::isEmployedVillager)
+        findEmployedVillagersWithJobSiteNear(world, placedPos, modifier.range())
                 .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, modifier.get()));
+    }
+
+    private static Collection<VillagerEntity> findEmployedVillagersWithJobSiteNear(ServerWorld world, BlockPos placedPos, double range) {
+        Box worldBounds = getWorldBounds(world);
+        return world.getEntitiesByClass(VillagerEntity.class, worldBounds, villager -> {
+            if (!isEmployedVillager(villager)) {
+                return false;
+            }
+
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isEmpty()) {
+                return false;
+            }
+
+            GlobalPos globalPos = jobSite.get();
+            if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+                return false;
+            }
+
+            return globalPos.pos().isWithinDistance(placedPos, range);
+        });
     }
 
     private static void tryPlayPairingAnimation(ServerWorld world, VillagerEntity villager, BlockPos placedPos) {
