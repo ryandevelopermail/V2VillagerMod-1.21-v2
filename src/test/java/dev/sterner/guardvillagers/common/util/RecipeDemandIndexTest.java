@@ -1,0 +1,54 @@
+package dev.sterner.guardvillagers.common.util;
+
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.recipe.Ingredient;
+import org.junit.jupiter.api.Test;
+
+import java.util.EnumSet;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class RecipeDemandIndexTest {
+
+    @Test
+    void collectMaterialsForRecipe_deduplicatesRepeatedIngredients() {
+        List<Ingredient> repeatedPlanksRecipe = List.of(
+                Ingredient.ofItems(Items.OAK_PLANKS),
+                Ingredient.ofItems(Items.SPRUCE_PLANKS),
+                Ingredient.ofItems(Items.BIRCH_PLANKS)
+        );
+
+        EnumSet<RecipeDemandIndex.DemandMaterial> materials = RecipeDemandIndex.collectMaterialsForRecipe(repeatedPlanksRecipe);
+
+        assertEquals(EnumSet.of(RecipeDemandIndex.DemandMaterial.PLANKS), materials);
+    }
+
+    @Test
+    void collectMaterialsForRecipe_keepsDistinctMaterials() {
+        List<Ingredient> mixedRecipe = List.of(
+                Ingredient.ofItems(Items.OAK_LOG),
+                Ingredient.ofItems(Items.STICK),
+                Ingredient.ofItems(Items.CHARCOAL)
+        );
+
+        EnumSet<RecipeDemandIndex.DemandMaterial> materials = RecipeDemandIndex.collectMaterialsForRecipe(mixedRecipe);
+
+        assertEquals(
+                EnumSet.of(
+                        RecipeDemandIndex.DemandMaterial.LOGS,
+                        RecipeDemandIndex.DemandMaterial.STICK,
+                        RecipeDemandIndex.DemandMaterial.CHARCOAL
+                ),
+                materials
+        );
+    }
+
+    @Test
+    void strengthForOutput_weightsByCountWithCap() {
+        assertEquals(1, RecipeDemandIndex.strengthForOutput(new ItemStack(Items.STICK, 1)));
+        assertEquals(4, RecipeDemandIndex.strengthForOutput(new ItemStack(Items.ARROW, 4)));
+        assertEquals(4, RecipeDemandIndex.strengthForOutput(new ItemStack(Items.ARROW, 16)));
+    }
+}

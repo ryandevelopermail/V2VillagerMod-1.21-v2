@@ -36,6 +36,9 @@ dependencies {
 
 	//modImplementation include("com.electronwill.night-config:core:${project.night_config_version}")
 
+	testImplementation platform('org.junit:junit-bom:5.10.2')
+	testImplementation 'org.junit.jupiter:junit-jupiter'
+
 }
 
 processResources {
@@ -72,4 +75,8 @@ publishing {
 
 	repositories {
 	}
+}
+
+tasks.named('test') {
+	useJUnitPlatform()
 }
