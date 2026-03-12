@@ -18,6 +18,9 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.entity.ai.pathing.Path;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
@@ -25,6 +28,7 @@ import java.util.Set;
 public final class UnemployedLumberjackConversionHook {
     private static final double CRAFTING_TABLE_SEARCH_RANGE = JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE;
     private static final double CONVERSION_CANDIDATE_SCAN_RANGE = 8.0D;
+    private static final Logger LOGGER = LoggerFactory.getLogger(UnemployedLumberjackConversionHook.class);
 
     private UnemployedLumberjackConversionHook() {
     }
@@ -187,6 +191,10 @@ public final class UnemployedLumberjackConversionHook {
         ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(), VillagerProfession.NONE, "unemployed lumberjack conversion");
 
         world.spawnEntityAndPassengers(guard);
+        LOGGER.info("Converted unemployed villager {} into lumberjack guard {} at crafting table {}",
+                villager.getUuidAsString(),
+                guard.getUuidAsString(),
+                tablePos.toShortString());
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
