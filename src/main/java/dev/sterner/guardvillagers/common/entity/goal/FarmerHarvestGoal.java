@@ -802,6 +802,7 @@ public class FarmerHarvestGoal extends Goal {
                     setStage(Stage.PLANT_FARMLAND);
                 } else {
                     wheatSeedForagingRequested = true;
+                    logWheatSeedForageIntent("post-deposit planting bootstrap", hasPlantablesForPlanting());
                     if (canEnterSeedForageStage(world, "post-deposit planting bootstrap")) {
                         setStage(Stage.GATHER_WHEAT_SEEDS);
                     } else {
@@ -819,6 +820,7 @@ public class FarmerHarvestGoal extends Goal {
                 setStage(Stage.PLANT_FARMLAND);
             } else {
                 wheatSeedForagingRequested = true;
+                logWheatSeedForageIntent("post-deposit bootstrap preflight", hasPlantablesForPlanting());
                 if (canEnterSeedForageStage(world, "post-deposit bootstrap preflight")) {
                     setStage(Stage.GATHER_WHEAT_SEEDS);
                 } else {
@@ -1240,10 +1242,7 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean requiresWheatSeedStartup() {
-        boolean hasOtherPlantables = countItemInInventory(Items.CARROT) > 0
-                || countItemInInventory(Items.POTATO) > 0
-                || countItemInInventory(Items.BEETROOT_SEEDS) > 0;
-        return !hasOtherPlantables && !hasRequiredWheatSeeds();
+        return !hasPlantablesForPlanting();
     }
 
     private boolean ensureWheatSeedStartup(ServerWorld world) {
@@ -1256,6 +1255,16 @@ public class FarmerHarvestGoal extends Goal {
         int wheatSeedCount = countItemInInventory(Items.WHEAT_SEEDS);
         LOGGER.info("Farmer {} chest wheat seed check result: {} / {}", villager.getUuidAsString(), wheatSeedCount, MIN_WHEAT_SEED_TARGET);
         return wheatSeedCount >= MIN_WHEAT_SEED_TARGET;
+    }
+
+    private void logWheatSeedForageIntent(String context, boolean optimizingSeedReserve) {
+        if (optimizingSeedReserve) {
+            LOGGER.info("Farmer {} foraging wheat seeds to optimize reserve toward threshold (context: {}, current: {} / {})",
+                    villager.getUuidAsString(), context, countItemInInventory(Items.WHEAT_SEEDS), MIN_WHEAT_SEED_TARGET);
+        } else {
+            LOGGER.info("Farmer {} foraging wheat seeds because zero plantables are available (context: {})",
+                    villager.getUuidAsString(), context);
+        }
     }
 
     private void logWheatSeedForageStart() {
@@ -1312,7 +1321,7 @@ public class FarmerHarvestGoal extends Goal {
         return countItemInInventory(Items.CARROT) > 0
                 || countItemInInventory(Items.POTATO) > 0
                 || countItemInInventory(Items.BEETROOT_SEEDS) > 0
-                || countItemInInventory(Items.WHEAT_SEEDS) >= MIN_WHEAT_SEED_TARGET;
+                || countItemInInventory(Items.WHEAT_SEEDS) > 0;
     }
 
     private int countItemInInventory(Item item) {
