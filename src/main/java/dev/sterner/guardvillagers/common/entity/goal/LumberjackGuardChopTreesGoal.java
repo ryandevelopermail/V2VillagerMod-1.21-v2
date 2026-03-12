@@ -873,13 +873,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private List<BlockPos> getTrunkAdjacent(BlockPos pos) {
-        return List.of(
-                pos.up(),
-                pos.down(),
-                pos.north(),
-                pos.south(),
-                pos.east(),
-                pos.west());
+        List<BlockPos> adjacent = new ArrayList<>(26);
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                for (int z = -1; z <= 1; z++) {
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    adjacent.add(pos.add(x, y, z));
+                }
+            }
+        }
+        return adjacent;
     }
 
     private boolean breakAndCollect(ServerWorld world, BlockPos pos) {
