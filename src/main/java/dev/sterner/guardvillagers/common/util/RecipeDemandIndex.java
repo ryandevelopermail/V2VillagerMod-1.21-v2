@@ -49,9 +49,9 @@ public final class RecipeDemandIndex {
     }
 
     private static RouteIndex build(ServerWorld world) {
-        EnumMap<DemandMaterial, EnumMap<VillagerProfession, MutableDemand>> aggregate = new EnumMap<>(DemandMaterial.class);
+        EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate = new EnumMap<>(DemandMaterial.class);
         for (DemandMaterial material : DemandMaterial.values()) {
-            aggregate.put(material, new EnumMap<>(VillagerProfession.class));
+            aggregate.put(material, new HashMap<>());
         }
 
         // fixed-goal enum requirements
@@ -76,7 +76,7 @@ public final class RecipeDemandIndex {
     }
 
     private static void scanDynamic(ServerWorld world,
-                                    EnumMap<DemandMaterial, EnumMap<VillagerProfession, MutableDemand>> aggregate,
+                                    EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate,
                                     VillagerProfession profession,
                                     Predicate<ItemStack> outputFilter,
                                     int defaultCap,
@@ -120,21 +120,21 @@ public final class RecipeDemandIndex {
                 || stack.isOf(Items.FISHING_ROD));
     }
 
-    private static void add(EnumMap<DemandMaterial, EnumMap<VillagerProfession, MutableDemand>> aggregate,
+    private static void add(EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate,
                             DemandMaterial material,
                             VillagerProfession profession,
                             int strength,
                             int cap,
                             double weight,
                             boolean requiresCraftingTable) {
-        EnumMap<VillagerProfession, MutableDemand> byProfession = aggregate.get(material);
+        Map<VillagerProfession, MutableDemand> byProfession = aggregate.get(material);
         MutableDemand demand = byProfession.computeIfAbsent(profession, ignored -> new MutableDemand(profession, cap, weight, requiresCraftingTable));
         demand.strength += strength;
         demand.cap = Math.max(demand.cap, cap);
         demand.weight = Math.max(demand.weight, weight);
     }
 
-    private static EnumMap<DemandMaterial, List<DistributionRouteEngine.ProfessionRoute>> toImmutable(EnumMap<DemandMaterial, EnumMap<VillagerProfession, MutableDemand>> aggregate) {
+    private static EnumMap<DemandMaterial, List<DistributionRouteEngine.ProfessionRoute>> toImmutable(EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate) {
         EnumMap<DemandMaterial, List<DistributionRouteEngine.ProfessionRoute>> routes = new EnumMap<>(DemandMaterial.class);
         for (Map.Entry<DemandMaterial, Map<VillagerProfession, MutableDemand>> entry : aggregate.entrySet()) {
             List<DistributionRouteEngine.ProfessionRoute> materialRoutes = entry.getValue().values().stream()
