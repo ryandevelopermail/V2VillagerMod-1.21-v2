@@ -28,6 +28,7 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerWorldEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
@@ -252,6 +253,15 @@ public class GuardVillagers implements ModInitializer {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
+        });
+
+        ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
+            int invalidatedWorlds = 0;
+            for (ServerWorld world : server.getWorlds()) {
+                RecipeDemandIndex.clearWorld(world);
+                invalidatedWorlds++;
+            }
+            LOGGER.info("[recipe-demand-index] invalidated {} world cache entries after datapack reload (success={})", invalidatedWorlds, success);
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
