@@ -110,9 +110,13 @@ public final class UniversalDistributionRouter {
                         "sticks-to-stick-consuming-professions",
                         stack -> stack.isOf(Items.STICK),
                         List.of(
-                                RecipientTarget.of(VillagerProfession.FARMER, Blocks.COMPOSTER),
-                                RecipientTarget.of(VillagerProfession.SHEPHERD, Blocks.LOOM),
-                                RecipientTarget.of(VillagerProfession.FLETCHER, Blocks.FLETCHING_TABLE)
+                                RecipientTarget.strictlyPaired(VillagerProfession.FARMER, Blocks.COMPOSTER),
+                                RecipientTarget.strictlyPaired(VillagerProfession.SHEPHERD, Blocks.LOOM),
+                                RecipientTarget.strictlyPaired(VillagerProfession.FLETCHER, Blocks.FLETCHING_TABLE),
+                                RecipientTarget.strictlyPaired(VillagerProfession.LEATHERWORKER, Blocks.CAULDRON),
+                                RecipientTarget.strictlyPaired(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE),
+                                RecipientTarget.strictlyPaired(VillagerProfession.WEAPONSMITH, Blocks.GRINDSTONE),
+                                RecipientTarget.strictlyPaired(VillagerProfession.FISHERMAN, Blocks.BARREL)
                         ),
                         85,
                         RoutingMode.ALWAYS
@@ -152,12 +156,24 @@ public final class UniversalDistributionRouter {
                     recipientRange,
                     target.profession(),
                     target.expectedJobBlock(),
-                    recipient -> supportsCapabilities(world, recipient, target.requiredCapabilities())));
+                    recipient -> isStrictlyPaired(world, recipient, target.expectedJobBlock())
+                            && supportsCapabilities(world, recipient, target.requiredCapabilities())));
         }
 
         return recipients.stream().distinct().sorted(Comparator
                 .comparingDouble(DistributionRecipientHelper.RecipientRecord::sourceSquaredDistance)
                 .thenComparing(record -> record.recipient().getUuid(), java.util.UUID::compareTo)).toList();
+    }
+
+
+    private static boolean isStrictlyPaired(ServerWorld world, DistributionRecipientHelper.RecipientRecord recipient, Block expectedJobBlock) {
+        if (!world.getBlockState(recipient.jobPos()).isOf(expectedJobBlock)) {
+            return false;
+        }
+
+        return JobBlockPairingHelper.findNearbyChest(world, recipient.jobPos())
+                .map(pos -> pos.equals(recipient.chestPos()))
+                .orElse(false);
     }
 
     private static boolean supportsCapabilities(ServerWorld world, DistributionRecipientHelper.RecipientRecord recipient, Set<RecipientCapability> capabilities) {
@@ -239,6 +255,10 @@ public final class UniversalDistributionRouter {
 
         public static RecipientTarget withCapability(VillagerProfession profession, Block expectedJobBlock, RecipientCapability capability) {
             return new RecipientTarget(profession, expectedJobBlock, EnumSet.of(capability));
+        }
+
+        public static RecipientTarget strictlyPaired(VillagerProfession profession, Block expectedJobBlock) {
+            return of(profession, expectedJobBlock);
         }
     }
 

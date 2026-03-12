@@ -65,7 +65,8 @@ public final class LumberjackDemandPlanner {
             }
 
             int stock = countMaterialInInventory(inventory.get(), materialType);
-            int deficit = Math.max(0, materialType.targetStock() - stock);
+            int targetStock = recipientTargetStock(materialType, recipient.record().recipient().getVillagerData().getProfession());
+            int deficit = Math.max(0, targetStock - stock);
             if (deficit <= 0) {
                 continue;
             }
@@ -94,6 +95,15 @@ public final class LumberjackDemandPlanner {
             return JobBlockPairingHelper.isCraftingTable(world.getBlockState(recipient.jobPos()));
         }
         return false;
+    }
+
+    private static int recipientTargetStock(MaterialType materialType, VillagerProfession profession) {
+        for (RecipientTarget target : materialType.recipientTargets()) {
+            if (target.profession() == profession) {
+                return target.targetStockCap() > 0 ? target.targetStockCap() : materialType.targetStock();
+            }
+        }
+        return materialType.targetStock();
     }
 
     private static Optional<Inventory> getChestInventory(ServerWorld world, BlockPos chestPos) {
@@ -141,9 +151,13 @@ public final class LumberjackDemandPlanner {
             }
         },
         STICK("stick", 24, new RecipientTarget[]{
-                new RecipientTarget(VillagerProfession.FARMER, Blocks.COMPOSTER, false),
-                new RecipientTarget(VillagerProfession.SHEPHERD, Blocks.LOOM, false),
-                new RecipientTarget(VillagerProfession.FLETCHER, Blocks.FLETCHING_TABLE, false)
+                new RecipientTarget(VillagerProfession.FARMER, Blocks.COMPOSTER, false, 24),
+                new RecipientTarget(VillagerProfession.SHEPHERD, Blocks.LOOM, false, 24),
+                new RecipientTarget(VillagerProfession.FLETCHER, Blocks.FLETCHING_TABLE, false, 24),
+                new RecipientTarget(VillagerProfession.LEATHERWORKER, Blocks.CAULDRON, false, 16),
+                new RecipientTarget(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, false, 32),
+                new RecipientTarget(VillagerProfession.WEAPONSMITH, Blocks.GRINDSTONE, false, 32),
+                new RecipientTarget(VillagerProfession.FISHERMAN, Blocks.BARREL, false, 20)
         }) {
             @Override
             public boolean matches(ItemStack stack) {
@@ -204,7 +218,11 @@ public final class LumberjackDemandPlanner {
         }
     }
 
-    public record RecipientTarget(VillagerProfession profession, Block expectedJobBlock, boolean requiresCraftingTable) {
+    public record RecipientTarget(VillagerProfession profession, Block expectedJobBlock, boolean requiresCraftingTable,
+                                  int targetStockCap) {
+        public RecipientTarget(VillagerProfession profession, Block expectedJobBlock, boolean requiresCraftingTable) {
+            this(profession, expectedJobBlock, requiresCraftingTable, -1);
+        }
     }
 
     public record RecipientDemand(DistributionRecipientHelper.RecipientRecord record, int currentStock, int deficit,
