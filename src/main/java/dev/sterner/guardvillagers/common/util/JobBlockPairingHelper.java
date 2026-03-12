@@ -179,12 +179,8 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE);
         if (nearbyChest.isEmpty()) {
-            return;
-        }
-
-        if (!nearbyChest.get().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             return;
         }
 
@@ -576,5 +572,29 @@ public final class JobBlockPairingHelper {
             }
         }
         return Optional.empty();
+    }
+
+
+    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range) {
+        int blockRange = (int) Math.ceil(range);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos checkPos : BlockPos.iterate(primaryCenter.add(-blockRange, -blockRange, -blockRange), primaryCenter.add(blockRange, blockRange, blockRange))) {
+            if (!primaryCenter.isWithinDistance(checkPos, range) || !secondaryCenter.isWithinDistance(checkPos, range)) {
+                continue;
+            }
+            if (!isPairingBlock(world.getBlockState(checkPos))) {
+                continue;
+            }
+
+            double distance = primaryCenter.getSquaredDistance(checkPos);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = checkPos.toImmutable();
+            }
+        }
+
+        return Optional.ofNullable(nearest);
     }
 }
