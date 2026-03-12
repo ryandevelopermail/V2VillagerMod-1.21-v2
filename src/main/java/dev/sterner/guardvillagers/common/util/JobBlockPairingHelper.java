@@ -103,8 +103,10 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        findEmployedVillagersWithJobSiteNear(world, placedPos, modifier.range())
-                .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, modifier.get()));
+        SpecialModifier resolvedModifier = modifier.get();
+
+        findEmployedVillagersWithJobSiteNear(world, placedPos, resolvedModifier.range())
+                .forEach(villager -> tryPlayPairingAnimationWithSpecialModifier(world, villager, placedPos, resolvedModifier));
     }
 
     private static Collection<VillagerEntity> findEmployedVillagersWithJobSiteNear(ServerWorld world, BlockPos placedPos, double range) {
