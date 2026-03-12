@@ -33,6 +33,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
     private static final int HOE_COMPONENT_BATCH_SIZE = 2;
+    private static final int WOOD_PICKAXE_PLANKS = 3;
+    private static final int WOOD_PICKAXE_STICKS = 2;
 
     private final LumberjackGuardEntity guard;
     private long nextDistributionAttemptTick;
@@ -241,6 +243,12 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             if (hoeReadyRecipient.isPresent()) {
                 return hoeReadyRecipient.get();
             }
+
+            Optional<LumberjackDemandPlanner.RecipientDemand> toolsmithReadyRecipient =
+                    findToolsmithPickaxeRecipeReadyRecipient(world, sourceInventory, sourceStack, materialType, rankedRecipients);
+            if (toolsmithReadyRecipient.isPresent()) {
+                return toolsmithReadyRecipient.get();
+            }
         }
 
         return rankedRecipients.getFirst();
@@ -270,6 +278,11 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             int hoeBatch = determineHoeBatchTransferAmount(world, sourceInventory, materialType, recipient);
             if (hoeBatch > 0) {
                 return hoeBatch;
+            }
+
+            int toolsmithBatch = determineToolsmithPickaxeBatchTransferAmount(world, sourceInventory, materialType, recipient);
+            if (toolsmithBatch > 0) {
+                return toolsmithBatch;
             }
         }
 
@@ -342,8 +355,92 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         return 0;
     }
 
+    private Optional<LumberjackDemandPlanner.RecipientDemand> findToolsmithPickaxeRecipeReadyRecipient(ServerWorld world,
+                                                                                                         Inventory sourceInventory,
+                                                                                                         ItemStack sourceStack,
+                                                                                                         LumberjackDemandPlanner.MaterialType materialType,
+                                                                                                         List<LumberjackDemandPlanner.RecipientDemand> rankedRecipients) {
+        int sourceMaterialCount = sourceStack.getCount();
+        for (LumberjackDemandPlanner.RecipientDemand recipient : rankedRecipients) {
+            if (!isToolsmithRecipient(recipient)) {
+                continue;
+            }
+            int transfer = determineToolsmithPickaxeBatchTransferAmount(world, sourceInventory, materialType, recipient);
+            if (transfer <= 0 || sourceMaterialCount < transfer) {
+                continue;
+            }
+            return Optional.of(recipient);
+        }
+        return Optional.empty();
+    }
+
+    private int determineToolsmithPickaxeBatchTransferAmount(ServerWorld world,
+                                                             Inventory sourceInventory,
+                                                             LumberjackDemandPlanner.MaterialType materialType,
+                                                             LumberjackDemandPlanner.RecipientDemand recipient) {
+        if (!isToolsmithRecipient(recipient)) {
+            return 0;
+        }
+
+        Inventory recipientInventory = getChestInventory(world, recipient.record().chestPos());
+        if (recipientInventory == null) {
+            return 0;
+        }
+
+        int recipientPlanks = countMaterialInInventory(recipientInventory, LumberjackDemandPlanner.MaterialType.PLANKS);
+        int recipientSticks = countMaterialInInventory(recipientInventory, LumberjackDemandPlanner.MaterialType.STICK);
+        int sourcePlanks = countMaterialInInventory(sourceInventory, LumberjackDemandPlanner.MaterialType.PLANKS);
+        int sourceSticks = countMaterialInInventory(sourceInventory, LumberjackDemandPlanner.MaterialType.STICK);
+
+        return determineToolsmithPickaxeBatchTransferAmountForCounts(
+                materialType,
+                recipientPlanks,
+                recipientSticks,
+                sourcePlanks,
+                sourceSticks
+        );
+    }
+
+    static int determineToolsmithPickaxeBatchTransferAmountForCounts(LumberjackDemandPlanner.MaterialType materialType,
+                                                                      int recipientPlanks,
+                                                                      int recipientSticks,
+                                                                      int sourcePlanks,
+                                                                      int sourceSticks) {
+        int missingPlanks = Math.max(0, WOOD_PICKAXE_PLANKS - recipientPlanks);
+        int missingSticks = Math.max(0, WOOD_PICKAXE_STICKS - recipientSticks);
+        if (missingPlanks == 0 && missingSticks == 0) {
+            return 0;
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS) {
+            if (missingPlanks <= 0 || sourcePlanks <= 0) {
+                return 0;
+            }
+            if (recipientSticks >= WOOD_PICKAXE_STICKS || sourceSticks >= missingSticks) {
+                return Math.min(sourcePlanks, missingPlanks);
+            }
+            return 0;
+        }
+
+        if (materialType == LumberjackDemandPlanner.MaterialType.STICK) {
+            if (missingSticks <= 0 || sourceSticks <= 0) {
+                return 0;
+            }
+            if (recipientPlanks >= WOOD_PICKAXE_PLANKS || sourcePlanks >= missingPlanks) {
+                return Math.min(sourceSticks, missingSticks);
+            }
+            return 0;
+        }
+
+        return 0;
+    }
+
     private boolean isFarmerRecipient(LumberjackDemandPlanner.RecipientDemand recipient) {
         return recipient.record().recipient().getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.FARMER;
+    }
+
+    private boolean isToolsmithRecipient(LumberjackDemandPlanner.RecipientDemand recipient) {
+        return recipient.record().recipient().getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.TOOLSMITH;
     }
 
     private int countMaterialInInventory(Inventory inventory, LumberjackDemandPlanner.MaterialType materialType) {
