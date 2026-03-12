@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
@@ -87,17 +88,31 @@ public final class RecipeDemandIndex {
             if (!outputFilter.test(output)) {
                 continue;
             }
-            for (Ingredient ingredient : recipe.getIngredients()) {
-                if (ingredient.isEmpty()) {
-                    continue;
-                }
-                for (DemandMaterial material : DemandMaterial.values()) {
-                    if (ingredient.test(material.probe())) {
-                        add(aggregate, material, profession, 1, defaultCap, defaultWeight, false);
-                    }
+            EnumSet<DemandMaterial> recipeMaterials = collectMaterialsForRecipe(recipe.getIngredients());
+            int recipeStrength = strengthForOutput(output);
+            for (DemandMaterial material : recipeMaterials) {
+                add(aggregate, material, profession, recipeStrength, defaultCap, defaultWeight, false);
+            }
+        }
+    }
+
+    static EnumSet<DemandMaterial> collectMaterialsForRecipe(List<Ingredient> ingredients) {
+        EnumSet<DemandMaterial> recipeMaterials = EnumSet.noneOf(DemandMaterial.class);
+        for (Ingredient ingredient : ingredients) {
+            if (ingredient.isEmpty()) {
+                continue;
+            }
+            for (DemandMaterial material : DemandMaterial.values()) {
+                if (ingredient.test(material.probe())) {
+                    recipeMaterials.add(material);
                 }
             }
         }
+        return recipeMaterials;
+    }
+
+    static int strengthForOutput(ItemStack output) {
+        return Math.max(1, Math.min(output.getCount(), 4));
     }
 
     private static boolean isLibrarianOutput(ItemStack stack) {
