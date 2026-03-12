@@ -53,4 +53,26 @@ class LumberjackGuardDepositLogsGoalTest {
         assertEquals(0, plankTransfer);
         assertEquals(0, stickTransfer);
     }
+
+    @Test
+    void resolveTransferAmount_returnsZeroWhenRequestedAmountIsZero() {
+        int transfer = LumberjackGuardDepositLogsGoal.resolveTransferAmount(0, 16);
+
+        assertEquals(0, transfer);
+    }
+
+    @Test
+    void resolveTransferAmount_returnsZeroWhenRequestedAmountIsNegative() {
+        int transfer = LumberjackGuardDepositLogsGoal.resolveTransferAmount(-2, 16);
+
+        assertEquals(0, transfer);
+    }
+
+    @Test
+    void resolveTransferAmount_clampsOnlyToSourceStackCount() {
+        int transfer = LumberjackGuardDepositLogsGoal.resolveTransferAmount(64, 5);
+
+        assertEquals(5, transfer);
+    }
+
 }

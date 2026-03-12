@@ -169,7 +169,10 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return;
         }
 
-        int transferAmount = Math.min(sourceStack.getCount(), Math.max(1, selected.transferAmount()));
+        int transferAmount = resolveTransferAmount(selected.transferAmount(), sourceStack.getCount());
+        if (transferAmount <= 0) {
+            return;
+        }
         ItemStack moved = sourceStack.split(transferAmount);
         sourceInventory.setStack(selected.slot(), sourceStack);
         sourceInventory.markDirty();
@@ -433,6 +436,13 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
 
         return 0;
+    }
+
+    static int resolveTransferAmount(int requestedTransferAmount, int sourceStackCount) {
+        if (requestedTransferAmount <= 0 || sourceStackCount <= 0) {
+            return 0;
+        }
+        return Math.min(requestedTransferAmount, sourceStackCount);
     }
 
     private boolean isFarmerRecipient(LumberjackDemandPlanner.RecipientDemand recipient) {
