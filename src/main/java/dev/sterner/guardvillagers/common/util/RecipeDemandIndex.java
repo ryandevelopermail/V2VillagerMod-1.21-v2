@@ -26,6 +26,8 @@ public final class RecipeDemandIndex {
     private static final Logger LOGGER = LoggerFactory.getLogger(RecipeDemandIndex.class);
     private static final Map<String, RouteIndex> CACHE = new HashMap<>();
     private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 3;
+    private static final int MASON_PLANK_COMPONENT_CAP = 3;
+    private static final int MASON_STICK_COMPONENT_CAP = 2;
 
     private RecipeDemandIndex() {
     }
@@ -61,6 +63,8 @@ public final class RecipeDemandIndex {
         add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, 24, 1.0D, false);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false);
         add(aggregate, DemandMaterial.LOGS, VillagerProfession.BUTCHER, 1, 32, 1.0D, false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 0.4D, false);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 0.4D, false);
 
         // dynamic-goal recipe scans (RecipeManager-backed goals)
         scanDynamic(world, aggregate, VillagerProfession.LIBRARIAN, RecipeDemandIndex::isLibrarianOutput, 48, 1.8D);
