@@ -22,6 +22,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.village.VillagerProfession;
 
 import java.util.Comparator;
 import java.util.ArrayList;
@@ -568,7 +569,8 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean hasPreCraftingTableMaterialReadiness(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
-        if (villager.getVillagerData().getProfession() != net.minecraft.village.VillagerProfession.FARMER) {
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        if (profession != VillagerProfession.FARMER && profession != VillagerProfession.MASON) {
             return true;
         }
 
@@ -592,6 +594,10 @@ public final class LumberjackChestTriggerController {
         int iron = countMatching(recipientInventory, stack -> stack.isOf(Items.IRON_INGOT));
         int gold = countMatching(recipientInventory, stack -> stack.isOf(Items.GOLD_INGOT));
         int diamonds = countMatching(recipientInventory, stack -> stack.isOf(Items.DIAMOND));
+
+        if (profession == VillagerProfession.MASON) {
+            return planks >= 3 || cobble >= 3 || iron >= 3 || gold >= 3 || diamonds >= 3;
+        }
 
         return planks >= 2 || cobble >= 2 || iron >= 2 || gold >= 2 || diamonds >= 2;
     }
