@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -11,6 +12,7 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
@@ -216,6 +218,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
                 this.pendingExtractCount = Math.max(1, stack.getCount());
                 this.pendingTargetChestPos = pendingCoalBatchMode ? pendingCoalTargets.getFirst() : selectedRecipient.chestPos();
             } else {
+                if (type == DistributionType.COBBLESTONE) {
+                    this.pendingExtractCount = Math.min(stack.getCount(), 8);
+                }
                 this.pendingTargetChestPos = selectedRecipient.chestPos();
             }
             return true;
@@ -442,6 +447,10 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return DistributionType.SEEDS;
         }
 
+        if (stack.isOf(Items.COBBLESTONE) || stack.isOf(Items.COBBLED_DEEPSLATE)) {
+            return DistributionType.COBBLESTONE;
+        }
+
         return DistributionType.NONE;
     }
 
@@ -466,6 +475,12 @@ public class MasonGuardChestDistributionGoal extends Goal {
             }
             case ORE -> normalizeRecipients(findRecipients(world, VillagerProfession.ARMORER, Blocks.BLAST_FURNACE));
             case SEEDS -> normalizeRecipients(findRecipients(world, VillagerProfession.FARMER, Blocks.COMPOSTER));
+            case COBBLESTONE -> {
+                Block lumberjackJobBlock = ProfessionDefinitions.get(VillagerProfession.NONE)
+                        .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst())
+                        .orElse(Blocks.CRAFTING_TABLE);
+                yield normalizeRecipients(findRecipients(world, VillagerProfession.NONE, lumberjackJobBlock));
+            }
             default -> List.of();
         };
     }
@@ -633,7 +648,8 @@ public class MasonGuardChestDistributionGoal extends Goal {
         NONE,
         COAL,
         ORE,
-        SEEDS
+        SEEDS,
+        COBBLESTONE
     }
 
     private enum Stage {
