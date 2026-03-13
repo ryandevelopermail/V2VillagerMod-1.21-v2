@@ -521,6 +521,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         this.guard.setChopCountdownLastLogStep(step);
+
+        if (step == 2) {
+            LumberjackGuardDepositLogsGoal.runOpportunisticDemandDistribution(world, this.guard);
+        }
+
         long remaining = this.guard.getNextChopTick() - world.getTime();
         LOGGER.info("Lumberjack Guard {} chop countdown {}% ({} ticks remaining)",
                 this.guard.getUuidAsString(),
