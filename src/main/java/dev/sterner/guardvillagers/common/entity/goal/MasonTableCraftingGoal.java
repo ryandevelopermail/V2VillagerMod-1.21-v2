@@ -10,6 +10,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -336,7 +337,22 @@ public class MasonTableCraftingGoal extends Goal {
     private enum Recipe {
         STONECUTTER(new ItemStack(Items.STONECUTTER),
                 new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 1),
-                new IngredientRequirement(stack -> stack.isOf(Items.STONE), 3));
+                new IngredientRequirement(stack -> stack.isOf(Items.STONE), 3)),
+        WOODEN_PICKAXE(new ItemStack(Items.WOODEN_PICKAXE),
+                new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 3),
+                new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        STONE_PICKAXE(new ItemStack(Items.STONE_PICKAXE),
+                new IngredientRequirement(stack -> stack.isOf(Items.COBBLESTONE), 3),
+                new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        IRON_PICKAXE(new ItemStack(Items.IRON_PICKAXE),
+                new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 3),
+                new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        GOLDEN_PICKAXE(new ItemStack(Items.GOLDEN_PICKAXE),
+                new IngredientRequirement(stack -> stack.isOf(Items.GOLD_INGOT), 3),
+                new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2)),
+        DIAMOND_PICKAXE(new ItemStack(Items.DIAMOND_PICKAXE),
+                new IngredientRequirement(stack -> stack.isOf(Items.DIAMOND), 3),
+                new IngredientRequirement(stack -> stack.isOf(Items.STICK), 2));
 
         private final ItemStack output;
         private final IngredientRequirement[] requirements;
