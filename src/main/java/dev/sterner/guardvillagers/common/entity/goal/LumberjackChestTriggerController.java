@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.DistributionInventoryAccess;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.behavior.LumberjackChestTriggerBehavior;
@@ -409,6 +410,10 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
+            if (!hasPreCraftingTableMaterialReadiness(context.world(), villager, jobPos)) {
+                continue;
+            }
+
             ItemStack tableStack = takeOneByItem(context, Items.CRAFTING_TABLE);
             if (tableStack.isEmpty()) {
                 if (!consumeMatching(context, stack -> stack.isIn(ItemTags.PLANKS), 4)) {
@@ -516,7 +521,10 @@ public final class LumberjackChestTriggerController {
             placedTick = V2_CHEST_PLACED_TICKS_BY_JOB_SITE.get(jobPos);
         }
         if (placedTick == null) {
-            return true;
+            long now = world.getTime();
+            V2_CHEST_PLACED_TICKS_BY_VILLAGER.put(villagerId, now);
+            V2_CHEST_PLACED_TICKS_BY_JOB_SITE.put(jobPos.toImmutable(), now);
+            return false;
         }
         return world.getTime() - placedTick >= V2_AFTER_CHEST_DELAY_TICKS;
     }
@@ -557,6 +565,35 @@ public final class LumberjackChestTriggerController {
             return null;
         }
         return findPlacementNear(world, jobPos, range, pairedChestPos);
+    }
+
+    private static boolean hasPreCraftingTableMaterialReadiness(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        if (villager.getVillagerData().getProfession() != net.minecraft.village.VillagerProfession.FARMER) {
+            return true;
+        }
+
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        if (chestPos == null) {
+            return false;
+        }
+
+        Inventory recipientInventory = DistributionInventoryAccess.getChestInventory(world, chestPos).orElse(null);
+        if (recipientInventory == null) {
+            return false;
+        }
+
+        int sticks = countMatching(recipientInventory, stack -> stack.isOf(Items.STICK));
+        if (sticks < 2) {
+            return false;
+        }
+
+        int planks = countMatching(recipientInventory, stack -> stack.isIn(ItemTags.PLANKS));
+        int cobble = countMatching(recipientInventory, stack -> stack.isOf(Items.COBBLESTONE));
+        int iron = countMatching(recipientInventory, stack -> stack.isOf(Items.IRON_INGOT));
+        int gold = countMatching(recipientInventory, stack -> stack.isOf(Items.GOLD_INGOT));
+        int diamonds = countMatching(recipientInventory, stack -> stack.isOf(Items.DIAMOND));
+
+        return planks >= 2 || cobble >= 2 || iron >= 2 || gold >= 2 || diamonds >= 2;
     }
 
     private static BlockPos findPlacementNear(ServerWorld world, BlockPos center, double range, BlockPos secondaryAnchor) {

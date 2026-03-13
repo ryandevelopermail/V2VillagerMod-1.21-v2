@@ -48,6 +48,21 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         this.setControls(EnumSet.of(Control.MOVE));
     }
 
+    public static void runOpportunisticDemandDistribution(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) {
+            return;
+        }
+
+        LumberjackGuardDepositLogsGoal helper = new LumberjackGuardDepositLogsGoal(guard);
+        Inventory chestInventory = helper.getChestInventory(world, chestPos);
+        if (chestInventory == null) {
+            return;
+        }
+
+        helper.tryDemandDrivenDistribution(world, chestInventory, chestPos);
+    }
+
     @Override
     public boolean canStart() {
         return this.guard.getWorld() instanceof ServerWorld
