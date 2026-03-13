@@ -94,4 +94,10 @@ class RecipeDemandIndexTest {
         assertEquals(24, stickCap);
     }
 
+    @Test
+    void resolveDynamicCap_leavesMasonDemandCapsUnchanged() {
+        assertEquals(3, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.MASON, RecipeDemandIndex.DemandMaterial.PLANKS, 3));
+        assertEquals(2, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.MASON, RecipeDemandIndex.DemandMaterial.STICK, 2));
+    }
+
 }

@@ -10,6 +10,19 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class LumberjackGuardDepositLogsGoalTest {
 
     @Test
+    void determinePickaxeBatchTransferAmount_sticksWhenTwoMissing() {
+        int transfer = LumberjackGuardDepositLogsGoal.determinePickaxeBatchTransferAmountForCounts(
+                LumberjackDemandPlanner.MaterialType.STICK,
+                3,
+                0,
+                0,
+                2
+        );
+
+        assertEquals(2, transfer);
+    }
+
+    @Test
     void determineToolsmithBatchTransferAmount_sticksWhenTwoMissing() {
         int transfer = LumberjackGuardDepositLogsGoal.determineToolsmithPickaxeBatchTransferAmountForCounts(
                 LumberjackDemandPlanner.MaterialType.STICK,
