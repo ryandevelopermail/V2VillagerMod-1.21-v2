@@ -23,6 +23,8 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
 import java.util.ArrayList;
@@ -34,6 +36,7 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 public final class LumberjackChestTriggerController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackChestTriggerController.class);
     private static final long EVALUATION_INTERVAL_TICKS = 100L;
     private static final long RULE_COOLDOWN_TICKS = 40L;
     private static final long V2_AFTER_CHEST_DELAY_TICKS = 40L;
@@ -435,46 +438,280 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
-        if (countByItem(context, Items.CRAFTING_TABLE) <= 0 && countMatching(context, stack -> stack.isIn(ItemTags.PLANKS)) < 4) {
+        Inventory pairedChestInventory = resolveChestInventory(context.world(), context.guard());
+        Inventory contextInventory = context.chestInventory() == pairedChestInventory ? null : context.chestInventory();
+        List<ItemStack> contextBuffer = context.guard().getGatheredStackBuffer();
+
+        int availableTables = countMatching(pairedChestInventory, stack -> stack.isOf(Items.CRAFTING_TABLE))
+                + countMatching(contextInventory, stack -> stack.isOf(Items.CRAFTING_TABLE))
+                + countMatching(contextBuffer, stack -> stack.isOf(Items.CRAFTING_TABLE));
+        int availablePlanks = countMatching(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(contextInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(contextBuffer, stack -> stack.isIn(ItemTags.PLANKS));
+        if (availableTables <= 0 && availablePlanks < 4) {
+            LOGGER.debug("Skip V2 crafting table placement: no materials available in paired chest/context");
             return false;
         }
 
         for (VillagerEntity villager : collectNearbyVillagers(context.world(), context.guard())) {
             if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager)) {
+                LOGGER.debug("Skip V2 crafting table placement: villager={} not eligible", villager.getUuid());
                 continue;
             }
 
             BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
             if (jobPos == null) {
+                LOGGER.debug("Skip V2 crafting table placement: villager={} not eligible (no job site)", villager.getUuid());
                 continue;
             }
 
             BlockPos placePos = findPlacementNearJobAndPairedChest(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
             if (placePos == null) {
+                LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} no place pos",
+                        villager.getUuid(), jobPos.toShortString());
                 continue;
             }
 
             if (!hasPreCraftingTableMaterialReadiness(context.world(), villager, jobPos)) {
+                LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} not eligible (preconditions)",
+                        villager.getUuid(), jobPos.toShortString());
                 continue;
             }
 
-            ItemStack tableStack = takeOneByItem(context, Items.CRAFTING_TABLE);
-            if (tableStack.isEmpty()) {
-                if (!consumeMatching(context, stack -> stack.isIn(ItemTags.PLANKS), 4)) {
-                    continue;
-                }
-                tableStack = new ItemStack(Items.CRAFTING_TABLE);
+            PlacementMaterialUse materialUse = tryConsumeCraftingTableMaterials(pairedChestInventory, contextInventory, contextBuffer);
+            if (materialUse == null) {
+                LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} placePos={} no materials",
+                        villager.getUuid(), jobPos.toShortString(), placePos.toShortString());
+                continue;
             }
 
             if (context.world().setBlockState(placePos, Blocks.CRAFTING_TABLE.getDefaultState())) {
                 JobBlockPairingHelper.handleCraftingTablePlacement(context.world(), placePos);
+                LOGGER.debug("Placed V2 crafting table: villager={} jobPos={} placePos={} source={}",
+                        villager.getUuid(), jobPos.toShortString(), placePos.toShortString(), materialUse.sourceLabel());
                 return true;
             }
 
-            addToInventoryOrBuffer(context, tableStack);
+            restorePlacementMaterials(context, materialUse);
+            LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} placePos={} placement failed source={}",
+                    villager.getUuid(), jobPos.toShortString(), placePos.toShortString(), materialUse.sourceLabel());
         }
 
         return false;
+    }
+
+    private static PlacementMaterialUse tryConsumeCraftingTableMaterials(Inventory pairedChestInventory,
+                                                                          Inventory contextInventory,
+                                                                          List<ItemStack> contextBuffer) {
+        ItemStack fromPairedChest = takeOneFromInventory(pairedChestInventory, stack -> stack.isOf(Items.CRAFTING_TABLE));
+        if (!fromPairedChest.isEmpty()) {
+            return PlacementMaterialUse.fromTable(MaterialSource.PAIRED_CHEST_TABLE, fromPairedChest);
+        }
+
+        ItemStack fromContextInventory = takeOneFromInventory(contextInventory, stack -> stack.isOf(Items.CRAFTING_TABLE));
+        if (!fromContextInventory.isEmpty()) {
+            return PlacementMaterialUse.fromTable(MaterialSource.CONTEXT_INVENTORY_TABLE, fromContextInventory);
+        }
+
+        ItemStack fromContextBuffer = takeOneFromBuffer(contextBuffer, stack -> stack.isOf(Items.CRAFTING_TABLE));
+        if (!fromContextBuffer.isEmpty()) {
+            return PlacementMaterialUse.fromTable(MaterialSource.CONTEXT_BUFFER_TABLE, fromContextBuffer);
+        }
+
+        List<ItemStack> pairedChestPlanks = consumeExactPlanksFromInventory(pairedChestInventory, 4);
+        if (!pairedChestPlanks.isEmpty()) {
+            if (countTotalItems(pairedChestPlanks) >= 4) {
+                return PlacementMaterialUse.fromPlanks(MaterialSource.PAIRED_CHEST_PLANKS, pairedChestPlanks);
+            }
+            addStacksBackToInventory(pairedChestInventory, pairedChestPlanks);
+        }
+
+        List<ItemStack> contextInventoryPlanks = consumeExactPlanksFromInventory(contextInventory, 4);
+        if (!contextInventoryPlanks.isEmpty()) {
+            if (countTotalItems(contextInventoryPlanks) >= 4) {
+                return PlacementMaterialUse.fromPlanks(MaterialSource.CONTEXT_INVENTORY_PLANKS, contextInventoryPlanks);
+            }
+            addStacksBackToInventory(contextInventory, contextInventoryPlanks);
+        }
+
+        List<ItemStack> contextBufferPlanks = consumeExactPlanksFromBuffer(contextBuffer, 4);
+        if (!contextBufferPlanks.isEmpty()) {
+            if (countTotalItems(contextBufferPlanks) >= 4) {
+                return PlacementMaterialUse.fromPlanks(MaterialSource.CONTEXT_BUFFER_PLANKS, contextBufferPlanks);
+            }
+            addStacksBackToBuffer(contextBuffer, contextBufferPlanks);
+        }
+
+        return null;
+    }
+
+    private static void restorePlacementMaterials(TriggerContext context, PlacementMaterialUse materialUse) {
+        if (materialUse == null) {
+            return;
+        }
+
+        if (!materialUse.consumedTable().isEmpty()) {
+            switch (materialUse.source()) {
+                case PAIRED_CHEST_TABLE, CONTEXT_INVENTORY_TABLE -> addToSpecificInventory(resolveSourceInventory(context, materialUse.source()), materialUse.consumedTable().copy());
+                case CONTEXT_BUFFER_TABLE -> addToBuffer(context.guard(), materialUse.consumedTable().copy());
+                default -> { }
+            }
+            return;
+        }
+
+        if (materialUse.consumedPlanks().isEmpty()) {
+            return;
+        }
+
+        switch (materialUse.source()) {
+            case PAIRED_CHEST_PLANKS, CONTEXT_INVENTORY_PLANKS -> addStacksBackToInventory(resolveSourceInventory(context, materialUse.source()), materialUse.consumedPlanks());
+            case CONTEXT_BUFFER_PLANKS -> addStacksBackToBuffer(context.guard().getGatheredStackBuffer(), materialUse.consumedPlanks());
+            default -> { }
+        }
+    }
+
+    private static Inventory resolveSourceInventory(TriggerContext context, MaterialSource source) {
+        return switch (source) {
+            case PAIRED_CHEST_TABLE, PAIRED_CHEST_PLANKS -> resolveChestInventory(context.world(), context.guard());
+            case CONTEXT_INVENTORY_TABLE, CONTEXT_INVENTORY_PLANKS -> context.chestInventory();
+            default -> null;
+        };
+    }
+
+    private static List<ItemStack> consumeExactPlanksFromInventory(Inventory inventory, int amount) {
+        List<ItemStack> consumed = new ArrayList<>();
+        if (inventory == null || amount <= 0) {
+            return consumed;
+        }
+        int remaining = amount;
+        for (int slot = 0; slot < inventory.size() && remaining > 0; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isIn(ItemTags.PLANKS)) {
+                continue;
+            }
+            int moved = Math.min(stack.getCount(), remaining);
+            ItemStack extracted = stack.copyWithCount(moved);
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            consumed.add(extracted);
+            remaining -= moved;
+        }
+        if (!consumed.isEmpty()) {
+            inventory.markDirty();
+        }
+        return consumed;
+    }
+
+    private static List<ItemStack> consumeExactPlanksFromBuffer(List<ItemStack> buffer, int amount) {
+        List<ItemStack> consumed = new ArrayList<>();
+        if (amount <= 0) {
+            return consumed;
+        }
+        int remaining = amount;
+        for (int i = 0; i < buffer.size() && remaining > 0; i++) {
+            ItemStack stack = buffer.get(i);
+            if (stack.isEmpty() || !stack.isIn(ItemTags.PLANKS)) {
+                continue;
+            }
+            int moved = Math.min(stack.getCount(), remaining);
+            ItemStack extracted = stack.copyWithCount(moved);
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                buffer.set(i, ItemStack.EMPTY);
+            }
+            consumed.add(extracted);
+            remaining -= moved;
+        }
+        buffer.removeIf(ItemStack::isEmpty);
+        return consumed;
+    }
+
+    private static int countTotalItems(List<ItemStack> stacks) {
+        int total = 0;
+        for (ItemStack stack : stacks) {
+            total += stack.getCount();
+        }
+        return total;
+    }
+
+    private static void addStacksBackToInventory(Inventory inventory, List<ItemStack> stacks) {
+        if (inventory == null) {
+            return;
+        }
+        for (ItemStack stack : stacks) {
+            addToSpecificInventory(inventory, stack.copy());
+        }
+    }
+
+    private static void addStacksBackToBuffer(List<ItemStack> buffer, List<ItemStack> stacks) {
+        for (ItemStack stack : stacks) {
+            addToSpecificBuffer(buffer, stack.copy());
+        }
+    }
+
+    private static void addToSpecificInventory(Inventory inventory, ItemStack incoming) {
+        if (inventory == null || incoming.isEmpty()) {
+            return;
+        }
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                inventory.setStack(slot, incoming.copy());
+                inventory.markDirty();
+                return;
+            }
+            if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
+                int move = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
+                existing.increment(move);
+                incoming.decrement(move);
+                if (incoming.isEmpty()) {
+                    inventory.markDirty();
+                    return;
+                }
+            }
+        }
+    }
+
+    private static void addToSpecificBuffer(List<ItemStack> buffer, ItemStack incoming) {
+        if (incoming.isEmpty()) {
+            return;
+        }
+        for (ItemStack existing : buffer) {
+            if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
+                int move = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
+                existing.increment(move);
+                incoming.decrement(move);
+                if (incoming.isEmpty()) {
+                    return;
+                }
+            }
+        }
+        buffer.add(incoming);
+    }
+
+    private enum MaterialSource {
+        PAIRED_CHEST_TABLE,
+        CONTEXT_INVENTORY_TABLE,
+        CONTEXT_BUFFER_TABLE,
+        PAIRED_CHEST_PLANKS,
+        CONTEXT_INVENTORY_PLANKS,
+        CONTEXT_BUFFER_PLANKS
+    }
+
+    private record PlacementMaterialUse(MaterialSource source, ItemStack consumedTable, List<ItemStack> consumedPlanks) {
+        private static PlacementMaterialUse fromTable(MaterialSource source, ItemStack consumedTable) {
+            return new PlacementMaterialUse(source, consumedTable, List.of());
+        }
+
+        private static PlacementMaterialUse fromPlanks(MaterialSource source, List<ItemStack> consumedPlanks) {
+            return new PlacementMaterialUse(source, ItemStack.EMPTY, consumedPlanks);
+        }
+
+        private String sourceLabel() {
+            return source.name().toLowerCase();
+        }
     }
 
     private static ArrayList<VillagerEntity> collectNearbyVillagers(ServerWorld world, LumberjackGuardEntity guard) {
