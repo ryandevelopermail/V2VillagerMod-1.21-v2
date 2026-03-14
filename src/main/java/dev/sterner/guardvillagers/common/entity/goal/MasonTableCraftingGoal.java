@@ -193,11 +193,11 @@ public class MasonTableCraftingGoal extends Goal {
             return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
         }
 
-        List<Recipe> alternatives = sameTierRecipes.stream()
+        List<Recipe> alternatives = craftableRecipes.stream()
                 .filter(recipe -> recipe.output.getItem() != lastCraftedOutputItem)
                 .toList();
         if (alternatives.isEmpty()) {
-            return sameTierRecipes.get(0);
+            return craftableRecipes.get(0);
         }
 
         return alternatives.get(0);
