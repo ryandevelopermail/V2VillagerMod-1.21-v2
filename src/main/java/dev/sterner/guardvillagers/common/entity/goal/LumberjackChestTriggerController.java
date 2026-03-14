@@ -63,7 +63,7 @@ public final class LumberjackChestTriggerController {
     private LumberjackChestTriggerController() {
     }
 
-    private enum UpgradeStage {
+    enum UpgradeStage {
         UNPAIRED,
         CHEST_PAIRED,
         TABLE_PAIRED
@@ -780,13 +780,20 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
-        if (getUpgradeStage(villager.getUuid(), jobPos) != UpgradeStage.CHEST_PAIRED) {
-            return false;
-        }
+        UpgradeStage stage = getUpgradeStage(villager.getUuid(), jobPos);
 
         BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
         if (chestPos == null) {
             clearUpgradeState(villager.getUuid(), jobPos);
+            return false;
+        }
+
+        if (stage == UpgradeStage.UNPAIRED) {
+            hydrateUpgradeStageToChestPaired(world.getTime(), villager.getUuid(), jobPos);
+            stage = UpgradeStage.CHEST_PAIRED;
+        }
+
+        if (stage != UpgradeStage.CHEST_PAIRED) {
             return false;
         }
 
@@ -800,6 +807,21 @@ public final class LumberjackChestTriggerController {
         }
 
         return true;
+    }
+
+    static boolean isEligibleV2MissingCraftingTableForStage(UpgradeStage stage,
+                                                             boolean hasNearbyChest,
+                                                             boolean hasNearbyCraftingTable,
+                                                             boolean requireDelay,
+                                                             long now,
+                                                             long chestPairedTick) {
+        if (!hasNearbyChest) {
+            return false;
+        }
+        if (hasNearbyCraftingTable || stage != UpgradeStage.CHEST_PAIRED) {
+            return false;
+        }
+        return !requireDelay || now - chestPairedTick >= V2_AFTER_CHEST_DELAY_TICKS;
     }
 
     private static void cleanupInvalidV2ChestDelayEntries(ServerWorld world, LumberjackGuardEntity guard) {
@@ -831,8 +853,11 @@ public final class LumberjackChestTriggerController {
     }
 
     private static void transitionUpgradeStageToChestPaired(ServerWorld world, UUID villagerId, BlockPos jobPos) {
+        hydrateUpgradeStageToChestPaired(world.getTime(), villagerId, jobPos);
+    }
+
+    private static void hydrateUpgradeStageToChestPaired(long now, UUID villagerId, BlockPos jobPos) {
         BlockPos immutableJobPos = jobPos.toImmutable();
-        long now = world.getTime();
         UPGRADE_STAGE_BY_VILLAGER.put(villagerId, UpgradeStage.CHEST_PAIRED);
         UPGRADE_STAGE_BY_JOB_SITE.put(immutableJobPos, UpgradeStage.CHEST_PAIRED);
         CHEST_PAIRED_TICKS_BY_VILLAGER.put(villagerId, now);
