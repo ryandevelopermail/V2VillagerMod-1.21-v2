@@ -104,6 +104,29 @@ class RecipeDemandIndexTest {
         assertEquals(2, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.MASON, RecipeDemandIndex.DemandMaterial.STICK, 2));
     }
 
+
+    @Test
+    void resolveFixedCap_limitsButcherLogDemandForSmokerFuelPolicy() {
+        int butcherLogs = RecipeDemandIndex.resolveFixedCap(
+                RecipeDemandIndex.DemandMaterial.LOGS,
+                VillagerProfession.BUTCHER,
+                32
+        );
+
+        assertEquals(1, butcherLogs);
+    }
+
+    @Test
+    void resolveFixedCap_keepsButcherCharcoalRoutingUnchanged() {
+        int butcherCharcoal = RecipeDemandIndex.resolveFixedCap(
+                RecipeDemandIndex.DemandMaterial.CHARCOAL,
+                VillagerProfession.BUTCHER,
+                16
+        );
+
+        assertEquals(16, butcherCharcoal);
+    }
+
     @Test
     void isToolCraftingOutput_detectsToolAndFishingOutputs() {
         assertTrue(RecipeDemandIndex.isToolCraftingOutput(new ItemStack(Items.WOODEN_AXE)));

@@ -14,6 +14,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -36,6 +37,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final int RECOVERY_CHEST_PLANK_REQUIREMENT = 8;
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
+    static final int BUTCHER_LOG_TRANSFER_CLAMP = 1;
 
     private final LumberjackGuardEntity guard;
     private long nextDistributionAttemptTick;
@@ -350,14 +352,31 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return Math.max(1, sourceStack.getCount() / divisor);
         }
 
+        int plannedTransferAmount;
         if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS
                 || materialType == LumberjackDemandPlanner.MaterialType.STICK
                 || materialType == LumberjackDemandPlanner.MaterialType.LOGS) {
             int maxDeficitBound = Math.max(1, Math.min(recipient.deficit(), 8));
-            return Math.min(sourceStack.getCount(), maxDeficitBound);
+            plannedTransferAmount = Math.min(sourceStack.getCount(), maxDeficitBound);
+        } else {
+            plannedTransferAmount = 1;
         }
 
-        return 1;
+        return clampTransferForRecipient(
+                materialType,
+                recipient.record().recipient().getVillagerData().getProfession(),
+                plannedTransferAmount);
+    }
+
+
+    static int clampTransferForRecipient(LumberjackDemandPlanner.MaterialType materialType,
+                                         VillagerProfession profession,
+                                         int transferAmount) {
+        if (materialType == LumberjackDemandPlanner.MaterialType.LOGS
+                && profession == VillagerProfession.BUTCHER) {
+            return Math.min(transferAmount, BUTCHER_LOG_TRANSFER_CLAMP);
+        }
+        return transferAmount;
     }
 
     static int resolveTransferAmount(int requestedTransferAmount, int sourceStackCount) {
