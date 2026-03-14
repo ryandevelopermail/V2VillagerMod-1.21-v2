@@ -140,6 +140,49 @@ public final class LumberjackChestTriggerController {
         return null;
     }
 
+    public static int countEligibleV1VillagersMissingPairedChest(ServerWorld world, LumberjackGuardEntity guard) {
+        int count = 0;
+        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+            if (!isEligibleV1Villager(world, villager)) {
+                continue;
+            }
+
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null) {
+                continue;
+            }
+
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public static int countEligibleV2VillagersMissingCraftingTable(ServerWorld world, LumberjackGuardEntity guard) {
+        int count = 0;
+        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+            if (isEligibleV2VillagerMissingCraftingTableQuery(world, villager)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public static boolean isEligibleV2Recipient(ServerWorld world, VillagerEntity villager) {
+        if (!isEligibleV1Villager(world, villager)) {
+            return false;
+        }
+
+        BlockPos jobPos = resolveVillagerJobSite(world, villager);
+        if (jobPos == null) {
+            return false;
+        }
+
+        return JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+                && findNearbyCraftingTable(world, jobPos) != null;
+    }
+
     private static void evaluateRules(ServerWorld world, LumberjackGuardEntity guard) {
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
         long now = world.getTime();
@@ -458,7 +501,27 @@ public final class LumberjackChestTriggerController {
         return ProfessionDefinitions.isExpectedJobBlock(villager.getVillagerData().getProfession(), world.getBlockState(jobPos));
     }
 
+    private static boolean isEligibleV2VillagerMissingCraftingTableQuery(ServerWorld world, VillagerEntity villager) {
+        if (!isEligibleV1Villager(world, villager)) {
+            return false;
+        }
+
+        BlockPos jobPos = resolveVillagerJobSite(world, villager);
+        if (jobPos == null) {
+            return false;
+        }
+
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        return chestPos != null && findNearbyCraftingTable(world, jobPos) == null;
+    }
+
     private static boolean isEligibleV2VillagerMissingCraftingTable(ServerWorld world, VillagerEntity villager) {
+        return isEligibleV2VillagerMissingCraftingTable(world, villager, true);
+    }
+
+    private static boolean isEligibleV2VillagerMissingCraftingTable(ServerWorld world,
+                                                                     VillagerEntity villager,
+                                                                     boolean requireDelay) {
         if (!isEligibleV1Villager(world, villager)) {
             clearV2ChestPlacementTick(villager.getUuid(), null);
             return false;
@@ -481,7 +544,7 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
-        if (!hasMetV2ChestDelay(world, villager.getUuid(), jobPos)) {
+        if (requireDelay && !hasMetV2ChestDelay(world, villager.getUuid(), jobPos)) {
             return false;
         }
 

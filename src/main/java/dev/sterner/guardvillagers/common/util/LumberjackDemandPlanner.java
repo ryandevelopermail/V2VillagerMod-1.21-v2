@@ -31,6 +31,53 @@ public final class LumberjackDemandPlanner {
         return new DemandSnapshot(demandByType);
     }
 
+
+    public static java.util.Set<net.minecraft.village.VillagerProfession> resolveToolMaterialDemandProfessions(ServerWorld world) {
+        RecipeDemandIndex.RouteIndex routeIndex = RecipeDemandIndex.forWorld(world);
+        java.util.Set<net.minecraft.village.VillagerProfession> professions = new java.util.HashSet<>();
+        professions.add(net.minecraft.village.VillagerProfession.FARMER);
+        professions.add(net.minecraft.village.VillagerProfession.TOOLSMITH);
+        professions.add(net.minecraft.village.VillagerProfession.FISHERMAN);
+        professions.add(net.minecraft.village.VillagerProfession.MASON);
+
+        for (DistributionRouteEngine.ProfessionRoute route : routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.STICK)) {
+            professions.add(route.profession());
+        }
+        for (DistributionRouteEngine.ProfessionRoute route : routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.PLANKS)) {
+            professions.add(route.profession());
+        }
+
+        return java.util.Set.copyOf(professions);
+    }
+
+    public static int countRecipientsUnderTargetStockForMaterials(ServerWorld world,
+                                                                   net.minecraft.entity.Entity source,
+                                                                   java.util.Set<MaterialType> materialTypes,
+                                                                   java.util.Set<net.minecraft.village.VillagerProfession> professions,
+                                                                   java.util.function.Predicate<DistributionRecipientHelper.RecipientRecord> recipientFilter) {
+        RecipeDemandIndex.RouteIndex routeIndex = RecipeDemandIndex.forWorld(world);
+        java.util.Set<java.util.UUID> underStockedRecipientIds = new java.util.HashSet<>();
+
+        for (MaterialType materialType : materialTypes) {
+            List<DistributionRouteEngine.ProfessionRoute> routes = routeIndex.routesFor(materialType.material());
+            List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRouteEngine.findEligibleRecipients(world, source, RECIPIENT_SCAN_RANGE, routes);
+            List<RecipientDemand> rankedRecipients = rankRecipients(world, recipients, materialType, routes);
+
+            for (RecipientDemand recipientDemand : rankedRecipients) {
+                net.minecraft.village.VillagerProfession profession = recipientDemand.record().recipient().getVillagerData().getProfession();
+                if (!professions.contains(profession)) {
+                    continue;
+                }
+                if (!recipientFilter.test(recipientDemand.record())) {
+                    continue;
+                }
+                underStockedRecipientIds.add(recipientDemand.record().recipient().getUuid());
+            }
+        }
+
+        return underStockedRecipientIds.size();
+    }
+
     private static List<RecipientDemand> rankRecipients(ServerWorld world,
                                                         List<DistributionRecipientHelper.RecipientRecord> recipients,
                                                         MaterialType materialType,
