@@ -35,16 +35,16 @@ public final class LumberjackDemandPlanner {
     public static java.util.Set<net.minecraft.village.VillagerProfession> resolveToolMaterialDemandProfessions(ServerWorld world) {
         RecipeDemandIndex.RouteIndex routeIndex = RecipeDemandIndex.forWorld(world);
         java.util.Set<net.minecraft.village.VillagerProfession> professions = new java.util.HashSet<>();
-        professions.add(net.minecraft.village.VillagerProfession.FARMER);
-        professions.add(net.minecraft.village.VillagerProfession.TOOLSMITH);
-        professions.add(net.minecraft.village.VillagerProfession.FISHERMAN);
-        professions.add(net.minecraft.village.VillagerProfession.MASON);
 
         for (DistributionRouteEngine.ProfessionRoute route : routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.STICK)) {
-            professions.add(route.profession());
+            if (route.toolRecipeDemandRoute()) {
+                professions.add(route.profession());
+            }
         }
         for (DistributionRouteEngine.ProfessionRoute route : routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.PLANKS)) {
-            professions.add(route.profession());
+            if (route.toolRecipeDemandRoute()) {
+                professions.add(route.profession());
+            }
         }
 
         return java.util.Set.copyOf(professions);
@@ -102,7 +102,7 @@ public final class LumberjackDemandPlanner {
 
             double chestFullness = DistributionInventoryAccess.getInventoryFullness(inventory.get());
             double weightedDeficit = deficit * route.demandWeight();
-            ranked.add(new RecipientDemand(recipient, stock, deficit, weightedDeficit, chestFullness));
+            ranked.add(new RecipientDemand(recipient, stock, deficit, weightedDeficit, chestFullness, route.toolRecipeDemandRoute()));
         }
 
         ranked.sort(Comparator
@@ -181,7 +181,7 @@ public final class LumberjackDemandPlanner {
     }
 
     public record RecipientDemand(DistributionRecipientHelper.RecipientRecord record, int currentStock, int deficit,
-                                  double weightedDeficit, double chestFullness) {
+                                  double weightedDeficit, double chestFullness, boolean toolRecipeDemandRoute) {
     }
 
     public record MaterialDemand(MaterialType materialType, int sourceStock, int recipientCount, int demandDeficit,
