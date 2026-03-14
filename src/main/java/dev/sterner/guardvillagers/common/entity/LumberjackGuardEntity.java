@@ -74,6 +74,10 @@ public class LumberjackGuardEntity extends GuardEntity {
         return this.pairedCraftingTablePos;
     }
 
+    public BlockPos getPairedJobPos() {
+        return this.pairedCraftingTablePos;
+    }
+
     public void setPairedChestPos(BlockPos pos) {
         this.pairedChestPos = pos == null ? null : pos.toImmutable();
         this.requestTriggerEvaluation();
