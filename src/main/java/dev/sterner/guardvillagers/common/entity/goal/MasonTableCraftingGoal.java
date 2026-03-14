@@ -18,6 +18,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -192,14 +193,14 @@ public class MasonTableCraftingGoal extends Goal {
             return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
         }
 
-        List<Recipe> alternatives = craftableRecipes.stream()
-                .filter(recipe -> recipe.output.getItem() != this.lastCraftedOutputItem)
+        List<Recipe> alternatives = sameTierRecipes.stream()
+                .filter(recipe -> recipe.output.getItem() != lastCraftedOutputItem)
                 .toList();
         if (alternatives.isEmpty()) {
-            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+            return sameTierRecipes.get(0);
         }
 
-        return alternatives.get(villager.getRandom().nextInt(alternatives.size()));
+        return alternatives.get(0);
     }
 
     private Recipe pickPickaxePriorityRecipe(List<Recipe> craftableRecipes) {
@@ -354,7 +355,10 @@ public class MasonTableCraftingGoal extends Goal {
     private record IngredientRequirement(Predicate<ItemStack> matcher, int count) {
     }
 
-    private enum Recipe {
+    record RecipeSelection(Recipe recipe, String priorityReason, String fallbackReason) {
+    }
+
+    enum Recipe {
         STONECUTTER(new ItemStack(Items.STONECUTTER),
                 new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 1),
                 new IngredientRequirement(stack -> stack.isOf(Items.STONE), 3)),
