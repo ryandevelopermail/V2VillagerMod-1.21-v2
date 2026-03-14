@@ -30,6 +30,7 @@ public final class RecipeDemandIndex {
     private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 3;
     private static final int MASON_PLANK_COMPONENT_CAP = 3;
     private static final int MASON_STICK_COMPONENT_CAP = 2;
+    private static final int BUTCHER_SMOKER_LOG_CAP = 1;
 
     private RecipeDemandIndex() {
     }
@@ -64,7 +65,14 @@ public final class RecipeDemandIndex {
         add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, 28, 1.0D, false, false);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, 24, 1.0D, false, false);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
-        add(aggregate, DemandMaterial.LOGS, VillagerProfession.BUTCHER, 1, 32, 1.0D, false, false);
+        add(aggregate,
+                DemandMaterial.LOGS,
+                VillagerProfession.BUTCHER,
+                1,
+                resolveFixedCap(DemandMaterial.LOGS, VillagerProfession.BUTCHER, 32),
+                1.0D,
+                false,
+                false);
         add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 0.4D, false, false);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 0.4D, false, false);
 
@@ -126,6 +134,13 @@ public final class RecipeDemandIndex {
     static int resolveDynamicCap(VillagerProfession profession, DemandMaterial material, int defaultCap) {
         if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.PLANKS) {
             return Math.min(defaultCap, TOOLSMITH_PLANK_COMPONENT_CAP);
+        }
+        return defaultCap;
+    }
+
+    static int resolveFixedCap(DemandMaterial material, VillagerProfession profession, int defaultCap) {
+        if (material == DemandMaterial.LOGS && profession == VillagerProfession.BUTCHER) {
+            return BUTCHER_SMOKER_LOG_CAP;
         }
         return defaultCap;
     }

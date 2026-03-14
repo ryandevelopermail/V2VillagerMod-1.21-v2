@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
+import net.minecraft.village.VillagerProfession;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -27,6 +30,29 @@ class LumberjackGuardDepositLogsGoalTest {
         int transfer = LumberjackGuardDepositLogsGoal.resolveTransferAmount(64, 5);
 
         assertEquals(5, transfer);
+    }
+
+
+    @Test
+    void clampTransferForRecipient_limitsButcherLogTransfersToOne() {
+        int transfer = LumberjackGuardDepositLogsGoal.clampTransferForRecipient(
+                LumberjackDemandPlanner.MaterialType.LOGS,
+                VillagerProfession.BUTCHER,
+                6
+        );
+
+        assertEquals(1, transfer);
+    }
+
+    @Test
+    void clampTransferForRecipient_keepsCharcoalTransfersUnchangedForButcher() {
+        int transfer = LumberjackGuardDepositLogsGoal.clampTransferForRecipient(
+                LumberjackDemandPlanner.MaterialType.CHARCOAL,
+                VillagerProfession.BUTCHER,
+                6
+        );
+
+        assertEquals(6, transfer);
     }
 
     @Test
