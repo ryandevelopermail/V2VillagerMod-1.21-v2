@@ -49,11 +49,20 @@ public final class DistributionRouteEngine {
                                   Block expectedJobBlock,
                                   boolean requiresCraftingTable,
                                   int targetStockCap,
-                                  double demandWeight) {
+                                  double demandWeight,
+                                  boolean toolRecipeDemandRoute) {
         public ProfessionRoute(net.minecraft.village.VillagerProfession profession,
                                Block expectedJobBlock,
                                boolean requiresCraftingTable) {
-            this(profession, expectedJobBlock, requiresCraftingTable, -1, 1.0D);
+            this(profession, expectedJobBlock, requiresCraftingTable, -1, 1.0D, false);
+        }
+
+        public ProfessionRoute(net.minecraft.village.VillagerProfession profession,
+                               Block expectedJobBlock,
+                               boolean requiresCraftingTable,
+                               int targetStockCap,
+                               double demandWeight) {
+            this(profession, expectedJobBlock, requiresCraftingTable, targetStockCap, demandWeight, false);
         }
     }
 }

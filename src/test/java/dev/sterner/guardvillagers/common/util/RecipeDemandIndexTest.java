@@ -6,10 +6,14 @@ import net.minecraft.recipe.Ingredient;
 import net.minecraft.village.VillagerProfession;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RecipeDemandIndexTest {
 
@@ -98,6 +102,29 @@ class RecipeDemandIndexTest {
     void resolveDynamicCap_leavesMasonDemandCapsUnchanged() {
         assertEquals(3, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.MASON, RecipeDemandIndex.DemandMaterial.PLANKS, 3));
         assertEquals(2, RecipeDemandIndex.resolveDynamicCap(VillagerProfession.MASON, RecipeDemandIndex.DemandMaterial.STICK, 2));
+    }
+
+    @Test
+    void isToolCraftingOutput_detectsToolAndFishingOutputs() {
+        assertTrue(RecipeDemandIndex.isToolCraftingOutput(new ItemStack(Items.WOODEN_AXE)));
+        assertTrue(RecipeDemandIndex.isToolCraftingOutput(new ItemStack(Items.FISHING_ROD)));
+        assertFalse(RecipeDemandIndex.isToolCraftingOutput(new ItemStack(Items.BREAD)));
+    }
+
+    @Test
+    void validateToolMaterialDemandCoverage_requiresDetectedProfessionsToHaveStickOrPlankRoutes() {
+        EnumMap<RecipeDemandIndex.DemandMaterial, List<DistributionRouteEngine.ProfessionRoute>> routes =
+                new EnumMap<>(RecipeDemandIndex.DemandMaterial.class);
+        for (RecipeDemandIndex.DemandMaterial material : RecipeDemandIndex.DemandMaterial.values()) {
+            routes.put(material, List.of());
+        }
+        routes.put(RecipeDemandIndex.DemandMaterial.PLANKS, List.of(
+                new DistributionRouteEngine.ProfessionRoute(VillagerProfession.FARMER, net.minecraft.block.Blocks.COMPOSTER, false, 28, 1.0D, true)
+        ));
+
+        RecipeDemandIndex.RouteIndex index = new RecipeDemandIndex.RouteIndex(routes);
+        assertTrue(RecipeDemandIndex.validateToolMaterialDemandCoverage(index, Set.of(VillagerProfession.FARMER)));
+        assertFalse(RecipeDemandIndex.validateToolMaterialDemandCoverage(index, Set.of(VillagerProfession.FARMER, VillagerProfession.MASON)));
     }
 
 }
