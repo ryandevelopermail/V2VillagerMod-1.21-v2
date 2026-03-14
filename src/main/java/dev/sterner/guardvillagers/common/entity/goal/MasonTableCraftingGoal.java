@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -10,6 +11,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.item.PickaxeItem;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -41,6 +43,7 @@ public class MasonTableCraftingGoal extends Goal {
     private int lastCheckCount;
     private boolean immediateCheckPending;
     private Item lastCraftedOutputItem;
+    private final List<ItemStack> craftedOutputsToday = new ArrayList<>();
 
     public MasonTableCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -139,9 +142,11 @@ public class MasonTableCraftingGoal extends Goal {
     private void refreshDailyLimit(ServerWorld world) {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
+            logDailySummary(world);
             lastCraftDay = day;
-            dailyCraftLimit = 2;
+            dailyCraftLimit = Math.max(1, GuardVillagersConfig.masonTableDailyCraftLimit);
             craftedToday = 0;
+            craftedOutputsToday.clear();
             immediateCheckPending = false;
         }
     }
@@ -165,18 +170,24 @@ public class MasonTableCraftingGoal extends Goal {
             return;
         }
 
-        Recipe recipe = pickRecipeAvoidingLastOutput(craftable);
+        Recipe recipe = pickRecipe(craftable);
         if (consumeIngredients(inventory, recipe.requirements)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            craftedOutputsToday.add(recipe.output.copyWithCount(1));
             this.lastCraftedOutputItem = recipe.output.getItem();
             CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
 
-    private Recipe pickRecipeAvoidingLastOutput(List<Recipe> craftableRecipes) {
+    private Recipe pickRecipe(List<Recipe> craftableRecipes) {
+        Recipe pickaxePriorityRecipe = pickPickaxePriorityRecipe(craftableRecipes);
+        if (pickaxePriorityRecipe != null) {
+            return pickaxePriorityRecipe;
+        }
+
         if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
             return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
         }
@@ -189,6 +200,15 @@ public class MasonTableCraftingGoal extends Goal {
         }
 
         return alternatives.get(villager.getRandom().nextInt(alternatives.size()));
+    }
+
+    private Recipe pickPickaxePriorityRecipe(List<Recipe> craftableRecipes) {
+        for (Recipe recipe : craftableRecipes) {
+            if (recipe.isPickaxe()) {
+                return recipe;
+            }
+        }
+        return null;
     }
 
     private List<Recipe> getCraftableRecipes(Inventory inventory) {
@@ -361,6 +381,27 @@ public class MasonTableCraftingGoal extends Goal {
             this.output = output;
             this.requirements = requirements;
         }
+
+        private boolean isPickaxe() {
+            return output.getItem() instanceof PickaxeItem;
+        }
+    }
+
+    private void logDailySummary(ServerWorld world) {
+        if (craftedOutputsToday.isEmpty()) {
+            return;
+        }
+
+        StringBuilder craftedSummary = new StringBuilder();
+        for (int i = 0; i < craftedOutputsToday.size(); i++) {
+            if (i > 0) {
+                craftedSummary.append(", ");
+            }
+            craftedSummary.append(craftedOutputsToday.get(i).getName().getString());
+        }
+
+        CraftingCheckLogger.report(world, "Mason",
+                "day " + lastCraftDay + " summary: crafted " + craftedToday + "/" + dailyCraftLimit + " -> [" + craftedSummary + "]");
     }
 
     private String formatCheckResult(int craftableCount) {

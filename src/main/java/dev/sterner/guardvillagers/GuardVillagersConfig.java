@@ -77,4 +77,6 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static boolean bellChestRequireNearbyBed = false;
     @Entry
     public static int bellChestBedSearchRadius = 6;
+    @Entry(min=1)
+    public static int masonTableDailyCraftLimit = 4;
 }
