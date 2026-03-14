@@ -16,6 +16,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -165,7 +166,9 @@ public class MasonTableCraftingGoal extends Goal {
             return;
         }
 
-        Recipe recipe = pickRecipeAvoidingLastOutput(craftable);
+        RecipeSelection selection = selectRecipeByPriority(craftable, this.lastCraftedOutputItem);
+        Recipe recipe = selection.recipe();
+        CraftingCheckLogger.report(world, "Mason", "selected " + recipe.output.getName().getString() + " (priority=" + selection.priorityReason() + ", fallback=" + selection.fallbackReason() + ")");
         if (consumeIngredients(inventory, recipe.requirements)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
@@ -176,19 +179,34 @@ public class MasonTableCraftingGoal extends Goal {
     }
 
 
-    private Recipe pickRecipeAvoidingLastOutput(List<Recipe> craftableRecipes) {
-        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
-            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+    static RecipeSelection selectRecipeByPriority(List<Recipe> craftableRecipes, Item lastCraftedOutputItem) {
+        List<Recipe> pickaxeCandidates = craftableRecipes.stream()
+                .filter(Recipe::isPickaxe)
+                .toList();
+        if (!pickaxeCandidates.isEmpty()) {
+            Recipe bestPickaxe = pickaxeCandidates.stream()
+                    .max(Comparator.comparingInt(Recipe::pickaxeTier))
+                    .orElseThrow();
+            return new RecipeSelection(bestPickaxe, "pickaxe", "none");
         }
 
-        List<Recipe> alternatives = craftableRecipes.stream()
-                .filter(recipe -> recipe.output.getItem() != this.lastCraftedOutputItem)
+        Recipe fallbackRecipe = selectWithinTierAvoidingLastOutput(craftableRecipes, lastCraftedOutputItem);
+        return new RecipeSelection(fallbackRecipe, "non_pickaxe", "non_pickaxe");
+    }
+
+    private static Recipe selectWithinTierAvoidingLastOutput(List<Recipe> sameTierRecipes, Item lastCraftedOutputItem) {
+        if (sameTierRecipes.size() <= 1 || lastCraftedOutputItem == null) {
+            return sameTierRecipes.get(0);
+        }
+
+        List<Recipe> alternatives = sameTierRecipes.stream()
+                .filter(recipe -> recipe.output.getItem() != lastCraftedOutputItem)
                 .toList();
         if (alternatives.isEmpty()) {
-            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
+            return sameTierRecipes.get(0);
         }
 
-        return alternatives.get(villager.getRandom().nextInt(alternatives.size()));
+        return alternatives.get(0);
     }
 
     private List<Recipe> getCraftableRecipes(Inventory inventory) {
@@ -334,7 +352,10 @@ public class MasonTableCraftingGoal extends Goal {
     private record IngredientRequirement(Predicate<ItemStack> matcher, int count) {
     }
 
-    private enum Recipe {
+    record RecipeSelection(Recipe recipe, String priorityReason, String fallbackReason) {
+    }
+
+    enum Recipe {
         STONECUTTER(new ItemStack(Items.STONECUTTER),
                 new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 1),
                 new IngredientRequirement(stack -> stack.isOf(Items.STONE), 3)),
@@ -360,6 +381,30 @@ public class MasonTableCraftingGoal extends Goal {
         Recipe(ItemStack output, IngredientRequirement... requirements) {
             this.output = output;
             this.requirements = requirements;
+        }
+
+        boolean isPickaxe() {
+            return output.isIn(ItemTags.PICKAXES);
+        }
+
+        int pickaxeTier() {
+            Item item = output.getItem();
+            if (item == Items.DIAMOND_PICKAXE) {
+                return 5;
+            }
+            if (item == Items.IRON_PICKAXE) {
+                return 4;
+            }
+            if (item == Items.STONE_PICKAXE) {
+                return 3;
+            }
+            if (item == Items.GOLDEN_PICKAXE) {
+                return 2;
+            }
+            if (item == Items.WOODEN_PICKAXE) {
+                return 1;
+            }
+            return 0;
         }
     }
 
