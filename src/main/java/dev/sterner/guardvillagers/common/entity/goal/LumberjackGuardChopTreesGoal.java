@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -523,7 +524,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setChopCountdownLastLogStep(step);
 
         if (step == 2) {
+            runMidpointVillageAudit(world, "pre-distribution");
             LumberjackGuardDepositLogsGoal.runOpportunisticDemandDistribution(world, this.guard);
+            runMidpointVillageAudit(world, "post-distribution");
         }
 
         long remaining = this.guard.getNextChopTick() - world.getTime();
@@ -531,6 +534,28 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 this.guard.getUuidAsString(),
                 step * 25,
                 Math.max(remaining, 0L));
+    }
+
+
+    private void runMidpointVillageAudit(ServerWorld world, String phase) {
+        int v1MissingChest = LumberjackChestTriggerController.countEligibleV1VillagersMissingPairedChest(world, this.guard);
+        int v2MissingCraftingTable = LumberjackChestTriggerController.countEligibleV2VillagersMissingCraftingTable(world, this.guard);
+
+        java.util.Set<net.minecraft.village.VillagerProfession> toolDemandProfessions =
+                LumberjackDemandPlanner.resolveToolMaterialDemandProfessions(world);
+        int v2UnderTargetToolMaterials = LumberjackDemandPlanner.countRecipientsUnderTargetStockForMaterials(
+                world,
+                this.guard,
+                java.util.EnumSet.of(LumberjackDemandPlanner.MaterialType.STICK, LumberjackDemandPlanner.MaterialType.PLANKS),
+                toolDemandProfessions,
+                record -> LumberjackChestTriggerController.isEligibleV2Recipient(world, record.recipient()));
+
+        LOGGER.info("Lumberjack Guard {} countdown audit [{}]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}",
+                this.guard.getUuidAsString(),
+                phase,
+                v1MissingChest,
+                v2MissingCraftingTable,
+                v2UnderTargetToolMaterials);
     }
 
 
