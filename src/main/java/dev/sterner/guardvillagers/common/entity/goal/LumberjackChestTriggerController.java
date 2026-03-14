@@ -737,9 +737,14 @@ public final class LumberjackChestTriggerController {
     private static ArrayList<VillagerEntity> collectNearbyVillagers(ServerWorld world, LumberjackGuardEntity guard) {
         return new ArrayList<>(world.getEntitiesByClass(
                 VillagerEntity.class,
-                new Box(guard.getBlockPos()).expand(VILLAGE_EXPANSION_SCAN_RADIUS),
+                villageExpansionScanBox(guard.getPairedJobPos(), guard.getBlockPos()),
                 VillagerEntity::isAlive
         ));
+    }
+
+    static Box villageExpansionScanBox(BlockPos pairedJobPos, BlockPos fallbackGuardPos) {
+        BlockPos scanCenter = pairedJobPos != null ? pairedJobPos : fallbackGuardPos;
+        return new Box(scanCenter).expand(VILLAGE_EXPANSION_SCAN_RADIUS);
     }
 
     private static boolean isEligibleV1Villager(ServerWorld world, VillagerEntity villager) {

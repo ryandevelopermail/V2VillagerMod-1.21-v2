@@ -68,6 +68,8 @@ public class MasonMiningStairGoal extends Goal {
     private BlockPos returnStepTarget;
     private int recoveryTicks;
     private boolean recoveryAttemptedForStep;
+    private int repairedObstructionCount;
+    private int placedSupportCount;
     private ReturnReason lastFailureReason = ReturnReason.NONE;
     private int consecutiveFailureCount;
     private Stage stage = Stage.IDLE;
@@ -163,6 +165,8 @@ public class MasonMiningStairGoal extends Goal {
         this.returnStepTarget = null;
         this.recoveryTicks = 0;
         this.recoveryAttemptedForStep = false;
+        this.repairedObstructionCount = 0;
+        this.placedSupportCount = 0;
         return true;
     }
 
@@ -407,10 +411,16 @@ public class MasonMiningStairGoal extends Goal {
             BlockState clearanceState = world.getBlockState(clearancePos);
             if (!clearanceState.isAir() && !clearanceState.getCollisionShape(world, clearancePos).isEmpty()) {
                 if (!clearBlockIfNeeded(world, clearancePos)) {
+                    LOGGER.warn("Mason guard {} failed stair-transition repair while clearing obstruction at {} (from={} -> to={})",
+                            guard.getUuidAsString(),
+                            clearancePos.toShortString(),
+                            fromStep.toShortString(),
+                            toStep.toShortString());
                     return false;
                 }
                 attemptedRepair = true;
-                LOGGER.info("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
+                repairedObstructionCount++;
+                LOGGER.debug("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
                         guard.getUuidAsString(),
                         clearancePos.toShortString(),
                         fromStep.toShortString(),
@@ -423,16 +433,27 @@ public class MasonMiningStairGoal extends Goal {
             BlockState supportState = world.getBlockState(supportPos);
             if (!supportState.isAir() && !supportState.getCollisionShape(world, supportPos).isEmpty()) {
                 if (!clearBlockIfNeeded(world, supportPos)) {
+                    LOGGER.warn("Mason guard {} failed stair-transition repair while clearing support position {} (from={} -> to={})",
+                            guard.getUuidAsString(),
+                            supportPos.toShortString(),
+                            fromStep.toShortString(),
+                            toStep.toShortString());
                     return false;
                 }
             }
 
             BlockState fillState = guard.getRandom().nextBoolean() ? Blocks.COBBLESTONE.getDefaultState() : Blocks.DIRT.getDefaultState();
             if (!world.setBlockState(supportPos, fillState)) {
+                LOGGER.warn("Mason guard {} failed stair-transition repair while placing support block at {} (from={} -> to={})",
+                        guard.getUuidAsString(),
+                        supportPos.toShortString(),
+                        fromStep.toShortString(),
+                        toStep.toShortString());
                 return false;
             }
             attemptedRepair = true;
-            LOGGER.info("Mason guard {} stair transition repaired by placed support block {} at {} (from={} -> to={})",
+            placedSupportCount++;
+            LOGGER.debug("Mason guard {} stair transition repaired by placed support block {} at {} (from={} -> to={})",
                     guard.getUuidAsString(),
                     fillState.getBlock().getName().getString(),
                     supportPos.toShortString(),
@@ -453,10 +474,16 @@ public class MasonMiningStairGoal extends Goal {
                     continue;
                 }
                 if (!clearBlockIfNeeded(world, ascentEdgePos)) {
+                    LOGGER.warn("Mason guard {} failed stair-transition repair while clearing ascent edge at {} (from={} -> to={})",
+                            guard.getUuidAsString(),
+                            ascentEdgePos.toShortString(),
+                            fromStep.toShortString(),
+                            toStep.toShortString());
                     return false;
                 }
                 attemptedRepair = true;
-                LOGGER.info("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
+                repairedObstructionCount++;
+                LOGGER.debug("Mason guard {} stair transition repaired by cleared obstruction at {} (from={} -> to={})",
                         guard.getUuidAsString(),
                         ascentEdgePos.toShortString(),
                         fromStep.toShortString(),
@@ -527,7 +554,8 @@ public class MasonMiningStairGoal extends Goal {
 
         placementChoice.stack.decrement(1);
         guard.guardInventory.markDirty();
-        LOGGER.info("Mason guard {} support-placement pos={} block={}",
+        placedSupportCount++;
+        LOGGER.debug("Mason guard {} support-placement pos={} block={}",
                 guard.getUuidAsString(),
                 supportPos.toShortString(),
                 Registries.BLOCK.getId(placementChoice.block));
@@ -572,7 +600,7 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (state.getBlock() instanceof FallingBlock) {
-            LOGGER.info("Mason guard {} gravity-clear breaking falling block at {} ({})",
+            LOGGER.debug("Mason guard {} gravity-clear breaking falling block at {} ({})",
                     guard.getUuidAsString(),
                     pos.toShortString(),
                     state.getBlock().getName().getString());
@@ -663,6 +691,8 @@ public class MasonMiningStairGoal extends Goal {
                 this.cooldownQuarterLogTick,
                 this.cooldownThreeQuarterLogTick,
                 this.nextSessionStartTick);
+
+        maybeLogRepairSummary();
 
         if (forceSafeAnchorReset) {
             resetMiningProgressToSafeAnchor();
@@ -1043,6 +1073,23 @@ public class MasonMiningStairGoal extends Goal {
                 reservedCobblestone,
                 reservedDirt,
                 guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
+    }
+
+    static boolean hasRepairSummaryData(int repairedObstructions, int placedSupports) {
+        return repairedObstructions > 0 || placedSupports > 0;
+    }
+
+    private void maybeLogRepairSummary() {
+        if (!hasRepairSummaryData(repairedObstructionCount, placedSupportCount)) {
+            return;
+        }
+
+        LOGGER.info("Mason guard {} stair-repair summary: repairedObstructions={}, supportsPlaced={}, reason={}, stepIndex={}",
+                guard.getUuidAsString(),
+                repairedObstructionCount,
+                placedSupportCount,
+                returnReason,
+                stepIndex);
     }
 
     private enum Stage {
