@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -10,6 +11,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.item.PickaxeItem;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -42,6 +44,7 @@ public class MasonTableCraftingGoal extends Goal {
     private int lastCheckCount;
     private boolean immediateCheckPending;
     private Item lastCraftedOutputItem;
+    private final List<ItemStack> craftedOutputsToday = new ArrayList<>();
 
     public MasonTableCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -140,9 +143,11 @@ public class MasonTableCraftingGoal extends Goal {
     private void refreshDailyLimit(ServerWorld world) {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastCraftDay) {
+            logDailySummary(world);
             lastCraftDay = day;
-            dailyCraftLimit = 2;
+            dailyCraftLimit = Math.max(1, GuardVillagersConfig.masonTableDailyCraftLimit);
             craftedToday = 0;
+            craftedOutputsToday.clear();
             immediateCheckPending = false;
         }
     }
@@ -166,37 +171,26 @@ public class MasonTableCraftingGoal extends Goal {
             return;
         }
 
-        RecipeSelection selection = selectRecipeByPriority(craftable, this.lastCraftedOutputItem);
-        Recipe recipe = selection.recipe();
-        CraftingCheckLogger.report(world, "Mason", "selected " + recipe.output.getName().getString() + " (priority=" + selection.priorityReason() + ", fallback=" + selection.fallbackReason() + ")");
+        Recipe recipe = pickRecipe(craftable);
         if (consumeIngredients(inventory, recipe.requirements)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
+            craftedOutputsToday.add(recipe.output.copyWithCount(1));
             this.lastCraftedOutputItem = recipe.output.getItem();
             CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
 
-    static RecipeSelection selectRecipeByPriority(List<Recipe> craftableRecipes, Item lastCraftedOutputItem) {
-        List<Recipe> pickaxeCandidates = craftableRecipes.stream()
-                .filter(Recipe::isPickaxe)
-                .toList();
-        if (!pickaxeCandidates.isEmpty()) {
-            Recipe bestPickaxe = pickaxeCandidates.stream()
-                    .max(Comparator.comparingInt(Recipe::pickaxeTier))
-                    .orElseThrow();
-            return new RecipeSelection(bestPickaxe, "pickaxe", "none");
+    private Recipe pickRecipe(List<Recipe> craftableRecipes) {
+        Recipe pickaxePriorityRecipe = pickPickaxePriorityRecipe(craftableRecipes);
+        if (pickaxePriorityRecipe != null) {
+            return pickaxePriorityRecipe;
         }
 
-        Recipe fallbackRecipe = selectWithinTierAvoidingLastOutput(craftableRecipes, lastCraftedOutputItem);
-        return new RecipeSelection(fallbackRecipe, "non_pickaxe", "non_pickaxe");
-    }
-
-    private static Recipe selectWithinTierAvoidingLastOutput(List<Recipe> sameTierRecipes, Item lastCraftedOutputItem) {
-        if (sameTierRecipes.size() <= 1 || lastCraftedOutputItem == null) {
-            return sameTierRecipes.get(0);
+        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
+            return craftableRecipes.get(villager.getRandom().nextInt(craftableRecipes.size()));
         }
 
         List<Recipe> alternatives = sameTierRecipes.stream()
@@ -207,6 +201,15 @@ public class MasonTableCraftingGoal extends Goal {
         }
 
         return alternatives.get(0);
+    }
+
+    private Recipe pickPickaxePriorityRecipe(List<Recipe> craftableRecipes) {
+        for (Recipe recipe : craftableRecipes) {
+            if (recipe.isPickaxe()) {
+                return recipe;
+            }
+        }
+        return null;
     }
 
     private List<Recipe> getCraftableRecipes(Inventory inventory) {
@@ -383,29 +386,26 @@ public class MasonTableCraftingGoal extends Goal {
             this.requirements = requirements;
         }
 
-        boolean isPickaxe() {
-            return output.isIn(ItemTags.PICKAXES);
+        private boolean isPickaxe() {
+            return output.getItem() instanceof PickaxeItem;
+        }
+    }
+
+    private void logDailySummary(ServerWorld world) {
+        if (craftedOutputsToday.isEmpty()) {
+            return;
         }
 
-        int pickaxeTier() {
-            Item item = output.getItem();
-            if (item == Items.DIAMOND_PICKAXE) {
-                return 5;
+        StringBuilder craftedSummary = new StringBuilder();
+        for (int i = 0; i < craftedOutputsToday.size(); i++) {
+            if (i > 0) {
+                craftedSummary.append(", ");
             }
-            if (item == Items.IRON_PICKAXE) {
-                return 4;
-            }
-            if (item == Items.STONE_PICKAXE) {
-                return 3;
-            }
-            if (item == Items.GOLDEN_PICKAXE) {
-                return 2;
-            }
-            if (item == Items.WOODEN_PICKAXE) {
-                return 1;
-            }
-            return 0;
+            craftedSummary.append(craftedOutputsToday.get(i).getName().getString());
         }
+
+        CraftingCheckLogger.report(world, "Mason",
+                "day " + lastCraftDay + " summary: crafted " + craftedToday + "/" + dailyCraftLimit + " -> [" + craftedSummary + "]");
     }
 
     private String formatCheckResult(int craftableCount) {
