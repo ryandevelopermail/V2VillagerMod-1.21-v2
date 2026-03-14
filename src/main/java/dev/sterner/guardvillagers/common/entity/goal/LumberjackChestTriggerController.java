@@ -465,9 +465,11 @@ public final class LumberjackChestTriggerController {
             BlockPos stagedJobPos = resolveVillagerJobSite(context.world(), villager);
             UpgradeStage stage = getUpgradeStage(villager.getUuid(), stagedJobPos);
             if (stage != UpgradeStage.CHEST_PAIRED) {
-                LOGGER.warn("Defensive skip V2 crafting table placement: villager={} stage={} expected={} jobPos={}",
-                        villager.getUuid(), stage, UpgradeStage.CHEST_PAIRED,
-                        stagedJobPos == null ? "null" : stagedJobPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("Skip V2 crafting table placement: villager={} stage={} expected={} jobPos={}",
+                            villager.getUuid(), stage, UpgradeStage.CHEST_PAIRED,
+                            stagedJobPos == null ? "null" : stagedJobPos.toShortString());
+                }
                 continue;
             }
 
