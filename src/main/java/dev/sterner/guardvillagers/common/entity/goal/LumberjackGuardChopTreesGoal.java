@@ -28,8 +28,10 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class LumberjackGuardChopTreesGoal extends Goal {
@@ -54,12 +56,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
+    private static final int MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT = 3;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
     private final Set<BlockPos> failedSessionRoots = new HashSet<>();
+    private final Map<BlockPos, Integer> rootTeardownRetryAttempts = new HashMap<>();
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
     private int stallRecoveryAttempts;
@@ -143,8 +147,45 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.lastTreeDistanceSq = treeDistanceSq;
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
-        teardownTree(world, targetRoot);
+        TreeTeardownResult teardownResult = teardownTree(world, targetRoot);
+        int remainingLogs = countRemainingConnectedLogs(world, targetRoot);
         collectNearbyWoodDrops(world);
+
+        LOGGER.info("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={}",
+                this.guard.getUuidAsString(),
+                targetRoot,
+                teardownResult.initialCandidateLogs(),
+                teardownResult.brokenLogs(),
+                remainingLogs);
+
+        if (remainingLogs > 0) {
+            int retryAttempt = this.rootTeardownRetryAttempts.getOrDefault(targetRoot, 0) + 1;
+            this.rootTeardownRetryAttempts.put(targetRoot.toImmutable(), retryAttempt);
+            if (retryAttempt >= MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT) {
+                LOGGER.warn("Lumberjack Guard {} tree_teardown_failed root={} attempts={} initialCandidates={} brokenLogs={} remainingLogs={}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        retryAttempt,
+                        teardownResult.initialCandidateLogs(),
+                        teardownResult.brokenLogs(),
+                        remainingLogs);
+                recordFailedTargetAttempt(targetRoot, "teardown verification exceeded retries with remaining logs=" + remainingLogs);
+                this.rootTeardownRetryAttempts.remove(targetRoot);
+                this.guard.getSelectedTreeTargets().remove(0);
+            } else {
+                LOGGER.warn("Lumberjack Guard {} tree_teardown_retry_scheduled root={} attempt={} maxAttempts={} initialCandidates={} brokenLogs={} remainingLogs={}",
+                        this.guard.getUuidAsString(),
+                        targetRoot,
+                        retryAttempt,
+                        MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT,
+                        teardownResult.initialCandidateLogs(),
+                        teardownResult.brokenLogs(),
+                        remainingLogs);
+            }
+            return;
+        }
+
+        this.rootTeardownRetryAttempts.remove(targetRoot);
         this.completedSessionRoots.add(targetRoot.toImmutable());
         this.guard.getSelectedTreeTargets().remove(0);
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
@@ -247,6 +288,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(selectedCount);
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
+        this.rootTeardownRetryAttempts.clear();
         this.bootstrapRetryTreeScheduled = false;
         this.guard.setActiveSession(true);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
@@ -288,6 +330,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(0);
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
+        this.rootTeardownRetryAttempts.clear();
         this.bootstrapRetryTreeScheduled = false;
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
@@ -461,6 +504,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private void recordFailedTargetAttempt(BlockPos targetRoot, String reason) {
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
         this.failedSessionRoots.add(targetRoot.toImmutable());
+        this.rootTeardownRetryAttempts.remove(targetRoot);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
@@ -825,37 +869,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return world.getBlockState(pos).isIn(BlockTags.LOGS);
     }
 
-    private void teardownTree(ServerWorld world, BlockPos root) {
-        Set<BlockPos> logs = new HashSet<>();
+    private TreeTeardownResult teardownTree(ServerWorld world, BlockPos root) {
+        ConnectedLogScanResult scanResult = collectConnectedLogsWithinTreeBounds(world, root);
+        Set<BlockPos> logs = scanResult.logs();
         Set<BlockPos> attachedLeaves = new HashSet<>();
-        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        queue.add(root);
-        int rejectedCrossTreeCandidates = 0;
-
-        while (!queue.isEmpty() && logs.size() < MAX_LOGS_PER_TREE) {
-            BlockPos pos = queue.poll();
-            if (!isWithinCrownRadius(root, pos)) {
-                rejectedCrossTreeCandidates++;
-                continue;
-            }
-            if (!logs.add(pos)) {
-                continue;
-            }
-
-            for (BlockPos candidate : getTrunkAdjacent(pos)) {
-                if (logs.contains(candidate)) {
-                    continue;
-                }
-                BlockState candidateState = world.getBlockState(candidate);
-                if (candidateState.isIn(BlockTags.LOGS)) {
-                    if (isWithinCrownRadius(root, candidate)) {
-                        queue.add(candidate.toImmutable());
-                    } else {
-                        rejectedCrossTreeCandidates++;
-                    }
-                }
-            }
-        }
 
         for (BlockPos logPos : logs) {
             for (BlockPos adjacent : BlockPos.iterate(logPos.add(-1, -1, -1), logPos.add(1, 1, 1))) {
@@ -874,7 +891,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 this.guard.getUuidAsString(),
                 root,
                 logs.size(),
-                rejectedCrossTreeCandidates);
+                scanResult.rejectedCrossTreeCandidates());
 
         int brokenLogs = 0;
         int brokenLeaves = 0;
@@ -895,6 +912,55 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 root,
                 brokenLogs,
                 brokenLeaves);
+
+        return new TreeTeardownResult(logs.size(), brokenLogs, brokenLeaves);
+    }
+
+    private int countRemainingConnectedLogs(ServerWorld world, BlockPos root) {
+        return collectConnectedLogsWithinTreeBounds(world, root).logs().size();
+    }
+
+    private ConnectedLogScanResult collectConnectedLogsWithinTreeBounds(ServerWorld world, BlockPos root) {
+        Set<BlockPos> logs = new HashSet<>();
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        queue.add(root);
+        int rejectedCrossTreeCandidates = 0;
+
+        while (!queue.isEmpty() && logs.size() < MAX_LOGS_PER_TREE) {
+            BlockPos pos = queue.poll();
+            if (!isWithinCrownRadius(root, pos)) {
+                rejectedCrossTreeCandidates++;
+                continue;
+            }
+            if (!isEligibleLog(world, pos)) {
+                continue;
+            }
+            if (!logs.add(pos.toImmutable())) {
+                continue;
+            }
+
+            for (BlockPos candidate : getTrunkAdjacent(pos)) {
+                if (logs.contains(candidate)) {
+                    continue;
+                }
+                if (!isEligibleLog(world, candidate)) {
+                    continue;
+                }
+                if (isWithinCrownRadius(root, candidate)) {
+                    queue.add(candidate.toImmutable());
+                } else {
+                    rejectedCrossTreeCandidates++;
+                }
+            }
+        }
+
+        return new ConnectedLogScanResult(logs, rejectedCrossTreeCandidates);
+    }
+
+    private record ConnectedLogScanResult(Set<BlockPos> logs, int rejectedCrossTreeCandidates) {
+    }
+
+    private record TreeTeardownResult(int initialCandidateLogs, int brokenLogs, int brokenLeaves) {
     }
 
     private boolean isWithinCrownRadius(BlockPos root, BlockPos candidate) {
