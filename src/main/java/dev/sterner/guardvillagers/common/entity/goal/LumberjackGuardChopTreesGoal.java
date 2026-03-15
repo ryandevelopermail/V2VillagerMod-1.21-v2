@@ -937,7 +937,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 rejectedCrossTreeCandidates++;
                 continue;
             }
-            if (!isEligibleLog(world, pos)) {
+            if (!isEligibleLog.test(pos)) {
                 continue;
             }
             if (!logs.add(pos.toImmutable())) {
