@@ -18,6 +18,7 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 public class LumberjackGuardCraftingGoal extends Goal {
     // Per-day cap for priority outputs only (raw wood/plank conversion does not consume this limit).
@@ -169,15 +170,24 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
     private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
-            if (!hasBootstrapMaterials(chestInventory)) {
-                return false;
-            }
-            if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, 3, 2, Items.WOODEN_AXE)) {
-                return true;
+            boolean meaningfulAction = craftBootstrapChestAndAttemptPlacementIfNeeded(
+                    shouldCraftBootstrapChest(chestInventory),
+                    () -> craftIfPossible(chestInventory, BOOTSTRAP_CHEST_PLANK_REQUIREMENT, 0, Items.CHEST),
+                    () -> {
+                        boolean placed = tryPlaceAndBindChest(world);
+                        if (placed) {
+                            basePairingEstablished = true;
+                        }
+                        return placed;
+                    }
+            );
+
+            if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, BOOTSTRAP_AXE_PLANK_REQUIREMENT, BOOTSTRAP_AXE_STICK_REQUIREMENT, Items.WOODEN_AXE)) {
+                meaningfulAction = true;
             }
 
             equipBootstrapAxeFromSupplies(chestInventory);
-            return false;
+            return meaningfulAction;
         }
 
         if (!demandEnabled || !isBasePairingReadyForDemand()) {
@@ -197,13 +207,20 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return false;
     }
 
+    static boolean craftBootstrapChestAndAttemptPlacementIfNeeded(boolean shouldCraftBootstrapChest, BooleanSupplier craftChestAction, BooleanSupplier placeChestAction) {
+        if (!shouldCraftBootstrapChest) {
+            return false;
+        }
 
-    private boolean hasBootstrapMaterials(Inventory chestInventory) {
-        int planks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
-                + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
-        int sticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
-        return planks >= BOOTSTRAP_CHEST_PLANK_REQUIREMENT + BOOTSTRAP_AXE_PLANK_REQUIREMENT && sticks >= BOOTSTRAP_AXE_STICK_REQUIREMENT;
+        boolean craftedChest = craftChestAction.getAsBoolean();
+        if (!craftedChest) {
+            return false;
+        }
+
+        placeChestAction.getAsBoolean();
+        return true;
     }
+
 
     private boolean isBootstrapSession() {
         return this.guard.getPairedChestPos() == null;
