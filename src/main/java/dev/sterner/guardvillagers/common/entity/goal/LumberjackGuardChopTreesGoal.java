@@ -32,6 +32,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
@@ -147,15 +149,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.CHOPPING);
         TreeTeardownResult teardownResult = teardownTree(world, targetRoot);
-        int remainingLogs = countRemainingConnectedLogs(world, targetRoot);
+        RemainingLogCountResult remainingLogCountResult = countRemainingConnectedLogs(world, targetRoot);
+        int remainingLogs = remainingLogCountResult.count();
         collectNearbyWoodDrops(world);
 
-        LOGGER.info("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={}",
+        LOGGER.info("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={} fallbackSeedUsed={}",
                 this.guard.getUuidAsString(),
                 targetRoot,
                 teardownResult.initialCandidateLogs(),
                 teardownResult.brokenLogs(),
-                remainingLogs);
+                remainingLogs,
+                remainingLogCountResult.fallbackSeedUsed());
 
         if (remainingLogs > 0) {
             int retryAttempt = this.rootTeardownRetryAttempts.getOrDefault(targetRoot, 0) + 1;
@@ -900,14 +904,31 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return new TreeTeardownResult(logs.size(), brokenLogs, brokenLeaves);
     }
 
-    private int countRemainingConnectedLogs(ServerWorld world, BlockPos root) {
-        return collectConnectedLogsWithinTreeBounds(world, root).logs().size();
+    private RemainingLogCountResult countRemainingConnectedLogs(ServerWorld world, BlockPos root) {
+        ConnectedLogScanResult scanResult = collectConnectedLogsWithinTreeBounds(world, root);
+        return new RemainingLogCountResult(scanResult.logs().size(), scanResult.usedFallbackSeed());
     }
 
     private ConnectedLogScanResult collectConnectedLogsWithinTreeBounds(ServerWorld world, BlockPos root) {
+        return collectConnectedLogsWithinTreeBounds(root, pos -> isEligibleLog(world, pos), this::getTrunkAdjacent);
+    }
+
+    static ConnectedLogScanResult collectConnectedLogsWithinTreeBounds(BlockPos root,
+                                                                       Predicate<BlockPos> isEligibleLog,
+                                                                       Function<BlockPos, List<BlockPos>> adjacentProvider) {
         Set<BlockPos> logs = new HashSet<>();
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        queue.add(root);
+        boolean usedFallbackSeed = false;
+        BlockPos seed = root;
+        if (!isEligibleLog.test(root)) {
+            seed = findFallbackSeedWithinTreeBounds(root, isEligibleLog);
+            usedFallbackSeed = seed != null;
+        }
+        if (seed == null) {
+            return new ConnectedLogScanResult(logs, 0, false);
+        }
+
+        queue.add(seed.toImmutable());
         int rejectedCrossTreeCandidates = 0;
 
         while (!queue.isEmpty() && logs.size() < MAX_LOGS_PER_TREE) {
@@ -923,11 +944,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 continue;
             }
 
-            for (BlockPos candidate : getTrunkAdjacent(pos)) {
+            for (BlockPos candidate : adjacentProvider.apply(pos)) {
                 if (logs.contains(candidate)) {
                     continue;
                 }
-                if (!isEligibleLog(world, candidate)) {
+                if (!isEligibleLog.test(candidate)) {
                     continue;
                 }
                 if (isWithinCrownRadius(root, candidate)) {
@@ -938,16 +959,47 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
         }
 
-        return new ConnectedLogScanResult(logs, rejectedCrossTreeCandidates);
+        return new ConnectedLogScanResult(logs, rejectedCrossTreeCandidates, usedFallbackSeed);
     }
 
-    private record ConnectedLogScanResult(Set<BlockPos> logs, int rejectedCrossTreeCandidates) {
+    static BlockPos findFallbackSeedWithinTreeBounds(BlockPos root, Predicate<BlockPos> isEligibleLog) {
+        BlockPos bestSeed = null;
+        int bestDistanceSq = Integer.MAX_VALUE;
+        BlockPos min = root.add(-TREE_CROWN_RADIUS, -ROOT_STRUCTURE_MAX_HEIGHT, -TREE_CROWN_RADIUS);
+        BlockPos max = root.add(TREE_CROWN_RADIUS, ROOT_STRUCTURE_MAX_HEIGHT, TREE_CROWN_RADIUS);
+
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockPos candidate = cursor.toImmutable();
+            if (!isEligibleLog.test(candidate) || !isWithinCrownRadius(root, candidate)) {
+                continue;
+            }
+            int distanceSq = squaredDistance(root, candidate);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestSeed = candidate;
+            }
+        }
+
+        return bestSeed;
+    }
+
+    private static int squaredDistance(BlockPos first, BlockPos second) {
+        int x = first.getX() - second.getX();
+        int y = first.getY() - second.getY();
+        int z = first.getZ() - second.getZ();
+        return x * x + y * y + z * z;
+    }
+
+    record ConnectedLogScanResult(Set<BlockPos> logs, int rejectedCrossTreeCandidates, boolean usedFallbackSeed) {
+    }
+
+    private record RemainingLogCountResult(int count, boolean fallbackSeedUsed) {
     }
 
     private record TreeTeardownResult(int initialCandidateLogs, int brokenLogs, int brokenLeaves) {
     }
 
-    private boolean isWithinCrownRadius(BlockPos root, BlockPos candidate) {
+    static boolean isWithinCrownRadius(BlockPos root, BlockPos candidate) {
         return Math.abs(candidate.getX() - root.getX()) <= TREE_CROWN_RADIUS
                 && Math.abs(candidate.getZ() - root.getZ()) <= TREE_CROWN_RADIUS;
     }
