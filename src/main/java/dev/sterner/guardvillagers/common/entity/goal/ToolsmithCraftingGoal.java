@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
+import dev.sterner.guardvillagers.common.villager.behavior.ToolsmithBehavior;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -195,11 +196,27 @@ public class ToolsmithCraftingGoal extends Goal {
             inventory.markDirty();
             craftedToday++;
             recordLastCrafted(recipe.output);
+            requestImmediateDistributionForCraftedOutput(villager, recipe.output);
             CraftingCheckLogger.report(world, "Toolsmith", formatCraftedResult(lastCheckCount, recipe.output));
             if (recipe.output.isOf(Items.FISHING_ROD)) {
                 CraftingCheckLogger.report(world, "Toolsmith", "crafted fishing rod due to fisherman recipient demand");
             }
         }
+    }
+
+    static boolean requestImmediateDistributionForCraftedOutput(VillagerEntity villager, ItemStack craftedOutput) {
+        if (!isDistributableToolOutput(craftedOutput)) {
+            return false;
+        }
+        ToolsmithBehavior.requestImmediateDistribution(villager);
+        return true;
+    }
+
+    static boolean isDistributableToolOutput(ItemStack craftedOutput) {
+        return craftedOutput.isOf(Items.WOODEN_PICKAXE)
+                || craftedOutput.isOf(Items.WOODEN_HOE)
+                || craftedOutput.isOf(Items.SHEARS)
+                || craftedOutput.isOf(Items.FISHING_ROD);
     }
 
     private List<ToolRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
