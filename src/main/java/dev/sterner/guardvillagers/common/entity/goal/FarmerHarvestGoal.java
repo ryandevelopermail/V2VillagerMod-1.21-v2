@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -43,7 +44,9 @@ public class FarmerHarvestGoal extends Goal {
     private static final int SEED_FORAGE_RETRY_BASE_COOLDOWN_TICKS = 100;
     private static final int SEED_FORAGE_RETRY_MAX_COOLDOWN_TICKS = 600;
     private static final int SEED_FORAGE_LOW_YIELD_COOLDOWN_TICKS = 100;
-    private static final int MIN_WHEAT_SEED_TARGET = 5;
+    private static final int DEFAULT_WHEAT_SEED_RESERVE_CAP = 64;
+    private static final int DEFAULT_WHEAT_SEED_BOOTSTRAP_FLOOR = 0;
+    private static final int FULL_WHEAT_SEED_STACK = 64;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -416,7 +419,7 @@ public class FarmerHarvestGoal extends Goal {
                         if (plantedState.canPlaceAt(serverWorld, above)) {
                             if (consumeSeed(villager.getInventory(), seedItem)) {
                                 serverWorld.setBlockState(above, plantedState);
-                                if (prioritizeWheatSeedsForPlanting && seedItem == Items.WHEAT_SEEDS && !hasRequiredWheatSeeds()) {
+                                if (prioritizeWheatSeedsForPlanting && seedItem == Items.WHEAT_SEEDS && !hasRequiredWheatSeedReserve(serverWorld)) {
                                     prioritizeWheatSeedsForPlanting = false;
                                 }
                             }
@@ -445,11 +448,11 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
 
-                if (hasRequiredWheatSeeds()) {
-                    logWheatSeedThresholdReached(getGatherStageNetSeedGain());
-                    clearSeedForageRetryCooldown(serverWorld, "wheat seed threshold reached");
+                if (hasRequiredWheatSeedReserve(serverWorld)) {
+                    logWheatSeedThresholdReached(serverWorld, getGatherStageNetSeedGain(serverWorld));
+                    clearSeedForageRetryCooldown(serverWorld, "dynamic seed reserve policy reached");
                     prioritizeWheatSeedsForPlanting = true;
-                    stopSeedForageWithOutcome(serverWorld, "threshold_reached", "wheat seed threshold reached");
+                    stopSeedForageWithOutcome(serverWorld, "policy_reached", "dynamic seed reserve policy reached");
                     return;
                 }
 
@@ -502,7 +505,7 @@ public class FarmerHarvestGoal extends Goal {
                 boolean brokeBlock = serverWorld.breakBlock(gatherTarget, true, villager);
                 if (brokeBlock) {
                     collectNearbyDrops(serverWorld, gatherTarget);
-                    if (getGatherStageNetSeedGain() <= 0) {
+                    if (getGatherStageNetSeedGain(serverWorld) <= 0) {
                         gatherLowYieldBreakPasses++;
                         if (gatherLowYieldBreakPasses >= GATHER_SEEDS_LOW_YIELD_BREAK_LIMIT) {
                             scheduleLowYieldSeedForageCooldown(serverWorld);
@@ -859,7 +862,7 @@ public class FarmerHarvestGoal extends Goal {
         if (newStage == Stage.GATHER_WHEAT_SEEDS && villager.getWorld() instanceof ServerWorld world) {
             pendingSeedGatherEndReason = null;
             gatherSeedsStageStartTick = world.getTime();
-            gatherStageSeedStartCount = countItemInInventory(Items.WHEAT_SEEDS);
+            gatherStageSeedStartCount = getCombinedWheatSeedReserve(world);
             currentGatherTarget = null;
             gatherSeedTargets.clear();
             gatherNoTargetPasses = 0;
@@ -885,8 +888,8 @@ public class FarmerHarvestGoal extends Goal {
         pickUpPlantablesFromChest(world);
         if (!plantTargets.isEmpty()) {
             if (hasPlantablesInInventory() && !requiresWheatSeedStartup()) {
-                if (hasRequiredWheatSeeds()) {
-                    LOGGER.info("Farmer {} wheat seed threshold already satisfied with {} seeds", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS));
+                if (hasRequiredWheatSeedReserve(world)) {
+                    logSeedReserveStatus(world, "wheat seed reserve policy already satisfied before planting");
                 }
                 setStage(Stage.PLANT_FARMLAND);
             } else {
@@ -1332,8 +1335,80 @@ public class FarmerHarvestGoal extends Goal {
         return findFirstPlantableInInventory(false) != null;
     }
 
-    private boolean hasRequiredWheatSeeds() {
-        return countItemInInventory(Items.WHEAT_SEEDS) >= MIN_WHEAT_SEED_TARGET;
+    private int getConfiguredWheatSeedReserveCap() {
+        return Math.max(1, GuardVillagersConfig.farmerWheatSeedReserveCap > 0 ? GuardVillagersConfig.farmerWheatSeedReserveCap : DEFAULT_WHEAT_SEED_RESERVE_CAP);
+    }
+
+    private int getConfiguredWheatSeedBootstrapFloor() {
+        return Math.max(0, GuardVillagersConfig.farmerWheatSeedBootstrapFloor >= 0 ? GuardVillagersConfig.farmerWheatSeedBootstrapFloor : DEFAULT_WHEAT_SEED_BOOTSTRAP_FLOOR);
+    }
+
+    private int countWheatSeedsInVillagerInventory() {
+        return countItemInInventory(Items.WHEAT_SEEDS);
+    }
+
+    private int countWheatSeedsInChestInventory(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return 0;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return 0;
+        }
+
+        int total = 0;
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() == Items.WHEAT_SEEDS) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int getCombinedWheatSeedReserve(ServerWorld world) {
+        return countWheatSeedsInVillagerInventory() + countWheatSeedsInChestInventory(world);
+    }
+
+    private FarmlandCoverageStats getFarmlandCoverageStats(ServerWorld world) {
+        int accessible = 0;
+        int seeded = 0;
+        int radius = HARVEST_RADIUS;
+        int radiusSquared = radius * radius;
+        BlockPos start = jobPos.add(-radius, -1, -radius);
+        BlockPos end = jobPos.add(radius, 1, radius);
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
+                continue;
+            }
+
+            boolean hoeable = isHoeTarget(world, pos) && hasNearbyWater(world, pos);
+            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND) && world.getBlockState(pos.up()).isAir();
+            if (!hoeable && !plantableFarmland) {
+                continue;
+            }
+            accessible++;
+            if (world.getBlockState(pos.up()).getBlock() instanceof CropBlock) {
+                seeded++;
+            }
+        }
+        return new FarmlandCoverageStats(accessible, seeded);
+    }
+
+    private boolean hasRequiredWheatSeedReserve(ServerWorld world) {
+        FarmlandCoverageStats coverageStats = getFarmlandCoverageStats(world);
+        if (coverageStats.hasFullCoverage()) {
+            return true;
+        }
+
+        int chestSeeds = countWheatSeedsInChestInventory(world);
+        if (chestSeeds >= FULL_WHEAT_SEED_STACK) {
+            return true;
+        }
+
+        int combinedReserve = getCombinedWheatSeedReserve(world);
+        return combinedReserve >= getConfiguredWheatSeedReserveCap();
     }
 
     private boolean requiresWheatSeedStartup() {
@@ -1341,25 +1416,27 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean ensureWheatSeedStartup(ServerWorld world) {
-        if (hasRequiredWheatSeeds()) {
+        if (hasRequiredWheatSeedReserve(world)) {
             return true;
         }
 
-        LOGGER.info("Farmer {} detected missing wheat seeds for planting startup ({} / {})", villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS), MIN_WHEAT_SEED_TARGET);
+        logSeedReserveStatus(world, "detected insufficient dynamic wheat seed reserve before startup");
         pickUpPlantablesFromChest(world);
-        int wheatSeedCount = countItemInInventory(Items.WHEAT_SEEDS);
-        LOGGER.info("Farmer {} chest wheat seed check result: {} / {}", villager.getUuidAsString(), wheatSeedCount, MIN_WHEAT_SEED_TARGET);
-        return wheatSeedCount >= MIN_WHEAT_SEED_TARGET;
+        logSeedReserveStatus(world, "post-chest pickup reserve check");
+
+        if (hasRequiredWheatSeedReserve(world)) {
+            return true;
+        }
+
+        return getCombinedWheatSeedReserve(world) >= getConfiguredWheatSeedBootstrapFloor();
     }
 
     private void logWheatSeedForageIntent(String context, boolean optimizingSeedReserve) {
-        if (optimizingSeedReserve) {
-            LOGGER.info("Farmer {} foraging wheat seeds to optimize reserve toward threshold (context: {}, current: {} / {})",
-                    villager.getUuidAsString(), context, countItemInInventory(Items.WHEAT_SEEDS), MIN_WHEAT_SEED_TARGET);
-        } else {
-            LOGGER.info("Farmer {} foraging wheat seeds because zero plantables are available (context: {})",
-                    villager.getUuidAsString(), context);
+        if (villager.getWorld() instanceof ServerWorld world) {
+            logSeedReserveStatus(world, "foraging wheat seeds (context: " + context + ", optimizing=" + optimizingSeedReserve + ")");
+            return;
         }
+        LOGGER.info("Farmer {} foraging wheat seeds (context: {}, optimizing={})", villager.getUuidAsString(), context, optimizingSeedReserve);
     }
 
     private void logWheatSeedForageStart() {
@@ -1370,19 +1447,21 @@ public class FarmerHarvestGoal extends Goal {
         LOGGER.info("Farmer {} stopping wheat seed forage: {}", villager.getUuidAsString(), reason);
     }
 
-    private void logWheatSeedThresholdReached(int netSeedGain) {
-        LOGGER.info("Farmer {} reached wheat seed threshold with {} seeds (netGain: {})",
-                villager.getUuidAsString(), countItemInInventory(Items.WHEAT_SEEDS), netSeedGain);
+    private void logWheatSeedThresholdReached(ServerWorld world, int netSeedGain) {
+        FarmlandCoverageStats stats = getFarmlandCoverageStats(world);
+        LOGGER.info("Farmer {} reached dynamic seed reserve policy villagerSeeds={} chestSeeds={} combined={} cap={} chestFullStack={} coverage={}/{} ({}) netGain={}",
+                villager.getUuidAsString(), countWheatSeedsInVillagerInventory(), countWheatSeedsInChestInventory(world), getCombinedWheatSeedReserve(world),
+                getConfiguredWheatSeedReserveCap(), FULL_WHEAT_SEED_STACK, stats.seededCells(), stats.accessibleCells(), stats.coverageLabel(), netSeedGain);
     }
 
-    private int getGatherStageNetSeedGain() {
-        return countItemInInventory(Items.WHEAT_SEEDS) - gatherStageSeedStartCount;
+    private int getGatherStageNetSeedGain(ServerWorld world) {
+        return getCombinedWheatSeedReserve(world) - gatherStageSeedStartCount;
     }
 
     private void stopSeedForageWithOutcome(ServerWorld world, String reasonCode, String detail) {
-        int currentSeedCount = countItemInInventory(Items.WHEAT_SEEDS);
-        int netSeedGain = getGatherStageNetSeedGain();
-        LOGGER.info("Farmer {} wheat seed forage outcome={} detail={} startSeeds={} currentSeeds={} netGain={} noTargetPasses={} lowYieldBreakPasses={}",
+        int currentSeedCount = getCombinedWheatSeedReserve(world);
+        int netSeedGain = getGatherStageNetSeedGain(world);
+        LOGGER.info("Farmer {} wheat seed forage outcome={} detail={} startCombinedSeeds={} currentCombinedSeeds={} netGain={} noTargetPasses={} lowYieldBreakPasses={}",
                 villager.getUuidAsString(), reasonCode, detail, gatherStageSeedStartCount, currentSeedCount, netSeedGain, gatherNoTargetPasses, gatherLowYieldBreakPasses);
         LOGGER.info("Farmer {} seed_gather_end_reason={}", villager.getUuidAsString(), reasonCode);
         pendingSeedGatherEndReason = reasonCode;
@@ -1435,6 +1514,27 @@ public class FarmerHarvestGoal extends Goal {
         long remaining = Math.max(0L, nextSeedForageRetryTick - world.getTime());
         LOGGER.info("Farmer {} wheat seed forage re-entry blocked by cooldown (context: {}, remainingTicks: {}, retries: {})",
                 villager.getUuidAsString(), context, remaining, seedForageRetryCount);
+    }
+
+
+    private void logSeedReserveStatus(ServerWorld world, String context) {
+        FarmlandCoverageStats stats = getFarmlandCoverageStats(world);
+        LOGGER.info("Farmer {} {} villagerSeeds={} chestSeeds={} combined={} cap={} bootstrapFloor={} chestFullStack={} coverage={}/{} ({})",
+                villager.getUuidAsString(), context, countWheatSeedsInVillagerInventory(), countWheatSeedsInChestInventory(world), getCombinedWheatSeedReserve(world),
+                getConfiguredWheatSeedReserveCap(), getConfiguredWheatSeedBootstrapFloor(), FULL_WHEAT_SEED_STACK, stats.seededCells(), stats.accessibleCells(), stats.coverageLabel());
+    }
+
+    private record FarmlandCoverageStats(int accessibleCells, int seededCells) {
+        private boolean hasFullCoverage() {
+            return accessibleCells <= 0 || seededCells >= accessibleCells;
+        }
+
+        private String coverageLabel() {
+            if (accessibleCells <= 0) {
+                return "100.0%";
+            }
+            return String.format(java.util.Locale.ROOT, "%.1f%%", (seededCells * 100.0D) / accessibleCells);
+        }
     }
 
     private boolean hasPlantablesForPlanting() {
