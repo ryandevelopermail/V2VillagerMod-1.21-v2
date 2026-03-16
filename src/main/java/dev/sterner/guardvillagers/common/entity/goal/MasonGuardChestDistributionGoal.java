@@ -31,6 +31,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 public class MasonGuardChestDistributionGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
@@ -70,11 +72,11 @@ public class MasonGuardChestDistributionGoal extends Goal {
     private DistributionType pendingType = DistributionType.NONE;
     private boolean pendingOverflowTransfer;
     private int pendingExtractCount = 1;
-    private boolean pendingCoalBatchMode;
-    private final List<BlockPos> pendingCoalTargets = new ArrayList<>();
-    private int pendingCoalRecipientCount;
-    private int pendingCoalTargetIndex;
-    private int pendingCoalFailedAttempts;
+    private boolean pendingBatchMode;
+    private final List<BlockPos> pendingBatchTargets = new ArrayList<>();
+    private int pendingBatchRecipientCount;
+    private int pendingBatchTargetIndex;
+    private int pendingBatchFailedAttempts;
 
     public MasonGuardChestDistributionGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -201,22 +203,23 @@ public class MasonGuardChestDistributionGoal extends Goal {
             this.pendingType = type;
             this.pendingOverflowTransfer = false;
             this.pendingExtractCount = 1;
-            this.pendingCoalBatchMode = false;
-            this.pendingCoalTargets.clear();
-            this.pendingCoalRecipientCount = 0;
-            this.pendingCoalTargetIndex = 0;
-            this.pendingCoalFailedAttempts = 0;
+            this.pendingBatchMode = false;
+            this.pendingBatchTargets.clear();
+            this.pendingBatchRecipientCount = 0;
+            this.pendingBatchTargetIndex = 0;
+            this.pendingBatchFailedAttempts = 0;
 
-            if ((type == DistributionType.COAL || type == DistributionType.ORE) && recipients.size() > 1) {
+            if ((type == DistributionType.COAL || type == DistributionType.ORE || type == DistributionType.COBBLESTONE) && recipients.size() > 1) {
                 int cursor = recipientCursorByType.getOrDefault(type, 0);
                 for (int i = 0; i < recipients.size(); i++) {
                     RecipientRecord recipient = recipients.get(Math.floorMod(cursor + i, recipients.size()));
-                    pendingCoalTargets.add(recipient.chestPos());
+                    pendingBatchTargets.add(recipient.chestPos());
                 }
-                this.pendingCoalBatchMode = !pendingCoalTargets.isEmpty();
-                this.pendingCoalRecipientCount = recipients.size();
-                this.pendingExtractCount = Math.max(1, stack.getCount());
-                this.pendingTargetChestPos = pendingCoalBatchMode ? pendingCoalTargets.getFirst() : selectedRecipient.chestPos();
+                this.pendingBatchMode = !pendingBatchTargets.isEmpty();
+                this.pendingBatchRecipientCount = recipients.size();
+                int requestedExtractCount = type == DistributionType.COBBLESTONE ? recipients.size() : stack.getCount();
+                this.pendingExtractCount = Math.max(1, Math.min(stack.getCount(), requestedExtractCount));
+                this.pendingTargetChestPos = pendingBatchMode ? pendingBatchTargets.getFirst() : selectedRecipient.chestPos();
             } else {
                 if (type == DistributionType.COBBLESTONE) {
                     this.pendingExtractCount = Math.min(stack.getCount(), 8);
@@ -253,11 +256,11 @@ public class MasonGuardChestDistributionGoal extends Goal {
             this.pendingType = DistributionType.NONE;
             this.pendingOverflowTransfer = true;
             this.pendingExtractCount = 1;
-            this.pendingCoalBatchMode = false;
-            this.pendingCoalTargets.clear();
-            this.pendingCoalRecipientCount = 0;
-            this.pendingCoalTargetIndex = 0;
-            this.pendingCoalFailedAttempts = 0;
+            this.pendingBatchMode = false;
+            this.pendingBatchTargets.clear();
+            this.pendingBatchRecipientCount = 0;
+            this.pendingBatchTargetIndex = 0;
+            this.pendingBatchFailedAttempts = 0;
             return true;
         }
 
@@ -269,8 +272,8 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return;
         }
 
-        if (pendingCoalBatchMode) {
-            executeCoalBatchTransfer(world);
+        if (pendingBatchMode) {
+            executeBatchTransfer(world);
             return;
         }
 
@@ -300,44 +303,85 @@ public class MasonGuardChestDistributionGoal extends Goal {
         returnPendingToSource(world);
     }
 
-    private void executeCoalBatchTransfer(ServerWorld world) {
-        if (pendingCoalTargets.isEmpty()) {
-            returnPendingToSource(world);
-            return;
-        }
-
-        Optional<Inventory> targetInventory = getChestInventory(world, pendingTargetChestPos);
-        if (targetInventory.isPresent()) {
-            ItemStack singleItem = pendingItem.copyWithCount(1);
-            ItemStack remaining = insertStack(targetInventory.get(), singleItem);
-            if (remaining.isEmpty()) {
-                pendingItem.decrement(1);
-                pendingCoalFailedAttempts = 0;
-                advanceBatchCursor();
-            } else {
-                pendingCoalFailedAttempts++;
-            }
-        } else {
-            pendingCoalFailedAttempts++;
-        }
-
-        if (pendingItem.isEmpty()) {
+    private void executeBatchTransfer(ServerWorld world) {
+        BatchTransferOutcome outcome = executeBatchTransferPass(target -> getChestInventory(world, target));
+        if (outcome == BatchTransferOutcome.COMPLETE) {
             clearPendingState();
             return;
         }
-
-        if (pendingCoalFailedAttempts >= pendingCoalTargets.size()) {
+        if (outcome == BatchTransferOutcome.RETURN_TO_SOURCE) {
             returnPendingToSource(world);
-            return;
+        }
+    }
+
+    BatchTransferOutcome executeBatchTransferPass(Function<BlockPos, Optional<Inventory>> inventoryResolver) {
+        BatchTransferStepResult result = performBatchTransferPass(
+                pendingItem,
+                pendingTargetChestPos,
+                pendingBatchTargets,
+                pendingBatchTargetIndex,
+                pendingBatchFailedAttempts,
+                inventoryResolver,
+                this::insertStack
+        );
+
+        this.pendingBatchTargetIndex = result.nextTargetIndex();
+        this.pendingBatchFailedAttempts = result.nextFailedAttempts();
+        this.pendingTargetChestPos = result.nextTarget();
+        if (result.deliveredItem()) {
+            pendingItem.decrement(1);
+            advanceBatchCursor();
+        }
+        if (result.outcome() == BatchTransferOutcome.CONTINUE) {
+            stage = Stage.MOVE_TO_TARGET;
+        }
+        return result.outcome();
+    }
+
+    static BatchTransferStepResult performBatchTransferPass(
+            ItemStack pendingItem,
+            BlockPos currentTarget,
+            List<BlockPos> targets,
+            int currentTargetIndex,
+            int failedAttempts,
+            Function<BlockPos, Optional<Inventory>> inventoryResolver,
+            BiFunction<Inventory, ItemStack, ItemStack> stackInserter
+    ) {
+        if (pendingItem.isEmpty() || targets.isEmpty()) {
+            return new BatchTransferStepResult(BatchTransferOutcome.RETURN_TO_SOURCE, currentTargetIndex, failedAttempts, currentTarget, false);
         }
 
-        pendingCoalTargetIndex = (pendingCoalTargetIndex + 1) % pendingCoalTargets.size();
-        pendingTargetChestPos = pendingCoalTargets.get(pendingCoalTargetIndex);
-        stage = Stage.MOVE_TO_TARGET;
+        boolean deliveredItem = false;
+        int nextFailedAttempts = failedAttempts;
+        Optional<Inventory> targetInventory = inventoryResolver.apply(currentTarget);
+        if (targetInventory.isPresent()) {
+            ItemStack singleItem = pendingItem.copyWithCount(1);
+            ItemStack remaining = stackInserter.apply(targetInventory.get(), singleItem);
+            if (remaining.isEmpty()) {
+                deliveredItem = true;
+                nextFailedAttempts = 0;
+            } else {
+                nextFailedAttempts++;
+            }
+        } else {
+            nextFailedAttempts++;
+        }
+
+        if (pendingItem.getCount() - (deliveredItem ? 1 : 0) <= 0) {
+            return new BatchTransferStepResult(BatchTransferOutcome.COMPLETE, currentTargetIndex, nextFailedAttempts, currentTarget, deliveredItem);
+        }
+
+        if (nextFailedAttempts >= targets.size()) {
+            return new BatchTransferStepResult(BatchTransferOutcome.RETURN_TO_SOURCE, currentTargetIndex, nextFailedAttempts, currentTarget, deliveredItem);
+        }
+
+        int nextTargetIndex = (currentTargetIndex + 1) % targets.size();
+        BlockPos nextTarget = targets.get(nextTargetIndex);
+        return new BatchTransferStepResult(BatchTransferOutcome.CONTINUE, nextTargetIndex, nextFailedAttempts, nextTarget, deliveredItem);
     }
 
     private void advanceBatchCursor() {
-        int recipientCount = pendingCoalRecipientCount;
+        int recipientCount = pendingBatchRecipientCount;
         if (recipientCount <= 0 || pendingType == DistributionType.NONE) {
             return;
         }
@@ -371,11 +415,11 @@ public class MasonGuardChestDistributionGoal extends Goal {
         this.pendingType = DistributionType.NONE;
         this.pendingOverflowTransfer = false;
         this.pendingExtractCount = 1;
-        this.pendingCoalBatchMode = false;
-        this.pendingCoalTargets.clear();
-        this.pendingCoalRecipientCount = 0;
-        this.pendingCoalTargetIndex = 0;
-        this.pendingCoalFailedAttempts = 0;
+        this.pendingBatchMode = false;
+        this.pendingBatchTargets.clear();
+        this.pendingBatchRecipientCount = 0;
+        this.pendingBatchTargetIndex = 0;
+        this.pendingBatchFailedAttempts = 0;
     }
 
     private boolean extractPendingItemFromSource(ServerWorld world, BlockPos sourceChestPos) {
@@ -658,6 +702,21 @@ public class MasonGuardChestDistributionGoal extends Goal {
         MOVE_TO_TARGET,
         EXECUTE_TRANSFER,
         DONE
+    }
+
+    enum BatchTransferOutcome {
+        CONTINUE,
+        COMPLETE,
+        RETURN_TO_SOURCE
+    }
+
+    record BatchTransferStepResult(
+            BatchTransferOutcome outcome,
+            int nextTargetIndex,
+            int nextFailedAttempts,
+            BlockPos nextTarget,
+            boolean deliveredItem
+    ) {
     }
 
     private record RecipientRecord(Inventory inventory, BlockPos chestPos, double distanceSquared) {
