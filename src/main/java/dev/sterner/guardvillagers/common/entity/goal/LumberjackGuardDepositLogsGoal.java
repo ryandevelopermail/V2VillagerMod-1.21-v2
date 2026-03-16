@@ -149,16 +149,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             if (LumberjackChestTriggerController.isBootstrapSatisfied(world, this.guard)) {
                 this.guard.setBootstrapComplete(true);
             }
-            for (int attempt = 0; attempt < MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT; attempt++) {
-                long attemptsBefore = this.distributionAttempts;
-                tryDemandDrivenDistribution(world, chestInventory, chestPos);
-                if (this.distributionAttempts == attemptsBefore) {
-                    break;
-                }
-                if (world.getTime() < this.nextDistributionAttemptTick) {
-                    break;
-                }
-            }
+            runDemandDrivenDistributionBatch(world, chestInventory, chestPos, Map.of());
             this.guard.requestTriggerEvaluation();
             LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.IDLE);
@@ -175,7 +166,27 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     }
 
     private void tryDemandDrivenDistribution(ServerWorld world, Inventory sourceInventory, BlockPos sourceChestPos) {
-        executeDemandDrivenDistributionAttempt(world, sourceInventory, sourceChestPos, Map.of(), false);
+        executeDemandDrivenDistributionAttempt(world, sourceInventory, sourceChestPos, Map.of(), true, -1);
+    }
+
+    private void runDemandDrivenDistributionBatch(ServerWorld world,
+                                                  Inventory sourceInventory,
+                                                  BlockPos sourceChestPos,
+                                                  Map<UUID, Integer> prioritizedRecipientRanks) {
+        for (int passIndex = 0; passIndex < MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT; passIndex++) {
+            Optional<DistributionCandidate> selected = executeDemandDrivenDistributionAttempt(
+                    world,
+                    sourceInventory,
+                    sourceChestPos,
+                    prioritizedRecipientRanks,
+                    false,
+                    passIndex);
+            if (selected.isEmpty()) {
+                break;
+            }
+        }
+
+        this.nextDistributionAttemptTick = world.getTime() + DISTRIBUTION_ATTEMPT_INTERVAL_TICKS;
     }
 
     private List<String> tryDemandDrivenDistributionWithAudit(ServerWorld world,
@@ -185,13 +196,14 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         Map<UUID, Integer> prioritizedRecipientRanks = auditSnapshot.prioritizedRecipientRanks();
         Set<String> recipientsChosen = new LinkedHashSet<>();
 
-        for (int attempt = 0; attempt < MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT; attempt++) {
+        for (int passIndex = 0; passIndex < MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT; passIndex++) {
             Optional<DistributionCandidate> selected = executeDemandDrivenDistributionAttempt(
                     world,
                     sourceInventory,
                     sourceChestPos,
                     prioritizedRecipientRanks,
-                    true);
+                    false,
+                    passIndex);
             if (selected.isEmpty()) {
                 break;
             }
@@ -209,17 +221,15 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                                                                                     Inventory sourceInventory,
                                                                                     BlockPos sourceChestPos,
                                                                                     Map<UUID, Integer> prioritizedRecipientRanks,
-                                                                                    boolean bypassThrottle) {
+                                                                                    boolean enforceThrottle,
+                                                                                    int passIndex) {
         long now = world.getTime();
-        if (!bypassThrottle && now < nextDistributionAttemptTick) {
+        if (enforceThrottle && now < nextDistributionAttemptTick) {
             return Optional.empty();
         }
         if (distributionAttempts >= MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT) {
             return Optional.empty();
         }
-
-        distributionAttempts++;
-        nextDistributionAttemptTick = now + DISTRIBUTION_ATTEMPT_INTERVAL_TICKS;
 
         LumberjackDemandPlanner.DemandSnapshot demandSnapshot = LumberjackDemandPlanner.buildSnapshot(world, this.guard, sourceInventory);
         List<DistributionCandidate> candidates = collectCandidates(world, sourceInventory, demandSnapshot, prioritizedRecipientRanks);
@@ -253,6 +263,20 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         if (transferAmount <= 0) {
             return Optional.empty();
         }
+
+        distributionAttempts++;
+        if (enforceThrottle) {
+            nextDistributionAttemptTick = now + DISTRIBUTION_ATTEMPT_INTERVAL_TICKS;
+        }
+        LOGGER.debug("lumberjack distribution transfer: material={} recipientUuid={} recipientProfession={} transferCount={} visitPassIndex={} distributionAttempts={}/{}",
+                selected.materialType().label(),
+                selected.recipient().record().recipient().getUuidAsString(),
+                selected.recipient().record().recipient().getVillagerData().getProfession(),
+                transferAmount,
+                passIndex,
+                this.distributionAttempts,
+                MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT);
+
         ItemStack moved = sourceStack.split(transferAmount);
         sourceInventory.setStack(selected.slot(), sourceStack);
         sourceInventory.markDirty();
