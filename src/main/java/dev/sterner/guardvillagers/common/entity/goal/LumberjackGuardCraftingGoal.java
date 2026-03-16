@@ -317,6 +317,27 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return true;
     }
 
+    public static boolean craftSingleUpgradeDemandOutputIfPossible(LumberjackGuardEntity guard,
+                                                                    Inventory chestInventory,
+                                                                    LumberjackChestTriggerController.UpgradeDemand demand) {
+        if (demand == null) {
+            return false;
+        }
+
+        int planks = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatchingStatic(guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+        if (planks < demand.planksCost()) {
+            return false;
+        }
+
+        if (!consumeMatchingStatic(chestInventory, guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), demand.planksCost())) {
+            return false;
+        }
+
+        addToBufferStatic(guard, new ItemStack(demand.outputItem(), 1));
+        return true;
+    }
+
     public static Inventory resolveChestInventoryForGuard(ServerWorld world, LumberjackGuardEntity guard) {
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null || !world.getBlockState(chestPos).isOf(Blocks.CHEST)) {
