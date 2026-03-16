@@ -516,7 +516,7 @@ public final class LumberjackChestTriggerController {
 
             if (context.world().setBlockState(placePos, Blocks.CRAFTING_TABLE.getDefaultState())) {
                 JobBlockPairingHelper.handleCraftingTablePlacement(context.world(), placePos);
-                transitionUpgradeStageToTablePaired(world, villager.getUuid(), jobPos);
+                transitionUpgradeStageToTablePaired(context.world(), villager.getUuid(), jobPos);
                 LOGGER.debug("Placed V2 crafting table: villager={} jobPos={} placePos={} source={}",
                         villager.getUuid(), jobPos.toShortString(), placePos.toShortString(), materialUse.sourceLabel());
                 return true;
