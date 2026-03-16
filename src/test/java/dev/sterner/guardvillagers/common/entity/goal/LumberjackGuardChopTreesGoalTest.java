@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
@@ -125,6 +127,15 @@ class LumberjackGuardChopTreesGoalTest {
 
         assertTrue(acted);
         assertEquals(LumberjackChestTriggerController.UpgradeDemand.v1Chest(), craftedDemand.get());
+    }
+
+    @Test
+    void isGatherableTreeDrop_acceptsSaplingsAndApplesInAdditionToWoodDrops() {
+        assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.OAK_LOG)));
+        assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.STICK)));
+        assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.OAK_SAPLING)));
+        assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.APPLE)));
+        assertFalse(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.DIRT)));
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {

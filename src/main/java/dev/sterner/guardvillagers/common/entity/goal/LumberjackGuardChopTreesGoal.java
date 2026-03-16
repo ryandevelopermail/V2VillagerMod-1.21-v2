@@ -58,6 +58,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
     private static final int MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT = 3;
+    private static final int TARGET_STUCK_FALLBACK_TICKS = 20 * 30;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
 
@@ -65,6 +66,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
     private final Set<BlockPos> failedSessionRoots = new HashSet<>();
     private final Map<BlockPos, Integer> rootTeardownRetryAttempts = new HashMap<>();
+    private final Map<BlockPos, Integer> rootFocusTicks = new HashMap<>();
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
     private int stallRecoveryAttempts;
@@ -132,6 +134,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return;
         }
 
+        int focusedTicks = updateAndGetFocusedRootTicks(targetRoot);
+        if (focusedTicks >= TARGET_STUCK_FALLBACK_TICKS) {
+            LOGGER.warn("Lumberjack Guard {} target {} exceeded focus timeout ({} ticks); forcing full tree removal",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    focusedTicks);
+            executeForcedTreeRemoval(world, targetRoot, "focus timeout");
+            return;
+        }
+
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
         double treeDistanceSq = this.guard.squaredDistanceTo(Vec3d.ofCenter(targetRoot));
         if (treeDistanceSq > 6.25D) {
@@ -165,16 +177,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             int retryAttempt = this.rootTeardownRetryAttempts.getOrDefault(targetRoot, 0) + 1;
             this.rootTeardownRetryAttempts.put(targetRoot.toImmutable(), retryAttempt);
             if (retryAttempt >= MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT) {
-                LOGGER.warn("Lumberjack Guard {} tree_teardown_failed root={} attempts={} initialCandidates={} brokenLogs={} remainingLogs={}",
+                LOGGER.warn("Lumberjack Guard {} tree_teardown_retry_exhausted root={} attempts={} initialCandidates={} brokenLogs={} remainingLogs={}; forcing full tree removal",
                         this.guard.getUuidAsString(),
                         targetRoot,
                         retryAttempt,
                         teardownResult.initialCandidateLogs(),
                         teardownResult.brokenLogs(),
                         remainingLogs);
-                recordFailedTargetAttempt(targetRoot, "teardown verification exceeded retries with remaining logs=" + remainingLogs);
-                this.rootTeardownRetryAttempts.remove(targetRoot);
-                this.guard.getSelectedTreeTargets().remove(0);
+                executeForcedTreeRemoval(world, targetRoot, "teardown retries exhausted");
             } else {
                 LOGGER.warn("Lumberjack Guard {} tree_teardown_retry_scheduled root={} attempt={} maxAttempts={} initialCandidates={} brokenLogs={} remainingLogs={}",
                         this.guard.getUuidAsString(),
@@ -292,6 +302,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
         this.rootTeardownRetryAttempts.clear();
+        this.rootFocusTicks.clear();
         this.bootstrapRetryTreeScheduled = false;
         this.guard.setActiveSession(true);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
@@ -334,6 +345,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.completedSessionRoots.clear();
         this.failedSessionRoots.clear();
         this.rootTeardownRetryAttempts.clear();
+        this.rootFocusTicks.clear();
         this.bootstrapRetryTreeScheduled = false;
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
@@ -535,6 +547,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
         this.failedSessionRoots.add(targetRoot.toImmutable());
         this.rootTeardownRetryAttempts.remove(targetRoot);
+        this.rootFocusTicks.remove(targetRoot);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
@@ -986,6 +999,38 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return new TreeTeardownResult(logs.size(), brokenLogs, brokenLeaves);
     }
 
+    private int updateAndGetFocusedRootTicks(BlockPos targetRoot) {
+        BlockPos immutableTarget = targetRoot.toImmutable();
+        this.rootFocusTicks.keySet().removeIf(root -> !root.equals(immutableTarget));
+        return this.rootFocusTicks.merge(immutableTarget, 1, Integer::sum);
+    }
+
+    private void executeForcedTreeRemoval(ServerWorld world, BlockPos root, String reason) {
+        TreeTeardownResult forcedTeardown = teardownTree(world, root);
+        RemainingLogCountResult afterForcedTeardown = countRemainingConnectedLogs(world, root);
+        int remainingAfterForcedTeardown = afterForcedTeardown.count();
+
+        LOGGER.warn("Lumberjack Guard {} forced tree removal result root={} reason={} brokenLogs={} brokenLeaves={} remainingLogs={}",
+                this.guard.getUuidAsString(),
+                root,
+                reason,
+                forcedTeardown.brokenLogs(),
+                forcedTeardown.brokenLeaves(),
+                remainingAfterForcedTeardown);
+
+        if (remainingAfterForcedTeardown > 0) {
+            recordFailedTargetAttempt(root, "forced tree removal could not clear all logs; remaining=" + remainingAfterForcedTeardown);
+        } else {
+            this.rootTeardownRetryAttempts.remove(root);
+            this.rootFocusTicks.remove(root);
+            this.completedSessionRoots.add(root.toImmutable());
+            this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
+        }
+
+        collectNearbyWoodDrops(world);
+        this.guard.getSelectedTreeTargets().remove(0);
+    }
+
     private RemainingLogCountResult countRemainingConnectedLogs(ServerWorld world, BlockPos root) {
         ConnectedLogScanResult scanResult = collectConnectedLogsWithinTreeBounds(world, root);
         return new RemainingLogCountResult(scanResult.logs().size(), scanResult.usedFallbackSeed());
@@ -1125,7 +1170,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         Box pickupBox = this.guard.getBoundingBox().expand(ITEM_PICKUP_RADIUS, 1.0D, ITEM_PICKUP_RADIUS);
         List<ItemEntity> nearbyItems = world.getEntitiesByClass(ItemEntity.class,
                 pickupBox,
-                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableWoodDrop(entity.getStack()));
+                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableTreeDrop(entity.getStack()));
 
         for (ItemEntity itemEntity : nearbyItems) {
             bufferStack(itemEntity.getStack().copy());
@@ -1133,11 +1178,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
     }
 
-    private boolean isGatherableWoodDrop(ItemStack stack) {
+    static boolean isGatherableTreeDrop(ItemStack stack) {
         return stack.isIn(ItemTags.LOGS)
                 || stack.isIn(ItemTags.PLANKS)
                 || stack.isOf(Items.STICK)
-                || stack.isOf(Items.CHARCOAL);
+                || stack.isOf(Items.CHARCOAL)
+                || stack.isIn(ItemTags.SAPLINGS)
+                || stack.isOf(Items.APPLE);
     }
 
     private void bufferStack(ItemStack incoming) {
