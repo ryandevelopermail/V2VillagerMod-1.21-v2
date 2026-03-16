@@ -204,7 +204,9 @@ public class MasonTableCraftingGoal extends Goal {
             if (countMatching(inventory, stack -> stack.isOf(Items.STICK)) < 2 && countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) >= 2) {
                 ItemStack sticks = new ItemStack(Items.STICK, 4);
                 if (canInsertFully(inventory, sticks) && consumeIngredients(inventory,
-                        new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2))) {
+                        new IngredientRequirement[] {
+                                new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2)
+                        })) {
                     insertStack(inventory, sticks);
                     mutated = true;
                     CraftingCheckLogger.report(world, "Mason", "crafted intermediate sticks");
@@ -229,7 +231,9 @@ public class MasonTableCraftingGoal extends Goal {
             return false;
         }
 
-        if (!consumeIngredients(inventory, new IngredientRequirement(stack -> stack.isIn(ItemTags.LOGS_THAT_BURN), 1))) {
+        if (!consumeIngredients(inventory, new IngredientRequirement[] {
+                new IngredientRequirement(stack -> stack.isIn(ItemTags.LOGS_THAT_BURN), 1)
+        })) {
             return false;
         }
 
