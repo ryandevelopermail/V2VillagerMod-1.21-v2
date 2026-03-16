@@ -87,6 +87,7 @@ public class FarmerHarvestGoal extends Goal {
     private int gatherLowYieldBreakPasses;
     private long nextSeedForageRetryTick;
     private int seedForageRetryCount;
+    private String pendingSeedGatherEndReason;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -343,6 +344,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (routePostDepositFlow(serverWorld, false)) {
                     break;
                 }
+                pendingSeedGatherEndReason = null;
                 finishDailyRunIfNeeded(serverWorld);
                 setStage(Stage.DONE);
             }
@@ -434,9 +436,7 @@ public class FarmerHarvestGoal extends Goal {
                 if (!bootstrapSeedGatherRequested && plantTargets.isEmpty()) {
                     populatePlantTargets(serverWorld);
                     if (plantTargets.isEmpty()) {
-                        logWheatSeedForageStop("no plant targets remain");
-                        finishDailyRunIfNeeded(serverWorld);
-                        setStage(Stage.DONE);
+                        stopSeedForageWithOutcome(serverWorld, "no_remaining_plant_targets", "no plant targets remain");
                         return;
                     }
                 }
@@ -515,6 +515,33 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 gatherSeedTargets.removeFirst();
                 currentGatherTarget = null;
+            }
+            case SEED_GATHER_END_RETURN_TO_CHEST -> {
+                if (isNear(chestPos)) {
+                    setStage(Stage.SEED_GATHER_END_DEPOSIT);
+                } else {
+                    moveTo(chestPos);
+                }
+            }
+            case SEED_GATHER_END_DEPOSIT -> {
+                if (!isNear(chestPos)) {
+                    setStage(Stage.SEED_GATHER_END_RETURN_TO_CHEST);
+                    return;
+                }
+
+                LOGGER.info("Farmer {} seed_gather_end_deposit_start reason={}", villager.getUuidAsString(), pendingSeedGatherEndReason == null ? "unknown" : pendingSeedGatherEndReason);
+                DepositSummary summary = depositPlantablesAndSeeds(serverWorld);
+                LOGGER.info("Farmer {} seed_gather_end_deposit_result moved={} remaining={}", villager.getUuidAsString(), summary.movedCount(), summary.remainingCount());
+
+                populatePlantTargets(serverWorld);
+                if (!plantTargets.isEmpty() && (hasPlantablesInInventory() || ensureWheatSeedStartup(serverWorld))) {
+                    setStage(Stage.PLANT_FARMLAND);
+                    return;
+                }
+
+                pendingSeedGatherEndReason = null;
+                finishDailyRunIfNeeded(serverWorld);
+                setStage(Stage.DONE);
             }
             case IDLE, DONE -> {
             }
@@ -727,6 +754,54 @@ public class FarmerHarvestGoal extends Goal {
         chestInventory.markDirty();
     }
 
+    private DepositSummary depositPlantablesAndSeeds(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return new DepositSummary(0, countPlantablesAndSeeds(villager.getInventory()));
+        }
+
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        if (chestInventory == null) {
+            return new DepositSummary(0, countPlantablesAndSeeds(villager.getInventory()));
+        }
+
+        int movedCount = 0;
+        Inventory villagerInventory = villager.getInventory();
+        for (int slot = 0; slot < villagerInventory.size(); slot++) {
+            ItemStack stack = villagerInventory.getStack(slot);
+            if (stack.isEmpty() || !isPlantableSeedOrCrop(stack.getItem())) {
+                continue;
+            }
+
+            int before = stack.getCount();
+            ItemStack remaining = insertStack(chestInventory, stack);
+            villagerInventory.setStack(slot, remaining);
+            movedCount += Math.max(0, before - remaining.getCount());
+        }
+
+        villagerInventory.markDirty();
+        chestInventory.markDirty();
+        return new DepositSummary(movedCount, countPlantablesAndSeeds(villagerInventory));
+    }
+
+    private boolean isPlantableSeedOrCrop(Item item) {
+        return item == Items.WHEAT_SEEDS || item == Items.CARROT || item == Items.POTATO || item == Items.BEETROOT_SEEDS;
+    }
+
+    private int countPlantablesAndSeeds(Inventory inventory) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && isPlantableSeedOrCrop(stack.getItem())) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private record DepositSummary(int movedCount, int remainingCount) {
+    }
+
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {
         ItemStack remaining = stack.copy();
         for (int slot = 0; slot < inventory.size(); slot++) {
@@ -782,6 +857,7 @@ public class FarmerHarvestGoal extends Goal {
             gatherLowYieldBreakPasses = 0;
         }
         if (newStage == Stage.GATHER_WHEAT_SEEDS && villager.getWorld() instanceof ServerWorld world) {
+            pendingSeedGatherEndReason = null;
             gatherSeedsStageStartTick = world.getTime();
             gatherStageSeedStartCount = countItemInInventory(Items.WHEAT_SEEDS);
             currentGatherTarget = null;
@@ -830,6 +906,7 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         if (bootstrapPreflight.shouldGatherSeedsAfterChestCheck()) {
+            depositPlantablesAndSeeds(world);
             bootstrapSeedGatherRequested = true;
             logBootstrapReason(bootstrapPreflight.reason);
             if (ensureWheatSeedStartup(world)) {
@@ -921,6 +998,8 @@ public class FarmerHarvestGoal extends Goal {
         DEPOSIT,
         HOE_GROUND,
         GATHER_WHEAT_SEEDS,
+        SEED_GATHER_END_RETURN_TO_CHEST,
+        SEED_GATHER_END_DEPOSIT,
         PLANT_FARMLAND,
         DONE
     }
@@ -1305,14 +1384,12 @@ public class FarmerHarvestGoal extends Goal {
         int netSeedGain = getGatherStageNetSeedGain();
         LOGGER.info("Farmer {} wheat seed forage outcome={} detail={} startSeeds={} currentSeeds={} netGain={} noTargetPasses={} lowYieldBreakPasses={}",
                 villager.getUuidAsString(), reasonCode, detail, gatherStageSeedStartCount, currentSeedCount, netSeedGain, gatherNoTargetPasses, gatherLowYieldBreakPasses);
-        if (!plantTargets.isEmpty() && hasPlantablesInInventory()) {
-            logWheatSeedForageStop("returning to planting stage");
-            setStage(Stage.PLANT_FARMLAND);
-            return;
-        }
+        LOGGER.info("Farmer {} seed_gather_end_reason={}", villager.getUuidAsString(), reasonCode);
+        pendingSeedGatherEndReason = reasonCode;
+        clearSeedForageRetryCooldown(world, "gather stage completed via deposit routing");
         logWheatSeedForageStop(detail);
-        finishDailyRunIfNeeded(world);
-        setStage(Stage.DONE);
+        setStage(Stage.SEED_GATHER_END_RETURN_TO_CHEST);
+        moveTo(chestPos);
     }
 
     private boolean canEnterSeedForageStage(ServerWorld world, String context) {
