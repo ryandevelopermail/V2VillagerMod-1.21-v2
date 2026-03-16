@@ -109,6 +109,9 @@ public final class LumberjackChestTriggerController {
             guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
             return true;
         }
+        if (hasUnresolvedV1ChestDemand(world, guard)) {
+            return false;
+        }
         if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
             guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
             return true;
@@ -446,6 +449,11 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
+        if (hasUnresolvedV1ChestDemand(context.world(), context.guard())) {
+            LOGGER.debug("Skip V2 crafting table placement: unresolved V1 chest demand still exists");
+            return false;
+        }
+
         Inventory pairedChestInventory = resolveChestInventory(context.world(), context.guard());
         Inventory contextInventory = context.chestInventory() == pairedChestInventory ? null : context.chestInventory();
         List<ItemStack> contextBuffer = context.guard().getGatheredStackBuffer();
@@ -518,6 +526,15 @@ public final class LumberjackChestTriggerController {
         }
 
         return false;
+    }
+
+    static boolean hasUnresolvedV1ChestDemand(ServerWorld world, LumberjackGuardEntity guard) {
+        return shouldBlockV2TablePlacement(resolveNextUpgradeDemand(world, guard),
+                countEligibleV1VillagersMissingPairedChest(world, guard));
+    }
+
+    static boolean shouldBlockV2TablePlacement(UpgradeDemand nextDemand, int eligibleV1MissingChestCount) {
+        return UpgradeDemand.v1Chest().equals(nextDemand) || eligibleV1MissingChestCount > 0;
     }
 
     private static PlacementMaterialUse tryConsumeCraftingTableMaterials(Inventory pairedChestInventory,
