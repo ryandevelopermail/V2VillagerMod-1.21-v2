@@ -314,6 +314,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
 
         candidates.sort(Comparator
                 .comparingInt(DistributionCandidate::auditPriorityRank)
+                .thenComparing(Comparator.comparing((DistributionCandidate candidate) -> candidate.recipient().toolRecipeDemandRoute()).reversed())
                 .thenComparing(Comparator.comparingDouble(DistributionCandidate::demandScore).reversed())
                 .thenComparing(Comparator.comparingInt((DistributionCandidate candidate) -> candidate.recipient().deficit()).reversed())
                 .thenComparingDouble(candidate -> candidate.recipient().record().sourceSquaredDistance())
