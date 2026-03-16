@@ -15,16 +15,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 public final class RecipeDemandIndex {
     private static final Logger LOGGER = LoggerFactory.getLogger(RecipeDemandIndex.class);
     private static final Map<String, RouteIndex> CACHE = new HashMap<>();
+    private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 32;
+    private static final int TOOLSMITH_STICK_COMPONENT_CAP = 32;
+    private static final int MASON_PLANK_COMPONENT_CAP = 24;
+    private static final int MASON_STICK_COMPONENT_CAP = 24;
+    private static final int FARMER_PLANK_COMPONENT_CAP = 32;
+    private static final int FARMER_STICK_COMPONENT_CAP = 32;
+    private static final int BUTCHER_SMOKER_LOG_CAP = 1;
 
     private RecipeDemandIndex() {
     }
@@ -56,28 +65,43 @@ public final class RecipeDemandIndex {
         }
 
         // fixed-goal enum requirements
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, 28, 1.0D, false);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, 24, 1.0D, false);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false);
-        add(aggregate, DemandMaterial.LOGS, VillagerProfession.BUTCHER, 1, 32, 1.0D, false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, FARMER_PLANK_COMPONENT_CAP, 1.15D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, FARMER_STICK_COMPONENT_CAP, 1.15D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
+        add(aggregate,
+                DemandMaterial.LOGS,
+                VillagerProfession.BUTCHER,
+                1,
+                resolveFixedCap(DemandMaterial.LOGS, VillagerProfession.BUTCHER, 32),
+                1.0D,
+                false,
+                false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 1.4D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 1.4D, false, true);
 
         // dynamic-goal recipe scans (RecipeManager-backed goals)
-        scanDynamic(world, aggregate, VillagerProfession.LIBRARIAN, RecipeDemandIndex::isLibrarianOutput, 48, 1.8D);
-        scanDynamic(world, aggregate, VillagerProfession.FISHERMAN, RecipeDemandIndex::isFishermanOutput, 40, 1.5D);
-        scanDynamic(world, aggregate, VillagerProfession.FLETCHER, RecipeDemandIndex::isFletcherOutput, 32, 1.2D);
-        scanDynamic(world, aggregate, VillagerProfession.TOOLSMITH, RecipeDemandIndex::isToolsmithOutput, 24, 0.45D);
+        Set<VillagerProfession> detectedToolMaterialDemandProfessions = new HashSet<>();
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.LIBRARIAN, RecipeDemandIndex::isLibrarianOutput, 48, 1.8D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FISHERMAN, RecipeDemandIndex::isFishermanOutput, 40, 1.5D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FLETCHER, RecipeDemandIndex::isFletcherOutput, 32, 1.2D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.TOOLSMITH, RecipeDemandIndex::isToolsmithOutput, 32, 1.6D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FARMER, RecipeDemandIndex::isFarmerOutput, FARMER_PLANK_COMPONENT_CAP, 1.15D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.MASON, RecipeDemandIndex::isMasonOutput, MASON_PLANK_COMPONENT_CAP, 1.4D);
 
         // non-crafting but currently used by lumberjack fuel routing
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.BUTCHER, 1, 16, 1.0D, false);
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.ARMORER, 1, 16, 1.0D, false);
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.TOOLSMITH, 1, 16, 1.0D, false);
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.WEAPONSMITH, 1, 16, 1.0D, false);
+        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.BUTCHER, 1, 16, 1.0D, false, false);
+        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.ARMORER, 1, 16, 1.0D, false, false);
+        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.TOOLSMITH, 1, 16, 1.0D, false, false);
+        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.WEAPONSMITH, 1, 16, 1.0D, false, false);
 
-        return new RouteIndex(toImmutable(aggregate));
+        RouteIndex routeIndex = new RouteIndex(toImmutable(aggregate));
+        validateToolMaterialDemandCoverage(routeIndex, detectedToolMaterialDemandProfessions);
+        return routeIndex;
     }
 
     private static void scanDynamic(ServerWorld world,
                                     EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate,
+                                    Set<VillagerProfession> detectedToolMaterialDemandProfessions,
                                     VillagerProfession profession,
                                     Predicate<ItemStack> outputFilter,
                                     int defaultCap,
@@ -90,10 +114,47 @@ public final class RecipeDemandIndex {
             }
             EnumSet<DemandMaterial> recipeMaterials = collectMaterialsForRecipe(recipe.getIngredients());
             int recipeStrength = strengthForOutput(output);
+            boolean toolRecipeDemandRoute = isToolCraftingOutput(output)
+                    && (recipeMaterials.contains(DemandMaterial.PLANKS) || recipeMaterials.contains(DemandMaterial.STICK));
+            if (toolRecipeDemandRoute) {
+                detectedToolMaterialDemandProfessions.add(profession);
+            }
             for (DemandMaterial material : recipeMaterials) {
-                add(aggregate, material, profession, recipeStrength, defaultCap, defaultWeight, false);
+                boolean useToolRecipeDemandRoute = toolRecipeDemandRoute
+                        && (material == DemandMaterial.PLANKS || material == DemandMaterial.STICK);
+                add(aggregate,
+                        material,
+                        profession,
+                        recipeStrength,
+                        resolveDynamicCap(profession, material, defaultCap),
+                        defaultWeight,
+                        false,
+                        useToolRecipeDemandRoute);
             }
         }
+    }
+
+    static int resolveDynamicCap(VillagerProfession profession, DemandMaterial material, int defaultCap) {
+        if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.PLANKS) {
+            return Math.min(defaultCap, TOOLSMITH_PLANK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, TOOLSMITH_STICK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.MASON && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, MASON_STICK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.FARMER && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, FARMER_STICK_COMPONENT_CAP);
+        }
+        return defaultCap;
+    }
+
+    static int resolveFixedCap(DemandMaterial material, VillagerProfession profession, int defaultCap) {
+        if (material == DemandMaterial.LOGS && profession == VillagerProfession.BUTCHER) {
+            return BUTCHER_SMOKER_LOG_CAP;
+        }
+        return defaultCap;
     }
 
     static EnumSet<DemandMaterial> collectMaterialsForRecipe(List<Ingredient> ingredients) {
@@ -113,6 +174,36 @@ public final class RecipeDemandIndex {
 
     static int strengthForOutput(ItemStack output) {
         return Math.max(1, Math.min(output.getCount(), 4));
+    }
+
+    static boolean isToolCraftingOutput(ItemStack stack) {
+        return !stack.isEmpty() && (stack.getItem() instanceof net.minecraft.item.ToolItem
+                || stack.getItem() instanceof net.minecraft.item.ShearsItem
+                || stack.isOf(Items.FISHING_ROD));
+    }
+
+    static boolean validateToolMaterialDemandCoverage(RouteIndex routeIndex,
+                                                      Set<VillagerProfession> detectedToolMaterialDemandProfessions) {
+        Set<VillagerProfession> planksRoutes = routeIndex.routesFor(DemandMaterial.PLANKS).stream()
+                .map(DistributionRouteEngine.ProfessionRoute::profession)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<VillagerProfession> stickRoutes = routeIndex.routesFor(DemandMaterial.STICK).stream()
+                .map(DistributionRouteEngine.ProfessionRoute::profession)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<VillagerProfession> missing = new HashSet<>();
+        for (VillagerProfession profession : detectedToolMaterialDemandProfessions) {
+            if (!planksRoutes.contains(profession) && !stickRoutes.contains(profession)) {
+                missing.add(profession);
+            }
+        }
+
+        if (!missing.isEmpty()) {
+            LOGGER.warn("[recipe-demand-index] tool recipe demand coverage missing professions={}", missing);
+            return false;
+        }
+
+        LOGGER.debug("[recipe-demand-index] tool recipe demand coverage validated professions={}", detectedToolMaterialDemandProfessions.size());
+        return true;
     }
 
     private static boolean isLibrarianOutput(ItemStack stack) {
@@ -135,18 +226,28 @@ public final class RecipeDemandIndex {
                 || stack.isOf(Items.FISHING_ROD));
     }
 
+    private static boolean isFarmerOutput(ItemStack stack) {
+        return !stack.isEmpty() && (stack.getItem() instanceof net.minecraft.item.HoeItem);
+    }
+
+    private static boolean isMasonOutput(ItemStack stack) {
+        return !stack.isEmpty() && (stack.getItem() instanceof net.minecraft.item.PickaxeItem || stack.getItem() instanceof net.minecraft.item.ShovelItem);
+    }
+
     private static void add(EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate,
                             DemandMaterial material,
                             VillagerProfession profession,
                             int strength,
                             int cap,
                             double weight,
-                            boolean requiresCraftingTable) {
+                            boolean requiresCraftingTable,
+                            boolean toolRecipeDemandRoute) {
         Map<VillagerProfession, MutableDemand> byProfession = aggregate.get(material);
         MutableDemand demand = byProfession.computeIfAbsent(profession, ignored -> new MutableDemand(profession, cap, weight, requiresCraftingTable));
         demand.strength += strength;
         demand.cap = Math.max(demand.cap, cap);
         demand.weight = Math.max(demand.weight, weight);
+        demand.toolRecipeDemandRoute = demand.toolRecipeDemandRoute || toolRecipeDemandRoute;
     }
 
     private static EnumMap<DemandMaterial, List<DistributionRouteEngine.ProfessionRoute>> toImmutable(EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate) {
@@ -159,7 +260,12 @@ public final class RecipeDemandIndex {
                                 .orElse(null);
                         return expectedBlock == null
                                 ? null
-                                : new DistributionRouteEngine.ProfessionRoute(demand.profession, expectedBlock, demand.requiresCraftingTable, demand.cap, demand.weight + (demand.strength * 0.05D));
+                                : new DistributionRouteEngine.ProfessionRoute(demand.profession,
+                                expectedBlock,
+                                demand.requiresCraftingTable,
+                                demand.cap,
+                                demand.weight + (demand.strength * 0.05D),
+                                demand.toolRecipeDemandRoute);
                     })
                     .filter(java.util.Objects::nonNull)
                     .sorted(Comparator.comparing(route -> route.profession().toString()))
@@ -209,7 +315,12 @@ public final class RecipeDemandIndex {
                 List<DistributionRouteEngine.ProfessionRoute> materialRoutes = routesFor(material);
                 logger.info("[recipe-demand-index] material={} routes={}", material.id(), materialRoutes.size());
                 for (DistributionRouteEngine.ProfessionRoute route : materialRoutes) {
-                    logger.info("  -> {} cap={} weight={} requiresTable={}", route.profession(), route.targetStockCap(), route.demandWeight(), route.requiresCraftingTable());
+                    logger.info("  -> {} cap={} weight={} requiresTable={} toolRecipePath={}",
+                            route.profession(),
+                            route.targetStockCap(),
+                            route.demandWeight(),
+                            route.requiresCraftingTable(),
+                            route.toolRecipeDemandRoute());
                 }
             }
         }
@@ -221,6 +332,7 @@ public final class RecipeDemandIndex {
         private int cap;
         private double weight;
         private final boolean requiresCraftingTable;
+        private boolean toolRecipeDemandRoute;
 
         private MutableDemand(VillagerProfession profession, int cap, double weight, boolean requiresCraftingTable) {
             this.profession = profession;
@@ -228,6 +340,7 @@ public final class RecipeDemandIndex {
             this.cap = cap;
             this.weight = weight;
             this.requiresCraftingTable = requiresCraftingTable;
+            this.toolRecipeDemandRoute = false;
         }
     }
 }

@@ -24,6 +24,13 @@ public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ToolsmithSmithingGoal> SMITHING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
 
+    public static void requestImmediateDistribution(VillagerEntity villager) {
+        ToolsmithDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal != null) {
+            distributionGoal.requestImmediateDistribution();
+        }
+    }
+
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!checkPairingPreconditions(world, villager, jobPos, chestPos,
@@ -53,10 +60,7 @@ public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
             if (crafting != null) {
                 crafting.requestImmediateCraft(serverWorld);
             }
-            ToolsmithDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
-            if (distribution != null) {
-                distribution.requestImmediateDistribution();
-            }
+            requestImmediateDistribution(pairedVillager);
             ToolsmithSmithingGoal smithing = SMITHING_GOALS.get(pairedVillager);
             if (smithing != null) {
                 smithing.requestImmediateSmithing(serverWorld);
@@ -86,10 +90,7 @@ public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
             if (crafting != null) {
                 crafting.requestImmediateCraft(serverWorld);
             }
-            ToolsmithDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
-            if (distribution != null) {
-                distribution.requestImmediateDistribution();
-            }
+            requestImmediateDistribution(pairedVillager);
             ToolsmithSmithingGoal smithing = SMITHING_GOALS.get(pairedVillager);
             if (smithing != null) {
                 smithing.requestImmediateSmithing(serverWorld);

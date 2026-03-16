@@ -19,11 +19,11 @@ public final class WoodRecipientRegistry {
             // Boats/chest boats require many planks and are crafted repeatedly by fishermen.
             new RecipientProfile(VillagerProfession.FISHERMAN, Blocks.BARREL, false, 40, 1.5D),
             // Farmers consume planks for wooden hoe crafting path.
-            new RecipientProfile(VillagerProfession.FARMER, Blocks.COMPOSTER, false, 28, 1.0D),
+            new RecipientProfile(VillagerProfession.FARMER, Blocks.COMPOSTER, false, 32, 1.15D),
             // Fletchers consume planks via target/crafting path.
             new RecipientProfile(VillagerProfession.FLETCHER, Blocks.FLETCHING_TABLE, false, 32, 1.2D),
-            // Toolsmith retained at lower weight for occasional dynamic wooden-tier/tool recipes.
-            new RecipientProfile(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, false, 24, 0.45D)
+            // Toolsmith weighted aggressively to satisfy active downstream tool deficits.
+            new RecipientProfile(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, false, 32, 1.6D)
     );
 
     private WoodRecipientRegistry() {
