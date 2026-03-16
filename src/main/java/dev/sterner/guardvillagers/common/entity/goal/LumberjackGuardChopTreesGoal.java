@@ -474,6 +474,20 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private BlockPos resolveReplacementRoot(ServerWorld world, BlockPos originalRoot) {
+        return resolveReplacementRoot(
+                originalRoot,
+                pos -> isEligibleLog(world, pos),
+                candidate -> normalizeRoot(world, candidate),
+                normalized -> isEligibleRoot(world, normalized),
+                this::getTrunkAdjacent
+        );
+    }
+
+    static BlockPos resolveReplacementRoot(BlockPos originalRoot,
+                                           Predicate<BlockPos> isEligibleLog,
+                                           Function<BlockPos, BlockPos> normalizeRoot,
+                                           Predicate<BlockPos> isEligibleRoot,
+                                           Function<BlockPos, List<BlockPos>> adjacentProvider) {
         BlockPos min = originalRoot.add(-2, -3, -2);
         BlockPos max = originalRoot.add(2, 3, 2);
         BlockPos replacement = null;
@@ -481,12 +495,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             BlockPos candidate = cursor.toImmutable();
-            if (!isEligibleLog(world, candidate)) {
+            if (!isEligibleLog.test(candidate)) {
                 continue;
             }
 
-            BlockPos normalized = normalizeRoot(world, candidate);
-            if (!isEligibleRoot(world, normalized)) {
+            BlockPos normalized = normalizeRoot.apply(candidate);
+            if (!isEligibleRoot.test(normalized)) {
                 continue;
             }
 
@@ -497,10 +511,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
         }
 
-        LOGGER.debug("Lumberjack Guard {} target {} replacement resolution result: {}",
-                this.guard.getUuidAsString(),
+        if (replacement != null) {
+            return replacement;
+        }
+
+        ConnectedLogScanResult fallbackScanResult = collectConnectedLogsWithinTreeBounds(
                 originalRoot,
-                replacement);
+                isEligibleLog,
+                adjacentProvider
+        );
+        for (BlockPos candidate : fallbackScanResult.logs()) {
+            double distanceSq = candidate.getSquaredDistance(originalRoot);
+            if (distanceSq < bestDistance) {
+                bestDistance = distanceSq;
+                replacement = candidate;
+            }
+        }
+
         return replacement;
     }
 

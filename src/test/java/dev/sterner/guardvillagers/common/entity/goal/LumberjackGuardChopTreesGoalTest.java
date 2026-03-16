@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,6 +34,55 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(result.usedFallbackSeed());
         assertTrue(result.logs().size() > 0);
         assertFalse(result.logs().contains(root));
+    }
+
+    @Test
+    void resolveReplacementRoot_rootRemovedButTrunkRemains_returnsConnectedFallbackLog() {
+        BlockPos root = new BlockPos(0, 64, 0);
+        Set<BlockPos> logs = Set.of(root.up(), root.up(2));
+
+        BlockPos replacement = LumberjackGuardChopTreesGoal.resolveReplacementRoot(
+                root,
+                logs::contains,
+                Function.identity(),
+                candidate -> false,
+                this::adjacent
+        );
+
+        assertEquals(root.up(), replacement);
+    }
+
+    @Test
+    void resolveReplacementRoot_prefersStrictRootCandidateWhenAvailable() {
+        BlockPos root = new BlockPos(0, 64, 0);
+        BlockPos strictRootCandidate = root.add(1, 0, 0);
+        Set<BlockPos> logs = Set.of(strictRootCandidate, root.up());
+
+        BlockPos replacement = LumberjackGuardChopTreesGoal.resolveReplacementRoot(
+                root,
+                logs::contains,
+                Function.identity(),
+                strictRootCandidate::equals,
+                this::adjacent
+        );
+
+        assertEquals(strictRootCandidate, replacement);
+    }
+
+    @Test
+    void resolveReplacementRoot_doesNotHopAcrossTreeBeyondCrownRadius() {
+        BlockPos root = new BlockPos(0, 64, 0);
+        BlockPos farOtherTree = root.add(5, 0, 0);
+
+        BlockPos replacement = LumberjackGuardChopTreesGoal.resolveReplacementRoot(
+                root,
+                farOtherTree::equals,
+                Function.identity(),
+                candidate -> false,
+                this::adjacent
+        );
+
+        assertTrue(replacement == null);
     }
 
 
