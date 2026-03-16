@@ -576,12 +576,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     world,
                     this.guard,
                     auditSnapshot);
-            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}",
+            boolean midpointUpgradeApplied = runMidpointUpgradeNeedPass(world, this.guard);
+            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}, midpoint upgrade applied={}",
                     this.guard.getUuidAsString(),
                     auditSnapshot.eligibleV1VillagersMissingChest(),
                     auditSnapshot.eligibleV2VillagersMissingCraftingTable(),
                     auditSnapshot.eligibleV2ProfessionalsUnderToolMaterialThreshold(),
-                    recipientsChosen);
+                    recipientsChosen,
+                    midpointUpgradeApplied);
         }
 
         long remaining = this.guard.getNextChopTick() - world.getTime();
@@ -589,6 +591,59 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 this.guard.getUuidAsString(),
                 step * 25,
                 Math.max(remaining, 0L));
+    }
+
+    static boolean runMidpointUpgradeNeedPass(ServerWorld world, LumberjackGuardEntity guard) {
+        Inventory chestInventory = LumberjackGuardCraftingGoal.resolveChestInventoryForGuard(world, guard);
+        return runMidpointUpgradeNeedPass(
+                () -> LumberjackChestTriggerController.resolveNextUpgradeDemand(world, guard),
+                demand -> countByItemForMidpoint(chestInventory, demand.outputItem())
+                        + countByItemForMidpoint(guard.getGatheredStackBuffer(), demand.outputItem()),
+                demand -> LumberjackGuardCraftingGoal.craftSingleUpgradeDemandOutputIfPossible(guard, chestInventory, demand),
+                () -> LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, guard)
+        );
+    }
+
+    static boolean runMidpointUpgradeNeedPass(java.util.function.Supplier<LumberjackChestTriggerController.UpgradeDemand> resolveDemand,
+                                              java.util.function.ToIntFunction<LumberjackChestTriggerController.UpgradeDemand> outputCount,
+                                              java.util.function.Predicate<LumberjackChestTriggerController.UpgradeDemand> craftOutput,
+                                              java.util.function.BooleanSupplier runImmediateUpgradePass) {
+        LumberjackChestTriggerController.UpgradeDemand demand = resolveDemand.get();
+        if (demand == null) {
+            return false;
+        }
+
+        int onHandOutput = outputCount.applyAsInt(demand);
+        if (onHandOutput <= 0 && !craftOutput.test(demand)) {
+            return false;
+        }
+
+        return runImmediateUpgradePass.getAsBoolean();
+    }
+
+    private static int countByItemForMidpoint(Inventory inventory, Item item) {
+        if (inventory == null) {
+            return 0;
+        }
+
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static int countByItemForMidpoint(List<ItemStack> stacks, Item item) {
+        int total = 0;
+        for (ItemStack stack : stacks) {
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     public static boolean scheduleSingleTreeRecoverySession(ServerWorld world, LumberjackGuardEntity guard) {
