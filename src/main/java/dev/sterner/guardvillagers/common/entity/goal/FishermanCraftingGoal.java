@@ -7,6 +7,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.recipe.CraftingRecipe;
@@ -16,6 +17,7 @@ import net.minecraft.recipe.RecipeType;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.random.Random;
 import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
@@ -29,6 +31,7 @@ public class FishermanCraftingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
+    private static final int MIN_OPERATIONAL_ROD_STOCK = 1;
 
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
@@ -172,7 +175,13 @@ public class FishermanCraftingGoal extends Goal {
             return;
         }
 
-        FishermanRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        List<ItemStack> outputs = craftable.stream().map(FishermanRecipe::output).toList();
+        int selectedIndex = selectRecipeIndex(outputs, isFishingRodNeeded(inventory), villager.getRandom());
+        if (selectedIndex < 0) {
+            return;
+        }
+
+        FishermanRecipe recipe = craftable.get(selectedIndex);
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -182,6 +191,37 @@ public class FishermanCraftingGoal extends Goal {
             craftedToday++;
             CraftingCheckLogger.report(world, "Fisherman", formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+    private boolean isFishingRodNeeded(Inventory inventory) {
+        return countItem(inventory, Items.FISHING_ROD) < MIN_OPERATIONAL_ROD_STOCK;
+    }
+
+    static int selectRecipeIndex(List<ItemStack> outputs, boolean fishingRodNeeded, Random random) {
+        if (outputs.isEmpty()) {
+            return -1;
+        }
+
+        if (fishingRodNeeded) {
+            for (int i = 0; i < outputs.size(); i++) {
+                if (outputs.get(i).isOf(Items.FISHING_ROD)) {
+                    return i;
+                }
+            }
+        }
+
+        return random.nextInt(outputs.size());
+    }
+
+    private int countItem(Inventory inventory, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private List<FishermanRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
