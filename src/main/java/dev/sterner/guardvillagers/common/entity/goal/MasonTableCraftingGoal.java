@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -18,7 +19,6 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -157,7 +157,12 @@ public class MasonTableCraftingGoal extends Goal {
         if (inventory == null) {
             return 0;
         }
-        return getCraftableRecipes(inventory).size();
+        int craftableCount = getCraftableRecipes(inventory).size();
+        if (craftableCount > 0) {
+            return craftableCount;
+        }
+
+        return canCraftPickaxeAfterPrerequisites(inventory) ? 1 : 0;
     }
 
     private void craftOnce(ServerWorld world) {
@@ -165,6 +170,8 @@ public class MasonTableCraftingGoal extends Goal {
         if (inventory == null) {
             return;
         }
+
+        runPickaxePrerequisites(world, inventory);
 
         List<Recipe> craftable = getCraftableRecipes(inventory);
         if (craftable.isEmpty()) {
@@ -175,11 +182,120 @@ public class MasonTableCraftingGoal extends Goal {
         if (consumeIngredients(inventory, recipe.requirements)) {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
+            MasonBehavior.onChestInventoryMutated(world, chestPos);
             craftedToday++;
             craftedOutputsToday.add(recipe.output.copyWithCount(1));
             this.lastCraftedOutputItem = recipe.output.getItem();
-            CraftingCheckLogger.report(world, "Mason", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Mason", "crafted final tool: " + formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+    private void runPickaxePrerequisites(ServerWorld world, Inventory inventory) {
+        if (!canCraftAnyPickaxeHead(inventory)) {
+            return;
+        }
+
+        boolean mutated = false;
+        if (countMatching(inventory, stack -> stack.isOf(Items.STICK)) < 2) {
+            if (countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) == 0) {
+                mutated = preprocessLogsToPlanks(inventory) || mutated;
+            }
+
+            if (countMatching(inventory, stack -> stack.isOf(Items.STICK)) < 2 && countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) >= 2) {
+                ItemStack sticks = new ItemStack(Items.STICK, 4);
+                if (canInsertFully(inventory, sticks) && consumeIngredients(inventory,
+                        new IngredientRequirement(stack -> stack.isIn(ItemTags.PLANKS), 2))) {
+                    insertStack(inventory, sticks);
+                    mutated = true;
+                    CraftingCheckLogger.report(world, "Mason", "crafted intermediate sticks");
+                }
+            }
+        }
+
+        if (mutated) {
+            inventory.markDirty();
+            MasonBehavior.onChestInventoryMutated(world, chestPos);
+        }
+    }
+
+    private boolean preprocessLogsToPlanks(Inventory inventory) {
+        int logs = countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS_THAT_BURN));
+        if (logs <= 0) {
+            return false;
+        }
+
+        ItemStack planks = new ItemStack(Items.OAK_PLANKS, 4);
+        if (!canInsertFully(inventory, planks)) {
+            return false;
+        }
+
+        if (!consumeIngredients(inventory, new IngredientRequirement(stack -> stack.isIn(ItemTags.LOGS_THAT_BURN), 1))) {
+            return false;
+        }
+
+        insertStack(inventory, planks);
+        return true;
+    }
+
+    private boolean canCraftPickaxeAfterPrerequisites(Inventory inventory) {
+        if (!canCraftAnyPickaxeHead(inventory)) {
+            return false;
+        }
+
+        int stickCount = countMatching(inventory, stack -> stack.isOf(Items.STICK));
+        if (stickCount >= 2) {
+            return true;
+        }
+
+        int plankCount = countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS));
+        if (plankCount >= 2) {
+            return canInsertFully(inventory, new ItemStack(Items.STICK, 4));
+        }
+
+        int logs = countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS_THAT_BURN));
+        return logs > 0
+                && canInsertFully(inventory, new ItemStack(Items.OAK_PLANKS, 4))
+                && canInsertFully(inventory, new ItemStack(Items.STICK, 4));
+    }
+
+    private boolean canCraftAnyPickaxeHead(Inventory inventory) {
+        return countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) >= 3
+                || countMatching(inventory, stack -> stack.isOf(Items.COBBLESTONE)) >= 3
+                || countMatching(inventory, stack -> stack.isOf(Items.IRON_INGOT)) >= 3
+                || countMatching(inventory, stack -> stack.isOf(Items.GOLD_INGOT)) >= 3
+                || countMatching(inventory, stack -> stack.isOf(Items.DIAMOND)) >= 3;
+    }
+
+    private boolean canInsertFully(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            remaining.decrement(moved);
+        }
+        return remaining.isEmpty();
     }
 
 
