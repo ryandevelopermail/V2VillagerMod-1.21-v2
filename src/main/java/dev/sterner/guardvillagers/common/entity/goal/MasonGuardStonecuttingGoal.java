@@ -203,7 +203,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
     }
 
 
-    private int countMatchingItems(Inventory inventory, Ingredient ingredient) {
+    private static int countMatchingItems(Inventory inventory, Ingredient ingredient) {
         int count = 0;
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
