@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -15,21 +17,48 @@ import net.minecraft.registry.Registries;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public class LumberjackFurnaceModifierGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackFurnaceModifierGoal.class);
     private static final double MOVE_SPEED = 0.8D;
     private static final double REACH_DISTANCE_SQUARED = 9.0D;
     private static final int SEARCH_RADIUS = 3;
+    private static final long PATH_REEVALUATION_INTERVAL_TICKS = 20L;
+    private static final long SERVICE_REEVALUATION_INTERVAL_TICKS = 20L;
+    private static final Set<VillagerProfession> CHECKED_JOB_PROFESSIONS = Set.of(
+            VillagerProfession.NONE,
+            VillagerProfession.ARMORER,
+            VillagerProfession.BUTCHER,
+            VillagerProfession.CARTOGRAPHER,
+            VillagerProfession.CLERIC,
+            VillagerProfession.FARMER,
+            VillagerProfession.FISHERMAN,
+            VillagerProfession.FLETCHER,
+            VillagerProfession.LIBRARIAN,
+            VillagerProfession.LEATHERWORKER,
+            VillagerProfession.MASON,
+            VillagerProfession.SHEPHERD,
+            VillagerProfession.TOOLSMITH,
+            VillagerProfession.WEAPONSMITH
+    );
 
     private final LumberjackGuardEntity guard;
     private BlockPos targetFurnacePos;
+    private long lastPathEvaluationTick;
+    private long lastServiceEvaluationTick;
+    private ServiceState lastServiceState = ServiceState.actionable("init");
 
     public LumberjackFurnaceModifierGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -51,12 +80,25 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
 
         this.targetFurnacePos = designatedFurnace.get();
-        return needsFurnaceService(world, this.targetFurnacePos);
+        this.lastServiceState = evaluateServiceState(world, this.targetFurnacePos);
+        return this.lastServiceState.actionable();
     }
 
     @Override
     public boolean shouldContinue() {
-        return this.guard.getWorkflowStage() == LumberjackGuardEntity.WorkflowStage.CRAFTING && this.targetFurnacePos != null;
+        if (!(this.guard.getWorld() instanceof ServerWorld world)) {
+            return false;
+        }
+        if (this.guard.getWorkflowStage() != LumberjackGuardEntity.WorkflowStage.CRAFTING || this.targetFurnacePos == null) {
+            return false;
+        }
+
+        long now = world.getTime();
+        if (now - this.lastServiceEvaluationTick >= SERVICE_REEVALUATION_INTERVAL_TICKS) {
+            this.lastServiceState = evaluateServiceState(world, this.targetFurnacePos);
+            this.lastServiceEvaluationTick = now;
+        }
+        return this.lastServiceState.actionable();
     }
 
     @Override
@@ -66,15 +108,19 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             return;
         }
 
+        long now = world.getTime();
         if (this.guard.squaredDistanceTo(Vec3d.ofCenter(this.targetFurnacePos)) > REACH_DISTANCE_SQUARED) {
-            this.guard.getNavigation().startMovingTo(this.targetFurnacePos.getX() + 0.5D, this.targetFurnacePos.getY(), this.targetFurnacePos.getZ() + 0.5D, MOVE_SPEED);
+            if (now - this.lastPathEvaluationTick >= PATH_REEVALUATION_INTERVAL_TICKS || this.guard.getNavigation().isIdle()) {
+                this.guard.getNavigation().startMovingTo(this.targetFurnacePos.getX() + 0.5D, this.targetFurnacePos.getY(), this.targetFurnacePos.getZ() + 0.5D, MOVE_SPEED);
+                this.lastPathEvaluationTick = now;
+            }
             return;
         }
 
         Inventory chestInventory = resolveChestInventory(world);
         Optional<AbstractFurnaceBlockEntity> furnaceOpt = resolveFurnace(world, this.targetFurnacePos);
         if (furnaceOpt.isEmpty()) {
-            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+            stopWithReason("no_furnace_block_entity");
             return;
         }
 
@@ -85,13 +131,30 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
         furnace.markDirty();
 
-        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+        if (now - this.lastServiceEvaluationTick >= SERVICE_REEVALUATION_INTERVAL_TICKS) {
+            this.lastServiceState = evaluateServiceState(world, this.targetFurnacePos);
+            this.lastServiceEvaluationTick = now;
+        }
+        if (!this.lastServiceState.actionable()) {
+            stopWithReason(this.lastServiceState.reason());
+        }
     }
 
     @Override
     public void stop() {
         this.guard.getNavigation().stop();
         this.targetFurnacePos = null;
+        this.lastPathEvaluationTick = 0L;
+        this.lastServiceEvaluationTick = 0L;
+        this.lastServiceState = ServiceState.actionable("reset");
+    }
+
+    private void stopWithReason(String reason) {
+        if (this.targetFurnacePos != null) {
+            LOGGER.debug("Stop lumberjack furnace service: guard={} furnacePos={} reason={}",
+                    this.guard.getUuidAsString(), this.targetFurnacePos.toShortString(), reason);
+        }
+        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
     }
 
     private void serviceFurnace(Inventory chestInventory, AbstractFurnaceBlockEntity furnace) {
@@ -423,31 +486,81 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
     }
 
-    private boolean needsFurnaceService(ServerWorld world, BlockPos furnacePos) {
+    private ServiceState evaluateServiceState(ServerWorld world, BlockPos furnacePos) {
         Inventory chestInventory = resolveChestInventory(world);
         Optional<AbstractFurnaceBlockEntity> furnaceOpt = resolveFurnace(world, furnacePos);
         if (furnaceOpt.isEmpty()) {
-            return false;
+            return ServiceState.stop("no_furnace");
         }
 
         AbstractFurnaceBlockEntity furnace = furnaceOpt.get();
-        if (furnace.getStack(1).isEmpty() && furnace.getStack(2).isOf(Items.CHARCOAL)) {
-            return true;
-        }
-        if (furnace.getStack(1).isEmpty() && furnace.getStack(0).isIn(ItemTags.LOGS)) {
-            return true;
-        }
-        if (furnace.getStack(1).isEmpty() && countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer()) >= 3) {
-            return true;
+        ItemStack input = furnace.getStack(0);
+        ItemStack fuel = furnace.getStack(1);
+        ItemStack output = furnace.getStack(2);
+
+        int logsInStorage = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
+        int logsInInput = input.isIn(ItemTags.LOGS) ? input.getCount() : 0;
+        int totalLogs = logsInStorage + logsInInput;
+
+        int inputSpace = input.isEmpty() ? 64 : (input.isIn(ItemTags.LOGS) ? input.getMaxCount() - input.getCount() : 0);
+        int fuelSpaceForCharcoal = fuel.isEmpty() ? 64 : (fuel.isOf(Items.CHARCOAL) ? fuel.getMaxCount() - fuel.getCount() : 0);
+        boolean fuelLow = fuel.isEmpty() || (fuel.isOf(Items.CHARCOAL) && fuel.getCount() < 3) || (fuel.isIn(ItemTags.LOGS) && fuel.getCount() < 3);
+
+        boolean outputIsCharcoal = output.isOf(Items.CHARCOAL) && !output.isEmpty();
+        boolean canRouteOutput = !outputIsCharcoal || fuelSpaceForCharcoal > 0 || hasReturnSpace(chestInventory, output);
+        if (outputIsCharcoal && !canRouteOutput) {
+            return ServiceState.stop("no_output_space");
         }
 
-        ItemStack input = furnace.getStack(0);
-        int space = input.isEmpty() ? 64 : (input.isIn(ItemTags.LOGS) ? input.getMaxCount() - input.getCount() : 0);
-        int logsToMove = (countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer())) / 2;
-        return logsToMove > 0 && space > 0;
+        if (outputIsCharcoal) {
+            return ServiceState.actionable("route_output");
+        }
+        if (totalLogs > 0 && inputSpace > 0) {
+            return ServiceState.actionable("load_input");
+        }
+        if (logsInStorage > 0 && fuelLow) {
+            return ServiceState.actionable("fuel_low");
+        }
+        if (totalLogs <= 0) {
+            return ServiceState.stop("no_logs");
+        }
+        return ServiceState.stop("fuel_saturated");
+    }
+
+    private boolean hasReturnSpace(Inventory chestInventory, ItemStack stack) {
+        if (stack.isEmpty()) {
+            return true;
+        }
+        if (chestInventory != null) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                ItemStack existing = chestInventory.getStack(slot);
+                if (existing.isEmpty()) {
+                    return true;
+                }
+                if (ItemStack.areItemsAndComponentsEqual(existing, stack) && existing.getCount() < existing.getMaxCount()) {
+                    return true;
+                }
+            }
+        }
+        for (ItemStack buffered : this.guard.getGatheredStackBuffer()) {
+            if (ItemStack.areItemsAndComponentsEqual(buffered, stack) && buffered.getCount() < buffered.getMaxCount()) {
+                return true;
+            }
+        }
+        return this.guard.getGatheredStackBuffer().size() < 64;
     }
 
     private Optional<BlockPos> findDesignatedFurnace(ServerWorld world) {
+        BlockPos paired = this.guard.getPairedFurnaceModifierPos();
+        if (paired != null && world.getBlockState(paired).isOf(Blocks.FURNACE)) {
+            if (belongsToPairedLumberjackZone(world, paired)) {
+                return Optional.of(paired.toImmutable());
+            }
+            this.guard.setPairedFurnaceModifierPos(null);
+            LOGGER.debug("Clearing invalid paired furnace modifier: guard={} pos={} reason=outside_zone",
+                    this.guard.getUuidAsString(), paired.toShortString());
+        }
+
         BlockPos tablePos = this.guard.getPairedCraftingTablePos();
         BlockPos chestPos = this.guard.getPairedChestPos();
         if (tablePos == null || chestPos == null) {
@@ -477,11 +590,56 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             if (!hasNearbyModifier(world, pos)) {
                 continue;
             }
+            if (!belongsToPairedLumberjackZone(world, pos)) {
+                continue;
+            }
             candidates.add(pos.toImmutable());
         }
 
-        return candidates.stream()
+        Optional<BlockPos> selected = candidates.stream()
                 .min(Comparator.comparing((BlockPos pos) -> pos.getSquaredDistance(tablePos)).thenComparing(pos -> Registries.BLOCK.getId(world.getBlockState(pos).getBlock()).toString()));
+        selected.ifPresent(pos -> this.guard.setPairedFurnaceModifierPos(pos.toImmutable()));
+        return selected;
+    }
+
+    private boolean belongsToPairedLumberjackZone(ServerWorld world, BlockPos pos) {
+        BlockPos chestPos = this.guard.getPairedChestPos();
+        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        if (chestPos == null || tablePos == null) {
+            return false;
+        }
+        double range = JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 2.0D;
+        if (!pos.isWithinDistance(chestPos, range) || !pos.isWithinDistance(tablePos, range)) {
+            return false;
+        }
+        return !isAdjacentToUnrelatedJobBlock(world, pos, chestPos, tablePos);
+    }
+
+    private boolean isAdjacentToUnrelatedJobBlock(ServerWorld world, BlockPos candidate, BlockPos chestPos, BlockPos tablePos) {
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacent = candidate.offset(direction);
+            BlockState state = world.getBlockState(adjacent);
+            if (!isAnyKnownJobBlock(state)) {
+                continue;
+            }
+            if (adjacent.equals(tablePos) || adjacent.equals(chestPos)) {
+                continue;
+            }
+            if (adjacent.isWithinDistance(tablePos, 1.5D) || adjacent.isWithinDistance(chestPos, 1.5D)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isAnyKnownJobBlock(BlockState state) {
+        for (VillagerProfession profession : CHECKED_JOB_PROFESSIONS) {
+            if (ProfessionDefinitions.isExpectedJobBlock(profession, state)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasNearbyModifier(ServerWorld world, BlockPos furnacePos) {
@@ -513,5 +671,15 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
 
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+    }
+
+    private record ServiceState(boolean actionable, String reason) {
+        private static ServiceState actionable(String reason) {
+            return new ServiceState(true, reason);
+        }
+
+        private static ServiceState stop(String reason) {
+            return new ServiceState(false, reason);
+        }
     }
 }
