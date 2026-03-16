@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.DistributionInventoryAccess;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.LumberjackUpgradeState;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.behavior.LumberjackChestTriggerBehavior;
 import net.minecraft.block.BlockState;
@@ -63,7 +64,7 @@ public final class LumberjackChestTriggerController {
     private LumberjackChestTriggerController() {
     }
 
-    enum UpgradeStage {
+    public enum UpgradeStage {
         UNPAIRED,
         CHEST_PAIRED,
         TABLE_PAIRED
@@ -449,8 +450,9 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
-        if (hasUnresolvedV1ChestDemand(context.world(), context.guard())) {
-            LOGGER.debug("Skip V2 crafting table placement: unresolved V1 chest demand still exists");
+        V2BlockReason v2BlockReason = resolveV2BlockReason(context.world(), context.guard());
+        if (v2BlockReason != null) {
+            LOGGER.debug("Skip V2 crafting table placement: {}", v2BlockReason.debugReason());
             return false;
         }
 
@@ -471,7 +473,7 @@ public final class LumberjackChestTriggerController {
 
         for (VillagerEntity villager : collectNearbyVillagers(context.world(), context.guard())) {
             BlockPos stagedJobPos = resolveVillagerJobSite(context.world(), villager);
-            UpgradeStage stage = getUpgradeStage(villager.getUuid(), stagedJobPos);
+            UpgradeStage stage = getTrackedUpgradeStage(context.world(), villager.getUuid(), stagedJobPos);
             if (stage != UpgradeStage.CHEST_PAIRED) {
                 if (LOGGER.isDebugEnabled()) {
                     LOGGER.debug("Skip V2 crafting table placement: villager={} stage={} expected={} jobPos={}",
@@ -514,7 +516,7 @@ public final class LumberjackChestTriggerController {
 
             if (context.world().setBlockState(placePos, Blocks.CRAFTING_TABLE.getDefaultState())) {
                 JobBlockPairingHelper.handleCraftingTablePlacement(context.world(), placePos);
-                transitionUpgradeStageToTablePaired(villager.getUuid(), jobPos);
+                transitionUpgradeStageToTablePaired(world, villager.getUuid(), jobPos);
                 LOGGER.debug("Placed V2 crafting table: villager={} jobPos={} placePos={} source={}",
                         villager.getUuid(), jobPos.toShortString(), placePos.toShortString(), materialUse.sourceLabel());
                 return true;
@@ -529,12 +531,20 @@ public final class LumberjackChestTriggerController {
     }
 
     static boolean hasUnresolvedV1ChestDemand(ServerWorld world, LumberjackGuardEntity guard) {
-        return shouldBlockV2TablePlacement(resolveNextUpgradeDemand(world, guard),
-                countEligibleV1VillagersMissingPairedChest(world, guard));
+        return resolveV2BlockReason(world, guard) != null;
     }
 
     static boolean shouldBlockV2TablePlacement(UpgradeDemand nextDemand, int eligibleV1MissingChestCount) {
         return UpgradeDemand.v1Chest().equals(nextDemand) || eligibleV1MissingChestCount > 0;
+    }
+
+    private static V2BlockReason resolveV2BlockReason(ServerWorld world, LumberjackGuardEntity guard) {
+        UpgradeDemand nextDemand = resolveNextUpgradeDemand(world, guard);
+        int eligibleV1MissingChestCount = countEligibleV1VillagersMissingPairedChest(world, guard);
+        if (!shouldBlockV2TablePlacement(nextDemand, eligibleV1MissingChestCount)) {
+            return null;
+        }
+        return new V2BlockReason(nextDemand, eligibleV1MissingChestCount);
     }
 
     private static PlacementMaterialUse tryConsumeCraftingTableMaterials(Inventory pairedChestInventory,
@@ -792,27 +802,22 @@ public final class LumberjackChestTriggerController {
                                                                      VillagerEntity villager,
                                                                      boolean requireDelay) {
         if (!isEligibleV1Villager(world, villager)) {
-            clearUpgradeState(villager.getUuid(), null);
+            clearUpgradeState(world, villager.getUuid(), null);
             return false;
         }
 
         BlockPos jobPos = resolveVillagerJobSite(world, villager);
         if (jobPos == null) {
-            clearUpgradeState(villager.getUuid(), null);
+            clearUpgradeState(world, villager.getUuid(), null);
             return false;
         }
 
-        UpgradeStage stage = getUpgradeStage(villager.getUuid(), jobPos);
+        UpgradeStage stage = getTrackedUpgradeStage(world, villager.getUuid(), jobPos);
 
         BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
         if (chestPos == null) {
-            clearUpgradeState(villager.getUuid(), jobPos);
+            clearUpgradeState(world, villager.getUuid(), jobPos);
             return false;
-        }
-
-        if (stage == UpgradeStage.UNPAIRED) {
-            hydrateUpgradeStageToChestPaired(world.getTime(), villager.getUuid(), jobPos);
-            stage = UpgradeStage.CHEST_PAIRED;
         }
 
         if (stage != UpgradeStage.CHEST_PAIRED) {
@@ -820,7 +825,7 @@ public final class LumberjackChestTriggerController {
         }
 
         if (findNearbyCraftingTable(world, jobPos) != null) {
-            transitionUpgradeStageToTablePaired(villager.getUuid(), jobPos);
+            transitionUpgradeStageToTablePaired(world, villager.getUuid(), jobPos);
             return false;
         }
 
@@ -861,37 +866,65 @@ public final class LumberjackChestTriggerController {
 
             BlockPos jobPos = resolveVillagerJobSite(world, villager);
             if (jobPos == null) {
-                clearUpgradeState(villagerId, null);
+                clearUpgradeState(world, villagerId, null);
                 continue;
             }
 
-            UpgradeStage stage = getUpgradeStage(villagerId, jobPos);
+            UpgradeStage stage = getTrackedUpgradeStage(world, villagerId, jobPos);
             if (stage == UpgradeStage.CHEST_PAIRED
                     && (!JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
                     || findNearbyCraftingTable(world, jobPos) != null)) {
-                clearUpgradeState(villagerId, jobPos);
+                clearUpgradeState(world, villagerId, jobPos);
             }
         }
     }
 
     private static void transitionUpgradeStageToChestPaired(ServerWorld world, UUID villagerId, BlockPos jobPos) {
-        hydrateUpgradeStageToChestPaired(world.getTime(), villagerId, jobPos);
+        hydrateUpgradeStageToChestPaired(world, world.getTime(), villagerId, jobPos);
     }
 
-    private static void hydrateUpgradeStageToChestPaired(long now, UUID villagerId, BlockPos jobPos) {
+    private static void hydrateUpgradeStageToChestPaired(ServerWorld world, long now, UUID villagerId, BlockPos jobPos) {
         BlockPos immutableJobPos = jobPos.toImmutable();
         UPGRADE_STAGE_BY_VILLAGER.put(villagerId, UpgradeStage.CHEST_PAIRED);
         UPGRADE_STAGE_BY_JOB_SITE.put(immutableJobPos, UpgradeStage.CHEST_PAIRED);
         CHEST_PAIRED_TICKS_BY_VILLAGER.put(villagerId, now);
         CHEST_PAIRED_TICKS_BY_JOB_SITE.put(immutableJobPos, now);
+        LumberjackUpgradeState.get(world.getServer()).putEntry(world, villagerId, immutableJobPos, UpgradeStage.CHEST_PAIRED, now);
     }
 
-    private static void transitionUpgradeStageToTablePaired(UUID villagerId, BlockPos jobPos) {
+    private static void transitionUpgradeStageToTablePaired(ServerWorld world, UUID villagerId, BlockPos jobPos) {
         BlockPos immutableJobPos = jobPos.toImmutable();
         UPGRADE_STAGE_BY_VILLAGER.put(villagerId, UpgradeStage.TABLE_PAIRED);
         UPGRADE_STAGE_BY_JOB_SITE.put(immutableJobPos, UpgradeStage.TABLE_PAIRED);
         CHEST_PAIRED_TICKS_BY_VILLAGER.remove(villagerId);
         CHEST_PAIRED_TICKS_BY_JOB_SITE.remove(immutableJobPos);
+        LumberjackUpgradeState.get(world.getServer()).putEntry(world, villagerId, immutableJobPos, UpgradeStage.TABLE_PAIRED, 0L);
+    }
+
+    private static UpgradeStage getTrackedUpgradeStage(ServerWorld world, UUID villagerId, BlockPos jobPos) {
+        UpgradeStage stage = getUpgradeStage(villagerId, jobPos);
+        if (stage != UpgradeStage.UNPAIRED || jobPos == null) {
+            return stage;
+        }
+
+        LumberjackUpgradeState.EntryValue entry = LumberjackUpgradeState.get(world.getServer())
+                .getEntry(world, villagerId, jobPos)
+                .orElse(null);
+        if (entry == null || !canHydrateFromPersistedStage(entry.stage())) {
+            return UpgradeStage.UNPAIRED;
+        }
+
+        if (entry.stage() == UpgradeStage.CHEST_PAIRED) {
+            hydrateUpgradeStageToChestPaired(world, entry.chestPairedTick(), villagerId, jobPos);
+            return UpgradeStage.CHEST_PAIRED;
+        }
+
+        BlockPos immutableJobPos = jobPos.toImmutable();
+        UPGRADE_STAGE_BY_VILLAGER.put(villagerId, UpgradeStage.TABLE_PAIRED);
+        UPGRADE_STAGE_BY_JOB_SITE.put(immutableJobPos, UpgradeStage.TABLE_PAIRED);
+        CHEST_PAIRED_TICKS_BY_VILLAGER.remove(villagerId);
+        CHEST_PAIRED_TICKS_BY_JOB_SITE.remove(immutableJobPos);
+        return UpgradeStage.TABLE_PAIRED;
     }
 
     private static UpgradeStage getUpgradeStage(UUID villagerId, BlockPos jobPos) {
@@ -916,13 +949,18 @@ public final class LumberjackChestTriggerController {
         return placedTick != null && world.getTime() - placedTick >= V2_AFTER_CHEST_DELAY_TICKS;
     }
 
-    private static void clearUpgradeState(UUID villagerId, BlockPos jobPos) {
+    private static void clearUpgradeState(ServerWorld world, UUID villagerId, BlockPos jobPos) {
         UPGRADE_STAGE_BY_VILLAGER.remove(villagerId);
         CHEST_PAIRED_TICKS_BY_VILLAGER.remove(villagerId);
         if (jobPos != null) {
             UPGRADE_STAGE_BY_JOB_SITE.remove(jobPos);
             CHEST_PAIRED_TICKS_BY_JOB_SITE.remove(jobPos);
+            LumberjackUpgradeState.get(world.getServer()).removeEntry(world, villagerId, jobPos);
         }
+    }
+
+    static boolean canHydrateFromPersistedStage(UpgradeStage persistedStage) {
+        return persistedStage == UpgradeStage.CHEST_PAIRED || persistedStage == UpgradeStage.TABLE_PAIRED;
     }
 
     private static BlockPos resolveVillagerJobSite(ServerWorld world, VillagerEntity villager) {
@@ -1302,5 +1340,14 @@ public final class LumberjackChestTriggerController {
     }
 
     private record TriggerContext(ServerWorld world, LumberjackGuardEntity guard, Inventory chestInventory) {
+    }
+
+    private record V2BlockReason(UpgradeDemand nextDemand, int eligibleV1MissingChestCount) {
+        private String debugReason() {
+            if (UpgradeDemand.v1Chest().equals(nextDemand)) {
+                return "next demand is V1 chest";
+            }
+            return "eligible V1 villagers still missing chest=" + eligibleV1MissingChestCount;
+        }
     }
 }

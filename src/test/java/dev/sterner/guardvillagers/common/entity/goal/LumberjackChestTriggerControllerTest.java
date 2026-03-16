@@ -8,7 +8,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LumberjackChestTriggerControllerTest {
 
     @Test
-    void isEligibleV2MissingCraftingTableForStage_existingChestMissingTableForEligibleV2AllowsPlacementAfterDelay() {
+    void nearbyChestWithUnpairedStageDoesNotPermitTablePlacement() {
+        boolean allowed = LumberjackChestTriggerController.isEligibleV2MissingCraftingTableForStage(
+                LumberjackChestTriggerController.UpgradeStage.UNPAIRED,
+                true,
+                false,
+                true,
+                130L,
+                80L
+        );
+
+        assertFalse(allowed);
+    }
+
+    @Test
+    void tablePlacementPermittedOnlyAfterChestPairedTransitionAndDelay() {
         boolean beforeDelay = LumberjackChestTriggerController.isEligibleV2MissingCraftingTableForStage(
                 LumberjackChestTriggerController.UpgradeStage.CHEST_PAIRED,
                 true,
@@ -29,6 +43,16 @@ class LumberjackChestTriggerControllerTest {
 
         assertFalse(beforeDelay);
         assertTrue(afterDelay);
+    }
+
+    @Test
+    void restartHydrationPathDoesNotInventChestPairedFromUnpairedPersistence() {
+        assertFalse(LumberjackChestTriggerController.canHydrateFromPersistedStage(
+                LumberjackChestTriggerController.UpgradeStage.UNPAIRED
+        ));
+        assertTrue(LumberjackChestTriggerController.canHydrateFromPersistedStage(
+                LumberjackChestTriggerController.UpgradeStage.CHEST_PAIRED
+        ));
     }
 
     @Test
