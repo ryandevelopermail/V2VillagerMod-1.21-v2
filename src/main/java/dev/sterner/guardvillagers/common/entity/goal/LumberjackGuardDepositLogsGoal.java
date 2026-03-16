@@ -479,7 +479,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         Box pickupBox = this.guard.getBoundingBox().expand(ITEM_PICKUP_RADIUS, 1.0D, ITEM_PICKUP_RADIUS);
         List<ItemEntity> nearbyItems = world.getEntitiesByClass(ItemEntity.class,
                 pickupBox,
-                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableWoodDrop(entity.getStack()));
+                entity -> entity.isAlive() && !entity.getStack().isEmpty() && LumberjackGuardChopTreesGoal.isGatherableTreeDrop(entity.getStack()));
 
         for (ItemEntity itemEntity : nearbyItems) {
             bufferStack(itemEntity.getStack().copy());
@@ -504,14 +504,6 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             buffer.add(incoming);
         }
     }
-
-    private boolean isGatherableWoodDrop(ItemStack stack) {
-        return stack.isIn(ItemTags.LOGS)
-                || stack.isIn(ItemTags.PLANKS)
-                || stack.isOf(Items.STICK)
-                || stack.isOf(Items.CHARCOAL);
-    }
-
 
     private boolean attemptChestRecovery(ServerWorld world, String reason, boolean clearInvalidPairing, BlockPos previousChestPos) {
         BlockPos tablePos = this.guard.getPairedCraftingTablePos();
