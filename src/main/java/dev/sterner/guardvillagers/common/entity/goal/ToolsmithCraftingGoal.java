@@ -241,9 +241,15 @@ public class ToolsmithCraftingGoal extends Goal {
             if (toolType == ToolsmithDemandPlanner.ToolType.SHEARS && deficit <= 0) {
                 continue;
             }
-            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0 && toolDemand != null) {
-                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
-                continue;
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0) {
+                boolean practicalRodNeed = hasPracticalFishingRodNeed(toolDemand, deficit);
+                if (!practicalRodNeed) {
+                    if (toolDemand != null) {
+                        CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: no practical recipient need (aggregate "
+                                + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
+                    }
+                    continue;
+                }
             }
             if (canCraft(inventory, recipe)) {
                 recipes.add(new ToolRecipe(recipe, result, toolType, deficit, toolType.fallbackPriority()));
@@ -262,6 +268,13 @@ public class ToolsmithCraftingGoal extends Goal {
                 || stack.getItem() instanceof HoeItem
                 || stack.getItem() instanceof ShearsItem
                 || stack.isOf(Items.FISHING_ROD);
+    }
+
+    static boolean hasPracticalFishingRodNeed(@Nullable ToolsmithDemandPlanner.ToolDemand toolDemand, int demandDeficit) {
+        if (toolDemand == null || demandDeficit != 0) {
+            return false;
+        }
+        return !toolDemand.rankedRecipients().isEmpty();
     }
 
     private boolean hasNonTableCraftableRecipe(ServerWorld world) {
