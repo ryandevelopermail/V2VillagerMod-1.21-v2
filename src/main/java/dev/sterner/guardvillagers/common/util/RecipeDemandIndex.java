@@ -27,9 +27,12 @@ import java.util.function.Predicate;
 public final class RecipeDemandIndex {
     private static final Logger LOGGER = LoggerFactory.getLogger(RecipeDemandIndex.class);
     private static final Map<String, RouteIndex> CACHE = new HashMap<>();
-    private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 3;
-    private static final int MASON_PLANK_COMPONENT_CAP = 3;
-    private static final int MASON_STICK_COMPONENT_CAP = 2;
+    private static final int TOOLSMITH_PLANK_COMPONENT_CAP = 32;
+    private static final int TOOLSMITH_STICK_COMPONENT_CAP = 32;
+    private static final int MASON_PLANK_COMPONENT_CAP = 24;
+    private static final int MASON_STICK_COMPONENT_CAP = 24;
+    private static final int FARMER_PLANK_COMPONENT_CAP = 32;
+    private static final int FARMER_STICK_COMPONENT_CAP = 32;
     private static final int BUTCHER_SMOKER_LOG_CAP = 1;
 
     private RecipeDemandIndex() {
@@ -62,8 +65,8 @@ public final class RecipeDemandIndex {
         }
 
         // fixed-goal enum requirements
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, 28, 1.0D, false, false);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, 24, 1.0D, false, false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, FARMER_PLANK_COMPONENT_CAP, 1.15D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, FARMER_STICK_COMPONENT_CAP, 1.15D, false, true);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
         add(aggregate,
                 DemandMaterial.LOGS,
@@ -73,17 +76,17 @@ public final class RecipeDemandIndex {
                 1.0D,
                 false,
                 false);
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 0.4D, false, false);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 0.4D, false, false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 1.4D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 1.4D, false, true);
 
         // dynamic-goal recipe scans (RecipeManager-backed goals)
         Set<VillagerProfession> detectedToolMaterialDemandProfessions = new HashSet<>();
         scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.LIBRARIAN, RecipeDemandIndex::isLibrarianOutput, 48, 1.8D);
         scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FISHERMAN, RecipeDemandIndex::isFishermanOutput, 40, 1.5D);
         scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FLETCHER, RecipeDemandIndex::isFletcherOutput, 32, 1.2D);
-        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.TOOLSMITH, RecipeDemandIndex::isToolsmithOutput, 24, 0.45D);
-        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FARMER, RecipeDemandIndex::isFarmerOutput, 28, 1.0D);
-        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.MASON, RecipeDemandIndex::isMasonOutput, MASON_PLANK_COMPONENT_CAP, 0.4D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.TOOLSMITH, RecipeDemandIndex::isToolsmithOutput, 32, 1.6D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FARMER, RecipeDemandIndex::isFarmerOutput, FARMER_PLANK_COMPONENT_CAP, 1.15D);
+        scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.MASON, RecipeDemandIndex::isMasonOutput, MASON_PLANK_COMPONENT_CAP, 1.4D);
 
         // non-crafting but currently used by lumberjack fuel routing
         add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.BUTCHER, 1, 16, 1.0D, false, false);
@@ -134,6 +137,15 @@ public final class RecipeDemandIndex {
     static int resolveDynamicCap(VillagerProfession profession, DemandMaterial material, int defaultCap) {
         if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.PLANKS) {
             return Math.min(defaultCap, TOOLSMITH_PLANK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.TOOLSMITH && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, TOOLSMITH_STICK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.MASON && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, MASON_STICK_COMPONENT_CAP);
+        }
+        if (profession == VillagerProfession.FARMER && material == DemandMaterial.STICK) {
+            return Math.min(defaultCap, FARMER_STICK_COMPONENT_CAP);
         }
         return defaultCap;
     }
