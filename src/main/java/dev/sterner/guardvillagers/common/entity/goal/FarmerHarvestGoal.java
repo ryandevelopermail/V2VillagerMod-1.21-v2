@@ -916,7 +916,12 @@ public class FarmerHarvestGoal extends Goal {
                 setStage(Stage.PLANT_FARMLAND);
             } else {
                 wheatSeedForagingRequested = true;
-                logWheatSeedForageIntent("post-deposit bootstrap preflight", hasPlantablesForPlanting());
+                boolean hasPlantables = hasPlantablesForPlanting();
+                logWheatSeedForageIntent("post-deposit bootstrap preflight", hasPlantables);
+                if (shouldForceBootstrapSeedGather(hasPlantables)) {
+                    seedForageRetryCount = 0;
+                    nextSeedForageRetryTick = 0L;
+                }
                 if (canEnterSeedForageStage(world, "post-deposit bootstrap preflight")) {
                     setStage(Stage.GATHER_WHEAT_SEEDS);
                 } else {
@@ -1417,6 +1422,7 @@ public class FarmerHarvestGoal extends Goal {
 
     private boolean ensureWheatSeedStartup(ServerWorld world) {
         if (hasRequiredWheatSeedReserve(world)) {
+            logWheatSeedStartupDecision(world, true, true, hasPlantablesForPlanting(), hasNonWheatPlantablesForPlanting(), getCombinedWheatSeedReserve(world), getConfiguredWheatSeedBootstrapFloor(), "dynamic reserve satisfied");
             return true;
         }
 
@@ -1425,10 +1431,45 @@ public class FarmerHarvestGoal extends Goal {
         logSeedReserveStatus(world, "post-chest pickup reserve check");
 
         if (hasRequiredWheatSeedReserve(world)) {
+            logWheatSeedStartupDecision(world, true, true, hasPlantablesForPlanting(), hasNonWheatPlantablesForPlanting(), getCombinedWheatSeedReserve(world), getConfiguredWheatSeedBootstrapFloor(), "dynamic reserve satisfied after chest pickup");
             return true;
         }
 
-        return getCombinedWheatSeedReserve(world) >= getConfiguredWheatSeedBootstrapFloor();
+        boolean hasPlantables = hasPlantablesForPlanting();
+        boolean hasNonWheatPlantables = hasNonWheatPlantablesForPlanting();
+        int combinedReserve = getCombinedWheatSeedReserve(world);
+        int bootstrapFloor = getConfiguredWheatSeedBootstrapFloor();
+        boolean startupReady = hasStartupPlantingReadiness(hasPlantables, hasNonWheatPlantables, combinedReserve, bootstrapFloor);
+        logWheatSeedStartupDecision(world, false, startupReady, hasPlantables, hasNonWheatPlantables, combinedReserve, bootstrapFloor, "startup fallback evaluated");
+        return startupReady;
+    }
+
+    static boolean hasStartupPlantingReadiness(boolean hasPlantablesForPlanting, boolean hasNonWheatPlantablesForPlanting, int combinedSeedReserve, int configuredBootstrapFloor) {
+        if (!hasPlantablesForPlanting) {
+            return false;
+        }
+        if (hasNonWheatPlantablesForPlanting) {
+            return true;
+        }
+        int effectiveBootstrapFloor = Math.max(1, configuredBootstrapFloor);
+        return combinedSeedReserve >= effectiveBootstrapFloor;
+    }
+
+    static boolean shouldForceBootstrapSeedGather(boolean hasPlantablesForPlanting) {
+        return !hasPlantablesForPlanting;
+    }
+
+    private void logWheatSeedStartupDecision(ServerWorld world,
+                                             boolean dynamicReserveSatisfied,
+                                             boolean startupReady,
+                                             boolean hasPlantables,
+                                             boolean hasNonWheatPlantables,
+                                             int combinedReserve,
+                                             int configuredBootstrapFloor,
+                                             String reason) {
+        LOGGER.info("Farmer {} wheat seed startup decision dynamicReserveSatisfied={} startupReady={} hasPlantables={} hasNonWheatPlantables={} combinedSeeds={} bootstrapFloor={} effectiveBootstrapFloor={} reason={}",
+                villager.getUuidAsString(), dynamicReserveSatisfied, startupReady, hasPlantables, hasNonWheatPlantables, combinedReserve,
+                configuredBootstrapFloor, Math.max(1, configuredBootstrapFloor), reason);
     }
 
     private void logWheatSeedForageIntent(String context, boolean optimizingSeedReserve) {
@@ -1542,6 +1583,12 @@ public class FarmerHarvestGoal extends Goal {
                 || countItemInInventory(Items.POTATO) > 0
                 || countItemInInventory(Items.BEETROOT_SEEDS) > 0
                 || countItemInInventory(Items.WHEAT_SEEDS) > 0;
+    }
+
+    private boolean hasNonWheatPlantablesForPlanting() {
+        return countItemInInventory(Items.CARROT) > 0
+                || countItemInInventory(Items.POTATO) > 0
+                || countItemInInventory(Items.BEETROOT_SEEDS) > 0;
     }
 
     private int countItemInInventory(Item item) {
