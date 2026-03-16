@@ -30,4 +30,35 @@ class LumberjackChestTriggerControllerTest {
         assertFalse(beforeDelay);
         assertTrue(afterDelay);
     }
+
+    @Test
+    void shouldBlockV2TablePlacement_whenNextDemandIsV1Chest() {
+        boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
+                LumberjackChestTriggerController.UpgradeDemand.v1Chest(),
+                0
+        );
+
+        assertTrue(blocked);
+    }
+
+    @Test
+    void shouldBlockV2TablePlacement_whenAnyEligibleV1VillagerStillMissingChest() {
+        boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
+                LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
+                1
+        );
+
+        assertTrue(blocked);
+    }
+
+    @Test
+    void shouldNotBlockV2TablePlacement_whenNoUnresolvedV1ChestDemandExists() {
+        boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
+                LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
+                0
+        );
+
+        assertFalse(blocked);
+    }
+
 }
