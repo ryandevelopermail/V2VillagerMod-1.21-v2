@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.PairedStorageHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.Block;
 import net.minecraft.block.BarrelBlock;
@@ -20,6 +21,8 @@ import net.minecraft.item.ShearsItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 
 public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ToolsmithDistributionGoal.class);
     private static final int TARGET_REFRESH_LOG_INTERVAL_TICKS = 100;
     private long lastTargetRefreshLogTick = Long.MIN_VALUE;
     private String lastTargetRefreshLogMessage = "";
@@ -197,22 +201,52 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
                                          ToolsmithDemandPlanner.ToolType toolType,
                                          ToolsmithDemandPlanner.RecipientDemand recipient) {
         if (world == null) {
+            logRecipientRejection("WORLD_NULL", recipient, null);
             return false;
         }
 
         VillagerProfession expectedProfession = expectedProfessionFor(toolType);
         if (expectedProfession == null || recipient.record().recipient().getVillagerData().getProfession() != expectedProfession) {
+            logRecipientRejection("PROFESSION_MISMATCH", recipient, null);
             return false;
         }
 
         Block expectedJobBlock = expectedJobBlockFor(toolType);
         if (expectedJobBlock == null || !world.getBlockState(recipient.record().jobPos()).isOf(expectedJobBlock)) {
+            logRecipientRejection("JOB_BLOCK_MISMATCH", recipient, null);
             return false;
         }
 
-        return JobBlockPairingHelper.findNearbyChest(world, recipient.record().jobPos())
-                .map(chestPos -> chestPos.equals(recipient.record().chestPos()))
-                .orElse(false);
+        BlockPos recipientChestPos = recipient.record().chestPos();
+        BlockState recipientChestState = world.getBlockState(recipientChestPos);
+        if (!(recipientChestState.getBlock() instanceof ChestBlock)
+                && !(recipientChestState.getBlock() instanceof BarrelBlock)) {
+            logRecipientRejection("RECIPIENT_STORAGE_INVALID", recipient, null);
+            return false;
+        }
+
+        Optional<BlockPos> resolvedChestPos = JobBlockPairingHelper.findNearbyChest(world, recipient.record().jobPos());
+        if (resolvedChestPos.isPresent()) {
+            if (!PairedStorageHelper.areEquivalentStoragePositions(world, resolvedChestPos.get(), recipientChestPos)) {
+                logRecipientRejection("PAIRING_MISMATCH", recipient, resolvedChestPos.get());
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void logRecipientRejection(String reasonCode,
+                                       ToolsmithDemandPlanner.RecipientDemand recipient,
+                                       BlockPos resolvedChestPos) {
+        String resolved = resolvedChestPos == null ? "<none>" : resolvedChestPos.toShortString();
+        LOGGER.debug("Toolsmith recipient rejected [{}]: villager={} profession={} jobPos={} chestPos={} resolvedChestPos={}",
+                reasonCode,
+                recipient.record().recipient().getUuidAsString(),
+                recipient.record().recipient().getVillagerData().getProfession(),
+                recipient.record().jobPos().toShortString(),
+                recipient.record().chestPos().toShortString(),
+                resolved);
     }
 
     private VillagerProfession expectedProfessionFor(ToolsmithDemandPlanner.ToolType toolType) {
