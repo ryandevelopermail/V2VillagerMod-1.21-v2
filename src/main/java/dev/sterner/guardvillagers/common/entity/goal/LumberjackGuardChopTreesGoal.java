@@ -32,8 +32,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
@@ -572,7 +575,30 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return false;
         }
 
-        return world.breakBlock(pos, true, this.guard);
+        BlockEntity blockEntity = world.getBlockEntity(pos);
+        return breakObstacleAndBufferDrops(
+                () -> Block.getDroppedStacks(state, world, pos, blockEntity, this.guard, ItemStack.EMPTY),
+                () -> world.removeBlock(pos, false),
+                this::bufferStack
+        );
+    }
+
+    static boolean breakObstacleAndBufferDrops(
+            Supplier<List<ItemStack>> dropsSupplier,
+            BooleanSupplier removeBlock,
+            Consumer<ItemStack> dropBuffer
+    ) {
+        List<ItemStack> drops = dropsSupplier.get();
+        if (!removeBlock.getAsBoolean()) {
+            return false;
+        }
+
+        for (ItemStack drop : drops) {
+            if (!drop.isEmpty()) {
+                dropBuffer.accept(drop.copy());
+            }
+        }
+        return true;
     }
 
     private boolean isAxeBreakablePathObstacle(BlockState state) {
