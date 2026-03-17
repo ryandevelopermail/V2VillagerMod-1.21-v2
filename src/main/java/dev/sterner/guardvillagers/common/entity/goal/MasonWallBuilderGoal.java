@@ -17,6 +17,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.GlobalPos;
+import net.minecraft.world.Heightmap;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
@@ -58,6 +59,17 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int WALL_EXPAND = 10;
     // Minimum stone needed before the elected builder starts placing
     private static final int STONE_PER_SEGMENT = 1; // 1-high wall = 1 block per pos
+    /**
+     * Maximum allowed height difference between a perimeter position's surface Y
+     * and the bell Y before that position is considered too steep to wall.
+     * Positions steeper than this are skipped entirely (left open).
+     */
+    private static final int STEEP_SKIP_THRESHOLD = 3;
+    /**
+     * Maximum number of blocks a fill column can extend downward to close a terrain dip.
+     * Dips deeper than this are also skipped to avoid filling ravines/caves.
+     */
+    private static final int MAX_FILL_DEPTH = 4;
     // Movement speed
     private static final double MOVE_SPEED = 0.55D;
     // Reach distance squared (close enough to place)
@@ -413,43 +425,97 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Returns all 1-high wall segment positions around the rectangle perimeter,
-     * applying gap rules:
+     * Returns all wall segment positions around the rectangle perimeter with terrain adaptation:
      * <ul>
-     *   <li>Skip DIRT_PATH positions</li>
+     *   <li>Skip DIRT_PATH positions (natural gaps / roads)</li>
+     *   <li>Skip positions where {@code |surfaceY - bellY| > STEEP_SKIP_THRESHOLD} (too steep)</li>
+     *   <li>Skip positions where the dip depth exceeds {@code MAX_FILL_DEPTH} (ravine guard)</li>
+     *   <li>For positions above ground level: place wall block on top of the surface
+     *       (wall sits on hill rather than being buried inside it)</li>
+     *   <li>For positions below ground level: emit a column of blocks from surfaceY+1
+     *       down to bellY, filling the dip so the wall has no gap underneath</li>
      *   <li>Force at least 1 gap so the wall is never fully enclosed</li>
      *   <li>Gate positions (1 per face) are included in the list but tagged separately</li>
      * </ul>
      */
     private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
         List<BlockPos> segments = new ArrayList<>();
-        int y = rect.y();
+        int bellY = rect.y();
 
-        // North face (z = minZ), South face (z = maxZ), West face (x = minX), East face (x = maxX)
+        // North face (z = minZ), South face (z = maxZ)
         for (int x = rect.minX(); x <= rect.maxX(); x++) {
-            addSegmentIfValid(world, new BlockPos(x, y, rect.minZ()), segments);
-            addSegmentIfValid(world, new BlockPos(x, y, rect.maxZ()), segments);
+            resolveWallColumn(world, x, rect.minZ(), bellY, segments);
+            resolveWallColumn(world, x, rect.maxZ(), bellY, segments);
         }
+        // West face (x = minX), East face (x = maxX) — corners already covered above
         for (int z = rect.minZ() + 1; z < rect.maxZ(); z++) {
-            addSegmentIfValid(world, new BlockPos(rect.minX(), y, z), segments);
-            addSegmentIfValid(world, new BlockPos(rect.maxX(), y, z), segments);
+            resolveWallColumn(world, rect.minX(), z, bellY, segments);
+            resolveWallColumn(world, rect.maxX(), z, bellY, segments);
         }
 
-        // Ensure at least 1 forced gap (remove last segment if all were added)
+        // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
             int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ());
             if (segments.size() >= perimeterTotal) {
-                segments.remove(segments.size() - 1); // force one gap
+                segments.remove(segments.size() - 1);
             }
         }
 
         return segments;
     }
 
+    /**
+     * Resolves the wall block(s) for one perimeter (x, z) position, adapting to terrain:
+     *
+     * <ol>
+     *   <li>Sample surface Y via {@code MOTION_BLOCKING_NO_LEAVES} heightmap
+     *       (top of solid/liquid column, ignoring leaf canopy).</li>
+     *   <li>Compute {@code delta = surfaceY - bellY}.</li>
+     *   <li>If {@code delta > STEEP_SKIP_THRESHOLD}: the ground rises more than the threshold
+     *       above bell level — the position is on a steep hill; skip it.</li>
+     *   <li>If {@code -delta > MAX_FILL_DEPTH}: the ground is too far below bell level
+     *       (ravine / cliff) — skip it.</li>
+     *   <li>If {@code delta >= 0}: the surface is at or above bell level. Place the wall
+     *       block at {@code surfaceY + 1} so it sits visibly on top of the ground.</li>
+     *   <li>If {@code delta < 0}: the surface dips below bell level. Emit a column of
+     *       blocks from {@code surfaceY + 1} up to {@code bellY} (inclusive) to fill the
+     *       gap underneath the wall line.</li>
+     *   <li>In all cases, skip DIRT_PATH and already-cobblestone positions.</li>
+     * </ol>
+     */
+    private void resolveWallColumn(ServerWorld world, int x, int z, int bellY, List<BlockPos> out) {
+        // Surface Y = top of the solid column (leaves excluded so forest canopy doesn't skew it)
+        int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
+        int delta = surfaceY - bellY;
+
+        // Too steep upward — skip
+        if (delta > STEEP_SKIP_THRESHOLD) {
+            return;
+        }
+
+        // Too deep downward — skip (ravine / cliff guard)
+        if (-delta > MAX_FILL_DEPTH) {
+            return;
+        }
+
+        if (delta >= 0) {
+            // Ground is at or above bell level: place wall block on top of surface
+            BlockPos pos = new BlockPos(x, surfaceY + 1, z);
+            addSegmentIfValid(world, pos, out);
+        } else {
+            // Ground dips below bell level: fill column from ground surface up to bell Y
+            // so there is no gap underneath the wall line.
+            for (int y = surfaceY + 1; y <= bellY; y++) {
+                BlockPos pos = new BlockPos(x, y, z);
+                addSegmentIfValid(world, pos, out);
+            }
+        }
+    }
+
     private void addSegmentIfValid(ServerWorld world, BlockPos pos, List<BlockPos> segments) {
-        // Skip dirt path positions
+        // Skip road tiles — natural gaps should stay open
         if (world.getBlockState(pos).isOf(Blocks.DIRT_PATH)) return;
-        // Skip positions that are already cobblestone (already built)
+        // Skip already-built positions
         if (world.getBlockState(pos).isOf(Blocks.COBBLESTONE)) return;
         segments.add(pos.toImmutable());
     }
