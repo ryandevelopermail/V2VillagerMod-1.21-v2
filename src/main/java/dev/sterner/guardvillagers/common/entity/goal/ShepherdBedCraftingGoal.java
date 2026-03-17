@@ -173,6 +173,11 @@ public class ShepherdBedCraftingGoal extends AbstractCraftingGoal<ShepherdBedCra
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, VillagerEntity::isAlive);
         int bedless = 0;
         for (VillagerEntity v : villagers) {
+            // Exclude the shepherd itself: it is the craftsman, not a recipient.
+            // Without this exclusion the shepherd always counts as bedless (shepherds rarely
+            // have a HOME memory), causing perpetual crafting even when all *other* villagers
+            // have sleeping spots.
+            if (v == villager) continue;
             if (!hasSleepingPos(v)) {
                 bedless++;
             }

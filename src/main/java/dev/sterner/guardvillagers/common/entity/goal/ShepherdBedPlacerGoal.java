@@ -50,6 +50,7 @@ public class ShepherdBedPlacerGoal extends Goal {
     private static final int PATH_RETRY_TICKS = 20;
     private static final int CHECK_INTERVAL_TICKS = 1200;   // 1 min cooldown between checks
     private static final int PLACEMENT_SCAN_RADIUS = 3;     // blocks around an existing bed to look for a new spot
+    private static final int BED_ANCHOR_Y_RANGE = 8;        // ±Y range when scanning for existing bed anchors (covers 2 floors)
     private static final int MAX_BED_ANCHOR_CANDIDATES = 16;
 
     private final VillagerEntity villager;
@@ -212,13 +213,14 @@ public class ShepherdBedPlacerGoal extends Goal {
      */
     private BedSite findBedPlacementSite(ServerWorld world) {
         BlockPos villagerPos = villager.getBlockPos();
-        Box searchBox = new Box(villagerPos).expand(BED_ANCHOR_SCAN_RANGE);
+        // Note: scan is a manual 3-nested loop (X/Z ±BED_ANCHOR_SCAN_RANGE, Y ±BED_ANCHOR_Y_RANGE)
+        // rather than a Box query because BedBlock is not a BlockEntity and requires a block scan.
 
         // Collect all bed foot-block positions (avoid scanning heads)
         List<BlockPos> existingBedPositions = new ArrayList<>();
         for (int x = (int)(villagerPos.getX() - BED_ANCHOR_SCAN_RANGE); x <= villagerPos.getX() + BED_ANCHOR_SCAN_RANGE; x++) {
             for (int z = (int)(villagerPos.getZ() - BED_ANCHOR_SCAN_RANGE); z <= villagerPos.getZ() + BED_ANCHOR_SCAN_RANGE; z++) {
-                for (int y = villagerPos.getY() - 4; y <= villagerPos.getY() + 4; y++) {
+                for (int y = villagerPos.getY() - BED_ANCHOR_Y_RANGE; y <= villagerPos.getY() + BED_ANCHOR_Y_RANGE; y++) {
                     BlockPos pos = new BlockPos(x, y, z);
                     BlockState state = world.getBlockState(pos);
                     if (state.getBlock() instanceof BedBlock
@@ -454,6 +456,10 @@ public class ShepherdBedPlacerGoal extends Goal {
         Box box = new Box(villager.getBlockPos()).expand(BEDLESS_SCAN_RANGE);
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, VillagerEntity::isAlive);
         for (VillagerEntity v : villagers) {
+            // Exclude self: the shepherd is the craftsman/placer, not a sleeping recipient.
+            // Shepherds rarely hold a HOME memory so they would always count as bedless,
+            // causing the placer to run even when every *other* villager has a bed.
+            if (v == villager) continue;
             if (!hasSleepingPos(v)) {
                 return true;
             }
