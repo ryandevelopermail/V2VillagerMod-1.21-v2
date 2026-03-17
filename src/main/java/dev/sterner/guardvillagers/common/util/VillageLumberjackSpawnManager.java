@@ -41,8 +41,15 @@ import java.util.Set;
 public final class VillageLumberjackSpawnManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillageLumberjackSpawnManager.class);
 
-    /** How often (in ticks) this manager runs the bell scan. 600 = every 30 s. */
-    private static final long SCAN_INTERVAL_TICKS = 600L;
+    /**
+     * How often (in ticks) this manager runs the bell scan. 6000 = every 5 minutes.
+     *
+     * <p>This must be long enough for a placed crafting table to be picked up by the
+     * conversion hook and for the resulting lumberjack to register as "existing" before
+     * the next scan fires — otherwise the deficit stays non-zero and additional tables
+     * keep getting placed every cycle.
+     */
+    private static final long SCAN_INTERVAL_TICKS = 6000L;
 
     /** Bell effect radius — mirrors VillageGuardStandManager.BELL_EFFECT_RANGE. */
     private static final int BELL_EFFECT_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -135,16 +142,14 @@ public final class VillageLumberjackSpawnManager {
         LOGGER.debug("lumberjack-spawn-manager bell={} professionals={} totalVillagers={} desired={} existing={} deficit={}",
                 bellPos.toShortString(), professionals, totalVillagers, desired, existing, deficit);
 
-        // Attempt to place one crafting table per missing lumberjack (cap at deficit).
-        boolean anyPlaced = false;
-        for (int i = 0; i < deficit; i++) {
-            boolean placed = tryPlaceCraftingTable(world, bellPos);
-            if (!placed) {
-                LOGGER.debug("lumberjack-spawn-manager bell={} could not find valid crafting table placement (attempt {})",
-                        bellPos.toShortString(), i + 1);
-                break; // If one attempt fails, the rest will too in this tick.
-            }
-            anyPlaced = true;
+        // Place at most ONE crafting table per bell per scan cycle, regardless of deficit.
+        // Placing multiple tables per cycle causes runaway table spawning: the conversion
+        // hook needs time to pick up each table and spawn a lumberjack before the next
+        // scan fires — if we race ahead of it, we flood the village with tables.
+        boolean anyPlaced = tryPlaceCraftingTable(world, bellPos);
+        if (!anyPlaced) {
+            LOGGER.debug("lumberjack-spawn-manager bell={} could not find valid crafting table placement (deficit={})",
+                    bellPos.toShortString(), deficit);
         }
 
         // Nudge the conversion hook once after all placements, but only if at least one

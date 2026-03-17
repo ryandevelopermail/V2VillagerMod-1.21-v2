@@ -609,9 +609,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private boolean isAxeBreakablePathObstacle(BlockState state) {
+        // NOTE: Logs are intentionally excluded here.
+        // A log in the path is either part of a building (must not be broken) or a tree
+        // that should be properly targeted via the session mechanism — not silently
+        // chewed through as a "path obstacle". Leaves and other axe-mineable blocks
+        // (e.g. dead bushes, bamboo, etc.) are safe to clear.
         return !state.isAir()
+                && !state.isIn(BlockTags.LOGS)
                 && (state.isIn(BlockTags.LEAVES)
-                || state.isIn(BlockTags.LOGS)
                 || state.isIn(BlockTags.AXE_MINEABLE));
     }
 
