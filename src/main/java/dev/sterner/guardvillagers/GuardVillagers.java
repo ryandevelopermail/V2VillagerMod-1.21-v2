@@ -15,6 +15,7 @@ import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationM
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
+import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
@@ -136,6 +137,9 @@ public class GuardVillagers implements ModInitializer {
     }
 
     public static void onBellRung(ServerWorld world, BlockPos bellPos) {
+        // Tag all villagers within range with this primary bell (Cluster 1B)
+        VillageMembershipTracker.tagVillagersNearBell(world, bellPos);
+
         BellVillageReport report = VillagerBellTracker.snapshotBellVillageReport(world, bellPos);
         VillagerBellTracker.logBellVillagerStats(world, bellPos, report);
         VillagerBellTracker.writeBellReportBooks(world, bellPos, report);
