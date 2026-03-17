@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.FletcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FletcherDistributionGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FletcherFletchingTableGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -24,8 +25,10 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(FletcherBehavior.class);
     private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
     private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int FLETCHING_TABLE_GOAL_PRIORITY = 5;
     private static final Map<VillagerEntity, FletcherCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FletcherDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, FletcherFletchingTableGoal> FLETCHING_TABLE_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -78,6 +81,17 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
 
         craftingGoal.requestImmediateCraft(world);
         distributionGoal.requestImmediateDistribution();
+
+        // Fletching-table goal is registered at chest-pair time (job block IS the fletching table)
+        FletcherFletchingTableGoal fletchingGoal = FLETCHING_TABLE_GOALS.get(villager);
+        if (fletchingGoal == null) {
+            fletchingGoal = new FletcherFletchingTableGoal(villager, jobPos, chestPos);
+            FLETCHING_TABLE_GOALS.put(villager, fletchingGoal);
+            villager.goalSelector.add(FLETCHING_TABLE_GOAL_PRIORITY, fletchingGoal);
+        } else {
+            fletchingGoal.setTargets(jobPos, chestPos);
+        }
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -143,6 +157,10 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             FletcherDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
+            }
+            FletcherFletchingTableGoal fletchingGoal = FLETCHING_TABLE_GOALS.get(villager);
+            if (fletchingGoal != null) {
+                fletchingGoal.requestImmediateCheck();
             }
         };
         simpleInventory.addListener(listener);

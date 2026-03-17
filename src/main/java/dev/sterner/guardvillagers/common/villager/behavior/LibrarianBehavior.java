@@ -149,6 +149,10 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
                 goal.requestImmediateCraft(serverWorld);
             }
+            LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
+            }
         };
         simpleInventory.addListener(listener);
         CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));

@@ -287,15 +287,21 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     }
 
     public static void onBarrelInventoryMutated(ServerWorld world, BlockPos barrelPos) {
-        Set<VillagerEntity> villagers = new LinkedHashSet<>();
-
         Set<VillagerEntity> watchedVillagers = BARREL_WATCHERS_BY_POS.get(barrelPos);
+
+        // If the watcher map already has live entries for this barrel, use them directly
+        // and skip the expensive world entity scan.
         if (watchedVillagers != null && !watchedVillagers.isEmpty()) {
-            villagers.addAll(watchedVillagers);
+            Set<VillagerEntity> snapshot = Set.copyOf(watchedVillagers);
+            if (snapshot.stream().anyMatch(v -> v.isAlive() && v.getWorld() == world)) {
+                handleStorageMutation(world, snapshot);
+                return;
+            }
         }
 
+        // Fallback scan: watcher map is empty or stale (fisherman just converted/died).
         Box scanBox = new Box(barrelPos).expand(24.0D);
-        villagers.addAll(world.getEntitiesByClass(
+        Set<VillagerEntity> villagers = new java.util.LinkedHashSet<>(world.getEntitiesByClass(
                 VillagerEntity.class,
                 scanBox,
                 villager -> villager.isAlive()
