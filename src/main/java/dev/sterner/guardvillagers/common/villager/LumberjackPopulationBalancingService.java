@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public final class LumberjackPopulationBalancingService {
@@ -19,7 +20,19 @@ public final class LumberjackPopulationBalancingService {
     private static final long BALANCING_INTERVAL_TICKS = 200L;
     private static final int REGION_SIZE_BLOCKS = 96;
     private static final int REGION_HALF_EXTENT = REGION_SIZE_BLOCKS / 2;
-    private static final int MIN_VILLAGERS_PER_GUARD = 6;
+
+    /**
+     * Dual-ratio gating: one lumberjack per N professionals (non-nitwit, non-unemployed)
+     * OR one per M total non-nitwit villagers, whichever demands more lumberjacks.
+     * The existing {@code belowRatioThreshold()} uses RATIO_TOTAL as the primary guard.
+     */
+    private static final int RATIO_PROFESSIONALS = 3;
+    private static final int RATIO_TOTAL = 6;
+
+    /** @deprecated Use RATIO_TOTAL for the region-snapshot guard. Kept for log messages. */
+    @SuppressWarnings("DeprecatedIsStillUsed")
+    @Deprecated
+    private static final int MIN_VILLAGERS_PER_GUARD = RATIO_TOTAL;
 
     private static final Map<RegistryKey<World>, Map<Long, RegionSnapshot>> LATEST_SNAPSHOTS = new HashMap<>();
     private static final Map<RegistryKey<World>, Long> LAST_REFRESH_TICK = new HashMap<>();
@@ -145,11 +158,13 @@ public final class LumberjackPopulationBalancingService {
                 center.getZ() + REGION_HALF_EXTENT + 1
         );
 
-        int villagerCount = world.getEntitiesByClass(VillagerEntity.class, scope, LumberjackPopulationBalancingService::isEligibleV2Villager).size();
-        int unemployedCount = world.getEntitiesByClass(VillagerEntity.class, scope, LumberjackPopulationBalancingService::isEligibleUnemployedVillager).size();
+        List<VillagerEntity> allVillagers = world.getEntitiesByClass(VillagerEntity.class, scope, LumberjackPopulationBalancingService::isEligibleV2Villager);
+        int villagerCount = allVillagers.size();
+        int unemployedCount = (int) allVillagers.stream().filter(LumberjackPopulationBalancingService::isEligibleUnemployedVillager).count();
+        int professionalCount = (int) allVillagers.stream().filter(LumberjackPopulationBalancingService::isProfessional).count();
         int guardCount = world.getEntitiesByClass(AxeGuardEntity.class, scope, LumberjackPopulationBalancingService::isActiveLumberjackGuard).size();
 
-        return new RegionSnapshot(toRegionKey(anchorPos), center, villagerCount, guardCount, unemployedCount);
+        return new RegionSnapshot(toRegionKey(anchorPos), center, villagerCount, professionalCount, guardCount, unemployedCount);
     }
 
     private static boolean isEligibleV2Villager(VillagerEntity villager) {
@@ -165,6 +180,11 @@ public final class LumberjackPopulationBalancingService {
             return false;
         }
         return villager.getVillagerData().getProfession() == VillagerProfession.NONE;
+    }
+
+    private static boolean isProfessional(VillagerEntity villager) {
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        return profession != VillagerProfession.NONE && profession != VillagerProfession.NITWIT;
     }
 
     private static boolean isActiveLumberjackGuard(AxeGuardEntity guard) {
@@ -188,10 +208,23 @@ public final class LumberjackPopulationBalancingService {
     private record RegionSnapshot(long regionKey,
                                   BlockPos regionCenter,
                                   int v2Villagers,
+                                  int professionals,
                                   int activeLumberjackGuards,
                                   int unemployedCandidates) {
+        /**
+         * Returns {@code true} when more lumberjacks are wanted by either ratio:
+         * <ul>
+         *   <li>1 per {@value RATIO_PROFESSIONALS} professionals, OR</li>
+         *   <li>1 per {@value RATIO_TOTAL} total non-nitwit villagers</li>
+         * </ul>
+         */
         private boolean belowRatioThreshold() {
-            return activeLumberjackGuards * MIN_VILLAGERS_PER_GUARD < v2Villagers;
+            int desiredFromProfessionals = professionals > 0
+                    ? (professionals + RATIO_PROFESSIONALS - 1) / RATIO_PROFESSIONALS : 0;
+            int desiredFromTotal = v2Villagers > 0
+                    ? (v2Villagers + RATIO_TOTAL - 1) / RATIO_TOTAL : 0;
+            int desired = Math.max(desiredFromProfessionals, desiredFromTotal);
+            return activeLumberjackGuards < desired;
         }
     }
 }
