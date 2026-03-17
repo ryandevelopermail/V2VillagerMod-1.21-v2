@@ -387,7 +387,8 @@ public class QuartermasterGoal extends Goal {
         if (pos == null) return Optional.empty();
         BlockState state = world.getBlockState(pos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, true));
+        // open=false: programmatic access must not trigger chest open-sound / lid animation.
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, false));
     }
 
     private BlockPos resolveBellChestPos(ServerWorld world) {

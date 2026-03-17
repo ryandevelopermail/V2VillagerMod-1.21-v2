@@ -378,7 +378,10 @@ public class ShepherdBedPlacerGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        // Pass open=false: programmatic inventory access should not trigger the chest
+        // open-sound or lid animation. open=true would cause an audible creak every
+        // CHECK_INTERVAL_TICKS (~60 s) whenever the placer goal evaluates demand.
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 

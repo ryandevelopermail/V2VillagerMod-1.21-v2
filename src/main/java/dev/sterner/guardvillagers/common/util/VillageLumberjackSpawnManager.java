@@ -50,7 +50,7 @@ import java.util.Random;
 public final class VillageLumberjackSpawnManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillageLumberjackSpawnManager.class);
 
-    /** How often (ticks) the bell scan runs. 6000 = every 5 minutes. */
+    /** How often (ticks) the bell scan runs. 6000 ticks = 5 minutes at 20 TPS. */
     private static final long SCAN_INTERVAL_TICKS = 6000L;
 
     /** Bell effect radius. */
