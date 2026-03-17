@@ -169,6 +169,23 @@ public final class LumberjackChestTriggerController {
             }
         }
 
+        // Cluster 5A: once all V1/V2 demands are satisfied, produce fences + gates for pen building.
+        // Only demand these if the lumberjack has a crafting table (base pairing is complete).
+        if (guard.getPairedCraftingTablePos() != null) {
+            Inventory chestInv = resolveChestInventory(world, guard);
+            if (chestInv != null) {
+                int fences = countItems(chestInv, Items.OAK_FENCE);
+                int gates = countItems(chestInv, Items.OAK_FENCE_GATE);
+                // Target: enough for a 6×6 pen (20 fence segments + 1 gate)
+                if (fences < 20) {
+                    return UpgradeDemand.v3Fence();
+                }
+                if (gates < 1) {
+                    return UpgradeDemand.v3FenceGate();
+                }
+            }
+        }
+
         return null;
     }
 
@@ -1342,6 +1359,11 @@ public final class LumberjackChestTriggerController {
         return countMatching(context.chestInventory(), predicate) + countMatching(context.guard().getGatheredStackBuffer(), predicate);
     }
 
+    /** Simple item count helper used by resolveNextUpgradeDemand. */
+    private static int countItems(Inventory inventory, Item item) {
+        return countMatching(inventory, stack -> stack.isOf(item));
+    }
+
     private static int countMatching(Inventory inventory, Predicate<ItemStack> predicate) {
         if (inventory == null) {
             return 0;
@@ -1509,13 +1531,28 @@ public final class LumberjackChestTriggerController {
         }
     }
 
-    public record UpgradeDemand(Item outputItem, int planksCost) {
+    public record UpgradeDemand(Item outputItem, int planksCost, int stickCost) {
+        /** Back-compat constructor for callers that don't use sticks. */
+        public UpgradeDemand(Item outputItem, int planksCost) {
+            this(outputItem, planksCost, 0);
+        }
+
         public static UpgradeDemand v1Chest() {
-            return new UpgradeDemand(Items.CHEST, 8);
+            return new UpgradeDemand(Items.CHEST, 8, 0);
         }
 
         public static UpgradeDemand v2CraftingTable() {
-            return new UpgradeDemand(Items.CRAFTING_TABLE, 4);
+            return new UpgradeDemand(Items.CRAFTING_TABLE, 4, 0);
+        }
+
+        // Cluster 5A — fence: 4 planks + 2 sticks → 3 fences (vanilla recipe)
+        public static UpgradeDemand v3Fence() {
+            return new UpgradeDemand(Items.OAK_FENCE, 4, 2);
+        }
+
+        // Cluster 5A — fence gate: 2 planks + 4 sticks → 1 gate (vanilla recipe)
+        public static UpgradeDemand v3FenceGate() {
+            return new UpgradeDemand(Items.OAK_FENCE_GATE, 2, 4);
         }
     }
 

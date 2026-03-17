@@ -196,7 +196,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
         LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
         if (demand != null && countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem()) <= 0) {
-            if (craftIfPossible(chestInventory, demand.planksCost(), 0, demand.outputItem())) {
+            if (craftIfPossible(chestInventory, demand.planksCost(), demand.stickCost(), demand.outputItem())) {
                 stashCraftedOutput(chestInventory, demand.outputItem());
                 LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
                 return true;
