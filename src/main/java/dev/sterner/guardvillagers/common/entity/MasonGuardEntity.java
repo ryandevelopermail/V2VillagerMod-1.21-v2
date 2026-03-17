@@ -11,6 +11,7 @@ import dev.sterner.guardvillagers.common.entity.goal.KickGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonGuardChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonGuardStonecuttingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonMiningStairGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MasonWallBuilderGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
@@ -28,13 +29,19 @@ import net.minecraft.entity.passive.PolarBearEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.nbt.NbtList;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.GlobalPos;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.util.Identifier;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class MasonGuardEntity extends GuardEntity {
@@ -51,6 +58,14 @@ public class MasonGuardEntity extends GuardEntity {
     private int miningStepIndex;
     private int miningDirectionId = -1;
     private boolean miningSessionActive;
+
+    // Cluster 4 — Wall builder state
+    /** The primary bell this mason is associated with for wall-building decisions. */
+    private GlobalPos wallBuilderHomeBell;
+    /** Ordered list of remaining wall segment positions to place. Persisted across restarts. */
+    private List<BlockPos> wallSegments = new ArrayList<>();
+    /** Gate positions reserved per wall face (1 per face, max 4). For lumberjack fence gates. */
+    private List<BlockPos> wallGatePositions = new ArrayList<>();
 
     public MasonGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -119,6 +134,38 @@ public class MasonGuardEntity extends GuardEntity {
         this.miningLastMinedPos = lastMinedPos == null ? null : lastMinedPos.toImmutable();
     }
 
+    // -------------------------------------------------------------------------
+    // Cluster 4 — Wall builder accessors
+    // -------------------------------------------------------------------------
+
+    public GlobalPos getWallBuilderHomeBell() {
+        return wallBuilderHomeBell;
+    }
+
+    public void setWallBuilderHomeBell(GlobalPos bellPos) {
+        this.wallBuilderHomeBell = bellPos;
+    }
+
+    public List<BlockPos> getWallSegments() {
+        return wallSegments;
+    }
+
+    public void setWallSegments(List<BlockPos> segments) {
+        this.wallSegments = segments == null ? new ArrayList<>() : new ArrayList<>(segments);
+    }
+
+    public void clearWallSegments() {
+        this.wallSegments.clear();
+    }
+
+    public List<BlockPos> getWallGatePositions() {
+        return wallGatePositions;
+    }
+
+    public void setWallGatePositions(List<BlockPos> gates) {
+        this.wallGatePositions = gates == null ? new ArrayList<>() : new ArrayList<>(gates);
+    }
+
     public void clearMiningProgress() {
         this.miningOrigin = null;
         this.miningStartPos = null;
@@ -133,6 +180,33 @@ public class MasonGuardEntity extends GuardEntity {
 
     public void setMiningSessionActive(boolean miningSessionActive) {
         this.miningSessionActive = miningSessionActive;
+    }
+
+    // -------------------------------------------------------------------------
+    // NBT helpers
+    // -------------------------------------------------------------------------
+
+    private static NbtList writeBlockPosList(List<BlockPos> list) {
+        NbtList nbtList = new NbtList();
+        for (BlockPos pos : list) {
+            NbtCompound entry = new NbtCompound();
+            entry.putInt("X", pos.getX());
+            entry.putInt("Y", pos.getY());
+            entry.putInt("Z", pos.getZ());
+            nbtList.add(entry);
+        }
+        return nbtList;
+    }
+
+    private static List<BlockPos> readBlockPosList(NbtCompound nbt, String key) {
+        List<BlockPos> result = new ArrayList<>();
+        if (!nbt.contains(key, net.minecraft.nbt.NbtElement.LIST_TYPE)) return result;
+        NbtList nbtList = nbt.getList(key, net.minecraft.nbt.NbtElement.COMPOUND_TYPE);
+        for (int i = 0; i < nbtList.size(); i++) {
+            NbtCompound entry = nbtList.getCompound(i);
+            result.add(new BlockPos(entry.getInt("X"), entry.getInt("Y"), entry.getInt("Z")));
+        }
+        return result;
     }
 
     @Override
@@ -155,6 +229,7 @@ public class MasonGuardEntity extends GuardEntity {
         this.goalSelector.add(2, new MasonGuardStonecuttingGoal(this));
         this.goalSelector.add(3, new MasonMiningStairGoal(this));
         this.goalSelector.add(3, new MasonGuardChestDistributionGoal(this));
+        this.goalSelector.add(4, new MasonWallBuilderGoal(this));
         this.goalSelector.add(3, new WanderAroundPointOfInterestGoal(this, 0.5D, false));
         this.goalSelector.add(3, new IronGolemWanderAroundGoal(this, 0.5D));
         this.goalSelector.add(3, new MoveThroughVillageGoal(this, 0.5D, false, 4, () -> false));
@@ -215,6 +290,20 @@ public class MasonGuardEntity extends GuardEntity {
         }
         this.nextMiningStartTick = nbt.contains("MasonNextMiningStartTick") ? nbt.getLong("MasonNextMiningStartTick") : 0L;
         this.miningSessionActive = nbt.getBoolean("MasonMiningSessionActive");
+        // Cluster 4 — Wall builder state
+        if (nbt.contains("MasonWallBellDim") && nbt.contains("MasonWallBellX")) {
+            Identifier dimId = Identifier.tryParse(nbt.getString("MasonWallBellDim"));
+            if (dimId != null) {
+                RegistryKey<World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimId);
+                BlockPos bellPos = new BlockPos(nbt.getInt("MasonWallBellX"), nbt.getInt("MasonWallBellY"), nbt.getInt("MasonWallBellZ"));
+                this.wallBuilderHomeBell = GlobalPos.create(worldKey, bellPos);
+            }
+        } else {
+            this.wallBuilderHomeBell = null;
+        }
+        this.wallSegments = readBlockPosList(nbt, "MasonWallSegments");
+        this.wallGatePositions = readBlockPosList(nbt, "MasonWallGates");
+
         if (nbt.contains("MasonMiningOriginX")) {
             this.miningOrigin = new BlockPos(nbt.getInt("MasonMiningOriginX"), nbt.getInt("MasonMiningOriginY"), nbt.getInt("MasonMiningOriginZ"));
             this.miningStepIndex = Math.max(0, nbt.getInt("MasonMiningStepIndex"));
@@ -252,6 +341,16 @@ public class MasonGuardEntity extends GuardEntity {
             NbtCompound toolNbt = new NbtCompound();
             nbt.put("MasonExpectedTool", this.expectedMiningTool.encode(this.getRegistryManager(), toolNbt));
         }
+        // Cluster 4 — Wall builder state
+        if (this.wallBuilderHomeBell != null) {
+            nbt.putString("MasonWallBellDim", this.wallBuilderHomeBell.dimension().getValue().toString());
+            nbt.putInt("MasonWallBellX", this.wallBuilderHomeBell.pos().getX());
+            nbt.putInt("MasonWallBellY", this.wallBuilderHomeBell.pos().getY());
+            nbt.putInt("MasonWallBellZ", this.wallBuilderHomeBell.pos().getZ());
+        }
+        nbt.put("MasonWallSegments", writeBlockPosList(this.wallSegments));
+        nbt.put("MasonWallGates", writeBlockPosList(this.wallGatePositions));
+
         nbt.putLong("MasonNextMiningStartTick", this.nextMiningStartTick);
         nbt.putBoolean("MasonMiningSessionActive", this.miningSessionActive);
         if (this.miningOrigin != null) {
