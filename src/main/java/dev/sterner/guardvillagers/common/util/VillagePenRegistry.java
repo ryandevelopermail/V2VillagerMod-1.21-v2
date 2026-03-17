@@ -61,8 +61,13 @@ public class VillagePenRegistry extends PersistentState {
     private static final int PEN_FENCE_RANGE = 64;
     /** Max gate candidates checked per bell per scan. */
     private static final int MAX_GATE_CANDIDATES = 64;
-    /** Max horizontal blocks to BFS from gate into pen interior. */
-    private static final int GATE_INTERIOR_MAX_DISTANCE = 8;
+    /**
+     * Max horizontal blocks to BFS from gate into pen interior.
+     * Raised to 16 so pens up to ~32×32 are reliably detected.
+     * (Interior BFS visits nodes up to this distance from the gate, which covers
+     * pens whose center is well beyond 8 blocks from the gate opening.)
+     */
+    private static final int GATE_INTERIOR_MAX_DISTANCE = 16;
 
     /**
      * A detected pen: the gate position, the interior center, and the foot (gate-level) position
@@ -353,7 +358,7 @@ public class VillagePenRegistry extends PersistentState {
         queue.add(startPos.toImmutable());
         visited.add(startPos.toImmutable());
 
-        while (!queue.isEmpty() && visited.size() <= 256) {
+        while (!queue.isEmpty() && visited.size() <= 1024) {
             BlockPos current = queue.poll();
             if (isInsideFencePen(world, current)) {
                 return current.toImmutable();
