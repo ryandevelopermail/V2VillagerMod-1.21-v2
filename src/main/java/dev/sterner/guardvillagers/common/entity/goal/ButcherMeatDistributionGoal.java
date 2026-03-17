@@ -249,7 +249,7 @@ public class ButcherMeatDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
     }
 
     private void moveTo(BlockPos target) {

@@ -1354,7 +1354,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return null;
         }
 
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private int countByPredicate(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {

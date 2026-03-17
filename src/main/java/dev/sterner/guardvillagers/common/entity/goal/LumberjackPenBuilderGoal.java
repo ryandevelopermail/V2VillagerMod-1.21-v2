@@ -286,9 +286,9 @@ public class LumberjackPenBuilderGoal extends Goal {
                 BlockPos ground = pos.down();
                 // Need solid ground below
                 if (!world.getBlockState(ground).isSolidBlock(world, ground)) return false;
-                // Need air at pen level and one above
-                if (!world.isAir(pos)) return false;
-                if (!world.isAir(pos.up())) return false;
+                // Need replaceable space at pen level and one above (covers carpet, flowers, cave_air, etc.)
+                if (!world.getBlockState(pos).isReplaceable()) return false;
+                if (!world.getBlockState(pos.up()).isReplaceable()) return false;
             }
         }
         return true;
@@ -363,7 +363,7 @@ public class LumberjackPenBuilderGoal extends Goal {
         if (pos == null) return Optional.empty();
         BlockState state = world.getBlockState(pos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, false));
     }
 
     private void moveTo(BlockPos target) {

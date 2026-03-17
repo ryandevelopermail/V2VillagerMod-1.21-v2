@@ -670,7 +670,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             return null;
         }
 
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private record ServiceState(boolean actionable, String reason) {

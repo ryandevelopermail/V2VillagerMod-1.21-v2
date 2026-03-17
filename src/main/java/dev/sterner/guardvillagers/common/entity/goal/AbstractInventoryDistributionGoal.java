@@ -203,7 +203,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 
@@ -472,7 +472,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
     }
 
     protected enum Stage {
@@ -675,7 +675,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             return false;
         }
 
-        Inventory targetInventory = ChestBlock.getInventory(chestBlock, state, world, pendingTargetPos, true);
+        Inventory targetInventory = ChestBlock.getInventory(chestBlock, state, world, pendingTargetPos, false);
         if (targetInventory == null) {
             return false;
         }

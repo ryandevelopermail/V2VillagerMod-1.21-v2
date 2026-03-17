@@ -174,7 +174,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {

@@ -661,7 +661,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (pos == null) return Optional.empty();
         BlockState state = world.getBlockState(pos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, false));
     }
 
     // -------------------------------------------------------------------------

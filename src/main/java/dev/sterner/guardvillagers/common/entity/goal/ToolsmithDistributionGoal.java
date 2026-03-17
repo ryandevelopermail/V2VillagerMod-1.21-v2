@@ -318,7 +318,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
     private Optional<Inventory> getRecipientInventory(ServerWorld world, BlockPos position) {
         BlockState state = world.getBlockState(position);
         if (state.getBlock() instanceof ChestBlock chestBlock) {
-            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
         }
         if (state.getBlock() instanceof BarrelBlock) {
             BlockEntity blockEntity = world.getBlockEntity(position);

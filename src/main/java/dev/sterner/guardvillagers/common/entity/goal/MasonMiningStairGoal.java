@@ -764,7 +764,7 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return;
         }

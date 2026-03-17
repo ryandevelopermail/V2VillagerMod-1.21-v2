@@ -172,7 +172,7 @@ public final class VillagerBellTracker {
                 continue;
             }
 
-            Inventory inventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
+            Inventory inventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, false);
             if (inventory != null) {
                 return Optional.of(inventory);
             }

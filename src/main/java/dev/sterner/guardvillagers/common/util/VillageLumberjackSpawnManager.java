@@ -216,7 +216,7 @@ public final class VillageLumberjackSpawnManager {
                     BlockPos candidate = new BlockPos(wx, surfaceY, wz);
                     BlockPos below = candidate.down();
                     if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
-                    if (!world.getBlockState(candidate).isAir()) continue;
+                    if (!world.getBlockState(candidate).isReplaceable()) continue;
                     if (isTooCloseToExistingTable(candidate, existingTables)) continue;
 
                     placeTableAndConvert(world, bellPos, candidate);
@@ -313,7 +313,7 @@ public final class VillageLumberjackSpawnManager {
                     BlockPos candidate = chestPos.add(dx, dy, dz);
                     if (!chestPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) continue;
 
-                    if (!world.getBlockState(candidate).isAir()) continue;
+                    if (!world.getBlockState(candidate).isReplaceable()) continue;
                     BlockPos below = candidate.down();
                     if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
                     if (isTooCloseToExistingTable(candidate, existingTables)) continue;

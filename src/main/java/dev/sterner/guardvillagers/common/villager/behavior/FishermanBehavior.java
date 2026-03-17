@@ -226,7 +226,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         if (chestPos != null) {
             BlockState chestState = world.getBlockState(chestPos);
             if (chestState.getBlock() instanceof ChestBlock chestBlock) {
-                Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
+                Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, false);
                 if (chestInventory != null) {
                     inventories.add(chestInventory);
                 }

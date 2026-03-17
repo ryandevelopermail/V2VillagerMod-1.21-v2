@@ -611,7 +611,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
     }
 
 

@@ -238,7 +238,7 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
             return ItemStack.EMPTY;
         }
 
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (inventory == null) {
             return ItemStack.EMPTY;
         }

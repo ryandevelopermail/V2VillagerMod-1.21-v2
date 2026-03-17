@@ -159,7 +159,7 @@ public class HealGolemGoal extends Goal {
             return null;
         }
 
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
 }

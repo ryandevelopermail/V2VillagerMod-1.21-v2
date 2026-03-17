@@ -406,7 +406,7 @@ public class ButcherGuardEntity extends GuardEntity {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
-        return ChestBlock.getInventory(chestBlock, state, world, this.pairedChestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, this.pairedChestPos, false);
     }
 
     private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {

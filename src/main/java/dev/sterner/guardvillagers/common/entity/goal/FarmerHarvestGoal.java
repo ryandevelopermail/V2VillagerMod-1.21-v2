@@ -724,7 +724,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return false;
         }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return false;
         }
@@ -737,7 +737,7 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
 
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return;
         }
@@ -763,7 +763,7 @@ public class FarmerHarvestGoal extends Goal {
             return new DepositSummary(0, countPlantablesAndSeeds(villager.getInventory()));
         }
 
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return new DepositSummary(0, countPlantablesAndSeeds(villager.getInventory()));
         }
@@ -1225,7 +1225,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return false;
         }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return false;
         }
@@ -1260,7 +1260,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return false;
         }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return false;
         }
@@ -1298,7 +1298,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return;
         }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return;
         }
@@ -1361,7 +1361,7 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return 0;
         }
-        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         if (chestInventory == null) {
             return 0;
         }
