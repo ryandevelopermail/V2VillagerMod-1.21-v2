@@ -9,6 +9,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -304,6 +305,17 @@ public class QuartermasterGoal extends Goal {
         }
 
         inventory.markDirty();
+        // If dest chest was full, remaining items would be silently lost.
+        // Drop them at the villager's feet so items are never destroyed.
+        if (!remaining.isEmpty()) {
+            LOGGER.info("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
+                    villager.getUuidAsString(), pos.toShortString(),
+                    remaining.getCount(), remaining.getItem());
+            ItemEntity drop = new ItemEntity(
+                    world, villager.getX(), villager.getY(), villager.getZ(), remaining.copy());
+            drop.setPickupDelay(10);
+            world.spawnEntity(drop);
+        }
         transferStack = ItemStack.EMPTY;
         LOGGER.debug("QM {}: delivered to {}", villager.getUuidAsString(), pos.toShortString());
     }

@@ -304,7 +304,10 @@ public class ShepherdBedPlacerGoal extends Goal {
         BlockState floorF = world.getBlockState(floorFoot);
         BlockState floorH = world.getBlockState(floorHead);
 
-        if (!foot.isAir() || !head.isAir()) return false;
+        // Use isReplaceable() instead of isAir() — matches how other placement goals work.
+        // isAir() rejects cave_air, flowers, carpet, grass, snow_layer etc.
+        // isReplaceable() accepts all blocks that can be overwritten by a new block placement.
+        if (!foot.isReplaceable() || !head.isReplaceable()) return false;
         if (!floorF.isSolidBlock(world, floorFoot)) return false;
         if (!floorH.isSolidBlock(world, floorHead)) return false;
         return true;
