@@ -91,6 +91,10 @@ public final class VillageLumberjackSpawnManager {
     // -------------------------------------------------------------------------
 
     public static void tick(ServerWorld world) {
+        // BellChestMappingState is stored on the overworld; villagers only exist in the overworld.
+        if (!world.getRegistryKey().equals(net.minecraft.world.World.OVERWORLD)) {
+            return;
+        }
         if (world.getTime() % SCAN_INTERVAL_TICKS != 3L) {
             return;
         }

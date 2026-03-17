@@ -14,6 +14,7 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -170,21 +171,23 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
-        // Priority 2: lumberjack crafting (low on planks) → top up from bell chest
+        // Priority 2: lumberjack crafting (low on planks) → top up from bell chest.
+        // Use any plank type (tag-based), pick the most abundant stack in the bell chest
+        // so we don't artificially lock onto oak when e.g. birch is available.
         Optional<LumberjackGuardEntity> lumberjackNeedingPlanks = findLumberjackNeedingPlanks(world);
         if (lumberjackNeedingPlanks.isPresent() && bellChestPos != null) {
-            int planksInBell = countItem(world, bellChestPos, Items.OAK_PLANKS);
-            if (planksInBell > 0) {
+            ItemStack bestPlanks = findBestTagItem(world, bellChestPos, ItemTags.PLANKS);
+            if (!bestPlanks.isEmpty()) {
                 sourcePos = bellChestPos;
                 destPos = lumberjackNeedingPlanks.get().getPairedChestPos();
-                transferStack = new ItemStack(Items.OAK_PLANKS, Math.min(HAUL_AMOUNT, planksInBell));
-                LOGGER.debug("QM {}: hauling planks from bell chest to lumberjack {}", villager.getUuidAsString(), destPos.toShortString());
+                transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
+                LOGGER.debug("QM {}: hauling {} planks from bell chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
                 return destPos != null;
             }
         }
 
         // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest
-        if (bellChestPos != null && bellChestPos != null) {
+        if (bellChestPos != null) {
             int bellTotal = countAllItems(world, bellChestPos);
             if (bellTotal < BELL_CHEST_LOW_THRESHOLD) {
                 Optional<BlockPos> surplusChest = findSurplusChest(world, bellChestPos);
@@ -223,7 +226,7 @@ public class QuartermasterGoal extends Goal {
         return world.getEntitiesByClass(LumberjackGuardEntity.class, box,
                 lj -> lj.isAlive()
                         && lj.getPairedChestPos() != null
-                        && countItem(world, lj.getPairedChestPos(), Items.OAK_PLANKS) < LUMBERJACK_PLANK_THRESHOLD
+                        && countTagItems(world, lj.getPairedChestPos(), ItemTags.PLANKS) < LUMBERJACK_PLANK_THRESHOLD
         ).stream().findFirst();
     }
 
@@ -303,6 +306,35 @@ public class QuartermasterGoal extends Goal {
         inventory.markDirty();
         transferStack = ItemStack.EMPTY;
         LOGGER.debug("QM {}: delivered to {}", villager.getUuidAsString(), pos.toShortString());
+    }
+
+    /** Counts all items matching a tag across all slots in the chest at {@code pos}. */
+    private int countTagItems(ServerWorld world, BlockPos pos, net.minecraft.registry.tag.TagKey<net.minecraft.item.Item> tag) {
+        Optional<Inventory> inv = getInventory(world, pos);
+        if (inv.isEmpty()) return 0;
+        int count = 0;
+        for (int i = 0; i < inv.get().size(); i++) {
+            ItemStack stack = inv.get().getStack(i);
+            if (!stack.isEmpty() && stack.isIn(tag)) count += stack.getCount();
+        }
+        return count;
+    }
+
+    /**
+     * Finds the largest single stack matching {@code tag} in the chest at {@code pos}.
+     * Returns a copy, or {@link ItemStack#EMPTY} if none found.
+     */
+    private ItemStack findBestTagItem(ServerWorld world, BlockPos pos, net.minecraft.registry.tag.TagKey<net.minecraft.item.Item> tag) {
+        Optional<Inventory> inv = getInventory(world, pos);
+        if (inv.isEmpty()) return ItemStack.EMPTY;
+        ItemStack best = ItemStack.EMPTY;
+        for (int i = 0; i < inv.get().size(); i++) {
+            ItemStack stack = inv.get().getStack(i);
+            if (!stack.isEmpty() && stack.isIn(tag) && stack.getCount() > best.getCount()) {
+                best = stack;
+            }
+        }
+        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
     }
 
     private int countItem(ServerWorld world, BlockPos pos, net.minecraft.item.Item item) {

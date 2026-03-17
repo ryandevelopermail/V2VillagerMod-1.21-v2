@@ -5,6 +5,7 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.BedPart;
+import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -17,7 +18,6 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -408,27 +408,39 @@ public class ShepherdBedPlacerGoal extends Goal {
     }
 
     private void putBedBackInChest(ServerWorld world) {
-        Optional<Inventory> invOpt = getChestInventory(world);
-        if (invOpt.isEmpty() || heldBed.isEmpty()) {
+        if (heldBed.isEmpty()) {
             return;
         }
-        Inventory inv = invOpt.get();
-        // Try to merge with existing stack first, then find empty slot
-        for (int slot = 0; slot < inv.size() && !heldBed.isEmpty(); slot++) {
-            ItemStack existing = inv.getStack(slot);
-            if (existing.isEmpty()) {
-                inv.setStack(slot, heldBed.copy());
-                heldBed = ItemStack.EMPTY;
-            } else if (ItemStack.areItemsAndComponentsEqual(existing, heldBed)) {
-                int space = existing.getMaxCount() - existing.getCount();
-                int moved = Math.min(space, heldBed.getCount());
-                if (moved > 0) {
-                    existing.increment(moved);
-                    heldBed.decrement(moved);
+        Optional<Inventory> invOpt = getChestInventory(world);
+        if (invOpt.isPresent()) {
+            Inventory inv = invOpt.get();
+            // Try to merge with existing stack first, then find empty slot
+            for (int slot = 0; slot < inv.size() && !heldBed.isEmpty(); slot++) {
+                ItemStack existing = inv.getStack(slot);
+                if (existing.isEmpty()) {
+                    inv.setStack(slot, heldBed.copy());
+                    heldBed = ItemStack.EMPTY;
+                } else if (ItemStack.areItemsAndComponentsEqual(existing, heldBed)) {
+                    int space = existing.getMaxCount() - existing.getCount();
+                    int moved = Math.min(space, heldBed.getCount());
+                    if (moved > 0) {
+                        existing.increment(moved);
+                        heldBed.decrement(moved);
+                    }
                 }
             }
+            inv.markDirty();
         }
-        inv.markDirty();
+        // If chest was full or unavailable, drop the bed so it is never silently lost.
+        if (!heldBed.isEmpty()) {
+            LOGGER.info("Shepherd {} chest full or missing; dropping held bed at {}",
+                    villager.getUuidAsString(), villager.getBlockPos().toShortString());
+            ItemEntity drop = new ItemEntity(
+                    world, villager.getX(), villager.getY(), villager.getZ(), heldBed.copy());
+            drop.setPickupDelay(10);
+            world.spawnEntity(drop);
+            heldBed = ItemStack.EMPTY;
+        }
     }
 
     // -------------------------------------------------------------------------
