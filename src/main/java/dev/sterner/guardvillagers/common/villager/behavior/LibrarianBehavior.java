@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
+import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -24,8 +25,11 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(LibrarianBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
+    private static final int QUARTERMASTER_GOAL_PRIORITY = 3;
     private static final Map<VillagerEntity, LibrarianCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LibrarianBellChestDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, QuartermasterGoal> QUARTERMASTER_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, BlockPos> PAIRED_CHEST_POS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
 
     @Override
@@ -70,6 +74,21 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
         }
         updateChestListener(world, villager, chestPos);
+
+        // Cluster 3 — Quartermaster promotion: if a second chest is placed adjacent to the
+        // librarian's already-paired chest, promote this librarian to Quartermaster.
+        BlockPos existingChest = PAIRED_CHEST_POS.get(villager);
+        if (existingChest != null && !existingChest.equals(chestPos) && existingChest.isWithinDistance(chestPos, 2.0D)) {
+            // The newly paired chest is adjacent to the existing paired chest — double-chest trigger
+            if (!QUARTERMASTER_GOALS.containsKey(villager)) {
+                QuartermasterGoal qmGoal = new QuartermasterGoal(villager, jobPos, chestPos);
+                QUARTERMASTER_GOALS.put(villager, qmGoal);
+                villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
+                LOGGER.info("Librarian {} promoted to Quartermaster (double-chest detected: {} + {})",
+                        villager.getUuidAsString(), existingChest.toShortString(), chestPos.toShortString());
+            }
+        }
+        PAIRED_CHEST_POS.put(villager, chestPos);
     }
 
     @Override
