@@ -71,16 +71,15 @@ public final class VillageLumberjackSpawnManager {
     private static final int TREE_SEARCH_HEIGHT = 10;
 
     /**
-     * Minimum number of eligible tree roots a candidate position must see before it
-     * is accepted as a viable placement site. Positions scoring below this threshold
-     * are skipped entirely, so we never place a table in the middle of a courtyard.
-     */
-    private static final int MIN_TREES_NEAR_CANDIDATE = 1;
-
-    /**
-     * The top-scoring fraction of candidates we sample from.
+     * The top-scoring fraction of candidates we sample from when at least one
+     * candidate has a non-zero tree score.
      * 0.25 = pick randomly from the best 25 % by tree count, so placement still has
      * some variety but always biases toward tree-rich directions.
+     *
+     * <p>If ALL candidates score 0 trees (e.g. a treeless desert/savanna village),
+     * we fall back to sampling from all geometric candidates so a table still gets
+     * placed. The lumberjack will reschedule once it finds no trees — that is fine;
+     * it at least allows conversion to happen.
      */
     private static final double CANDIDATE_SCORE_TOP_FRACTION = 0.25;
 
@@ -176,33 +175,39 @@ public final class VillageLumberjackSpawnManager {
             return false;
         }
 
-        // Score each candidate by number of eligible tree roots visible within TREE_SEARCH_RADIUS.
-        // This biases placement toward the forest edge rather than the village courtyard.
+        // Score every geometric candidate by eligible tree count within TREE_SEARCH_RADIUS.
+        // Tree score biases placement toward the forest edge, but is never a hard gate —
+        // a village with no nearby trees (desert, savanna, sparse plains) must still get
+        // a table so the lumberjack can be converted. It will reschedule its chop session
+        // once it finds no trees, which is the correct behaviour.
         List<ScoredCandidate> scored = new ArrayList<>(candidates.size());
         for (BlockPos candidate : candidates) {
             int treeCount = countEligibleTreeRootsNear(world, candidate);
-            if (treeCount >= MIN_TREES_NEAR_CANDIDATE) {
-                scored.add(new ScoredCandidate(candidate, treeCount));
-            }
+            scored.add(new ScoredCandidate(candidate, treeCount));
         }
 
-        if (scored.isEmpty()) {
-            LOGGER.debug("lumberjack-spawn-manager bell={} no candidates with ≥{} trees nearby (checked {} candidates)",
-                    bellPos.toShortString(), MIN_TREES_NEAR_CANDIDATE, candidates.size());
-            return false;
-        }
-
-        // Sort descending by score, then sample from the top fraction for variety.
+        // Sort descending by tree score.
         scored.sort(Comparator.comparingInt(ScoredCandidate::treeCount).reversed());
-        int topN = Math.max(1, (int) Math.ceil(scored.size() * CANDIDATE_SCORE_TOP_FRACTION));
-        List<ScoredCandidate> topCandidates = scored.subList(0, Math.min(topN, scored.size()));
 
-        ScoredCandidate chosen = topCandidates.get(world.getRandom().nextInt(topCandidates.size()));
+        int bestScore = scored.get(0).treeCount();
+        List<ScoredCandidate> pool;
+        if (bestScore > 0) {
+            // At least one candidate sees trees — sample from the top fraction biased toward forest.
+            int topN = Math.max(1, (int) Math.ceil(scored.size() * CANDIDATE_SCORE_TOP_FRACTION));
+            pool = scored.subList(0, Math.min(topN, scored.size()));
+        } else {
+            // No trees visible anywhere — fall back to all geometric candidates (random placement).
+            pool = scored;
+            LOGGER.debug("lumberjack-spawn-manager bell={} no tree-scored candidates; placing at random geometric position (treeless biome?)",
+                    bellPos.toShortString());
+        }
+
+        ScoredCandidate chosen = pool.get(world.getRandom().nextInt(pool.size()));
 
         world.setBlockState(chosen.pos(), Blocks.CRAFTING_TABLE.getDefaultState());
-        LOGGER.info("lumberjack-spawn-manager placed crafting table at {} near bell {} (treeScore={}, topN={}/{})",
+        LOGGER.info("lumberjack-spawn-manager placed crafting table at {} near bell {} (treeScore={}, poolSize={})",
                 chosen.pos().toShortString(), bellPos.toShortString(),
-                chosen.treeCount(), topN, scored.size());
+                chosen.treeCount(), pool.size());
 
         return true;
     }
