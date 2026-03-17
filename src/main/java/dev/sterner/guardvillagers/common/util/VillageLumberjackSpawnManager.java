@@ -1,10 +1,13 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
 import dev.sterner.guardvillagers.common.villager.UnemployedLumberjackConversionHook;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.LeavesBlock;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -14,6 +17,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -50,6 +55,27 @@ public final class VillageLumberjackSpawnManager {
 
     /** Minimum distance (blocks) between any two crafting tables in the placement area. */
     private static final int TABLE_MIN_SPACING = 5;
+
+    /**
+     * Tree search radius used to score candidate positions.
+     * Must match {@link LumberjackGuardChopTreesGoal}'s own TREE_SEARCH_RADIUS (20).
+     */
+    private static final int TREE_SEARCH_RADIUS = 20;
+    private static final int TREE_SEARCH_HEIGHT = 10;
+
+    /**
+     * Minimum number of eligible tree roots a candidate position must see before it
+     * is accepted as a viable placement site. Positions scoring below this threshold
+     * are skipped entirely, so we never place a table in the middle of a courtyard.
+     */
+    private static final int MIN_TREES_NEAR_CANDIDATE = 1;
+
+    /**
+     * The top-scoring fraction of candidates we sample from.
+     * 0.25 = pick randomly from the best 25 % by tree count, so placement still has
+     * some variety but always biases toward tree-rich directions.
+     */
+    private static final double CANDIDATE_SCORE_TOP_FRACTION = 0.25;
 
     /** Ratio: one lumberjack per N professionals. */
     private static final int RATIO_PROFESSIONALS = 3;
@@ -128,25 +154,50 @@ public final class VillageLumberjackSpawnManager {
         // Collect existing crafting tables near bell to enforce spacing.
         List<BlockPos> existingTables = findExistingCraftingTablesNear(world, bellPos, TABLE_MAX_DIST + TABLE_MIN_SPACING);
 
-        // Candidate positions: horizontal ring 10–20 blocks from bell.
+        // Build geometric candidates (ring, solid ground, air surface, spacing).
         List<BlockPos> candidates = buildRingCandidates(world, bellPos, existingTables);
         if (candidates.isEmpty()) {
+            LOGGER.debug("lumberjack-spawn-manager bell={} no geometric candidates in placement ring",
+                    bellPos.toShortString());
             return false;
         }
 
-        // Pick a random candidate (use world RNG for determinism with seed).
-        BlockPos chosen = candidates.get(world.getRandom().nextInt(candidates.size()));
+        // Score each candidate by number of eligible tree roots visible within TREE_SEARCH_RADIUS.
+        // This biases placement toward the forest edge rather than the village courtyard.
+        List<ScoredCandidate> scored = new ArrayList<>(candidates.size());
+        for (BlockPos candidate : candidates) {
+            int treeCount = countEligibleTreeRootsNear(world, candidate);
+            if (treeCount >= MIN_TREES_NEAR_CANDIDATE) {
+                scored.add(new ScoredCandidate(candidate, treeCount));
+            }
+        }
 
-        world.setBlockState(chosen, Blocks.CRAFTING_TABLE.getDefaultState());
-        LOGGER.info("lumberjack-spawn-manager placed crafting table at {} near bell {}",
-                chosen.toShortString(), bellPos.toShortString());
+        if (scored.isEmpty()) {
+            LOGGER.debug("lumberjack-spawn-manager bell={} no candidates with ≥{} trees nearby (checked {} candidates)",
+                    bellPos.toShortString(), MIN_TREES_NEAR_CANDIDATE, candidates.size());
+            return false;
+        }
 
-        // Nudge the conversion hook immediately (it will find this table on its next scan).
-        // The hook is also scheduled to run via runConversionHooksOnSchedule, but kicking it
-        // here gets faster turnaround on first placement.
+        // Sort descending by score, then sample from the top fraction for variety.
+        scored.sort(Comparator.comparingInt(ScoredCandidate::treeCount).reversed());
+        int topN = Math.max(1, (int) Math.ceil(scored.size() * CANDIDATE_SCORE_TOP_FRACTION));
+        List<ScoredCandidate> topCandidates = scored.subList(0, Math.min(topN, scored.size()));
+
+        ScoredCandidate chosen = topCandidates.get(world.getRandom().nextInt(topCandidates.size()));
+
+        world.setBlockState(chosen.pos(), Blocks.CRAFTING_TABLE.getDefaultState());
+        LOGGER.info("lumberjack-spawn-manager placed crafting table at {} near bell {} (treeScore={}, topN={}/{})",
+                chosen.pos().toShortString(), bellPos.toShortString(),
+                chosen.treeCount(), topN, scored.size());
+
+        // Nudge the conversion hook immediately so the newly placed table gets claimed
+        // without waiting for the next scheduled sweep.
         UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
 
         return true;
+    }
+
+    private record ScoredCandidate(BlockPos pos, int treeCount) {
     }
 
     /**
@@ -201,6 +252,132 @@ public final class VillageLumberjackSpawnManager {
     private static boolean isTooCloseToExistingTable(BlockPos candidate, List<BlockPos> existingTables) {
         for (BlockPos table : existingTables) {
             if (candidate.isWithinDistance(table, TABLE_MIN_SPACING)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Counts eligible tree roots within {@value TREE_SEARCH_RADIUS} blocks of {@code center},
+     * using the same eligibility criteria as {@link LumberjackGuardChopTreesGoal}.
+     * A position with a high count is a good placement site for a lumberjack crafting table.
+     */
+    private static int countEligibleTreeRootsNear(ServerWorld world, BlockPos center) {
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
+        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockPos pos = cursor.toImmutable();
+            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(pos);
+            if (!state.isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            BlockPos root = normalizeRoot(world, pos);
+            if (isEligibleTreeRoot(world, root)) {
+                uniqueRoots.add(root);
+            }
+        }
+
+        return uniqueRoots.size();
+    }
+
+    /** Walk down to the base of a log column (same as the chop goal's normalizeRoot). */
+    private static BlockPos normalizeRoot(ServerWorld world, BlockPos pos) {
+        BlockPos.Mutable mutable = pos.mutableCopy();
+        while (mutable.getY() > world.getBottomY() && world.getBlockState(mutable.down()).isIn(BlockTags.LOGS)) {
+            mutable.move(0, -1, 0);
+        }
+        return mutable.toImmutable();
+    }
+
+    /**
+     * Mirrors the eligibility check from {@link LumberjackGuardChopTreesGoal}:
+     * natural ground, no bell nearby, min structure (4+ logs + canopy).
+     */
+    private static boolean isEligibleTreeRoot(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        if (!state.isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        BlockState below = world.getBlockState(pos.down());
+        if (below.isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        if (!isNaturalGround(below)) {
+            return false;
+        }
+        // Stilted log-cabin guard
+        if (world.getBlockState(pos.down(2)).isIn(BlockTags.LOGS)) {
+            return false;
+        }
+        // Bell-proximity guard (matches BELL_EXCLUSION_RADIUS in chop goal)
+        BlockPos bellMin = pos.add(-6, -4, -6);
+        BlockPos bellMax = pos.add(6, 4, 6);
+        for (BlockPos cursor : BlockPos.iterate(bellMin, bellMax)) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                return false;
+            }
+        }
+        // Minimum tree structure: ≥4 logs + natural leaves or log above
+        return hasMinimumTreeStructure(world, pos);
+    }
+
+    private static boolean isNaturalGround(BlockState state) {
+        return state.isOf(Blocks.DIRT)
+                || state.isOf(Blocks.GRASS_BLOCK)
+                || state.isOf(Blocks.PODZOL)
+                || state.isOf(Blocks.COARSE_DIRT)
+                || state.isOf(Blocks.ROOTED_DIRT)
+                || state.isOf(Blocks.MOSS_BLOCK)
+                || state.isOf(Blocks.MYCELIUM);
+    }
+
+    private static boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
+        // Require a log above OR non-persistent leaves nearby.
+        if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeaves(world, root)) {
+            return false;
+        }
+
+        Set<BlockPos> visited = new HashSet<>();
+        java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        int minY = root.getY();
+        int maxY = root.getY() + 12; // ROOT_STRUCTURE_MAX_HEIGHT
+
+        while (!queue.isEmpty()) {
+            BlockPos current = queue.poll();
+            if (!visited.add(current)) {
+                continue;
+            }
+            if (visited.size() >= 4) { // MIN_ROOT_STRUCTURE_LOGS
+                return true;
+            }
+            for (BlockPos adj : List.of(current.up(), current.down(), current.north(), current.south(), current.east(), current.west())) {
+                if (adj.getY() < minY || adj.getY() > maxY) {
+                    continue;
+                }
+                if (Math.abs(adj.getX() - root.getX()) > 2 || Math.abs(adj.getZ() - root.getZ()) > 2) {
+                    continue;
+                }
+                if (!visited.contains(adj) && world.getBlockState(adj).isIn(BlockTags.LOGS)) {
+                    queue.add(adj.toImmutable());
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
+        BlockPos min = root.add(-3, 1, -3);
+        BlockPos max = root.add(3, 8, 3);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (state.getBlock() instanceof LeavesBlock && !state.get(LeavesBlock.PERSISTENT)) {
                 return true;
             }
         }

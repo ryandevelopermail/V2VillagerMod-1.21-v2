@@ -57,6 +57,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int ROOT_STRUCTURE_HORIZONTAL_RADIUS = 2;
     private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
     private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
+
+    /**
+     * Logs within this horizontal radius of a bell block are considered part of a village
+     * structure and are never chopped. Village bells sit in the center of build areas;
+     * any tree this close to a bell is almost certainly a decoration, not a harvestable tree.
+     */
+    private static final int BELL_EXCLUSION_RADIUS = 6;
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
@@ -784,28 +791,19 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private static boolean isEligibleRootStatic(ServerWorld world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
-        if (!state.isIn(BlockTags.LOGS)) {
-            return false;
-        }
-        BlockState below = world.getBlockState(pos.down());
-        if (below.isIn(BlockTags.LOGS)) {
-            return false;
-        }
-        if (!(below.isOf(Blocks.DIRT)
-                || below.isOf(Blocks.GRASS_BLOCK)
-                || below.isOf(Blocks.PODZOL)
-                || below.isOf(Blocks.COARSE_DIRT)
-                || below.isOf(Blocks.ROOTED_DIRT)
-                || below.isOf(Blocks.MOSS_BLOCK)
-                || below.isOf(Blocks.MYCELIUM))) {
-            return false;
-        }
-
-        return hasMinimumTreeStructureStatic(world, pos);
+        return isEligibleRootImpl(world, pos);
     }
 
     private static boolean hasMinimumTreeStructureStatic(ServerWorld world, BlockPos root) {
+        return hasMinimumTreeStructureImpl(world, root);
+    }
+
+    /**
+     * Returns {@code true} if {@code root} has at least {@value MIN_ROOT_STRUCTURE_LOGS}
+     * connected log blocks forming a trunk column, AND either a log directly above or
+     * natural (non-persistent) leaves nearby.
+     */
+    private static boolean hasMinimumTreeStructureImpl(ServerWorld world, BlockPos root) {
         if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeavesStatic(world, root)) {
             return false;
         }
@@ -900,64 +898,79 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private boolean isEligibleRoot(ServerWorld world, BlockPos pos) {
+        return isEligibleRootImpl(world, pos);
+    }
+
+    /**
+     * Shared eligibility logic for both the instance and static code paths.
+     *
+     * <p>A log position qualifies as a harvestable tree root when ALL of the following hold:
+     * <ol>
+     *   <li>It is tagged {@code #logs}.</li>
+     *   <li>The block immediately below it is a natural ground block (not a log, not planks,
+     *       not stone, not any other artificial material).</li>
+     *   <li>The block two below is not a log (catches stilted/stacked log cabins where the
+     *       direct ground check passes but the structure continues below).</li>
+     *   <li>No {@link Blocks#BELL} exists within {@value BELL_EXCLUSION_RADIUS} horizontal
+     *       blocks (village-center decorative trees are excluded).</li>
+     *   <li>It passes the minimum tree-structure check (≥4 connected logs + canopy).</li>
+     * </ol>
+     */
+    private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return false;
         }
+
         BlockState below = world.getBlockState(pos.down());
         if (below.isIn(BlockTags.LOGS)) {
             return false;
         }
-        if (!(below.isOf(Blocks.DIRT)
-                || below.isOf(Blocks.GRASS_BLOCK)
-                || below.isOf(Blocks.PODZOL)
-                || below.isOf(Blocks.COARSE_DIRT)
-                || below.isOf(Blocks.ROOTED_DIRT)
-                || below.isOf(Blocks.MOSS_BLOCK)
-                || below.isOf(Blocks.MYCELIUM))) {
+        if (!isNaturalGroundBlock(below)) {
             return false;
         }
 
-        return hasMinimumTreeStructure(world, pos);
+        // Stilted structure guard: if the block two below is also a log, this is not a tree root
+        // (e.g. a log cabin whose bottom row sits on dirt but continues below as another log layer).
+        if (world.getBlockState(pos.down(2)).isIn(BlockTags.LOGS)) {
+            return false;
+        }
+
+        // Bell-proximity guard: skip logs that are decorative village-center trees.
+        if (isNearBell(world, pos)) {
+            return false;
+        }
+
+        return hasMinimumTreeStructureImpl(world, pos);
+    }
+
+    private static boolean isNaturalGroundBlock(BlockState state) {
+        return state.isOf(Blocks.DIRT)
+                || state.isOf(Blocks.GRASS_BLOCK)
+                || state.isOf(Blocks.PODZOL)
+                || state.isOf(Blocks.COARSE_DIRT)
+                || state.isOf(Blocks.ROOTED_DIRT)
+                || state.isOf(Blocks.MOSS_BLOCK)
+                || state.isOf(Blocks.MYCELIUM);
+    }
+
+    /**
+     * Returns {@code true} if any bell block exists within {@value BELL_EXCLUSION_RADIUS}
+     * horizontal blocks (and ±4 vertical) of {@code pos}.
+     */
+    private static boolean isNearBell(ServerWorld world, BlockPos pos) {
+        BlockPos min = pos.add(-BELL_EXCLUSION_RADIUS, -4, -BELL_EXCLUSION_RADIUS);
+        BlockPos max = pos.add(BELL_EXCLUSION_RADIUS, 4, BELL_EXCLUSION_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
-        if (!isEligibleLog(world, root.up()) && !hasNearbyNaturalLeaves(world, root)) {
-            return false;
-        }
-
-        Set<BlockPos> visited = new HashSet<>();
-        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        queue.add(root);
-
-        int minY = root.getY();
-        int maxY = root.getY() + ROOT_STRUCTURE_MAX_HEIGHT;
-
-        while (!queue.isEmpty()) {
-            BlockPos current = queue.poll();
-            if (!visited.add(current)) {
-                continue;
-            }
-            if (visited.size() >= MIN_ROOT_STRUCTURE_LOGS) {
-                return true;
-            }
-
-            for (BlockPos adjacent : getTrunkAdjacent(current)) {
-                if (adjacent.getY() < minY || adjacent.getY() > maxY) {
-                    continue;
-                }
-                if (Math.abs(adjacent.getX() - root.getX()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS
-                        || Math.abs(adjacent.getZ() - root.getZ()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS) {
-                    continue;
-                }
-                if (visited.contains(adjacent) || !isEligibleLog(world, adjacent)) {
-                    continue;
-                }
-                queue.add(adjacent.toImmutable());
-            }
-        }
-
-        return false;
+        return hasMinimumTreeStructureImpl(world, root);
     }
 
     private boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
