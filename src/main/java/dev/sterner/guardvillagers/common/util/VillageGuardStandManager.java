@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.util.BellChestMappingState;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
 import net.minecraft.block.BellBlock;
 import net.minecraft.entity.Entity;
@@ -158,6 +159,14 @@ public final class VillageGuardStandManager {
     }
 
     private static List<ArmorStandEntity> ensureArmorStands(ServerWorld world, BlockPos bellPos, int guardCount) {
+        // Cluster 2: Secondary bells (within BELL_EFFECT_RANGE of an already-registered primary)
+        // must not generate a cobblestone pad or armor-stand post.  Only the primary bell's
+        // village gets a guard post.
+        BellChestMappingState mappingState = BellChestMappingState.get(world.getServer());
+        if (!mappingState.isPrimaryBell(world, bellPos)) {
+            return List.of();
+        }
+
         Optional<CobblePad> cobblePad = prepareCobblePad(world, bellPos);
         if (cobblePad.isEmpty()) {
             return List.of();
