@@ -136,6 +136,7 @@ public final class VillageLumberjackSpawnManager {
                 bellPos.toShortString(), professionals, totalVillagers, desired, existing, deficit);
 
         // Attempt to place one crafting table per missing lumberjack (cap at deficit).
+        boolean anyPlaced = false;
         for (int i = 0; i < deficit; i++) {
             boolean placed = tryPlaceCraftingTable(world, bellPos);
             if (!placed) {
@@ -143,6 +144,14 @@ public final class VillageLumberjackSpawnManager {
                         bellPos.toShortString(), i + 1);
                 break; // If one attempt fails, the rest will too in this tick.
             }
+            anyPlaced = true;
+        }
+
+        // Nudge the conversion hook once after all placements, but only if at least one
+        // player is nearby — this avoids the expensive getWorldBounds() entity scan.
+        // The hook also runs on its normal schedule so no conversion is lost.
+        if (anyPlaced && !world.getPlayers().isEmpty()) {
+            UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
         }
     }
 
@@ -189,10 +198,6 @@ public final class VillageLumberjackSpawnManager {
         LOGGER.info("lumberjack-spawn-manager placed crafting table at {} near bell {} (treeScore={}, topN={}/{})",
                 chosen.pos().toShortString(), bellPos.toShortString(),
                 chosen.treeCount(), topN, scored.size());
-
-        // Nudge the conversion hook immediately so the newly placed table gets claimed
-        // without waiting for the next scheduled sweep.
-        UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
 
         return true;
     }
@@ -264,6 +269,17 @@ public final class VillageLumberjackSpawnManager {
      * A position with a high count is a good placement site for a lumberjack crafting table.
      */
     private static int countEligibleTreeRootsNear(ServerWorld world, BlockPos center) {
+        // Collect bells once for the whole scan — avoids a 13×9×13 block scan per log candidate.
+        int bellScanRadius = TREE_SEARCH_RADIUS + 6; // 6 = BELL_EXCLUSION_RADIUS
+        Set<BlockPos> nearbyBells = new HashSet<>();
+        for (BlockPos cursor : BlockPos.iterate(
+                center.add(-bellScanRadius, -8, -bellScanRadius),
+                center.add(bellScanRadius, 8, bellScanRadius))) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                nearbyBells.add(cursor.toImmutable());
+            }
+        }
+
         Set<BlockPos> uniqueRoots = new HashSet<>();
         BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
         BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
@@ -278,7 +294,7 @@ public final class VillageLumberjackSpawnManager {
                 continue;
             }
             BlockPos root = normalizeRoot(world, pos);
-            if (isEligibleTreeRoot(world, root)) {
+            if (isEligibleTreeRoot(world, root, nearbyBells)) {
                 uniqueRoots.add(root);
             }
         }
@@ -297,9 +313,10 @@ public final class VillageLumberjackSpawnManager {
 
     /**
      * Mirrors the eligibility check from {@link LumberjackGuardChopTreesGoal}:
-     * natural ground, no bell nearby, min structure (4+ logs + canopy).
+     * natural ground, no bell nearby (checked against pre-collected {@code cachedBells}),
+     * min structure (4+ logs + canopy).
      */
-    private static boolean isEligibleTreeRoot(ServerWorld world, BlockPos pos) {
+    private static boolean isEligibleTreeRoot(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return false;
@@ -315,11 +332,12 @@ public final class VillageLumberjackSpawnManager {
         if (world.getBlockState(pos.down(2)).isIn(BlockTags.LOGS)) {
             return false;
         }
-        // Bell-proximity guard (matches BELL_EXCLUSION_RADIUS in chop goal)
-        BlockPos bellMin = pos.add(-6, -4, -6);
-        BlockPos bellMax = pos.add(6, 4, 6);
-        for (BlockPos cursor : BlockPos.iterate(bellMin, bellMax)) {
-            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+        // Bell-proximity guard — use cached set for O(bells) instead of O(volume) per root
+        for (BlockPos bell : cachedBells) {
+            int dx = Math.abs(bell.getX() - pos.getX());
+            int dy = Math.abs(bell.getY() - pos.getY());
+            int dz = Math.abs(bell.getZ() - pos.getZ());
+            if (dx <= 6 && dy <= 4 && dz <= 6) {
                 return false;
             }
         }

@@ -275,7 +275,9 @@ public class GuardVillagers implements ModInitializer {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
                 VillagerBellTracker.tickVillagerReports(world);
-                if (world.getTime() % 100L == 0L) {
+                // 1200 ticks = 60 s. Bell-chest reconciliation can place block states;
+                // running it every 5 seconds was unnecessarily hot.
+                if (world.getTime() % 1200L == 7L) {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
                 if (GuardVillagersConfig.villagerConversionFallbackSweepEnabled

@@ -791,7 +791,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private static boolean isEligibleRootStatic(ServerWorld world, BlockPos pos) {
-        return isEligibleRootImpl(world, pos);
+        return isEligibleRootImpl(world, pos, null);
     }
 
     private static boolean hasMinimumTreeStructureStatic(ServerWorld world, BlockPos root) {
@@ -861,8 +861,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         BlockPos center = chest == null
                 ? table
                 : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
-        Set<BlockPos> uniqueRoots = new HashSet<>();
 
+        // Cache bell positions once for the entire scan so isNearBell() doesn't
+        // re-scan a 13×9×13 box for every log candidate. In a typical forest
+        // this saves tens of thousands of block reads per session start.
+        Set<BlockPos> nearbyBells = collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
+
+        Set<BlockPos> uniqueRoots = new HashSet<>();
         BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
         BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
 
@@ -872,14 +877,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 continue;
             }
             BlockState state = world.getBlockState(pos);
-            if (!isEligibleLog(world, pos) || !state.isIn(BlockTags.LOGS)) {
+            if (!state.isIn(BlockTags.LOGS)) {
                 continue;
             }
             BlockPos root = normalizeRoot(world, pos);
-            if (!hasMinimumTreeStructure(world, root)) {
+            if (!isEligibleRootImpl(world, root, nearbyBells)) {
                 continue;
             }
-            if (isEligibleRoot(world, root)) {
+            if (hasMinimumTreeStructure(world, root)) {
                 uniqueRoots.add(root);
             }
         }
@@ -887,6 +892,19 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
         sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
         return sorted;
+    }
+
+    /** Collect all bell block positions within {@code radius} blocks of {@code center}. */
+    private static Set<BlockPos> collectBellsNear(ServerWorld world, BlockPos center, int radius) {
+        Set<BlockPos> bells = new HashSet<>();
+        BlockPos min = center.add(-radius, -8, -radius);
+        BlockPos max = center.add(radius, 8, radius);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                bells.add(cursor.toImmutable());
+            }
+        }
+        return bells;
     }
 
     private BlockPos normalizeRoot(ServerWorld world, BlockPos pos) {
@@ -898,7 +916,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private boolean isEligibleRoot(ServerWorld world, BlockPos pos) {
-        return isEligibleRootImpl(world, pos);
+        return isEligibleRootImpl(world, pos, null);
     }
 
     /**
@@ -915,8 +933,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
      *       blocks (village-center decorative trees are excluded).</li>
      *   <li>It passes the minimum tree-structure check (≥4 connected logs + canopy).</li>
      * </ol>
+     *
+     * @param cachedBells pre-collected bell positions for the scan area, or {@code null} to
+     *                    scan the world on demand (slower — only use for one-off checks)
      */
-    private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos) {
+    private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return false;
@@ -937,7 +958,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         // Bell-proximity guard: skip logs that are decorative village-center trees.
-        if (isNearBell(world, pos)) {
+        // Use pre-cached bell set when available to avoid repeated world scans.
+        if (isNearBell(world, pos, cachedBells)) {
             return false;
         }
 
@@ -957,8 +979,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     /**
      * Returns {@code true} if any bell block exists within {@value BELL_EXCLUSION_RADIUS}
      * horizontal blocks (and ±4 vertical) of {@code pos}.
+     *
+     * <p>If {@code cachedBells} is non-null, the check is O(n) over the cached set with no
+     * block reads. Otherwise falls back to a world scan (only for one-off call sites).
      */
-    private static boolean isNearBell(ServerWorld world, BlockPos pos) {
+    private static boolean isNearBell(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
+        if (cachedBells != null) {
+            for (BlockPos bell : cachedBells) {
+                int dx = Math.abs(bell.getX() - pos.getX());
+                int dy = Math.abs(bell.getY() - pos.getY());
+                int dz = Math.abs(bell.getZ() - pos.getZ());
+                if (dx <= BELL_EXCLUSION_RADIUS && dy <= 4 && dz <= BELL_EXCLUSION_RADIUS) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Fallback: scan the world (one-off use only, e.g. recovery session targeting)
         BlockPos min = pos.add(-BELL_EXCLUSION_RADIUS, -4, -BELL_EXCLUSION_RADIUS);
         BlockPos max = pos.add(BELL_EXCLUSION_RADIUS, 4, BELL_EXCLUSION_RADIUS);
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
