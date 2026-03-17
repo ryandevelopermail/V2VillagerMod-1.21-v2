@@ -17,6 +17,7 @@ import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillageLumberjackSpawnManager;
 import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
+import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
@@ -286,6 +287,7 @@ public class GuardVillagers implements ModInitializer {
                 }
                 LumberjackPopulationBalancingService.tick(world);
                 VillageLumberjackSpawnManager.tick(world);
+                VillagePenRegistry.tick(world);
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");

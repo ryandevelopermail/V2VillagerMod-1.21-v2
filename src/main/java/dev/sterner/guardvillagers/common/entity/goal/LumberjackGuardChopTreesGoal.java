@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -933,6 +934,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             if (hasMinimumTreeStructure(world, root)) {
                 uniqueRoots.add(root);
             }
+        }
+
+        // If the cartographer has completed mapping for this village, restrict harvesting
+        // to within the mapped region. This prevents the lumberjack from straying into
+        // adjacent biomes or other villages' territory.
+        VillageMappedBoundsState.MappedBounds mappedBounds = VillageMappedBoundsState
+                .get(world.getServer())
+                .getBoundsNear(world.getRegistryKey(), center, 300)
+                .orElse(null);
+
+        if (mappedBounds != null) {
+            uniqueRoots.removeIf(root -> !mappedBounds.contains(root));
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds filter applied; {} root(s) within bounds",
+                    this.guard.getUuidAsString(),
+                    uniqueRoots.size());
         }
 
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);

@@ -21,7 +21,7 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1013,14 +1013,18 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean prepareFeeding(ServerWorld world) {
-        bannerPos = FarmerBannerTracker.getBanner(villager).orElse(null);
-        if (bannerPos == null) {
+        // Use VillagePenRegistry (geometry-based) instead of banner tracker.
+        VillagePenRegistry.PenEntry pen = VillagePenRegistry.get(world.getServer())
+                .getNearestPen(world, jobPos, 300)
+                .orElse(null);
+        if (pen == null) {
             return false;
         }
         if (villager.getInventory().isEmpty()) {
             return false;
         }
-        gatePos = findNearestGate(world, bannerPos);
+        bannerPos = pen.center();
+        gatePos = pen.gate();
         if (gatePos == null) {
             return false;
         }

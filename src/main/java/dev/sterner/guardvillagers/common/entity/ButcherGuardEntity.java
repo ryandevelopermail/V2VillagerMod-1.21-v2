@@ -18,6 +18,7 @@ import dev.sterner.guardvillagers.common.entity.goal.RangedCrossbowAttackPassive
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.EquipmentSlot;
@@ -340,8 +341,16 @@ public class ButcherGuardEntity extends GuardEntity {
         if (!this.getNavigation().isIdle()) {
             return;
         }
-        JobBlockPairingHelper.findNearestPenBanner(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE)
-                .ifPresent(pos -> this.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, 0.6D));
+        // Use VillagePenRegistry (geometry-based) to navigate toward the nearest pen gate.
+        VillagePenRegistry.get(serverWorld.getServer())
+                .getNearestPen(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE)
+                .ifPresentOrElse(
+                        pen -> this.getNavigation().startMovingTo(
+                                pen.gate().getX() + 0.5D, pen.gate().getY(), pen.gate().getZ() + 0.5D, 0.6D),
+                        // Fallback to legacy banner scan if registry is empty.
+                        () -> JobBlockPairingHelper.findNearestPenBanner(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE)
+                                .ifPresent(pos -> this.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY(), pos.getZ() + 0.5D, 0.6D))
+                );
     }
 
     private void collectNearbyLoot() {
