@@ -361,8 +361,11 @@ public final class VillageLumberjackSpawnManager {
     }
 
     private static boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
-        // Require a log above OR non-persistent leaves nearby.
-        if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeaves(world, root)) {
+        // Require crown-attached natural leaves — not just any leaves within flat radius.
+        // This prevents house log pillars from qualifying: a pillar next to a real tree
+        // no longer passes because the neighbouring tree's canopy is not attached to
+        // the top of the pillar's own column.
+        if (!hasCrownAttachedNaturalLeaves(world, root)) {
             return false;
         }
 
@@ -395,9 +398,28 @@ public final class VillageLumberjackSpawnManager {
         return false;
     }
 
-    private static boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
-        BlockPos min = root.add(-3, 1, -3);
-        BlockPos max = root.add(3, 8, 3);
+    /**
+     * Returns {@code true} if natural (non-persistent) leaves are directly attached to the
+     * crown of the log column rooted at {@code root}.
+     *
+     * <p>Walks up to the topmost log block of this column, then checks a tight neighbourhood
+     * around that crown block. This means a house pillar next to a real tree does NOT qualify
+     * — the neighbouring canopy is not attached to this column's own top.
+     */
+    private static boolean hasCrownAttachedNaturalLeaves(ServerWorld world, BlockPos root) {
+        // Walk to the top of this log column (max 12 blocks up = ROOT_STRUCTURE_MAX_HEIGHT).
+        BlockPos crown = root;
+        for (int i = 0; i < 12; i++) {
+            BlockPos above = crown.up();
+            if (!world.getBlockState(above).isIn(BlockTags.LOGS)) {
+                break;
+            }
+            crown = above;
+        }
+
+        // Check a tight box around the crown for non-persistent leaves.
+        BlockPos min = crown.add(-3, -1, -3);
+        BlockPos max = crown.add(3, 4, 3);
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             BlockState state = world.getBlockState(cursor);
             if (state.getBlock() instanceof LeavesBlock && !state.get(LeavesBlock.PERSISTENT)) {

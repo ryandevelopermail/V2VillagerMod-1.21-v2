@@ -805,11 +805,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     /**
      * Returns {@code true} if {@code root} has at least {@value MIN_ROOT_STRUCTURE_LOGS}
-     * connected log blocks forming a trunk column, AND either a log directly above or
-     * natural (non-persistent) leaves nearby.
+     * connected log blocks forming a trunk column, AND natural (non-persistent) leaves are
+     * connected to the crown of this specific column (not just present somewhere nearby).
+     *
+     * <p>Requiring crown-attached leaves (rather than any leaves within a flat radius of the
+     * root) prevents village house log pillars from being classified as harvestable trees.
+     * A house log sitting next to a real tree would previously pass the old "leaves nearby"
+     * check; now the leaves must actually be adjacent to the top of <em>this</em> column.
      */
     private static boolean hasMinimumTreeStructureImpl(ServerWorld world, BlockPos root) {
-        if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeavesStatic(world, root)) {
+        if (!hasCrownAttachedNaturalLeaves(world, root)) {
             return false;
         }
 
@@ -856,6 +861,42 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 continue;
             }
             return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns {@code true} if natural (non-persistent) leaves are directly attached to the
+     * crown of the log column rooted at {@code root}.
+     *
+     * <p>Unlike the old "leaves anywhere within radius 3" check, this walks up to the top of
+     * the log column and then checks the immediate neighbourhood of the topmost log block.
+     * This prevents village house pillars from qualifying: a house pillar has no leaves
+     * coming off its own top — nearby tree canopy no longer counts.
+     *
+     * <p>The crown search checks a 3×3×3 neighbourhood around the topmost log, then expands
+     * one more level up for tall trees where the canopy starts slightly above the last trunk
+     * block.
+     */
+    private static boolean hasCrownAttachedNaturalLeaves(ServerWorld world, BlockPos root) {
+        // Walk to the top of this log column.
+        BlockPos crown = root;
+        for (int i = 0; i < ROOT_STRUCTURE_MAX_HEIGHT; i++) {
+            BlockPos above = crown.up();
+            if (!world.getBlockState(above).isIn(BlockTags.LOGS)) {
+                break;
+            }
+            crown = above;
+        }
+
+        // Search a tight box around the crown for non-persistent leaves.
+        BlockPos min = crown.add(-ROOT_CANOPY_SEARCH_RADIUS, -1, -ROOT_CANOPY_SEARCH_RADIUS);
+        BlockPos max = crown.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_RADIUS + 1, ROOT_CANOPY_SEARCH_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (state.getBlock() instanceof LeavesBlock && !state.get(LeavesBlock.PERSISTENT)) {
+                return true;
+            }
         }
         return false;
     }
