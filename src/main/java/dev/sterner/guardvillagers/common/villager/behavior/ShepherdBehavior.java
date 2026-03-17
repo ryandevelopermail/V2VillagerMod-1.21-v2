@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.common.entity.goal.ShepherdBedCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ShepherdBedPlacerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
@@ -27,9 +29,13 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final int SPECIAL_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
+    private static final int BED_CRAFTING_GOAL_PRIORITY = 6;
+    private static final int BED_PLACER_GOAL_PRIORITY = 7;
     private static final Map<VillagerEntity, ShepherdCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdSpecialGoal> SPECIAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ShepherdBedCraftingGoal> BED_CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ShepherdBedPlacerGoal> BED_PLACER_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
@@ -78,6 +84,18 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        // Bed placer (runs on chest-pair only; doesn't need a crafting table)
+        ShepherdBedPlacerGoal bedPlacerGoal = BED_PLACER_GOALS.get(villager);
+        if (bedPlacerGoal == null) {
+            bedPlacerGoal = new ShepherdBedPlacerGoal(villager, jobPos, chestPos);
+            BED_PLACER_GOALS.put(villager, bedPlacerGoal);
+            villager.goalSelector.add(BED_PLACER_GOAL_PRIORITY, bedPlacerGoal);
+        } else {
+            bedPlacerGoal.setTargets(jobPos, chestPos);
+        }
+        bedPlacerGoal.requestImmediateCheck();
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -93,6 +111,17 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+
+        // Bed crafting (requires crafting table)
+        ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
+        if (bedCraftingGoal == null) {
+            bedCraftingGoal = new ShepherdBedCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            BED_CRAFTING_GOALS.put(villager, bedCraftingGoal);
+            villager.goalSelector.add(BED_CRAFTING_GOAL_PRIORITY, bedCraftingGoal);
+        } else {
+            bedCraftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        bedCraftingGoal.requestImmediateCraft(world);
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -168,6 +197,16 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal != null) {
             distributionGoal.requestImmediateDistribution();
+        }
+
+        ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
+        if (bedCraftingGoal != null) {
+            bedCraftingGoal.requestImmediateCraft(world);
+        }
+
+        ShepherdBedPlacerGoal bedPlacerGoal = BED_PLACER_GOALS.get(villager);
+        if (bedPlacerGoal != null) {
+            bedPlacerGoal.requestImmediateCheck();
         }
     }
 

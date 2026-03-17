@@ -68,6 +68,8 @@ public final class RecipeDemandIndex {
         add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, FARMER_PLANK_COMPONENT_CAP, 1.15D, false, true);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, FARMER_STICK_COMPONENT_CAP, 1.15D, false, true);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
+        // Shepherd needs planks for bed crafting (3 per bed)
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.SHEPHERD, 1, 32, 1.0D, false, false);
         add(aggregate,
                 DemandMaterial.LOGS,
                 VillagerProfession.BUTCHER,

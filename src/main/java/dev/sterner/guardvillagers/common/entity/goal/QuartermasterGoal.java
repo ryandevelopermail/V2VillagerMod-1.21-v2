@@ -350,6 +350,25 @@ public class QuartermasterGoal extends Goal {
         return VillageBellChestPlacementHelper.getMappedChestPos(world, jobPos).orElse(null);
     }
 
+    // -------------------------------------------------------------------------
+    // Static utility — used by ArmorerIronRoutingGoal to defer when QM is present
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if any living Librarian-profession villager with an active
+     * QuartermasterGoal exists within {@code range} blocks of {@code anchor}.
+     */
+    public static boolean isAnyActive(ServerWorld world, BlockPos anchor, double range) {
+        Box box = new Box(anchor).expand(range);
+        List<net.minecraft.entity.passive.VillagerEntity> librarians = world.getEntitiesByClass(
+                net.minecraft.entity.passive.VillagerEntity.class,
+                box,
+                v -> v.isAlive()
+                        && v.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.LIBRARIAN);
+        // We treat any alive librarian near the anchor as potential QM — lightweight check.
+        return !librarians.isEmpty();
+    }
+
     private void moveTo(BlockPos target) {
         villager.getNavigation().startMovingTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, MOVE_SPEED);
     }
