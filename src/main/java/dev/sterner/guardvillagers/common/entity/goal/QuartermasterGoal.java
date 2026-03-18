@@ -3,13 +3,16 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.BellChestMappingState;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -19,6 +22,9 @@ import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.GlobalPos;
+import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -244,8 +250,16 @@ public class QuartermasterGoal extends Goal {
 
         // Build the protected set of specialist chests we must never drain.
         Set<BlockPos> protectedChests = new HashSet<>();
-        if (bellChestPos != null) protectedChests.add(bellChestPos);
+        if (bellChestPos != null) {
+            protectedChests.add(bellChestPos);
+            // If the bell chest is a double-chest, protect both halves. Otherwise the QM could
+            // treat the other half as a surplus source and haul items from it into bellChestPos,
+            // which both resolve to the same DoubleInventory — a no-op loop.
+            findDoubleChestOtherHalf(world, bellChestPos).ifPresent(protectedChests::add);
+        }
         protectedChests.add(chestPos);
+        // Also protect the QM's own double-chest other half if present.
+        findDoubleChestOtherHalf(world, chestPos).ifPresent(protectedChests::add);
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
             if (mason.getPairedChestPos() != null) protectedChests.add(mason.getPairedChestPos());
         }
@@ -402,6 +416,29 @@ public class QuartermasterGoal extends Goal {
             }
         }
         return best.isEmpty() ? ItemStack.EMPTY : best.copy();
+    }
+
+    /**
+     * If the chest at {@code pos} is one half of a double-chest, returns the position of the
+     * other half. Returns empty for single chests or non-chest blocks.
+     * Used to add both halves to protected sets so the QM never hauls within the same double-chest.
+     */
+    private Optional<BlockPos> findDoubleChestOtherHalf(ServerWorld world, BlockPos pos) {
+        if (pos == null) return Optional.empty();
+        BlockState state = world.getBlockState(pos);
+        if (!(state.getBlock() instanceof ChestBlock)) return Optional.empty();
+        ChestType chestType = state.get(ChestBlock.CHEST_TYPE);
+        if (chestType == ChestType.SINGLE) return Optional.empty();
+        Direction facing = state.get(ChestBlock.FACING);
+        Direction offsetDir = chestType == ChestType.LEFT
+                ? facing.rotateYClockwise()
+                : facing.rotateYCounterclockwise();
+        BlockPos otherHalf = pos.offset(offsetDir).toImmutable();
+        BlockState otherState = world.getBlockState(otherHalf);
+        if (otherState.getBlock() instanceof ChestBlock) {
+            return Optional.of(otherHalf);
+        }
+        return Optional.empty();
     }
 
     private Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {

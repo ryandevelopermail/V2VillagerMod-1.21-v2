@@ -123,15 +123,23 @@ public final class UnemployedLumberjackConversionHook {
     }
 
     private static boolean isCraftingTableAlreadyPaired(ServerWorld world, BlockPos tablePos) {
-        Box scanBox = new Box(tablePos).expand(300.0D);
+        // Lumberjacks roam widely so we need a broad box to find the one whose
+        // pairedCraftingTablePos points to this exact table. Keep it at BELL_EFFECT_RANGE.
+        // The reservation manager is the primary guard; this scan is a secondary safeguard
+        // for cases where the reservation wasn't persisted (e.g., server restart before persist).
+        Box lumberjackScanBox = new Box(tablePos).expand(VillageGuardStandManager.BELL_EFFECT_RANGE);
 
-        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, scanBox, LumberjackGuardEntity::isAlive)) {
+        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, lumberjackScanBox, LumberjackGuardEntity::isAlive)) {
             if (tablePos.equals(lumberjack.getPairedCraftingTablePos())) {
                 return true;
             }
         }
 
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, UnemployedLumberjackConversionHook::isEmployedVillager)) {
+        // Any villager whose job site is paired to this table must be within JOB_BLOCK_PAIRING_RANGE
+        // of it (by definition of the pairing geometry). No need to scan further.
+        Box villagerScanBox = new Box(tablePos).expand(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 1.0D);
+
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, villagerScanBox, UnemployedLumberjackConversionHook::isEmployedVillager)) {
             BlockPos jobPos = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                     .filter(globalPos -> globalPos.dimension() == world.getRegistryKey())
                     .map(GlobalPos::pos)
