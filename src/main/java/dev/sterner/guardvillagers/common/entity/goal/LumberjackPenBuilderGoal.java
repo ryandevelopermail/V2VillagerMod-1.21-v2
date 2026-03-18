@@ -385,15 +385,21 @@ public class LumberjackPenBuilderGoal extends Goal {
     }
 
     private BlockPos resolveBellPos(ServerWorld world) {
-        // Use BellChestMappingState to find the nearest primary bell
+        // Use BellChestMappingState to find the nearest registered primary bell.
         BellChestMappingState mapping = BellChestMappingState.get(world.getServer());
-        BlockPos chest = guard.getPairedChestPos();
-        if (chest == null) return guard.getBlockPos();
+        BlockPos guardPos = guard.getBlockPos();
 
-        // Scan for nearest registered primary bell
-        Box searchBox = new Box(guard.getBlockPos()).expand(SCAN_RADIUS);
-        // Fall back to guard position if no bell found
-        return guard.getBlockPos();
+        BlockPos nearest = null;
+        double nearestDist = Double.MAX_VALUE;
+        for (BlockPos bell : mapping.getBellPositions(world)) {
+            double dist = guardPos.getSquaredDistance(bell);
+            if (dist <= (double) SCAN_RADIUS * SCAN_RADIUS && dist < nearestDist) {
+                nearestDist = dist;
+                nearest = bell;
+            }
+        }
+        // Fall back to guard position if no registered bell is nearby.
+        return nearest != null ? nearest : guardPos;
     }
 
     private boolean consumeFromChest(ServerWorld world, net.minecraft.item.Item item, int amount) {
