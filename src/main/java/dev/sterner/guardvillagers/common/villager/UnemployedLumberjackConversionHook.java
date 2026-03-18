@@ -35,7 +35,6 @@ public final class UnemployedLumberjackConversionHook {
 
     public static void tryConvertUnemployedVillagersNearCraftingTables(ServerWorld world) {
         Set<VillagerEntity> candidates = new LinkedHashSet<>();
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
 
         for (PlayerEntity player : world.getPlayers()) {
             candidates.addAll(world.getEntitiesByClass(
@@ -45,7 +44,11 @@ public final class UnemployedLumberjackConversionHook {
             ));
         }
 
+        // Only fall back to world-bounds scan when no player-proximate candidates found.
+        // getWorldBounds() is the entire world-border-sized box — expensive, O(all entities).
+        // Moved to fallback branch so it is never computed when players are present nearby.
         if (candidates.isEmpty()) {
+            Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
             candidates.addAll(world.getEntitiesByClass(VillagerEntity.class, worldBounds, UnemployedLumberjackConversionHook::isEligibleUnemployed));
         }
 

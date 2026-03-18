@@ -232,7 +232,10 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<BlockPos> findSurplusChest(ServerWorld world, BlockPos bellChestPos) {
-        // Find any chest near job-site villagers with more items than threshold
+        // Find any chest near job-site villagers with more items than threshold.
+        // Must exclude:
+        //   - bellChestPos  (we're trying to fill it, not drain it further)
+        //   - chestPos      (the QM's own transit buffer — draining it causes haul loops)
         Box box = new Box(jobPos).expand(SCAN_RANGE);
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
         for (VillagerEntity v : villagers) {
@@ -241,10 +244,12 @@ public class QuartermasterGoal extends Goal {
             for (BlockPos candidate : BlockPos.iterate(
                     v.getBlockPos().add(-3, -1, -3),
                     v.getBlockPos().add(3, 1, 3))) {
-                if (world.getBlockState(candidate).getBlock() instanceof ChestBlock) {
-                    if (countAllItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                        return Optional.of(candidate.toImmutable());
-                    }
+                if (!world.getBlockState(candidate).getBlock().equals(net.minecraft.block.Blocks.CHEST)) continue;
+                BlockPos immutable = candidate.toImmutable();
+                // Skip the bell chest and QM's own transit chest
+                if (immutable.equals(bellChestPos) || immutable.equals(chestPos)) continue;
+                if (countAllItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                    return Optional.of(immutable);
                 }
             }
         }
