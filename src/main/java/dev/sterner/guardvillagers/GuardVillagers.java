@@ -332,26 +332,61 @@ public class GuardVillagers implements ModInitializer {
         ProfessionDefinitions.runConversionHooks(world);
     }
 
+    /** Scan radius (blocks) for per-schedule guard reconciliation — covers normal village spread. */
+    private static final double RECONCILIATION_SCAN_RADIUS = 800.0D;
+
     private static void reconcileConvertedWorkerReservations(ServerWorld world, String source) {
         ReconciliationStats stats = new ReconciliationStats();
 
-        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        // Use a player-proximity box instead of world-bounds to avoid scanning the entire world.
+        // Guards more than 800 blocks from all players will be reconciled on next world-load instead.
+        Box scanBox = buildPlayerProximityBox(world, RECONCILIATION_SCAN_RADIUS);
+        if (scanBox == null) {
+            // No players online — skip this pass entirely.
+            return;
+        }
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedSmokerPos(), VillagerProfession.BUTCHER, source + " butcher", stats,
                     () -> guard.setPairedSmokerPos(null));
         }
 
-        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.MASON, source + " mason", stats,
                     () -> guard.setPairedJobPos(null));
         }
 
-        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.FISHERMAN, source + " fisherman", stats,
                     () -> guard.setPairedJobPos(null));
         }
 
         LOGGER.debug("Converted worker reservation reconciliation pass (world={}, source={}): added={}, removed={}",
                 world.getRegistryKey().getValue(), source, stats.added, stats.removed);
+    }
+
+    /**
+     * Returns a Box that encompasses all players in {@code world} expanded by {@code radius},
+     * or {@code null} if there are no players online in that world.
+     */
+    @Nullable
+    private static Box buildPlayerProximityBox(ServerWorld world, double radius) {
+        var players = world.getPlayers();
+        if (players.isEmpty()) {
+            return null;
+        }
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for (var p : players) {
+            minX = Math.min(minX, p.getX());
+            minY = Math.min(minY, p.getY());
+            minZ = Math.min(minZ, p.getZ());
+            maxX = Math.max(maxX, p.getX());
+            maxY = Math.max(maxY, p.getY());
+            maxZ = Math.max(maxZ, p.getZ());
+        }
+        return new Box(minX - radius, minY - radius, minZ - radius,
+                       maxX + radius, maxY + radius, maxZ + radius);
     }
 
     private static void reconcileGuardReservation(ServerWorld world,

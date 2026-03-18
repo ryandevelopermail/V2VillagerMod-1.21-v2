@@ -70,7 +70,10 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         if (!(this.guard.getWorld() instanceof ServerWorld world)) {
             return false;
         }
-        if (!this.guard.isAlive() || this.guard.getWorkflowStage() != LumberjackGuardEntity.WorkflowStage.CRAFTING) {
+        // Charcoal production runs in any workflow stage — not gated on CRAFTING.
+        // This ensures charcoal is continuously produced and distributed as the
+        // reliable village fuel regardless of the lumberjack's chop cycle.
+        if (!this.guard.isAlive()) {
             return false;
         }
 
@@ -89,7 +92,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         if (!(this.guard.getWorld() instanceof ServerWorld world)) {
             return false;
         }
-        if (this.guard.getWorkflowStage() != LumberjackGuardEntity.WorkflowStage.CRAFTING || this.targetFurnacePos == null) {
+        if (this.targetFurnacePos == null) {
             return false;
         }
 
@@ -104,7 +107,6 @@ public class LumberjackFurnaceModifierGoal extends Goal {
     @Override
     public void tick() {
         if (!(this.guard.getWorld() instanceof ServerWorld world) || this.targetFurnacePos == null) {
-            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
             return;
         }
 
@@ -154,7 +156,8 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             LOGGER.debug("Stop lumberjack furnace service: guard={} furnacePos={} reason={}",
                     this.guard.getUuidAsString(), this.targetFurnacePos.toShortString(), reason);
         }
-        this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+        // Do NOT force WorkflowStage — furnace servicing now runs outside of the crafting stage
+        // and should not disrupt the lumberjack's normal chop/deposit workflow.
     }
 
     private void serviceFurnace(Inventory chestInventory, AbstractFurnaceBlockEntity furnace) {

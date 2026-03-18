@@ -88,11 +88,18 @@ public class CartographerMapExplorationGoal extends Goal {
         refreshMappedTargets(world);
         buildTargets(world);
 
-        if (countEmptyMaps(world) < REQUIRED_MAP_BATCH || pendingTargets.size() < REQUIRED_MAP_BATCH) {
+        int emptyMaps = countEmptyMaps(world);
+        int pending = pendingTargets.size();
+
+        if (emptyMaps < REQUIRED_MAP_BATCH || pending < REQUIRED_MAP_BATCH) {
+            LOGGER.info("Cartographer {} canStart=false: emptyMaps={} (need {}) pendingTiles={} (need {}) mappedTiles={}",
+                    villager.getUuidAsString(), emptyMaps, REQUIRED_MAP_BATCH, pending, REQUIRED_MAP_BATCH, mappedTargets.size());
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             immediateCheckPending = false;
             return false;
         }
+
+        LOGGER.info("Cartographer {} canStart=true: emptyMaps={} pendingTiles={}", villager.getUuidAsString(), emptyMaps, pending);
         return true;
     }
 
@@ -377,6 +384,21 @@ public class CartographerMapExplorationGoal extends Goal {
                 {0, 1},
                 {1, 1}
         };
+
+        // If all 4 tiles are already mapped, clear mappedTargets so the cartographer
+        // can do a fresh remapping cycle on the next check. Otherwise it would sit idle forever.
+        boolean allMapped = true;
+        for (int[] offset : offsets) {
+            long key = packKey(baseIndexX + offset[0], baseIndexZ + offset[1]);
+            if (!mappedTargets.contains(key)) {
+                allMapped = false;
+                break;
+            }
+        }
+        if (allMapped) {
+            LOGGER.info("Cartographer {} all 4 tiles already mapped — resetting for next mapping cycle", villager.getUuidAsString());
+            mappedTargets.clear();
+        }
 
         for (int[] offset : offsets) {
             int mapIndexX = baseIndexX + offset[0];

@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.BellChestMappingState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -10,8 +11,12 @@ import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.BlockItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -80,11 +85,12 @@ public class LumberjackPenBuilderGoal extends Goal {
         if (guard.getPairedChestPos() == null) return false;
         if (world.getTime() < nextScanTick) return false;
 
-        // Only fire at 50% through the chop cooldown
-        if (!isAtChopMidpoint(world)) return false;
-
-        // Need enough materials
-        if (!hasPenMaterials(world)) return false;
+        // Need enough materials — chop-midpoint gate removed: pen building fires whenever
+        // materials are ready, not only mid-cooldown. Cooldown is SCAN_INTERVAL_TICKS (600t).
+        if (!hasPenMaterials(world)) {
+            nextScanTick = world.getTime() + SCAN_INTERVAL_TICKS;
+            return false;
+        }
 
         nextScanTick = world.getTime() + SCAN_INTERVAL_TICKS;
 
@@ -134,7 +140,7 @@ public class LumberjackPenBuilderGoal extends Goal {
 
     private void tickMoveToFence(ServerWorld world) {
         while (currentIndex < pendingFencePositions.size()
-                && world.getBlockState(pendingFencePositions.get(currentIndex)).isOf(Blocks.OAK_FENCE)) {
+                && world.getBlockState(pendingFencePositions.get(currentIndex)).isIn(BlockTags.FENCES)) {
             currentIndex++;
         }
 
@@ -158,20 +164,24 @@ public class LumberjackPenBuilderGoal extends Goal {
         }
 
         BlockPos target = pendingFencePositions.get(currentIndex);
-        if (world.getBlockState(target).isOf(Blocks.OAK_FENCE)) {
+        if (world.getBlockState(target).isIn(BlockTags.FENCES)) {
             currentIndex++;
             stage = Stage.MOVE_TO_FENCE;
             return;
         }
 
-        if (!consumeFromChest(world, Items.OAK_FENCE, 1)) {
+        // Pick fence block from chest (any wood type) before consuming
+        Optional<Inventory> invOpt = getInventory(world, guard.getPairedChestPos());
+        Block fenceBlock = invOpt.map(this::chooseFenceBlock).orElse(Blocks.OAK_FENCE);
+
+        if (!consumeTagFromChest(world, ItemTags.FENCES)) {
             LOGGER.debug("LumberjackPen {}: ran out of fences mid-build", guard.getUuidAsString());
             stage = Stage.DONE;
             return;
         }
 
-        world.setBlockState(target, Blocks.OAK_FENCE.getDefaultState());
-        LOGGER.debug("LumberjackPen {}: placed fence at {}", guard.getUuidAsString(), target.toShortString());
+        world.setBlockState(target, fenceBlock.getDefaultState());
+        LOGGER.debug("LumberjackPen {}: placed {} at {}", guard.getUuidAsString(), fenceBlock, target.toShortString());
         currentIndex++;
         stage = Stage.MOVE_TO_FENCE;
     }
@@ -194,7 +204,11 @@ public class LumberjackPenBuilderGoal extends Goal {
             return;
         }
 
-        if (!consumeFromChest(world, Items.OAK_FENCE_GATE, 1)) {
+        // Pick gate block from chest (any wood type) before consuming
+        Optional<Inventory> invOpt2 = getInventory(world, guard.getPairedChestPos());
+        Block gateBlock = invOpt2.map(this::chooseGateBlock).orElse(Blocks.OAK_FENCE_GATE);
+
+        if (!consumeTagFromChest(world, ItemTags.FENCE_GATES)) {
             LOGGER.debug("LumberjackPen {}: no gate available", guard.getUuidAsString());
             stage = Stage.DONE;
             return;
@@ -202,7 +216,7 @@ public class LumberjackPenBuilderGoal extends Goal {
 
         // Face the gate south (default open direction)
         world.setBlockState(pendingGatePos,
-                Blocks.OAK_FENCE_GATE.getDefaultState().with(FenceGateBlock.FACING, Direction.SOUTH));
+                gateBlock.getDefaultState().with(FenceGateBlock.FACING, Direction.SOUTH));
         LOGGER.info("LumberjackPen {}: placed fence gate at {}", guard.getUuidAsString(), pendingGatePos.toShortString());
         pendingGatePos = null;
         stage = Stage.DONE;
@@ -240,9 +254,9 @@ public class LumberjackPenBuilderGoal extends Goal {
         BlockPos gatePos = new BlockPos(gateMidX, y, origin.getZ() + PEN_SIZE - 1);
         fences.remove(gatePos);
 
-        // Filter out already-built positions
+        // Filter out already-built positions (any fence type)
         List<BlockPos> unbuilt = fences.stream()
-                .filter(pos -> !(world.getBlockState(pos).getBlock() instanceof FenceBlock))
+                .filter(pos -> !world.getBlockState(pos).isIn(BlockTags.FENCES))
                 .toList();
 
         if (unbuilt.isEmpty()) return false;
@@ -313,8 +327,61 @@ public class LumberjackPenBuilderGoal extends Goal {
         Optional<Inventory> inv = getInventory(world, chestPos);
         if (inv.isEmpty()) return false;
         Inventory inventory = inv.get();
-        return countItem(inventory, Items.OAK_FENCE) >= FENCE_NEEDED
-                && countItem(inventory, Items.OAK_FENCE_GATE) >= GATE_NEEDED;
+        // Accept any fence type (oak, spruce, birch, etc.) via item tags
+        return countItemTag(inventory, ItemTags.FENCES) >= FENCE_NEEDED
+                && countItemTag(inventory, ItemTags.FENCE_GATES) >= GATE_NEEDED;
+    }
+
+    /** Counts items in the inventory that match a given item tag. */
+    private int countItemTag(Inventory inventory, net.minecraft.registry.tag.TagKey<Item> tag) {
+        int total = 0;
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack s = inventory.getStack(i);
+            if (!s.isEmpty() && s.isIn(tag)) total += s.getCount();
+        }
+        return total;
+    }
+
+    /**
+     * Picks the first fence item in the chest (any wood type) and returns the corresponding
+     * Block, or OAK_FENCE as fallback.
+     */
+    private Block chooseFenceBlock(Inventory inventory) {
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack s = inventory.getStack(i);
+            if (!s.isEmpty() && s.isIn(ItemTags.FENCES) && s.getItem() instanceof BlockItem bi) {
+                return bi.getBlock();
+            }
+        }
+        return Blocks.OAK_FENCE;
+    }
+
+    /** Picks the first fence-gate item in the chest and returns its Block, or OAK_FENCE_GATE. */
+    private Block chooseGateBlock(Inventory inventory) {
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack s = inventory.getStack(i);
+            if (!s.isEmpty() && s.isIn(ItemTags.FENCE_GATES) && s.getItem() instanceof BlockItem bi) {
+                return bi.getBlock();
+            }
+        }
+        return Blocks.OAK_FENCE_GATE;
+    }
+
+    /** Consumes one item matching the given tag from the inventory. Returns true if successful. */
+    private boolean consumeTagFromChest(ServerWorld world, net.minecraft.registry.tag.TagKey<Item> tag) {
+        Optional<Inventory> inv = getInventory(world, guard.getPairedChestPos());
+        if (inv.isEmpty()) return false;
+        Inventory inventory = inv.get();
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack s = inventory.getStack(i);
+            if (!s.isEmpty() && s.isIn(tag)) {
+                s.decrement(1);
+                if (s.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
+                inventory.markDirty();
+                return true;
+            }
+        }
+        return false;
     }
 
     private BlockPos resolveBellPos(ServerWorld world) {
