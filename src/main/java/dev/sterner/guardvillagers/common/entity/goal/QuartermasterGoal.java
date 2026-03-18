@@ -492,19 +492,6 @@ public class QuartermasterGoal extends Goal {
         return count;
     }
 
-    private ItemStack findTopItem(ServerWorld world, BlockPos pos) {
-        Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty()) return ItemStack.EMPTY;
-        ItemStack best = ItemStack.EMPTY;
-        for (int i = 0; i < inv.get().size(); i++) {
-            ItemStack stack = inv.get().getStack(i);
-            if (!stack.isEmpty() && stack.getCount() > best.getCount()) {
-                best = stack;
-            }
-        }
-        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
-    }
-
     /**
      * Finds the largest single stack that passes {@link #SURPLUS_HAUL_WHITELIST} in the chest at
      * {@code pos}. Returns a copy, or {@link ItemStack#EMPTY} if no whitelisted material found.
