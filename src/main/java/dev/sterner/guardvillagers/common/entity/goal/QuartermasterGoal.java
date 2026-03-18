@@ -261,10 +261,16 @@ public class QuartermasterGoal extends Goal {
         // Also protect the QM's own double-chest other half if present.
         findDoubleChestOtherHalf(world, chestPos).ifPresent(protectedChests::add);
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
-            if (mason.getPairedChestPos() != null) protectedChests.add(mason.getPairedChestPos());
+            if (mason.getPairedChestPos() != null) {
+                protectedChests.add(mason.getPairedChestPos());
+                findDoubleChestOtherHalf(world, mason.getPairedChestPos()).ifPresent(protectedChests::add);
+            }
         }
         for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
-            if (lj.getPairedChestPos() != null) protectedChests.add(lj.getPairedChestPos());
+            if (lj.getPairedChestPos() != null) {
+                protectedChests.add(lj.getPairedChestPos());
+                findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
+            }
         }
         // Protect shepherd chests — they contain beds + wool + planks needed for bed economy.
         // Without this, QM Priority-3 hauls beds out of the shepherd chest into the bell chest.
@@ -275,7 +281,11 @@ public class QuartermasterGoal extends Goal {
                     .map(GlobalPos::pos)
                     .orElse(null);
             if (jobSite != null) {
-                JobBlockPairingHelper.findNearbyChest(world, jobSite).ifPresent(protectedChests::add);
+                JobBlockPairingHelper.findNearbyChest(world, jobSite).ifPresent(shepherdChest -> {
+                    protectedChests.add(shepherdChest);
+                    // Also protect the other half if it is a double-chest.
+                    findDoubleChestOtherHalf(world, shepherdChest).ifPresent(protectedChests::add);
+                });
             }
         }
 
