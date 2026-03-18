@@ -216,24 +216,27 @@ public class ShepherdBedPlacerGoal extends Goal {
         // Note: scan is a manual 3-nested loop (X/Z ±BED_ANCHOR_SCAN_RANGE, Y ±BED_ANCHOR_Y_RANGE)
         // rather than a Box query because BedBlock is not a BlockEntity and requires a block scan.
 
-        // Collect all bed foot-block positions (avoid scanning heads)
+        // Collect all bed foot-block positions (avoid scanning heads).
+        // Use a BlockPos.Mutable to avoid allocating ~65k BlockPos objects per canStart() call.
+        // The triple-nested loop over ±32x ±8y ±32z = 65,536 positions would generate massive
+        // GC pressure with `new BlockPos(x, y, z)` per iteration. Mutable avoids all that.
         List<BlockPos> existingBedPositions = new ArrayList<>();
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
+        outer:
         for (int x = (int)(villagerPos.getX() - BED_ANCHOR_SCAN_RANGE); x <= villagerPos.getX() + BED_ANCHOR_SCAN_RANGE; x++) {
             for (int z = (int)(villagerPos.getZ() - BED_ANCHOR_SCAN_RANGE); z <= villagerPos.getZ() + BED_ANCHOR_SCAN_RANGE; z++) {
                 for (int y = villagerPos.getY() - BED_ANCHOR_Y_RANGE; y <= villagerPos.getY() + BED_ANCHOR_Y_RANGE; y++) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    BlockState state = world.getBlockState(pos);
+                    mutablePos.set(x, y, z);
+                    BlockState state = world.getBlockState(mutablePos);
                     if (state.getBlock() instanceof BedBlock
                             && state.get(BedBlock.PART) == BedPart.FOOT) {
-                        existingBedPositions.add(pos.toImmutable());
+                        existingBedPositions.add(mutablePos.toImmutable());
                         if (existingBedPositions.size() >= MAX_BED_ANCHOR_CANDIDATES) {
-                            break;
+                            break outer;
                         }
                     }
                 }
-                if (existingBedPositions.size() >= MAX_BED_ANCHOR_CANDIDATES) break;
             }
-            if (existingBedPositions.size() >= MAX_BED_ANCHOR_CANDIDATES) break;
         }
 
         if (existingBedPositions.isEmpty()) {

@@ -33,6 +33,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Cluster 3 — Quartermaster Goal (added to a Librarian villager after double-chest promotion).
@@ -67,6 +68,40 @@ public class QuartermasterGoal extends Goal {
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
+
+    /**
+     * Item whitelist for Priority-3 surplus haul.
+     *
+     * <p>Priority-3 hauls from ANY over-stocked chest near a villager. Without this
+     * safelist the QM would drain Cleric potions, Fletcher arrows, Armorer iron gear,
+     * Fisherman fish, Cartographer maps, Butcher meat — all specialist trade goods —
+     * into the generic bell chest. This makes those professions silently stop trading.
+     *
+     * <p>Only "generic village bulk" materials that are safe to redistribute are
+     * included here. Logs and planks are particularly important because the bell chest
+     * is the primary routing hub for the Lumberjack→Shepherd plank pipeline.
+     */
+    private static final Predicate<ItemStack> SURPLUS_HAUL_WHITELIST = stack -> {
+        if (stack.isEmpty()) return false;
+        // Accept any log type
+        if (stack.isIn(net.minecraft.registry.tag.ItemTags.LOGS)) return true;
+        // Accept any plank type
+        if (stack.isIn(ItemTags.PLANKS)) return true;
+        // Accept any wool type
+        if (stack.isIn(net.minecraft.registry.tag.ItemTags.WOOL)) return true;
+        // Accept specific bulk construction/farming materials
+        net.minecraft.item.Item item = stack.getItem();
+        return item == Items.COBBLESTONE
+                || item == Items.STONE
+                || item == Items.GRAVEL
+                || item == Items.SAND
+                || item == Items.WHEAT
+                || item == Items.WHEAT_SEEDS
+                || item == Items.HAY_BLOCK
+                || item == Items.COAL
+                || item == Items.CHARCOAL
+                || item == Items.STICK;
+    };
 
     private final VillagerEntity villager;
     private final BlockPos jobPos;
@@ -195,18 +230,21 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
-        // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest
+        // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest.
+        // IMPORTANT: only haul whitelisted bulk materials (logs, planks, wool, cobble, wheat, coal, etc.)
+        // to avoid draining specialist profession chests of their unique trade goods (arrows, potions,
+        // enchanted books, iron gear, fish, maps, meat, etc.). EC-NEW-EC-8 resolution.
         if (bellChestPos != null) {
             int bellTotal = countAllItems(world, bellChestPos);
             if (bellTotal < BELL_CHEST_LOW_THRESHOLD) {
                 Optional<BlockPos> surplusChest = findSurplusChest(world, bellChestPos);
                 if (surplusChest.isPresent()) {
-                    ItemStack topItem = findTopItem(world, surplusChest.get());
-                    if (!topItem.isEmpty()) {
+                    ItemStack whitelistedItem = findTopWhitelistedItem(world, surplusChest.get());
+                    if (!whitelistedItem.isEmpty()) {
                         sourcePos = surplusChest.get();
                         destPos = bellChestPos;
-                        transferStack = topItem.copyWithCount(Math.min(HAUL_AMOUNT, topItem.getCount()));
-                        LOGGER.debug("QM {}: hauling surplus from {} to bell chest", villager.getUuidAsString(), sourcePos.toShortString());
+                        transferStack = whitelistedItem.copyWithCount(Math.min(HAUL_AMOUNT, whitelistedItem.getCount()));
+                        LOGGER.debug("QM {}: hauling {} surplus from {} to bell chest", villager.getUuidAsString(), whitelistedItem.getItem(), sourcePos.toShortString());
                         return true;
                     }
                 }
@@ -289,20 +327,29 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
+        // Discover surplus chests via JOB_SITE brain memory, NOT v.getBlockPos().
+        // Villagers wander constantly; their chest is almost never within ±3 blocks of wherever
+        // they happen to be standing when this scan fires. Scanning by job-site makes chest
+        // discovery reliable regardless of villager movement. This was the root cause of
+        // Priority-3 surplus haul almost never firing despite chests having surplus material.
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
         for (VillagerEntity v : villagers) {
             if (v == villager) continue;
-            // Check if they have a nearby chest with items
-            for (BlockPos candidate : BlockPos.iterate(
-                    v.getBlockPos().add(-3, -1, -3),
-                    v.getBlockPos().add(3, 1, 3))) {
-                if (!world.getBlockState(candidate).getBlock().equals(net.minecraft.block.Blocks.CHEST)) continue;
-                BlockPos immutable = candidate.toImmutable();
-                // Skip all protected chests (bell, QM transit, mason, lumberjack)
-                if (protectedChests.contains(immutable)) continue;
-                if (countAllItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                    return Optional.of(immutable);
-                }
+            BlockPos vJobSite = v.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .filter(gp -> gp.dimension() == world.getRegistryKey())
+                    .map(GlobalPos::pos)
+                    .orElse(null);
+            if (vJobSite == null) continue;
+            // Use the same pairing helper the rest of the mod uses to find a chest near a job site.
+            Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, vJobSite);
+            if (pairedChest.isEmpty()) continue;
+            BlockPos immutable = pairedChest.get().toImmutable();
+            // Skip all protected chests (bell, QM transit, mason, lumberjack, shepherd)
+            if (protectedChests.contains(immutable)) continue;
+            // Only count whitelisted bulk materials so specialist trade goods (arrows, potions,
+            // enchanted books, iron gear, fish, maps, meat) never trigger the threshold.
+            if (countWhitelistedItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                return Optional.of(immutable);
             }
         }
         return Optional.empty();
@@ -427,6 +474,24 @@ public class QuartermasterGoal extends Goal {
         return count;
     }
 
+    /**
+     * Counts only items that pass {@link #SURPLUS_HAUL_WHITELIST} in the chest at {@code pos}.
+     * Used by {@link #findSurplusChest} to avoid treating specialist chests as "surplus" just
+     * because they contain many arrows, potions, or other high-count trade goods.
+     */
+    private int countWhitelistedItems(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inv = getInventory(world, pos);
+        if (inv.isEmpty()) return 0;
+        int count = 0;
+        for (int i = 0; i < inv.get().size(); i++) {
+            ItemStack stack = inv.get().getStack(i);
+            if (!stack.isEmpty() && SURPLUS_HAUL_WHITELIST.test(stack)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
     private ItemStack findTopItem(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
         if (inv.isEmpty()) return ItemStack.EMPTY;
@@ -434,6 +499,27 @@ public class QuartermasterGoal extends Goal {
         for (int i = 0; i < inv.get().size(); i++) {
             ItemStack stack = inv.get().getStack(i);
             if (!stack.isEmpty() && stack.getCount() > best.getCount()) {
+                best = stack;
+            }
+        }
+        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
+    }
+
+    /**
+     * Finds the largest single stack that passes {@link #SURPLUS_HAUL_WHITELIST} in the chest at
+     * {@code pos}. Returns a copy, or {@link ItemStack#EMPTY} if no whitelisted material found.
+     *
+     * <p>Used by Priority-3 surplus haul so that only generic bulk materials (logs, planks, wool,
+     * cobblestone, wheat, coal, etc.) are ever moved into the bell chest. Specialist trade goods
+     * (arrows, potions, enchanted books, iron gear, fish, maps, meat) will never be touched.
+     */
+    private ItemStack findTopWhitelistedItem(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inv = getInventory(world, pos);
+        if (inv.isEmpty()) return ItemStack.EMPTY;
+        ItemStack best = ItemStack.EMPTY;
+        for (int i = 0; i < inv.get().size(); i++) {
+            ItemStack stack = inv.get().getStack(i);
+            if (!stack.isEmpty() && SURPLUS_HAUL_WHITELIST.test(stack) && stack.getCount() > best.getCount()) {
                 best = stack;
             }
         }
