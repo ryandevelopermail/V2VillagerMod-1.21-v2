@@ -54,14 +54,17 @@ public class ShepherdBedCraftingGoal extends AbstractCraftingGoal<ShepherdBedCra
 
     @Override
     protected List<BedRecipe> discoverRecipes(ServerWorld world, Inventory inventory) {
-        // Only craft if there's actual demand
-        if (!hasBedlessVillagerNearby(world)) {
+        // Call countBedlessVillagersNearby once and reuse the result for both the
+        // demand gate and the surplus check. Previously hasBedlessVillagerNearby()
+        // called countBedlessVillagersNearby() internally, causing a second full
+        // entity scan on the same tick whenever demand was positive.
+        int bedlessCount = countBedlessVillagersNearby(world);
+        if (bedlessCount <= 0) {
             return List.of();
         }
         // Don't over-stockpile — count beds already in chest
         int bedsInChest = countBedsInChest(inventory);
-        int bedlesCount = countBedlessVillagersNearby(world);
-        if (bedsInChest >= bedlesCount + BED_SURPLUS_BUFFER) {
+        if (bedsInChest >= bedlessCount + BED_SURPLUS_BUFFER) {
             return List.of();
         }
 
