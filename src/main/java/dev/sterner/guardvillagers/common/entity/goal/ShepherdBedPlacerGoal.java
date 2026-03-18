@@ -245,24 +245,28 @@ public class ShepherdBedPlacerGoal extends Goal {
         existingBedPositions.sort((a, b) -> Double.compare(
                 a.getSquaredDistance(villagerPos), b.getSquaredDistance(villagerPos)));
 
-        // For each existing bed, try to find a free adjacent slot
+        // For each existing bed, try to find a free adjacent slot.
+        // buildAdjacentCandidates generates candidate foot-positions based solely on anchor geometry.
+        // For each candidate we then pick the first horizontal facing that makes canPlaceBedAt pass.
+        // This avoids the previous bug where tryFacing was iterated in the outer loop but not used
+        // inside buildAdjacentCandidates, causing the same 4 positions to be tested 4× with
+        // geometrically-incompatible facings.
         for (BlockPos anchorFoot : existingBedPositions) {
             BlockState anchorState = world.getBlockState(anchorFoot);
             if (!(anchorState.getBlock() instanceof BedBlock)) continue;
             Direction anchorFacing = anchorState.get(BedBlock.FACING);
 
-            // Try all horizontal directions for a new bed adjacent to this one
-            for (Direction tryFacing : Direction.Type.HORIZONTAL) {
-                // Try offsets around the anchor foot: same row parallel, next row
-                List<BlockPos> candidates = buildAdjacentCandidates(anchorFoot, anchorFacing, tryFacing);
-                for (BlockPos candidate : candidates) {
-                    if (canPlaceBedAt(world, candidate, tryFacing)) {
+            List<BlockPos> candidates = buildAdjacentCandidates(anchorFoot, anchorFacing);
+            for (BlockPos candidate : candidates) {
+                // Try each horizontal facing until we find one where both foot+head are clear
+                for (Direction facing : Direction.Type.HORIZONTAL) {
+                    if (canPlaceBedAt(world, candidate, facing)) {
                         LOGGER.info("Shepherd {} found bed site {} (facing {}) adjacent to existing bed at {}",
                                 villager.getUuidAsString(),
                                 candidate.toShortString(),
-                                tryFacing.name(),
+                                facing.name(),
                                 anchorFoot.toShortString());
-                        return new BedSite(candidate.toImmutable(), tryFacing);
+                        return new BedSite(candidate.toImmutable(), facing);
                     }
                 }
             }
@@ -274,8 +278,9 @@ public class ShepherdBedPlacerGoal extends Goal {
     /**
      * Builds candidate foot-positions for a new bed adjacent to an existing one.
      * We try positions in the same row (beside existing bed) and the next row over.
+     * The facing for each candidate is determined later by trying all horizontal directions.
      */
-    private List<BlockPos> buildAdjacentCandidates(BlockPos anchorFoot, Direction anchorFacing, Direction tryFacing) {
+    private List<BlockPos> buildAdjacentCandidates(BlockPos anchorFoot, Direction anchorFacing) {
         List<BlockPos> candidates = new ArrayList<>();
         // Side-by-side (perpendicular to anchor facing)
         Direction perp1 = anchorFacing.rotateYClockwise();

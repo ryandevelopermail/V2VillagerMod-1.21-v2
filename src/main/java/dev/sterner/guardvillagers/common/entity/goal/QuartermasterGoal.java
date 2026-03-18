@@ -23,8 +23,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Cluster 3 — Quartermaster Goal (added to a Librarian villager after double-chest promotion).
@@ -236,7 +238,21 @@ public class QuartermasterGoal extends Goal {
         // Must exclude:
         //   - bellChestPos  (we're trying to fill it, not drain it further)
         //   - chestPos      (the QM's own transit buffer — draining it causes haul loops)
+        //   - mason paired chests  (draining them undoes Priority 1 stone hauls)
+        //   - lumberjack paired chests (draining them undoes Priority 2 plank hauls)
         Box box = new Box(jobPos).expand(SCAN_RANGE);
+
+        // Build the protected set of specialist chests we must never drain.
+        Set<BlockPos> protectedChests = new HashSet<>();
+        if (bellChestPos != null) protectedChests.add(bellChestPos);
+        protectedChests.add(chestPos);
+        for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
+            if (mason.getPairedChestPos() != null) protectedChests.add(mason.getPairedChestPos());
+        }
+        for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
+            if (lj.getPairedChestPos() != null) protectedChests.add(lj.getPairedChestPos());
+        }
+
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
         for (VillagerEntity v : villagers) {
             if (v == villager) continue;
@@ -246,8 +262,8 @@ public class QuartermasterGoal extends Goal {
                     v.getBlockPos().add(3, 1, 3))) {
                 if (!world.getBlockState(candidate).getBlock().equals(net.minecraft.block.Blocks.CHEST)) continue;
                 BlockPos immutable = candidate.toImmutable();
-                // Skip the bell chest and QM's own transit chest
-                if (immutable.equals(bellChestPos) || immutable.equals(chestPos)) continue;
+                // Skip all protected chests (bell, QM transit, mason, lumberjack)
+                if (protectedChests.contains(immutable)) continue;
                 if (countAllItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
                     return Optional.of(immutable);
                 }
