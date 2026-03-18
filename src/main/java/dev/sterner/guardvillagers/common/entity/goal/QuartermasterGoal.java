@@ -266,6 +266,18 @@ public class QuartermasterGoal extends Goal {
         for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
             if (lj.getPairedChestPos() != null) protectedChests.add(lj.getPairedChestPos());
         }
+        // Protect shepherd chests — they contain beds + wool + planks needed for bed economy.
+        // Without this, QM Priority-3 hauls beds out of the shepherd chest into the bell chest.
+        for (VillagerEntity shepherd : world.getEntitiesByClass(VillagerEntity.class, box,
+                v -> v.isAlive() && v.getVillagerData().getProfession() == VillagerProfession.SHEPHERD)) {
+            BlockPos jobSite = shepherd.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .filter(gp -> gp.dimension() == world.getRegistryKey())
+                    .map(GlobalPos::pos)
+                    .orElse(null);
+            if (jobSite != null) {
+                JobBlockPairingHelper.findNearbyChest(world, jobSite).ifPresent(protectedChests::add);
+            }
+        }
 
         List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
         for (VillagerEntity v : villagers) {

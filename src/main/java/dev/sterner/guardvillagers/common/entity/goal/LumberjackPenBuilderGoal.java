@@ -58,8 +58,6 @@ public class LumberjackPenBuilderGoal extends Goal {
     private static final int SCAN_RADIUS = VillageGuardStandManager.BELL_EFFECT_RANGE;
     // How often to re-check whether we can start (in ticks)
     private static final int SCAN_INTERVAL_TICKS = 600;
-    // Fraction of chop countdown at which we consider triggering
-    private static final double TRIGGER_COUNTDOWN_FRACTION = 0.5D;
 
     private final LumberjackGuardEntity guard;
 
@@ -312,15 +310,6 @@ public class LumberjackPenBuilderGoal extends Goal {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private boolean isAtChopMidpoint(ServerWorld world) {
-        if (!guard.isChopCountdownActive()) return false;
-        long total = guard.getChopCountdownTotalTicks();
-        if (total <= 0) return false;
-        long elapsed = world.getTime() - guard.getChopCountdownStartTick();
-        double fraction = (double) elapsed / (double) total;
-        return fraction >= TRIGGER_COUNTDOWN_FRACTION;
-    }
-
     private boolean hasPenMaterials(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null) return false;
@@ -400,36 +389,6 @@ public class LumberjackPenBuilderGoal extends Goal {
         }
         // Fall back to guard position if no registered bell is nearby.
         return nearest != null ? nearest : guardPos;
-    }
-
-    private boolean consumeFromChest(ServerWorld world, net.minecraft.item.Item item, int amount) {
-        Optional<Inventory> inv = getInventory(world, guard.getPairedChestPos());
-        if (inv.isEmpty()) return false;
-        Inventory inventory = inv.get();
-        int remaining = amount;
-        for (int i = 0; i < inventory.size() && remaining > 0; i++) {
-            ItemStack stack = inventory.getStack(i);
-            if (!stack.isEmpty() && stack.isOf(item)) {
-                int consumed = Math.min(stack.getCount(), remaining);
-                stack.decrement(consumed);
-                if (stack.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
-                remaining -= consumed;
-            }
-        }
-        if (remaining == 0) {
-            inventory.markDirty();
-            return true;
-        }
-        return false;
-    }
-
-    private int countItem(Inventory inventory, net.minecraft.item.Item item) {
-        int count = 0;
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack stack = inventory.getStack(i);
-            if (!stack.isEmpty() && stack.isOf(item)) count += stack.getCount();
-        }
-        return count;
     }
 
     private Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
