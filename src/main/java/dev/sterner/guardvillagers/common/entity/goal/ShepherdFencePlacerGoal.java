@@ -400,8 +400,10 @@ public class ShepherdFencePlacerGoal extends Goal {
                 // Dirt path check — natural gap/road, don't build here
                 if (floor.isOf(Blocks.DIRT_PATH)) return false;
 
-                // Solid floor
-                if (!floor.isSolidBlock(world, mutable.toImmutable())) return false;
+                // Solid floor — use isSideSolidFullSquare so slabs, stairs, and other
+                // partial blocks with a solid top face are accepted (isSolidBlock requires
+                // full cube occlusion and rejects common terrain like bottom slabs).
+                if (!floor.isSideSolidFullSquare(world, mutable.toImmutable(), net.minecraft.util.math.Direction.UP)) return false;
 
                 // Space at pen level must be replaceable
                 mutable.set(x, surfY + 1, z);

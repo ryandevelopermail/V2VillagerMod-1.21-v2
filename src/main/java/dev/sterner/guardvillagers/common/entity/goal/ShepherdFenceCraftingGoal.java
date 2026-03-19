@@ -85,6 +85,17 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
         return "ShepherdFence";
     }
 
+    /**
+     * Fence crafting is simulated (consume ingredients → produce output directly into chest).
+     * No real crafting table interaction is needed, so we don't block on table availability.
+     * This also allows the goal to run without a crafting table being paired — which is the
+     * common case when there is no lumberjack/bell to place one automatically.
+     */
+    @Override
+    protected boolean requiresCraftingTable() {
+        return false;
+    }
+
     @Override
     protected int getDailyCraftLimit(ServerWorld world) {
         return DAILY_LIMIT;

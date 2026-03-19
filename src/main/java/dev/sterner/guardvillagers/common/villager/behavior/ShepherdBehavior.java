@@ -102,6 +102,19 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         bedPlacerGoal.requestImmediateCheck();
 
+        // Fence crafting (does NOT require a crafting table — simulated craft into chest).
+        // Registered here in onChestPaired so it works without a crafting table being paired.
+        // onCraftingTablePaired will update targets if a table is later paired.
+        ShepherdFenceCraftingGoal fenceCraftingGoalFromChest = FENCE_CRAFTING_GOALS.get(villager);
+        if (fenceCraftingGoalFromChest == null) {
+            fenceCraftingGoalFromChest = new ShepherdFenceCraftingGoal(villager, jobPos, chestPos, null);
+            FENCE_CRAFTING_GOALS.put(villager, fenceCraftingGoalFromChest);
+            villager.goalSelector.add(FENCE_CRAFTING_GOAL_PRIORITY, fenceCraftingGoalFromChest);
+        } else {
+            fenceCraftingGoalFromChest.setTargets(jobPos, chestPos, fenceCraftingGoalFromChest.getCraftingTablePos());
+        }
+        fenceCraftingGoalFromChest.requestImmediateCraft(world);
+
         // Fence placer (runs on chest-pair; no crafting table needed — only places blocks)
         ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
         if (fencePlacerGoal == null) {
