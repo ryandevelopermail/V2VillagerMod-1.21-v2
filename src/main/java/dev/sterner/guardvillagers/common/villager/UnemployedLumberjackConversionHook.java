@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -86,7 +87,28 @@ public final class UnemployedLumberjackConversionHook {
         if (profession == VillagerProfession.NITWIT) {
             return false;
         }
-        return profession == VillagerProfession.NONE;
+        if (profession != VillagerProfession.NONE) {
+            return false;
+        }
+        // Do NOT grab a villager that is already heading toward a non-crafting-table job site.
+        // Vanilla sets POTENTIAL_JOB_SITE in the brain when a villager starts walking to claim
+        // a job block. If that target is anything other than a CRAFTING_TABLE, this villager is
+        // in the process of adopting a different profession — hands off.
+        if (villager.getWorld() instanceof ServerWorld serverWorld) {
+            GlobalPos potentialJobSite = villager.getBrain()
+                    .getOptionalMemory(MemoryModuleType.POTENTIAL_JOB_SITE)
+                    .orElse(null);
+            if (potentialJobSite != null
+                    && potentialJobSite.dimension() == serverWorld.getRegistryKey()) {
+                BlockState targetState =
+                        serverWorld.getBlockState(potentialJobSite.pos());
+                if (!targetState.isOf(Blocks.CRAFTING_TABLE)) {
+                    // Villager is already trying to claim a different job block — leave it alone.
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static Optional<BlockPos> findReachableCraftingTable(ServerWorld world, VillagerEntity villager) {

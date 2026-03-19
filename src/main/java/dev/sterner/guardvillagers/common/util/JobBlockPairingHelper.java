@@ -110,8 +110,14 @@ public final class JobBlockPairingHelper {
     }
 
     private static Collection<VillagerEntity> findEmployedVillagersWithJobSiteNear(ServerWorld world, BlockPos placedPos, double range) {
-        Box worldBounds = getWorldBounds(world);
-        return world.getEntitiesByClass(VillagerEntity.class, worldBounds, villager -> {
+        // Use a tight search box around the placed block instead of getWorldBounds().
+        // getWorldBounds() = entire world border (~60k×60k) → O(all entities) per chest placement.
+        // Any villager whose JOB_SITE is within `range` of placedPos must themselves be within
+        // JOB_BLOCK_PAIRING_RANGE (3.0) of that job site, so they are at most range + 3 blocks
+        // from placedPos. Use a generous 64-block box to safely cover all realistic cases.
+        double scanRadius = range + 64.0D;
+        Box searchBox = new Box(placedPos).expand(scanRadius);
+        return world.getEntitiesByClass(VillagerEntity.class, searchBox, villager -> {
             if (!isEmployedVillager(villager)) {
                 return false;
             }

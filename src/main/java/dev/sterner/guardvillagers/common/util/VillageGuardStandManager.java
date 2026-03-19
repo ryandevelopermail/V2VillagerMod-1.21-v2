@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.BellChestMappingState;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
@@ -144,12 +145,19 @@ public final class VillageGuardStandManager {
 
     private static int countVillageGuards(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
-        return world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive).size();
+        // Only count pure GuardVillagers.GUARD_VILLAGER type — not specialist subtypes
+        // (MasonGuardEntity, LumberjackGuardEntity, etc. extend GuardEntity but are NOT
+        // stand-display guards; including them causes the armor-stand platform to grow
+        // to match specialist counts and display specialist guards on the platform).
+        return world.getEntitiesByClass(GuardEntity.class, searchBox,
+                e -> e.isAlive() && e.getType() == GuardVillagers.GUARD_VILLAGER).size();
     }
 
     private static List<GuardEntity> getGuardsInRange(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
-        return world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+        // Filter to only pure GUARD_VILLAGER type — excludes specialist guard subtypes.
+        return world.getEntitiesByClass(GuardEntity.class, searchBox,
+                e -> e.isAlive() && e.getType() == GuardVillagers.GUARD_VILLAGER);
     }
 
     public static List<ArmorStandEntity> getGuardArmorStands(ServerWorld world, BlockPos bellPos) {
