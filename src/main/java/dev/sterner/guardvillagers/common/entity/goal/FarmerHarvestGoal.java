@@ -194,11 +194,20 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 return true;
             } else {
-                // No seeds yet — remember the obligation and check back soon
-                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds yet — retrying in {} ticks",
-                        villager.getUuidAsString(), unseededCount, UNSEEDED_FARMLAND_SEED_WAIT_TICKS);
-                nextCheckTime = world.getTime() + UNSEEDED_FARMLAND_SEED_WAIT_TICKS;
-                return false;
+                // No seeds in inventory or chest — but we still have unseeded farmland.
+                // Allow the goal to START so it can route into GATHER_WHEAT_SEEDS via
+                // routePostDepositFlow(). Blocking here creates a deadlock: the farmer
+                // can never gather seeds because it can never start.
+                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
+                        villager.getUuidAsString(), unseededCount);
+                wheatSeedForagingRequested = true;
+                nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                long day = world.getTimeOfDay() / 24000L;
+                if (day != lastHarvestDay) {
+                    lastHarvestDay = day;
+                    dailyHarvestRun = true;
+                }
+                return true;
             }
         }
 
