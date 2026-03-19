@@ -26,7 +26,10 @@ import java.util.List;
 import java.util.Optional;
 
 public final class ToolsmithDemandPlanner {
-    public static final double RECIPIENT_SCAN_RANGE = 24.0D;
+    // 64 blocks — generous enough to reach profession job blocks across a typical village
+    // layout without relying on villagers being near the toolsmith at scan time.
+    // Previously 24 blocks, which was too tight for fisherman barrels placed across a village.
+    public static final double RECIPIENT_SCAN_RANGE = 64.0D;
 
     private ToolsmithDemandPlanner() {
     }

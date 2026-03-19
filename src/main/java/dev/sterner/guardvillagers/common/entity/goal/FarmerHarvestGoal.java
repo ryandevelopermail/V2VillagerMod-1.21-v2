@@ -480,6 +480,17 @@ public class FarmerHarvestGoal extends Goal {
             }
             case PLANT_FARMLAND -> {
                 if (plantTargets.isEmpty()) {
+                    // Recheck coverage — if all farmland is now seeded, clear the obligation
+                    FarmlandCoverageStats postPlantCoverage = getFarmlandCoverageStats(serverWorld);
+                    if (postPlantCoverage.hasFullCoverage()) {
+                        hasUnseededFarmlandObligation = false;
+                        LOGGER.info("Farmer {} farmland obligation satisfied — coverage full ({}/{})",
+                                villager.getUuidAsString(), postPlantCoverage.seededCells(), postPlantCoverage.accessibleCells());
+                    } else if (postPlantCoverage.accessibleCells() > postPlantCoverage.seededCells()) {
+                        // Still unseeded farmland — keep obligation active
+                        LOGGER.info("Farmer {} farmland still partially unseeded ({}/{}) — obligation remains",
+                                villager.getUuidAsString(), postPlantCoverage.seededCells(), postPlantCoverage.accessibleCells());
+                    }
                     if (dailyHarvestRun) {
                         notifyDailyHarvestComplete(serverWorld);
                         dailyHarvestRun = false;

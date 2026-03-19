@@ -318,8 +318,11 @@ public class ShepherdBedPlacerGoal extends Goal {
         // isAir() rejects cave_air, flowers, carpet, grass, snow_layer etc.
         // isReplaceable() accepts all blocks that can be overwritten by a new block placement.
         if (!foot.isReplaceable() || !head.isReplaceable()) return false;
-        if (!floorF.isSolidBlock(world, floorFoot)) return false;
-        if (!floorH.isSolidBlock(world, floorHead)) return false;
+        // Use isSideSolidFullSquare(UP) instead of isSolidBlock() so beds can be placed on
+        // bottom slabs, bottom stairs, and other face-solid blocks — matching vanilla placement rules.
+        // isSolidBlock() requires a full-cube occlusion shape, rejecting valid slab/stair floors.
+        if (!floorF.isSideSolidFullSquare(world, floorFoot, Direction.UP)) return false;
+        if (!floorH.isSideSolidFullSquare(world, floorHead, Direction.UP)) return false;
         return true;
     }
 
