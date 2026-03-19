@@ -158,13 +158,11 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
     }
 
     public static void tryConvertButchersWithWeapon(ServerWorld world) {
+        // Use the candidate index only — no world-bounds fallback scan.
+        // getWorldBounds() = entire world-border box (~60k×60k), O(all entities), called every 40 ticks.
+        // The candidate index covers all newly-promoted butchers; the loop body already filters by JOB_SITE,
+        // so any villager not in the index with a job site will be picked up on the next index mark cycle.
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.BUTCHER));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.BUTCHER
-        ));
 
         for (VillagerEntity villager : candidates) {
             if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {

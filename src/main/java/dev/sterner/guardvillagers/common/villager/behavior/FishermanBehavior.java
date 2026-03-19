@@ -150,13 +150,11 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertFishermenWithRod(ServerWorld world) {
+        // Use the candidate index only — no world-bounds fallback scan.
+        // getWorldBounds() = entire world-border box (~60k×60k), O(all entities), called every 40 ticks.
+        // The candidate index covers all newly-promoted fishermen; the loop body already filters by JOB_SITE,
+        // so any villager not in the index with a job site will be picked up on the next index mark cycle.
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
-        ));
 
         for (VillagerEntity villager : candidates) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);

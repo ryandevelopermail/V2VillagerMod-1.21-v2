@@ -37,6 +37,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
+    /** Long backoff when canStart evaluates but there is truly nothing actionable (no crops, seeds, or hoe-ready ground). */
+    private static final int IDLE_BACKOFF_INTERVAL_TICKS = 600;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_NO_TARGET_LIMIT = 3;
@@ -154,17 +156,30 @@ public class FarmerHarvestGoal extends Goal {
         BootstrapPreflight bootstrapPreflight = evaluateBootstrapPreflight(world, false);
         int matureCount = bootstrapPreflight.matureCropCount;
         boolean canRunForHoeing = bootstrapPreflight.canHoeGround;
-        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         if (immediateRunRequested) {
             immediateRunRequested = false;
         }
         if (matureCount >= 1 || canRunForHoeing) {
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             return true;
         }
         if (bootstrapPreflight.shouldRun()) {
-            logBootstrapReason(bootstrapPreflight.reason);
-            return true;
+            // shouldRun() fires when there is a plausible reason (no crops found, may need seeding/hoeing).
+            // But if there are truly no seeds, no hoe-ready ground, and no plantable targets,
+            // there is nothing the farmer can do right now. Use a long backoff to avoid thrashing.
+            boolean nothingActionable = !bootstrapPreflight.canHoeGround
+                    && !bootstrapPreflight.hasPlantTargets
+                    && !bootstrapPreflight.hasSeedsForPlanting
+                    && bootstrapPreflight.matureCropCount == 0
+                    && bootstrapPreflight.plantedCropCount == 0;
+            nextCheckTime = world.getTime() + (nothingActionable ? IDLE_BACKOFF_INTERVAL_TICKS : CHECK_INTERVAL_TICKS);
+            if (!nothingActionable) {
+                logBootstrapReason(bootstrapPreflight.reason);
+                return true;
+            }
+            return false;
         }
+        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         return false;
     }
 
