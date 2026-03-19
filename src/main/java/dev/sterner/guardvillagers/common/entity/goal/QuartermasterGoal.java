@@ -45,7 +45,9 @@ import java.util.function.Predicate;
  *
  * <ol>
  *   <li><b>Mason building wall</b> → haul stone from bell chest to mason's paired chest.</li>
- *   <li><b>Lumberjack crafting</b> → haul planks/wood from bell chest to lumberjack's chest.</li>
+ *   <li><b>Lumberjack crafting (planks)</b> → haul planks/wood from bell chest to lumberjack's chest.</li>
+ *   <li><b>Weaponsmith planks</b> → haul planks to weaponsmith chest for wood weapon crafting.</li>
+ *   <li><b>Lumberjack furnace stone</b> → haul 8 cobblestone to lumberjack for furnace crafting (skipped if furnace already exists near job site).</li>
  *   <li><b>Village chest low</b> → haul from any over-stocked profession chest to bell chest.</li>
  * </ol>
  *
@@ -66,6 +68,10 @@ public class QuartermasterGoal extends Goal {
     private static final int LUMBERJACK_PLANK_THRESHOLD = 16;
     /** Minimum planks in weaponsmith chest before we top it up (for wood weapon crafting). */
     private static final int WEAPONSMITH_PLANK_THRESHOLD = 16;
+    /** Cobblestone needed to craft one furnace (8 cobblestone = 1 furnace). */
+    private static final int LUMBERJACK_FURNACE_STONE_AMOUNT = 8;
+    /** Radius around lumberjack job site to check for an existing furnace. */
+    private static final int FURNACE_CHECK_RADIUS = 5;
     /** Bell chest is considered "low" if total items < this. */
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
@@ -266,6 +272,29 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
+        // Priority 2c: lumberjack needs cobblestone for furnace crafting.
+        // Deliver exactly 8 cobblestone so the lumberjack can craft a furnace for charcoal production.
+        // Skip if a furnace already exists near the lumberjack's job site.
+        Optional<LumberjackFurnaceStoneNeed> lumberjackNeedingFurnaceStone = findLumberjackNeedingFurnaceStone(world);
+        if (lumberjackNeedingFurnaceStone.isPresent()) {
+            LumberjackFurnaceStoneNeed need = lumberjackNeedingFurnaceStone.get();
+            // Prefer mason chest as source; fall back to QM's own chest
+            BlockPos stoneSource = findMasonChestWithCobblestone(world, LUMBERJACK_FURNACE_STONE_AMOUNT);
+            if (stoneSource == null && countItem(world, chestPos, Items.COBBLESTONE) >= LUMBERJACK_FURNACE_STONE_AMOUNT) {
+                stoneSource = chestPos;
+            }
+            if (stoneSource != null) {
+                int available = countItem(world, stoneSource, Items.COBBLESTONE);
+                int toDeliver = Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT, available);
+                sourcePos = stoneSource;
+                destPos = need.chestPos();
+                transferStack = new ItemStack(Items.COBBLESTONE, toDeliver);
+                LOGGER.info("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
+                        villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                return true;
+            }
+        }
+
         // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest.
         // IMPORTANT: only haul whitelisted bulk materials (logs, planks, wool, cobble, wheat, coal, etc.)
         // to avoid draining specialist profession chests of their unique trade goods (arrows, potions,
@@ -320,6 +349,58 @@ public class QuartermasterGoal extends Goal {
      * to our job site to warrant a delivery trip. Uses WeaponsmithBehavior.getPairedChestPositions()
      * so we don't need to scan entities — the chest positions are tracked by the behavior.
      */
+    /**
+     * Finds a lumberjack that needs cobblestone for furnace crafting:
+     * - Paired chest has fewer than 8 cobblestone
+     * - No furnace or blast furnace exists within FURNACE_CHECK_RADIUS of the lumberjack's job pos
+     */
+    private Optional<LumberjackFurnaceStoneNeed> findLumberjackNeedingFurnaceStone(ServerWorld world) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
+            BlockPos ljChest = lj.getPairedChestPos();
+            BlockPos ljJob = lj.getPairedJobPos();
+            if (ljChest == null || ljJob == null) continue;
+            int stoneInChest = countItem(world, ljChest, Items.COBBLESTONE);
+            if (stoneInChest >= LUMBERJACK_FURNACE_STONE_AMOUNT) continue;
+            // Check if a furnace already exists near the lumberjack's job site
+            if (hasFurnaceNear(world, ljJob)) continue;
+            return Optional.of(new LumberjackFurnaceStoneNeed(lj, ljChest));
+        }
+        return Optional.empty();
+    }
+
+    /** Returns true if a furnace or blast furnace exists within FURNACE_CHECK_RADIUS of center. */
+    private boolean hasFurnaceNear(ServerWorld world, BlockPos center) {
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        int r = FURNACE_CHECK_RADIUS;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    mutable.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
+                    BlockState bs = world.getBlockState(mutable);
+                    if (bs.isOf(Blocks.FURNACE) || bs.isOf(Blocks.BLAST_FURNACE)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Finds the nearest mason paired chest that has at least minAmount cobblestone. */
+    private BlockPos findMasonChestWithCobblestone(ServerWorld world, int minAmount) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
+            BlockPos mc = mason.getPairedChestPos();
+            if (mc != null && countItem(world, mc, Items.COBBLESTONE) >= minAmount) {
+                return mc;
+            }
+        }
+        return null;
+    }
+
+    private record LumberjackFurnaceStoneNeed(LumberjackGuardEntity lumberjack, BlockPos chestPos) {}
+
     private Optional<BlockPos> findWeaponsmithChestNeedingPlanks(ServerWorld world) {
         for (BlockPos chestPos : WeaponsmithBehavior.getPairedChestPositions()) {
             if (chestPos.isWithinDistance(jobPos, SCAN_RANGE)
