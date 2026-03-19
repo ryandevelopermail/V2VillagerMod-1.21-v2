@@ -2,9 +2,8 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.util.BellChestMappingState;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -122,6 +121,21 @@ public class QuartermasterGoal extends Goal {
         this.setControls(EnumSet.of(Control.MOVE));
     }
 
+    /**
+     * Registers this QM's chest as the village anchor. Call after construction when the
+     * world is available (e.g. on first canStart() or from the behavior's onChestPaired callback).
+     */
+    public void registerAnchor(ServerWorld world) {
+        VillageAnchorState.get(world.getServer()).register(world, chestPos);
+    }
+
+    /**
+     * Unregisters this QM's chest anchor. Call when the QM dies or loses pairing.
+     */
+    public void unregisterAnchor(ServerWorld world) {
+        VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
+    }
+
     // -------------------------------------------------------------------------
     // Goal lifecycle
     // -------------------------------------------------------------------------
@@ -130,6 +144,8 @@ public class QuartermasterGoal extends Goal {
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive()) return false;
+        // Ensure QM chest is registered as village anchor on every active check
+        registerAnchor(world);
         if (world.getTime() < nextCheckTick) return false;
 
         nextCheckTick = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -545,7 +561,8 @@ public class QuartermasterGoal extends Goal {
     }
 
     private BlockPos resolveBellChestPos(ServerWorld world) {
-        return VillageBellChestPlacementHelper.getMappedChestPos(world, jobPos).orElse(null);
+        // The QM's own paired chest IS the village bank. No bell lookup needed.
+        return chestPos;
     }
 
     // -------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
@@ -31,8 +32,8 @@ import java.util.Optional;
  * Geometry-only pen registry that replaces the old banner-based pen detection.
  * <p>
  * Rescans the world every {@value #RESCAN_INTERVAL_TICKS} ticks (same cadence as the
- * lumberjack spawn manager) to detect fence-gate-enclosed pens near each registered bell.
- * Results are cached per-bell and survive server restarts via {@link PersistentState}.
+ * lumberjack spawn manager) to detect fence-gate-enclosed pens near each registered QM chest anchor.
+ * Results are cached per-anchor and survive server restarts via {@link PersistentState}.
  * <p>
  * Consumer API:
  * <ul>
@@ -44,9 +45,9 @@ import java.util.Optional;
 public class VillagePenRegistry extends PersistentState {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagePenRegistry.class);
     private static final String STATE_ID = GuardVillagers.MODID + "_village_pen_registry";
-    private static final String BELLS_KEY = "Bells";
+    private static final String ANCHORS_KEY = "Anchors";
     private static final String DIMENSION_KEY = "Dimension";
-    private static final String BELL_POS_KEY = "BellPos";
+    private static final String ANCHOR_POS_KEY = "AnchorPos";
     private static final String PENS_KEY = "Pens";
     private static final String FOOT_POS_KEY = "FootPos";
     private static final String CENTER_KEY = "Center";
@@ -80,8 +81,8 @@ public class VillagePenRegistry extends PersistentState {
         }
     }
 
-    /** bell GlobalPos → list of detected pens. */
-    private final Map<GlobalPos, List<PenEntry>> bellToPens = new HashMap<>();
+    /** QM chest GlobalPos → list of detected pens. */
+    private final Map<GlobalPos, List<PenEntry>> anchorToPens = new HashMap<>();
 
     /** Tick of last rescan. Persisted so we don't rescan on first tick after restart. */
     private long lastRescanTick = Long.MIN_VALUE;
@@ -106,28 +107,32 @@ public class VillagePenRegistry extends PersistentState {
         VillagePenRegistry state = new VillagePenRegistry();
         state.lastRescanTick = nbt.getLong("LastRescanTick");
 
-        NbtList bellList = nbt.getList(BELLS_KEY, NbtElement.COMPOUND_TYPE);
-        for (NbtElement element : bellList) {
-            if (!(element instanceof NbtCompound bellEntry)) {
+        // Support both the new "Anchors" key and the legacy "Bells" key so old saves load cleanly.
+        String listKey = nbt.contains(ANCHORS_KEY, NbtElement.LIST_TYPE) ? ANCHORS_KEY : "Bells";
+        String posKey = listKey.equals(ANCHORS_KEY) ? ANCHOR_POS_KEY : "BellPos";
+
+        NbtList anchorList = nbt.getList(listKey, NbtElement.COMPOUND_TYPE);
+        for (NbtElement element : anchorList) {
+            if (!(element instanceof NbtCompound anchorEntry)) {
                 continue;
             }
-            if (!bellEntry.contains(DIMENSION_KEY, NbtElement.STRING_TYPE)
-                    || !bellEntry.contains(BELL_POS_KEY, NbtElement.COMPOUND_TYPE)) {
+            if (!anchorEntry.contains(DIMENSION_KEY, NbtElement.STRING_TYPE)
+                    || !anchorEntry.contains(posKey, NbtElement.COMPOUND_TYPE)) {
                 continue;
             }
-            Identifier dimId = Identifier.tryParse(bellEntry.getString(DIMENSION_KEY));
+            Identifier dimId = Identifier.tryParse(anchorEntry.getString(DIMENSION_KEY));
             if (dimId == null) {
                 continue;
             }
-            Optional<BlockPos> bellPos = NbtHelper.toBlockPos(bellEntry, BELL_POS_KEY);
-            if (bellPos.isEmpty()) {
+            Optional<BlockPos> anchorPos = NbtHelper.toBlockPos(anchorEntry, posKey);
+            if (anchorPos.isEmpty()) {
                 continue;
             }
 
             RegistryKey<net.minecraft.world.World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimId);
-            GlobalPos bellKey = GlobalPos.create(worldKey, bellPos.get().toImmutable());
+            GlobalPos anchorKey = GlobalPos.create(worldKey, anchorPos.get().toImmutable());
 
-            NbtList penList = bellEntry.getList(PENS_KEY, NbtElement.COMPOUND_TYPE);
+            NbtList penList = anchorEntry.getList(PENS_KEY, NbtElement.COMPOUND_TYPE);
             List<PenEntry> pens = new ArrayList<>();
             for (NbtElement penElement : penList) {
                 if (!(penElement instanceof NbtCompound penEntry)) {
@@ -141,7 +146,7 @@ public class VillagePenRegistry extends PersistentState {
                 }
                 pens.add(new PenEntry(gate.get().toImmutable(), center.get().toImmutable(), foot.get().toImmutable()));
             }
-            state.bellToPens.put(bellKey, pens);
+            state.anchorToPens.put(anchorKey, pens);
         }
 
         return state;
@@ -151,11 +156,11 @@ public class VillagePenRegistry extends PersistentState {
     public NbtCompound writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         nbt.putLong("LastRescanTick", lastRescanTick);
 
-        NbtList bellList = new NbtList();
-        for (Map.Entry<GlobalPos, List<PenEntry>> entry : bellToPens.entrySet()) {
-            NbtCompound bellEntry = new NbtCompound();
-            bellEntry.putString(DIMENSION_KEY, entry.getKey().dimension().getValue().toString());
-            bellEntry.put(BELL_POS_KEY, NbtHelper.fromBlockPos(entry.getKey().pos()));
+        NbtList anchorList = new NbtList();
+        for (Map.Entry<GlobalPos, List<PenEntry>> entry : anchorToPens.entrySet()) {
+            NbtCompound anchorEntry = new NbtCompound();
+            anchorEntry.putString(DIMENSION_KEY, entry.getKey().dimension().getValue().toString());
+            anchorEntry.put(ANCHOR_POS_KEY, NbtHelper.fromBlockPos(entry.getKey().pos()));
 
             NbtList penList = new NbtList();
             for (PenEntry pen : entry.getValue()) {
@@ -165,10 +170,10 @@ public class VillagePenRegistry extends PersistentState {
                 penEntry.put(FOOT_POS_KEY, NbtHelper.fromBlockPos(pen.foot()));
                 penList.add(penEntry);
             }
-            bellEntry.put(PENS_KEY, penList);
-            bellList.add(bellEntry);
+            anchorEntry.put(PENS_KEY, penList);
+            anchorList.add(anchorEntry);
         }
-        nbt.put(BELLS_KEY, bellList);
+        nbt.put(ANCHORS_KEY, anchorList);
         return nbt;
     }
 
@@ -196,23 +201,23 @@ public class VillagePenRegistry extends PersistentState {
     private void rescan(ServerWorld world) {
         lastRescanTick = world.getTime();
 
-        // Find all bells in the world
-        BellChestMappingState bellState = BellChestMappingState.get(world.getServer());
-        java.util.Set<BlockPos> bells = bellState.getBellPositions(world);
-        if (bells.isEmpty()) {
+        // Find all registered QM chests (village anchors) in this world
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        java.util.Set<BlockPos> anchors = anchorState.getAllQmChests(world);
+        if (anchors.isEmpty()) {
             return;
         }
 
         int totalPens = 0;
-        for (BlockPos bellPos : bells) {
-            GlobalPos key = GlobalPos.create(world.getRegistryKey(), bellPos.toImmutable());
-            List<PenEntry> pens = scanPensNearBell(world, bellPos);
-            bellToPens.put(key, pens);
+        for (BlockPos anchorPos : anchors) {
+            GlobalPos key = GlobalPos.create(world.getRegistryKey(), anchorPos.toImmutable());
+            List<PenEntry> pens = scanPensNearBell(world, anchorPos);
+            anchorToPens.put(key, pens);
             totalPens += pens.size();
         }
 
         markDirty();
-        LOGGER.info("[VillagePenRegistry] rescan complete: {} bell(s), {} pen(s) detected", bells.size(), totalPens);
+        LOGGER.info("[VillagePenRegistry] rescan complete: {} anchor(s), {} pen(s) detected", anchors.size(), totalPens);
     }
 
     // -------------------------------------------------------------------------
@@ -223,9 +228,9 @@ public class VillagePenRegistry extends PersistentState {
      * Returns the list of detected pens associated with the given bell position.
      * Returns an empty list if no pens have been detected yet.
      */
-    public List<PenEntry> getPens(ServerWorld world, BlockPos bellPos) {
-        GlobalPos key = GlobalPos.create(world.getRegistryKey(), bellPos.toImmutable());
-        return bellToPens.getOrDefault(key, List.of());
+    public List<PenEntry> getPens(ServerWorld world, BlockPos anchorPos) {
+        GlobalPos key = GlobalPos.create(world.getRegistryKey(), anchorPos.toImmutable());
+        return anchorToPens.getOrDefault(key, List.of());
     }
 
     /**
@@ -238,13 +243,13 @@ public class VillagePenRegistry extends PersistentState {
         GlobalPos nearest = null;
         long nearestDist = Long.MAX_VALUE;
 
-        for (GlobalPos key : bellToPens.keySet()) {
+        for (GlobalPos key : anchorToPens.keySet()) {
             if (!key.dimension().equals(world.getRegistryKey())) {
                 continue;
             }
-            BlockPos bellPos = key.pos();
-            long dx = bellPos.getX() - entityPos.getX();
-            long dz = bellPos.getZ() - entityPos.getZ();
+            BlockPos anchorPos = key.pos();
+            long dx = anchorPos.getX() - entityPos.getX();
+            long dz = anchorPos.getZ() - entityPos.getZ();
             long dist = dx * dx + dz * dz;
             if (dist <= radiusSq && dist < nearestDist) {
                 nearestDist = dist;
@@ -255,7 +260,7 @@ public class VillagePenRegistry extends PersistentState {
         if (nearest == null) {
             return List.of();
         }
-        return bellToPens.getOrDefault(nearest, List.of());
+        return anchorToPens.getOrDefault(nearest, List.of());
     }
 
     /**

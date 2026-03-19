@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.util.BellChestMappingState;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -21,7 +21,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.GlobalPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -225,8 +224,10 @@ public class LumberjackPenBuilderGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private boolean tryPlanPen(ServerWorld world) {
-        BlockPos bellPos = resolveBellPos(world);
-        BlockPos origin = findPenOrigin(world, bellPos);
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        BlockPos anchorPos = anchorState.getNearestQmChest(world, guard.getBlockPos(), SCAN_RADIUS)
+                .orElse(guard.getBlockPos());
+        BlockPos origin = findPenOrigin(world, anchorPos);
         if (origin == null) return false;
 
         // Build perimeter list for a PEN_SIZE × PEN_SIZE rectangle
@@ -269,16 +270,16 @@ public class LumberjackPenBuilderGoal extends Goal {
     }
 
     /**
-     * Finds a flat, open 6×6 area within scan range of the bell.
+     * Finds a flat, open 6×6 area within scan range of the anchor (QM chest).
      * Prefers positions inside or near mason wall cobblestone (soft preference).
      */
-    private BlockPos findPenOrigin(ServerWorld world, BlockPos bellPos) {
-        if (bellPos == null) return null;
+    private BlockPos findPenOrigin(ServerWorld world, BlockPos anchorPos) {
+        if (anchorPos == null) return null;
 
         int searchStep = 4;
         for (int dx = -SCAN_RADIUS + PEN_SIZE; dx <= SCAN_RADIUS - PEN_SIZE; dx += searchStep) {
             for (int dz = -SCAN_RADIUS + PEN_SIZE; dz <= SCAN_RADIUS - PEN_SIZE; dz += searchStep) {
-                BlockPos candidate = bellPos.add(dx, 0, dz);
+                BlockPos candidate = anchorPos.add(dx, 0, dz);
                 // Sample the surface Y at this candidate
                 int surfaceY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, candidate).getY();
                 BlockPos origin = new BlockPos(candidate.getX(), surfaceY, candidate.getZ());
@@ -371,24 +372,6 @@ public class LumberjackPenBuilderGoal extends Goal {
             }
         }
         return false;
-    }
-
-    private BlockPos resolveBellPos(ServerWorld world) {
-        // Use BellChestMappingState to find the nearest registered primary bell.
-        BellChestMappingState mapping = BellChestMappingState.get(world.getServer());
-        BlockPos guardPos = guard.getBlockPos();
-
-        BlockPos nearest = null;
-        double nearestDist = Double.MAX_VALUE;
-        for (BlockPos bell : mapping.getBellPositions(world)) {
-            double dist = guardPos.getSquaredDistance(bell);
-            if (dist <= (double) SCAN_RADIUS * SCAN_RADIUS && dist < nearestDist) {
-                nearestDist = dist;
-                nearest = bell;
-            }
-        }
-        // Fall back to guard position if no registered bell is nearby.
-        return nearest != null ? nearest : guardPos;
     }
 
     private Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {

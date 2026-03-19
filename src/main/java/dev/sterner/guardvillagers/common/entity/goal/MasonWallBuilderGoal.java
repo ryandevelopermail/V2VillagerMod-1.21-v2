@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
-import dev.sterner.guardvillagers.common.util.BellChestMappingState;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -16,7 +16,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
@@ -36,7 +35,7 @@ import java.util.stream.Stream;
  *
  * <p>Behaviour summary:
  * <ol>
- *   <li>Scan all job-site POI blocks + beds within BELL_EFFECT_RANGE of this mason's home bell
+ *   <li>Scan all job-site POI blocks + beds within BELL_EFFECT_RANGE of the nearest QM chest
  *       → compute axis-aligned bounding rectangle → expand 10 blocks outward.</li>
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
@@ -110,16 +109,14 @@ public class MasonWallBuilderGoal extends Goal {
         if (guard.getPairedChestPos() == null) return false;
         if (world.getTime() < nextScanTick) return false;
 
-        // Only fire from primary bells
-        GlobalPos homeBell = guard.getWallBuilderHomeBell();
-        if (homeBell == null) return false;
-
-        BellChestMappingState mapping = BellChestMappingState.get(world.getServer());
-        if (!mapping.isPrimaryBell(world, homeBell.pos())) return false;
+        // Resolve village anchor from nearest QM chest — no bell required
+        Optional<BlockPos> anchorOpt = VillageAnchorState.get(world.getServer())
+                .getNearestQmChest(world, guard.getBlockPos(), (int) PEER_SCAN_RANGE);
+        if (anchorOpt.isEmpty()) return false;
 
         nextScanTick = world.getTime() + SCAN_INTERVAL_TICKS;
 
-        return tryInitiateBuildCycle(world, homeBell.pos());
+        return tryInitiateBuildCycle(world, anchorOpt.get());
     }
 
     @Override
@@ -172,13 +169,15 @@ public class MasonWallBuilderGoal extends Goal {
     /**
      * Attempts to start a wall-build cycle.  Returns true if this mason has a role to play
      * (either elected builder or stone donor).
+     *
+     * @param anchorPos the QM chest position — used as the geographic village center
      */
-    private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos bellPos) {
+    private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos anchorPos) {
         // 1. Compute wall rectangle
-        Optional<WallRect> rectOpt = computeWallRect(world, bellPos);
+        Optional<WallRect> rectOpt = computeWallRect(world, anchorPos);
         if (rectOpt.isEmpty()) {
-            LOGGER.debug("MasonWallBuilder {}: no village bounds found near bell {}",
-                    guard.getUuidAsString(), bellPos.toShortString());
+            LOGGER.debug("MasonWallBuilder {}: no village bounds found near anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
             return false;
         }
         WallRect rect = rectOpt.get();
@@ -198,8 +197,8 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
-        // 3. Find all peer masons sharing this bell
-        List<MasonGuardEntity> peers = getPeerMasons(world, bellPos);
+        // 3. Find all peer masons near the anchor
+        List<MasonGuardEntity> peers = getPeerMasons(world, anchorPos);
 
         // 4. Count cobblestone across all peers (including self)
         int myStone = countCobblestoneInChest(world, guard.getPairedChestPos());
@@ -368,12 +367,12 @@ public class MasonWallBuilderGoal extends Goal {
     // -------------------------------------------------------------------------
 
     /**
-     * Scans job-site POI blocks and beds within BELL_EFFECT_RANGE of the bell,
+     * Scans job-site POI blocks and beds within BELL_EFFECT_RANGE of the QM chest anchor,
      * computes their bounding box, expands by WALL_EXPAND, and returns a rectangle.
      */
-    private Optional<WallRect> computeWallRect(ServerWorld world, BlockPos bellPos) {
+    private Optional<WallRect> computeWallRect(ServerWorld world, BlockPos anchorPos) {
         int range = VillageGuardStandManager.BELL_EFFECT_RANGE;
-        Box searchBox = new Box(bellPos).expand(range);
+        Box searchBox = new Box(anchorPos).expand(range);
 
         int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
@@ -383,7 +382,7 @@ public class MasonWallBuilderGoal extends Goal {
         PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         Stream<BlockPos> poiStream = poiStorage.getInSquare(
                 type -> true,
-                bellPos,
+                anchorPos,
                 range,
                 PointOfInterestStorage.OccupationStatus.ANY
         ).map(poi -> poi.getPos());
@@ -413,7 +412,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (!found) return Optional.empty();
 
         // Expand by WALL_EXPAND and snap to a rectangle
-        int wallY = bellPos.getY(); // wall is at bell Y level
+        int wallY = anchorPos.getY(); // wall is at anchor Y level
 
         return Optional.of(new WallRect(
                 minX - WALL_EXPAND,
@@ -559,8 +558,8 @@ public class MasonWallBuilderGoal extends Goal {
     // Peer mason utilities
     // -------------------------------------------------------------------------
 
-    private List<MasonGuardEntity> getPeerMasons(ServerWorld world, BlockPos bellPos) {
-        Box searchBox = new Box(bellPos).expand(PEER_SCAN_RANGE);
+    private List<MasonGuardEntity> getPeerMasons(ServerWorld world, BlockPos anchorPos) {
+        Box searchBox = new Box(anchorPos).expand(PEER_SCAN_RANGE);
         return world.getEntitiesByClass(MasonGuardEntity.class, searchBox,
                 mason -> mason.isAlive() && mason.getPairedChestPos() != null);
     }

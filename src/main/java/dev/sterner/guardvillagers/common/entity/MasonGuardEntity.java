@@ -32,11 +32,7 @@ import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.registry.Registries;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.RegistryKeys;
-import net.minecraft.util.Identifier;
 import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,8 +56,6 @@ public class MasonGuardEntity extends GuardEntity {
     private boolean miningSessionActive;
 
     // Cluster 4 — Wall builder state
-    /** The primary bell this mason is associated with for wall-building decisions. */
-    private GlobalPos wallBuilderHomeBell;
     /** Ordered list of remaining wall segment positions to place. Persisted across restarts. */
     private List<BlockPos> wallSegments = new ArrayList<>();
     /** Gate positions reserved per wall face (1 per face, max 4). For lumberjack fence gates. */
@@ -137,14 +131,6 @@ public class MasonGuardEntity extends GuardEntity {
     // -------------------------------------------------------------------------
     // Cluster 4 — Wall builder accessors
     // -------------------------------------------------------------------------
-
-    public GlobalPos getWallBuilderHomeBell() {
-        return wallBuilderHomeBell;
-    }
-
-    public void setWallBuilderHomeBell(GlobalPos bellPos) {
-        this.wallBuilderHomeBell = bellPos;
-    }
 
     public List<BlockPos> getWallSegments() {
         return wallSegments;
@@ -290,17 +276,7 @@ public class MasonGuardEntity extends GuardEntity {
         }
         this.nextMiningStartTick = nbt.contains("MasonNextMiningStartTick") ? nbt.getLong("MasonNextMiningStartTick") : 0L;
         this.miningSessionActive = nbt.getBoolean("MasonMiningSessionActive");
-        // Cluster 4 — Wall builder state
-        if (nbt.contains("MasonWallBellDim") && nbt.contains("MasonWallBellX")) {
-            Identifier dimId = Identifier.tryParse(nbt.getString("MasonWallBellDim"));
-            if (dimId != null) {
-                RegistryKey<World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimId);
-                BlockPos bellPos = new BlockPos(nbt.getInt("MasonWallBellX"), nbt.getInt("MasonWallBellY"), nbt.getInt("MasonWallBellZ"));
-                this.wallBuilderHomeBell = GlobalPos.create(worldKey, bellPos);
-            }
-        } else {
-            this.wallBuilderHomeBell = null;
-        }
+        // Cluster 4 — Wall builder state (bell-based anchor removed; QM chest is now the anchor)
         this.wallSegments = readBlockPosList(nbt, "MasonWallSegments");
         this.wallGatePositions = readBlockPosList(nbt, "MasonWallGates");
 
@@ -341,13 +317,7 @@ public class MasonGuardEntity extends GuardEntity {
             NbtCompound toolNbt = new NbtCompound();
             nbt.put("MasonExpectedTool", this.expectedMiningTool.encode(this.getRegistryManager(), toolNbt));
         }
-        // Cluster 4 — Wall builder state
-        if (this.wallBuilderHomeBell != null) {
-            nbt.putString("MasonWallBellDim", this.wallBuilderHomeBell.dimension().getValue().toString());
-            nbt.putInt("MasonWallBellX", this.wallBuilderHomeBell.pos().getX());
-            nbt.putInt("MasonWallBellY", this.wallBuilderHomeBell.pos().getY());
-            nbt.putInt("MasonWallBellZ", this.wallBuilderHomeBell.pos().getZ());
-        }
+        // Cluster 4 — Wall builder state (bell-based anchor removed; QM chest is now the anchor)
         nbt.put("MasonWallSegments", writeBlockPosList(this.wallSegments));
         nbt.put("MasonWallGates", writeBlockPosList(this.wallGatePositions));
 

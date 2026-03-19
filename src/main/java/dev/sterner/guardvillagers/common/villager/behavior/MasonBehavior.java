@@ -6,7 +6,6 @@ import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal.CraftingCheckTrigger;
-import dev.sterner.guardvillagers.common.util.BellChestMappingState;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.PairedStorageHelper;
@@ -334,11 +333,8 @@ public class MasonBehavior implements VillagerProfessionBehavior {
         guard.setExpectedMiningTool(trigger.tool());
         guard.setPairedChestPos(chestPos);
         guard.setPairedJobPos(jobPos);
-
-        // Cluster 4: assign home bell so the wall builder goal knows which village this mason belongs to
-        BlockPos primaryBell = BellChestMappingState.get(world.getServer())
-                .registerBellAndGetPrimary(world, jobPos, VillageGuardStandManager.BELL_EFFECT_RANGE);
-        guard.setWallBuilderHomeBell(GlobalPos.create(world.getRegistryKey(), primaryBell));
+        // No bell registration needed — MasonWallBuilderGoal resolves village anchor from
+        // VillageAnchorState (QM chest) at runtime, not from a stored bell GlobalPos.
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.MASON, "mason conversion");
 

@@ -1,8 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.MapColor;
 import net.minecraft.entity.ai.goal.Goal;
@@ -259,7 +259,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
     /**
      * Computes the bounding box that covers all 4 completed map tiles and writes it to
-     * {@link VillageMappedBoundsState}, keyed by the nearest bell to the cartographer's job site.
+     * {@link VillageMappedBoundsState}, keyed by the nearest QM chest to the cartographer's job site.
      */
     private void emitMappedBoundsToRegistry(ServerWorld world) {
         if (workflowTargets.isEmpty()) {
@@ -280,39 +280,24 @@ public class CartographerMapExplorationGoal extends Goal {
             maxZ = Math.max(maxZ, target.centerZ() + half);
         }
 
-        // Find nearest bell to the job site so we can key the bounds correctly.
-        BlockPos nearestBell = findNearestBell(world, jobPos, 300);
-        if (nearestBell == null) {
-            LOGGER.warn("Cartographer {} could not find a nearby bell to key mapped bounds; skipping registry write",
+        // Find the nearest QM chest to the job site — this is the village anchor key.
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, jobPos, 300);
+        if (nearestQm.isEmpty()) {
+            LOGGER.warn("Cartographer {} could not find a nearby QM chest to key mapped bounds; skipping registry write",
                     villager.getUuidAsString());
             return;
         }
+        BlockPos anchorPos = nearestQm.get();
 
         VillageMappedBoundsState boundsState = VillageMappedBoundsState.get(world.getServer());
         VillageMappedBoundsState.MappedBounds bounds = new VillageMappedBoundsState.MappedBounds(minX, maxX, minZ, maxZ);
-        boundsState.putBounds(world.getRegistryKey(), nearestBell, bounds);
+        boundsState.putBounds(world.getRegistryKey(), anchorPos, bounds);
 
-        LOGGER.info("Cartographer {} wrote mapped bounds for bell {} → [{},{} to {},{}]",
+        LOGGER.info("Cartographer {} wrote mapped bounds for QM chest {} → [{},{} to {},{}]",
                 villager.getUuidAsString(),
-                nearestBell.toShortString(),
+                anchorPos.toShortString(),
                 minX, minZ, maxX, maxZ);
-    }
-
-    private BlockPos findNearestBell(ServerWorld world, BlockPos center, int radius) {
-        BlockPos min = center.add(-radius, -16, -radius);
-        BlockPos max = center.add(radius, 16, radius);
-        BlockPos nearest = null;
-        double nearestDist = Double.MAX_VALUE;
-        for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
-                double dist = center.getSquaredDistance(cursor);
-                if (dist < nearestDist) {
-                    nearestDist = dist;
-                    nearest = cursor.toImmutable();
-                }
-            }
-        }
-        return nearest;
     }
 
     private void clearWorkflowState() {
