@@ -65,9 +65,9 @@ public class ShepherdFencePlacerGoal extends Goal {
     private static final int MIN_GATES = 1;
 
     /** How far from the job block to search for a valid pen site. */
-    private static final int SITE_SEARCH_RADIUS = 16;
-    /** Flat-ground tolerance: all floor Y must be within ±1 of the base Y. */
-    private static final int FLAT_Y_TOLERANCE = 1;
+    private static final int SITE_SEARCH_RADIUS = 32;
+    /** Flat-ground tolerance: all floor Y must be within ±2 of the base Y. */
+    private static final int FLAT_Y_TOLERANCE = 2;
 
     /** Pen scan radius — same as crafting goal. */
     private static final int PEN_SCAN_RADIUS = 300;
@@ -123,7 +123,7 @@ public class ShepherdFencePlacerGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
-        if (!villager.isAlive() || !world.isDay()) return false;
+        if (!villager.isAlive()) return false;
         if (villager.getVillagerData().getProfession() != VillagerProfession.SHEPHERD) return false;
         if (jobPos == null || chestPos == null) return false;
         if (!world.getRegistryKey().equals(net.minecraft.world.World.OVERWORLD)) return false;
@@ -134,22 +134,32 @@ public class ShepherdFencePlacerGoal extends Goal {
         // Don't act if a pen already exists near the job site
         VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
         if (registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent()) {
+            LOGGER.debug("ShepherdFencePlacer {}: pen already exists near job site {}, skipping",
+                    villager.getUuidAsString(), jobPos.toShortString());
             return false;
         }
 
         // Check chest has enough materials
         Optional<Inventory> invOpt = getChestInventory(world);
-        if (invOpt.isEmpty()) return false;
+        if (invOpt.isEmpty()) {
+            LOGGER.info("ShepherdFencePlacer {}: no chest inventory at {}", villager.getUuidAsString(), chestPos.toShortString());
+            return false;
+        }
         Inventory inv = invOpt.get();
 
-        if (countTag(inv, ItemTags.FENCES) < MIN_FENCES) return false;
-        if (countTag(inv, ItemTags.FENCE_GATES) < MIN_GATES) return false;
+        int fenceCount = countTag(inv, ItemTags.FENCES);
+        int gateCount = countTag(inv, ItemTags.FENCE_GATES);
+        if (fenceCount < MIN_FENCES || gateCount < MIN_GATES) {
+            LOGGER.info("ShepherdFencePlacer {}: insufficient materials — fences={}/{} gates={}/{}",
+                    villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES);
+            return false;
+        }
 
         // Find a valid site
         PenPlan plan = findPenSite(world);
         if (plan == null) {
-            LOGGER.info("ShepherdFencePlacer {}: has materials but found no valid 7×7 site within {} blocks of job site {}",
-                    villager.getUuidAsString(), SITE_SEARCH_RADIUS, jobPos.toShortString());
+            LOGGER.info("ShepherdFencePlacer {}: has materials (fences={} gates={}) but found no valid 7×7 site within {} blocks of job site {}",
+                    villager.getUuidAsString(), fenceCount, gateCount, SITE_SEARCH_RADIUS, jobPos.toShortString());
             return false;
         }
 
@@ -397,21 +407,24 @@ public class ShepherdFencePlacerGoal extends Goal {
                 mutable.set(x, surfY + 1, z);
                 if (!world.getBlockState(mutable).isReplaceable()) return false;
 
-                // No job-site POI inside the 5×5 interior
-                // Interior = dx in [1, PEN_SIZE-2], dz in [1, PEN_SIZE-2]
-                if (dx > 0 && dx < PEN_SIZE - 1 && dz > 0 && dz < PEN_SIZE - 1) {
-                    mutable.set(x, surfY + 1, z);
-                    PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
-                    Stream<BlockPos> poiStream = poiStorage.getInSquare(
-                            type -> true,
-                            mutable.toImmutable(),
-                            1,
-                            PointOfInterestStorage.OccupationStatus.ANY
-                    ).map(poi -> poi.getPos());
-                    if (poiStream.findAny().isPresent()) return false;
-                }
             }
         }
+
+        // Single POI check for the entire interior (5×5 inner area)
+        // More efficient than per-cell checks
+        BlockPos interiorCenter = new BlockPos(
+                origin.getX() + PEN_SIZE / 2,
+                origin.getY() + 1,
+                origin.getZ() + PEN_SIZE / 2);
+        PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+        boolean hasPoi = poiStorage.getInSquare(
+                type -> true,
+                interiorCenter,
+                PEN_SIZE / 2 - 1,
+                PointOfInterestStorage.OccupationStatus.ANY
+        ).findAny().isPresent();
+        if (hasPoi) return false;
+
         return true;
     }
 

@@ -99,7 +99,13 @@ public class CartographerMapExplorationGoal extends Goal {
             return false;
         }
 
-        LOGGER.info("Cartographer {} canStart=true: emptyMaps={} pendingTiles={}", villager.getUuidAsString(), emptyMaps, pending);
+        // Log first tile destination so the user can confirm cartographer is about to move
+        if (!pendingTargets.isEmpty()) {
+            MapTarget first = pendingTargets.get(0);
+            int dist = (int) Math.sqrt(villager.squaredDistanceTo(first.centerX(), villager.getY(), first.centerZ()));
+            LOGGER.info("Cartographer {} canStart=true: emptyMaps={} pendingTiles={} firstTarget=({},{}) approxDist={}",
+                    villager.getUuidAsString(), emptyMaps, pending, first.centerX(), first.centerZ(), dist);
+        }
         return true;
     }
 

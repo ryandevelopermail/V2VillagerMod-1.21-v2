@@ -39,6 +39,11 @@ public class FarmerHarvestGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = 20;
     /** Long backoff when canStart evaluates but there is truly nothing actionable (no crops, seeds, or hoe-ready ground). */
     private static final int IDLE_BACKOFF_INTERVAL_TICKS = 600;
+    /**
+     * Short retry interval used when the farmer knows it has unseeded farmland but currently
+     * lacks seeds. The farmer "remembers" the obligation and checks back frequently.
+     */
+    private static final int UNSEEDED_FARMLAND_SEED_WAIT_TICKS = 100;
     private static final int TARGET_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_TIMEOUT_TICKS = 200;
     private static final int GATHER_SEEDS_NO_TARGET_LIMIT = 3;
@@ -94,6 +99,14 @@ public class FarmerHarvestGoal extends Goal {
     private int seedForageRetryCount;
     private String pendingSeedGatherEndReason;
 
+    /**
+     * True when the farmer has confirmed unseeded farmland exists within its range.
+     * Persists across goal ticks so the farmer treats it as an ongoing obligation,
+     * not just an opportunistic check. Cleared only when farmland coverage is full
+     * or the farmer runs out of farmland entirely.
+     */
+    private boolean hasUnseededFarmlandObligation = false;
+
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
         setTargets(jobPos, chestPos);
@@ -116,6 +129,7 @@ public class FarmerHarvestGoal extends Goal {
         this.gatherLowYieldBreakPasses = 0;
         this.nextSeedForageRetryTick = 0L;
         this.seedForageRetryCount = 0;
+        this.hasUnseededFarmlandObligation = false;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -144,15 +158,54 @@ public class FarmerHarvestGoal extends Goal {
         if (!immediateRunRequested && world.getTime() < nextCheckTime) {
             return false;
         }
+        if (immediateRunRequested) {
+            immediateRunRequested = false;
+        }
 
+        BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
+
+        // Update unseeded farmland obligation state — this persists between canStart() calls
+        // so the farmer "remembers" that it has unfinished work even between goal ticks.
+        FarmlandCoverageStats coverage = getFarmlandCoverageStats(world);
+        int unseededCount = Math.max(0, coverage.accessibleCells() - coverage.seededCells());
+        if (unseededCount > 0) {
+            hasUnseededFarmlandObligation = true;
+        } else if (coverage.accessibleCells() > 0) {
+            // Coverage is full — obligation satisfied
+            hasUnseededFarmlandObligation = false;
+        }
+        // If accessibleCells == 0 (no farmland at all), leave obligation as-is
+
+        // --- OBLIGATION PATH ---
+        // Unseeded farmland is an incomplete task. The farmer is obligated to finish it.
+        if (hasUnseededFarmlandObligation) {
+            boolean seedsAvailable = preflight.hasSeedsForPlanting || hasSeedsInChest(world);
+            if (seedsAvailable) {
+                // Seeds exist — act immediately, no backoff
+                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
+                        villager.getUuidAsString(), unseededCount);
+                nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                long day = world.getTimeOfDay() / 24000L;
+                if (day != lastHarvestDay) {
+                    lastHarvestDay = day;
+                    dailyHarvestRun = true;
+                }
+                return true;
+            } else {
+                // No seeds yet — remember the obligation and check back soon
+                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds yet — retrying in {} ticks",
+                        villager.getUuidAsString(), unseededCount, UNSEEDED_FARMLAND_SEED_WAIT_TICKS);
+                nextCheckTime = world.getTime() + UNSEEDED_FARMLAND_SEED_WAIT_TICKS;
+                return false;
+            }
+        }
+
+        // --- NORMAL PATH (no unseeded farmland obligation) ---
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastHarvestDay) {
             lastHarvestDay = day;
             // Evaluate before committing to a daily run — if there is truly nothing actionable
             // (no farmland, no crops, no seeds, no hoe-ready ground) skip the daily trip entirely.
-            // Without this guard, a farmer with no farmland walks to job and back every in-game day,
-            // creating a constant idle loop visible as "farmer standing still" between movements.
-            BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
             boolean nothingActionable = !preflight.canHoeGround
                     && !preflight.hasPlantTargets
                     && !preflight.hasSeedsForPlanting
@@ -167,33 +220,42 @@ public class FarmerHarvestGoal extends Goal {
             return true;
         }
 
-        BootstrapPreflight bootstrapPreflight = evaluateBootstrapPreflight(world, false);
-        int matureCount = bootstrapPreflight.matureCropCount;
-        boolean canRunForHoeing = bootstrapPreflight.canHoeGround;
-        if (immediateRunRequested) {
-            immediateRunRequested = false;
-        }
+        int matureCount = preflight.matureCropCount;
+        boolean canRunForHoeing = preflight.canHoeGround;
         if (matureCount >= 1 || canRunForHoeing) {
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             return true;
         }
-        if (bootstrapPreflight.shouldRun()) {
+        if (preflight.shouldRun()) {
             // shouldRun() fires when there is a plausible reason (no crops found, may need seeding/hoeing).
             // But if there are truly no seeds, no hoe-ready ground, and no plantable targets,
             // there is nothing the farmer can do right now. Use a long backoff to avoid thrashing.
-            boolean nothingActionable = !bootstrapPreflight.canHoeGround
-                    && !bootstrapPreflight.hasPlantTargets
-                    && !bootstrapPreflight.hasSeedsForPlanting
-                    && bootstrapPreflight.matureCropCount == 0
-                    && bootstrapPreflight.plantedCropCount == 0;
+            boolean nothingActionable = !preflight.canHoeGround
+                    && !preflight.hasPlantTargets
+                    && !preflight.hasSeedsForPlanting
+                    && preflight.matureCropCount == 0
+                    && preflight.plantedCropCount == 0;
             nextCheckTime = world.getTime() + (nothingActionable ? IDLE_BACKOFF_INTERVAL_TICKS : CHECK_INTERVAL_TICKS);
             if (!nothingActionable) {
-                logBootstrapReason(bootstrapPreflight.reason);
+                logBootstrapReason(preflight.reason);
                 return true;
             }
             return false;
         }
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        return false;
+    }
+
+    /** Returns true if any plantable seed type is present in the paired chest. */
+    private boolean hasSeedsInChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return false;
+        Inventory inv = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
+        if (inv == null) return false;
+        for (int slot = 0; slot < inv.size(); slot++) {
+            ItemStack stack = inv.getStack(slot);
+            if (!stack.isEmpty() && isPlantableSeedOrCrop(stack.getItem())) return true;
+        }
         return false;
     }
 
