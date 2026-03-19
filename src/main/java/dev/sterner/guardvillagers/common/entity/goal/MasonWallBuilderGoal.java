@@ -11,7 +11,6 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
-import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -210,11 +209,14 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
 
-        int needed = unbuilt.size() * STONE_PER_SEGMENT;
-        if (totalStone < needed) {
-            LOGGER.debug("MasonWallBuilder {}: not enough stone ({}/{}) for wall", guard.getUuidAsString(), totalStone, needed);
+        // Build with whatever stone we have — don't require full wall upfront.
+        // If we have zero stone, wait for the distribution goal to supply more.
+        if (totalStone < 1) {
+            LOGGER.debug("MasonWallBuilder {}: no stone available yet (0/{} needed total)", guard.getUuidAsString(), unbuilt.size());
             return false;
         }
+        LOGGER.info("MasonWallBuilder {}: {} stone available, {} segments to build ({} unbuilt)",
+                guard.getUuidAsString(), totalStone, unbuilt.size(), unbuilt.size());
 
         // 5. Elect builder — the mason (including self) with the most stone
         MasonGuardEntity electedBuilder = guard;
@@ -378,7 +380,8 @@ public class MasonWallBuilderGoal extends Goal {
         int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
         boolean found = false;
 
-        // Scan job-site POI via the POI storage
+        // Scan all POI blocks (job sites AND beds — beds are registered as HOME POI in vanilla)
+        // via the POI storage. This is O(POI count), not O(volume).
         PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         Stream<BlockPos> poiStream = poiStorage.getInSquare(
                 type -> true,
@@ -394,19 +397,6 @@ public class MasonWallBuilderGoal extends Goal {
             if (pos.getZ() < minZ) minZ = pos.getZ();
             if (pos.getZ() > maxZ) maxZ = pos.getZ();
             found = true;
-        }
-
-        // Also scan for beds
-        for (BlockPos pos : BlockPos.iterate(
-                (int) searchBox.minX, (int) searchBox.minY, (int) searchBox.minZ,
-                (int) searchBox.maxX, (int) searchBox.maxY, (int) searchBox.maxZ)) {
-            if (world.getBlockState(pos).isIn(BlockTags.BEDS)) {
-                if (pos.getX() < minX) minX = pos.getX();
-                if (pos.getX() > maxX) maxX = pos.getX();
-                if (pos.getZ() < minZ) minZ = pos.getZ();
-                if (pos.getZ() > maxZ) maxZ = pos.getZ();
-                found = true;
-            }
         }
 
         if (!found) return Optional.empty();
@@ -520,33 +510,61 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Picks one gate position per wall face (N/S/E/W) — the midpoint of each face.
+     * Picks one gate position per wall face (N/S/E/W) — the unbuilt segment closest to the
+     * midpoint of each face.  Actual segment Y varies with terrain (surfaceY + 1), so we
+     * search by X/Z proximity rather than constructing a fixed-Y position that would never
+     * match any computed segment.
+     *
      * These are stored on the guard entity for lumberjack fence gate placement later.
      */
     private List<BlockPos> pickGatePositions(WallRect rect, List<BlockPos> unbuiltSegments) {
         List<BlockPos> gates = new ArrayList<>();
-        int y = rect.y();
-        Set<BlockPos> unbuiltSet = new HashSet<>(unbuiltSegments);
 
-        // North face midpoint
+        // Midpoint X and Z coordinates for each face
         int northMidX = (rect.minX() + rect.maxX()) / 2;
-        BlockPos northGate = new BlockPos(northMidX, y, rect.minZ());
-        if (unbuiltSet.contains(northGate)) gates.add(northGate);
+        int southMidX = northMidX;
+        int westMidZ  = (rect.minZ() + rect.maxZ()) / 2;
+        int eastMidZ  = westMidZ;
 
-        // South face midpoint
-        BlockPos southGate = new BlockPos(northMidX, y, rect.maxZ());
-        if (unbuiltSet.contains(southGate)) gates.add(southGate);
+        // For each face, find the segment whose (X,Z) is closest to the face midpoint
+        BlockPos northGate = findClosestSegmentOnFace(unbuiltSegments, northMidX, rect.minZ(), true);
+        BlockPos southGate = findClosestSegmentOnFace(unbuiltSegments, southMidX, rect.maxZ(), true);
+        BlockPos westGate  = findClosestSegmentOnFace(unbuiltSegments, rect.minX(), westMidZ,  false);
+        BlockPos eastGate  = findClosestSegmentOnFace(unbuiltSegments, rect.maxX(), eastMidZ,  false);
 
-        // West face midpoint
-        int westMidZ = (rect.minZ() + rect.maxZ()) / 2;
-        BlockPos westGate = new BlockPos(rect.minX(), y, westMidZ);
-        if (unbuiltSet.contains(westGate)) gates.add(westGate);
-
-        // East face midpoint
-        BlockPos eastGate = new BlockPos(rect.maxX(), y, westMidZ);
-        if (unbuiltSet.contains(eastGate)) gates.add(eastGate);
+        if (northGate != null) gates.add(northGate);
+        if (southGate != null) gates.add(southGate);
+        if (westGate  != null) gates.add(westGate);
+        if (eastGate  != null) gates.add(eastGate);
 
         return gates;
+    }
+
+    /**
+     * Finds the segment in {@code segments} that lies on the face defined by the fixed
+     * coordinate ({@code fixedZ} when {@code fixedIsZ} is true, otherwise {@code fixedX})
+     * and whose variable coordinate is closest to the midpoint value.
+     *
+     * @param segments    list of unbuilt wall segment positions
+     * @param midX        target X coordinate (used as midpoint when fixedIsZ = true)
+     * @param midZ        target Z coordinate (used as midpoint when fixedIsZ = false)
+     * @param fixedIsZ    true → match segments where Z == midZ; false → match where X == midX
+     */
+    private BlockPos findClosestSegmentOnFace(List<BlockPos> segments, int midX, int midZ, boolean fixedIsZ) {
+        BlockPos best = null;
+        int bestDist = Integer.MAX_VALUE;
+        for (BlockPos pos : segments) {
+            if (fixedIsZ) {
+                if (pos.getZ() != midZ) continue;
+                int dist = Math.abs(pos.getX() - midX);
+                if (dist < bestDist) { bestDist = dist; best = pos; }
+            } else {
+                if (pos.getX() != midX) continue;
+                int dist = Math.abs(pos.getZ() - midZ);
+                if (dist < bestDist) { bestDist = dist; best = pos; }
+            }
+        }
+        return best;
     }
 
     private boolean isGatePosition(BlockPos pos) {
