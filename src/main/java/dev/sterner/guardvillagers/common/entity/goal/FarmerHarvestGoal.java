@@ -181,7 +181,9 @@ public class FarmerHarvestGoal extends Goal {
         if (hasUnseededFarmlandObligation) {
             boolean seedsAvailable = preflight.hasSeedsForPlanting || hasSeedsInChest(world);
             if (seedsAvailable) {
-                // Seeds exist — act immediately, no backoff
+                // Seeds exist — act immediately, clear any stale forage cooldown so
+                // the seed-gathering workflow isn't blocked by a previous retry timer.
+                clearSeedForageRetryCooldown(world, "unseeded farmland obligation with seeds available");
                 LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
                         villager.getUuidAsString(), unseededCount);
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -1263,9 +1265,6 @@ public class FarmerHarvestGoal extends Goal {
     private void populateHoeTargets(ServerWorld world) {
         hoeTargets.clear();
 
-        // No water-proximity gate — hoe any valid dirt/grass block with air above.
-        // The game engine handles farmland drying out if there's no water; we should not
-        // refuse to hoe just because water isn't immediately adjacent.
         List<BlockPos> hoeableTargets = new ArrayList<>();
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
@@ -1276,6 +1275,9 @@ public class FarmerHarvestGoal extends Goal {
                 continue;
             }
             if (!isHoeTarget(world, pos)) {
+                continue;
+            }
+            if (!hasNearbyWater(world, pos)) {
                 continue;
             }
             hoeableTargets.add(pos.toImmutable());
@@ -1385,7 +1387,7 @@ public class FarmerHarvestGoal extends Goal {
             if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
                 continue;
             }
-            if (isHoeTarget(world, pos)) {
+            if (isHoeTarget(world, pos) && hasNearbyWater(world, pos)) {
                 return true;
             }
         }
