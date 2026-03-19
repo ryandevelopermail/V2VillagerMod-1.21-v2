@@ -34,6 +34,13 @@ import java.util.List;
 
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
+    /**
+     * Hoeing scans for raw dirt/grass to convert to farmland. This should be kept tight —
+     * scanning 50 blocks for hoe-eligible ground causes the farmer to spend enormous time
+     * walking to and tilling distant dirt that is unrelated to its existing farm plot.
+     * 30 blocks is enough to expand a farm reasonably without excessive wandering.
+     */
+    private static final int HOE_RADIUS = 30;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
@@ -1282,7 +1289,7 @@ public class FarmerHarvestGoal extends Goal {
         hoeTargets.clear();
 
         List<BlockPos> hoeableTargets = new ArrayList<>();
-        int radius = HARVEST_RADIUS;
+        int radius = HOE_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -1, -radius);
         BlockPos end = jobPos.add(radius, 1, radius);
@@ -1395,7 +1402,7 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean hasHoeableGroundInRange(ServerWorld world) {
-        int radius = HARVEST_RADIUS;
+        int radius = HOE_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -1, -radius);
         BlockPos end = jobPos.add(radius, 1, radius);
