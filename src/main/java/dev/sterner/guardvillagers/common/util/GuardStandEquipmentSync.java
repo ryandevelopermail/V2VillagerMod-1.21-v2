@@ -38,6 +38,16 @@ public final class GuardStandEquipmentSync {
             if (!copy.isEmpty()) {
                 copy.setCount(1);
             }
+
+            // Guard: skip if the guard already has an identical item in this slot.
+            // Calling equipStack unconditionally every 20 ticks fires EquipmentChangeEvent
+            // and sends equipment packets to nearby clients every 20t → visible helmet flicker.
+            ItemStack current = guard.getEquippedStack(slot);
+            if (ItemStack.areItemsAndComponentsEqual(current, copy)
+                    && current.getCount() == copy.getCount()) {
+                continue;
+            }
+
             guard.equipStack(slot, copy);
             guard.guardInventory.setStack(slotToInventoryIndex(slot), copy);
         }

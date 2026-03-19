@@ -12,6 +12,8 @@ import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -32,6 +34,7 @@ import java.util.function.Predicate;
  * {@link ShepherdFencePlacerGoal} to take over and build the pen.</p>
  */
 public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenceCraftingGoal.FenceRecipe> {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdFenceCraftingGoal.class);
 
     /** Fence count target for a 7×7 pen perimeter (28 fences + 1 gate gap). */
     static final int FENCE_TARGET = 28;
@@ -60,8 +63,13 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
     /** Daily craft limit — allow enough cycles to reach FENCE_TARGET in one day. */
     private static final int DAILY_LIMIT = 16;
 
-    /** Pen-scan radius for the no-pen check (bell radius first, job-site fallback). */
-    private static final int PEN_SCAN_RADIUS = 300;
+    /**
+     * Pen-scan radius for the no-pen check.
+     * Deliberately small — we only care if the shepherd's own pen exists near their job site,
+     * not whether some other profession's pen exists 200 blocks away.
+     * Using 300 caused the live-scan fallback to pick up unrelated pens and block crafting.
+     */
+    private static final int PEN_SCAN_RADIUS = 64;
 
     public ShepherdFenceCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -98,9 +106,12 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
             return List.of();
         }
 
-        // If a pen already exists, don't craft more materials
+        // If a pen already exists near this shepherd's job site, don't craft more materials
         VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
-        if (registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent()) {
+        boolean penExists = registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent();
+        if (penExists) {
+            LOGGER.info("ShepherdFence {}: pen found within {} blocks of job site — skipping fence crafting",
+                    villager.getUuidAsString(), PEN_SCAN_RADIUS);
             return List.of();
         }
 
@@ -108,17 +119,28 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
         int gatesInChest = countTag(inventory, ItemTags.FENCE_GATES);
 
         List<FenceRecipe> recipes = new ArrayList<>();
+        int planks = countTag(inventory, ItemTags.PLANKS);
+        int sticks = countMatching(inventory, stack -> stack.isOf(Items.STICK));
+
+        LOGGER.info("ShepherdFence {}: fences={}/{} gates={}/{} planks={} sticks={} noPen=true",
+                villager.getUuidAsString(), fencesInChest, FENCE_TARGET, gatesInChest, GATE_TARGET, planks, sticks);
 
         // Phase 1: craft fences until target reached
         if (fencesInChest < FENCE_TARGET) {
             if (hasFenceIngredients(inventory)) {
                 recipes.add(FenceRecipe.FENCE);
+            } else {
+                LOGGER.info("ShepherdFence {}: needs fences but insufficient ingredients (need 6 planks + 2 sticks, have {} + {})",
+                        villager.getUuidAsString(), planks, sticks);
             }
         }
         // Phase 2: craft gate once fence quota is met
         else if (gatesInChest < GATE_TARGET) {
             if (hasGateIngredients(inventory)) {
                 recipes.add(FenceRecipe.GATE);
+            } else {
+                LOGGER.info("ShepherdFence {}: needs gate but insufficient ingredients (need 2 planks + 2 sticks, have {} + {})",
+                        villager.getUuidAsString(), planks, sticks);
             }
         }
 

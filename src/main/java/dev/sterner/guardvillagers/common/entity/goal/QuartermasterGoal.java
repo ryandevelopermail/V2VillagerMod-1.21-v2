@@ -257,8 +257,12 @@ public class QuartermasterGoal extends Goal {
                 sourcePos = bellChestPos;
                 destPos = weaponsmithChestNeedingPlanks.get();
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                LOGGER.debug("QM {}: hauling {} planks from bell chest to weaponsmith {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                LOGGER.info("QM {}: hauling {} planks from bell chest to weaponsmith at {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
                 return true;
+            } else {
+                LOGGER.info("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
+                        villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
+                        bellChestPos.toShortString());
             }
         }
 
