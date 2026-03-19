@@ -3,6 +3,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdBedCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdBedPlacerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ShepherdFenceCraftingGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ShepherdFencePlacerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
@@ -31,11 +33,15 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final int CRAFTING_GOAL_PRIORITY = 5;
     private static final int BED_CRAFTING_GOAL_PRIORITY = 6;
     private static final int BED_PLACER_GOAL_PRIORITY = 7;
+    private static final int FENCE_CRAFTING_GOAL_PRIORITY = 8;
+    private static final int FENCE_PLACER_GOAL_PRIORITY = 9;
     private static final Map<VillagerEntity, ShepherdCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdSpecialGoal> SPECIAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdBedCraftingGoal> BED_CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ShepherdBedPlacerGoal> BED_PLACER_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ShepherdFenceCraftingGoal> FENCE_CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ShepherdFencePlacerGoal> FENCE_PLACER_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
@@ -96,6 +102,17 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         bedPlacerGoal.requestImmediateCheck();
 
+        // Fence placer (runs on chest-pair; no crafting table needed — only places blocks)
+        ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
+        if (fencePlacerGoal == null) {
+            fencePlacerGoal = new ShepherdFencePlacerGoal(villager, jobPos, chestPos);
+            FENCE_PLACER_GOALS.put(villager, fencePlacerGoal);
+            villager.goalSelector.add(FENCE_PLACER_GOAL_PRIORITY, fencePlacerGoal);
+        } else {
+            fencePlacerGoal.setTargets(jobPos, chestPos);
+        }
+        fencePlacerGoal.requestImmediateCheck();
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -122,6 +139,17 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             bedCraftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         bedCraftingGoal.requestImmediateCraft(world);
+
+        // Fence crafting (requires crafting table; lower priority than bed crafting)
+        ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
+        if (fenceCraftingGoal == null) {
+            fenceCraftingGoal = new ShepherdFenceCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+            FENCE_CRAFTING_GOALS.put(villager, fenceCraftingGoal);
+            villager.goalSelector.add(FENCE_CRAFTING_GOAL_PRIORITY, fenceCraftingGoal);
+        } else {
+            fenceCraftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        }
+        fenceCraftingGoal.requestImmediateCraft(world);
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -207,6 +235,16 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         ShepherdBedPlacerGoal bedPlacerGoal = BED_PLACER_GOALS.get(villager);
         if (bedPlacerGoal != null) {
             bedPlacerGoal.requestImmediateCheck();
+        }
+
+        ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
+        if (fenceCraftingGoal != null) {
+            fenceCraftingGoal.requestImmediateCraft(world);
+        }
+
+        ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
+        if (fencePlacerGoal != null) {
+            fencePlacerGoal.requestImmediateCheck();
         }
     }
 

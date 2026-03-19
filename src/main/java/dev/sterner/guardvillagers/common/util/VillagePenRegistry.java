@@ -262,9 +262,29 @@ public class VillagePenRegistry extends PersistentState {
      * Returns the nearest {@link PenEntry} to {@code anchor} among all pens registered for
      * the nearest bell within {@code radius} blocks. Useful for Farmer/Butcher single-pen
      * selection (they just want the closest pen).
+     *
+     * <p>If no registered bell exists within {@code radius} blocks, falls back to a live
+     * geometry scan within {@code jobSiteFallbackRadius} blocks of {@code anchor} (i.e. the
+     * villager's job-site position). Pass 0 to disable the fallback.
      */
     public Optional<PenEntry> getNearestPen(ServerWorld world, BlockPos anchor, int radius) {
+        return getNearestPen(world, anchor, radius, 300);
+    }
+
+    /**
+     * Returns the nearest {@link PenEntry} to {@code anchor} among all pens registered for
+     * the nearest bell within {@code radius} blocks.
+     *
+     * <p>If no bell-registered pens are found AND {@code jobSiteFallbackRadius > 0}, performs
+     * a live geometry scan within {@code jobSiteFallbackRadius} blocks of {@code anchor} so
+     * that pens are visible even in worlds without a registered bell.
+     */
+    public Optional<PenEntry> getNearestPen(ServerWorld world, BlockPos anchor, int radius, int jobSiteFallbackRadius) {
         List<PenEntry> pens = getNearestBellPens(world, anchor, radius);
+        if (pens.isEmpty() && jobSiteFallbackRadius > 0) {
+            // No bell-registered pens — fall back to a live scan around the job-site position
+            pens = scanPensNearJobSite(world, anchor, jobSiteFallbackRadius);
+        }
         if (pens.isEmpty()) {
             return Optional.empty();
         }
@@ -280,21 +300,48 @@ public class VillagePenRegistry extends PersistentState {
         return Optional.ofNullable(nearest);
     }
 
+    /**
+     * Returns pen entries near {@code anchor} using bell registry first, then falling back
+     * to a live job-site scan within 300 blocks if no bell is found. This is the preferred
+     * call for shepherd-specific pen detection (needs a list, not just the nearest).
+     */
+    public List<PenEntry> getNearestBellPensWithJobSiteFallback(ServerWorld world, BlockPos anchor, int radius) {
+        List<PenEntry> pens = getNearestBellPens(world, anchor, radius);
+        if (pens.isEmpty()) {
+            pens = scanPensNearJobSite(world, anchor, 300);
+        }
+        return pens;
+    }
+
+    /**
+     * Performs a live geometry scan for fence-gate-enclosed pens within {@code radius} blocks
+     * of {@code jobSitePos}. Used as a fallback when no bell is registered nearby.
+     * Results are NOT cached — this is intentionally a one-shot scan for rare/fallback use.
+     */
+    private List<PenEntry> scanPensNearJobSite(ServerWorld world, BlockPos jobSitePos, int radius) {
+        LOGGER.debug("[VillagePenRegistry] job-site fallback scan around {} r={}", jobSitePos.toShortString(), radius);
+        return scanPensNearBell(world, jobSitePos, radius);
+    }
+
     // -------------------------------------------------------------------------
     // Pen geometry detection
     // -------------------------------------------------------------------------
 
     private List<PenEntry> scanPensNearBell(ServerWorld world, BlockPos bellPos) {
+        return scanPensNearBell(world, bellPos, PEN_SCAN_RADIUS);
+    }
+
+    private List<PenEntry> scanPensNearBell(ServerWorld world, BlockPos bellPos, int scanRadius) {
         int y = bellPos.getY();
         int minY = Math.max(world.getBottomY(), y - 16);
         int maxY = Math.min(world.getTopY(), y + 16);
 
         List<BlockPos> gateCandidates = new ArrayList<>();
-        BlockPos scanMin = bellPos.add(-PEN_SCAN_RADIUS, minY - bellPos.getY(), -PEN_SCAN_RADIUS);
-        BlockPos scanMax = bellPos.add(PEN_SCAN_RADIUS, maxY - bellPos.getY(), PEN_SCAN_RADIUS);
+        BlockPos scanMin = bellPos.add(-scanRadius, minY - bellPos.getY(), -scanRadius);
+        BlockPos scanMax = bellPos.add(scanRadius, maxY - bellPos.getY(), scanRadius);
 
         for (BlockPos cursor : BlockPos.iterate(scanMin, scanMax)) {
-            if (!bellPos.isWithinDistance(cursor, PEN_SCAN_RADIUS)) {
+            if (!bellPos.isWithinDistance(cursor, scanRadius)) {
                 continue;
             }
             if (world.getBlockState(cursor).getBlock() instanceof FenceGateBlock) {
