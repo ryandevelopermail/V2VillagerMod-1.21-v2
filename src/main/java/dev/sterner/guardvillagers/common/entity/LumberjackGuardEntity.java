@@ -12,6 +12,7 @@ import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoa
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackChestTriggerController;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardDepositLogsGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackCharcoalDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackFurnaceModifierGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackPenBuilderGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
@@ -251,6 +252,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.goalSelector.add(4, new LumberjackGuardCraftingGoal(this));
         this.goalSelector.add(5, new LumberjackGuardDepositLogsGoal(this));
         this.goalSelector.add(6, new LumberjackPenBuilderGoal(this));
+        this.goalSelector.add(7, new LumberjackCharcoalDistributionGoal(this));
         if (GuardVillagersConfig.guardEntitysRunFromPolarBears) {
             this.goalSelector.add(3, new FleeEntityGoal<>(this, PolarBearEntity.class, 12.0F, 1.0D, 1.2D));
         }
