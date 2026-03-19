@@ -153,7 +153,15 @@ public class LumberjackGuardCraftingGoal extends Goal {
             int planksNeededForSticks = (stickDeficit + 1) / 2;
             planksToConvert = Math.min(planksAvailableAfterReserve, planksNeededForSticks);
         } else {
-            planksToConvert = availablePlanks / 2;
+            // Cap stick production: only convert planks to sticks up to the stick target cap.
+            // Sticks are a byproduct, not the primary output — planks should be the dominant product.
+            int stickTarget = 64;
+            int currentSticks = countByItem(chestInventory, Items.STICK)
+                    + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+            int sticksNeeded = Math.max(0, stickTarget - currentSticks);
+            // 2 planks → 4 sticks, so planks needed = ceil(sticksNeeded / 4) * 2 → simpler: sticksNeeded / 2
+            int planksNeededForStickTarget = (sticksNeeded + 3) / 4 * 2; // round up to plank pairs
+            planksToConvert = Math.min(availablePlanks / 2, planksNeededForStickTarget);
         }
 
         if (planksToConvert > 0 && consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), planksToConvert)) {
