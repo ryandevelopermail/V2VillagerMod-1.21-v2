@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.villager.behavior.WeaponsmithBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
@@ -63,6 +64,8 @@ public class QuartermasterGoal extends Goal {
     private static final int MASON_STONE_THRESHOLD = 32;
     /** Minimum planks in lumberjack chest before we top it up. */
     private static final int LUMBERJACK_PLANK_THRESHOLD = 16;
+    /** Minimum planks in weaponsmith chest before we top it up (for wood weapon crafting). */
+    private static final int WEAPONSMITH_PLANK_THRESHOLD = 16;
     /** Bell chest is considered "low" if total items < this. */
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
@@ -231,7 +234,7 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
-        // Priority 2: lumberjack crafting (low on planks) → top up from bell chest.
+        // Priority 2a: lumberjack crafting (low on planks) → top up from bell chest.
         // Use any plank type (tag-based), pick the most abundant stack in the bell chest
         // so we don't artificially lock onto oak when e.g. birch is available.
         Optional<LumberjackGuardEntity> lumberjackNeedingPlanks = findLumberjackNeedingPlanks(world);
@@ -243,6 +246,19 @@ public class QuartermasterGoal extends Goal {
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
                 LOGGER.debug("QM {}: hauling {} planks from bell chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
                 return destPos != null;
+            }
+        }
+
+        // Priority 2b: weaponsmith low on planks → top up from bell chest (for wood weapon crafting).
+        Optional<BlockPos> weaponsmithChestNeedingPlanks = findWeaponsmithChestNeedingPlanks(world);
+        if (weaponsmithChestNeedingPlanks.isPresent() && bellChestPos != null) {
+            ItemStack bestPlanks = findBestTagItem(world, bellChestPos, ItemTags.PLANKS);
+            if (!bestPlanks.isEmpty()) {
+                sourcePos = bellChestPos;
+                destPos = weaponsmithChestNeedingPlanks.get();
+                transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
+                LOGGER.debug("QM {}: hauling {} planks from bell chest to weaponsmith {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                return true;
             }
         }
 
@@ -279,7 +295,9 @@ public class QuartermasterGoal extends Goal {
         return world.getEntitiesByClass(MasonGuardEntity.class, box,
                 mason -> mason.isAlive()
                         && mason.getPairedChestPos() != null
-                        && !mason.getWallSegments().isEmpty()
+                        // Deliver stone to ANY mason with low cobblestone:
+                        // - wall builders (getWallSegments non-empty) need it for block placement
+                        // - all other masons need it for stonecutting crafting recipes
                         && countItem(world, mason.getPairedChestPos(), Items.COBBLESTONE) < MASON_STONE_THRESHOLD
         ).stream().findFirst();
     }
@@ -291,6 +309,21 @@ public class QuartermasterGoal extends Goal {
                         && lj.getPairedChestPos() != null
                         && countTagItems(world, lj.getPairedChestPos(), ItemTags.PLANKS) < LUMBERJACK_PLANK_THRESHOLD
         ).stream().findFirst();
+    }
+
+    /**
+     * Returns the chest position of any weaponsmith that is low on planks and close enough
+     * to our job site to warrant a delivery trip. Uses WeaponsmithBehavior.getPairedChestPositions()
+     * so we don't need to scan entities — the chest positions are tracked by the behavior.
+     */
+    private Optional<BlockPos> findWeaponsmithChestNeedingPlanks(ServerWorld world) {
+        for (BlockPos chestPos : WeaponsmithBehavior.getPairedChestPositions()) {
+            if (chestPos.isWithinDistance(jobPos, SCAN_RANGE)
+                    && countTagItems(world, chestPos, ItemTags.PLANKS) < WEAPONSMITH_PLANK_THRESHOLD) {
+                return Optional.of(chestPos);
+            }
+        }
+        return Optional.empty();
     }
 
     private Optional<BlockPos> findSurplusChest(ServerWorld world, BlockPos bellChestPos) {

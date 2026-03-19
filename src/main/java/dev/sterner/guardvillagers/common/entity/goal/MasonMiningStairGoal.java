@@ -679,7 +679,12 @@ public class MasonMiningStairGoal extends Goal {
 
         long worldTime = world.getTime();
         this.miningSessionStartTick = worldTime;
-        this.miningSessionEndTick = worldTime + plannedMiningDurationTicks + travelAllowanceTicks;
+        // Session end is measured from NOW (when the mason has arrived at the mining front),
+        // NOT from canStart() time. Travel time was already spent getting here.
+        // Add a small forward-travel buffer scaled to how deep we already are: each step
+        // is roughly 1.4 blocks of diagonal travel at MOVE_SPEED 0.7 blocks/tick ≈ 2 ticks/step.
+        int depthTravelBuffer = stepIndex * 2;
+        this.miningSessionEndTick = worldTime + plannedMiningDurationTicks + depthTravelBuffer;
         LOGGER.info("Mason guard {} mining stage activated: miningStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, sessionEndTick={}, stage={}, stepIndex={}",
                 guard.getUuidAsString(),
                 this.miningSessionStartTick,

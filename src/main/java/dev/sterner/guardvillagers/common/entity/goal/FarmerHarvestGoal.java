@@ -1263,7 +1263,10 @@ public class FarmerHarvestGoal extends Goal {
     private void populateHoeTargets(ServerWorld world) {
         hoeTargets.clear();
 
-        List<BlockPos> hydratedTargets = new ArrayList<>();
+        // No water-proximity gate — hoe any valid dirt/grass block with air above.
+        // The game engine handles farmland drying out if there's no water; we should not
+        // refuse to hoe just because water isn't immediately adjacent.
+        List<BlockPos> hoeableTargets = new ArrayList<>();
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -1, -radius);
@@ -1275,14 +1278,11 @@ public class FarmerHarvestGoal extends Goal {
             if (!isHoeTarget(world, pos)) {
                 continue;
             }
-            if (!hasNearbyWater(world, pos)) {
-                continue;
-            }
-            hydratedTargets.add(pos.toImmutable());
+            hoeableTargets.add(pos.toImmutable());
         }
 
-        hydratedTargets.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
-        hoeTargets.addAll(hydratedTargets);
+        hoeableTargets.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
+        hoeTargets.addAll(hoeableTargets);
     }
 
     private void populatePlantTargets(ServerWorld world) {
@@ -1385,10 +1385,7 @@ public class FarmerHarvestGoal extends Goal {
             if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
                 continue;
             }
-            if (!isHoeTarget(world, pos)) {
-                continue;
-            }
-            if (hasNearbyWater(world, pos)) {
+            if (isHoeTarget(world, pos)) {
                 return true;
             }
         }
@@ -1494,7 +1491,7 @@ public class FarmerHarvestGoal extends Goal {
                 continue;
             }
 
-            boolean hoeable = isHoeTarget(world, pos) && hasNearbyWater(world, pos);
+            boolean hoeable = isHoeTarget(world, pos);
             boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND) && world.getBlockState(pos.up()).isAir();
             if (!hoeable && !plantableFarmland) {
                 continue;

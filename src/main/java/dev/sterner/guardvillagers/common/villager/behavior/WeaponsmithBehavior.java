@@ -23,6 +23,13 @@ public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, WeaponsmithDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, WeaponsmithRepairGoal> REPAIR_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
+    /** Exposed for QM plank delivery — maps each weaponsmith villager to their paired chest pos. */
+    private static final Map<VillagerEntity, BlockPos> PAIRED_CHESTS = new WeakHashMap<>();
+
+    /** Returns all currently-paired weaponsmith chest positions (for QM plank delivery). */
+    public static java.util.Collection<BlockPos> getPairedChestPositions() {
+        return PAIRED_CHESTS.values();
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -33,6 +40,7 @@ public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
         }
 
         LOGGER.info("Weaponsmith {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
 
         WeaponsmithDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new WeaponsmithDistributionGoal(villager, jobPos, chestPos, null));
@@ -63,6 +71,7 @@ public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        PAIRED_CHESTS.put(villager, chestPos.toImmutable());
         WeaponsmithCraftingGoal craftingGoal = upsertGoal(CRAFTING_GOALS, villager, CRAFTING_GOAL_PRIORITY,
                 () -> new WeaponsmithCraftingGoal(villager, jobPos, chestPos, craftingTablePos));
         craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);

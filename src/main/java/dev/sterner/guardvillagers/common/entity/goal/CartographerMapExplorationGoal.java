@@ -198,9 +198,19 @@ public class CartographerMapExplorationGoal extends Goal {
                         for (ItemStack workflowMap : workflowMaps) {
                             ItemStack finalizedMap = workflowMap.copy();
                             forceCompleteMapStack(world, finalizedMap);
-                            insertStack(inventory, finalizedMap);
+                            boolean inserted = insertStackChecked(inventory, finalizedMap);
+                            if (!inserted) {
+                                LOGGER.warn("Cartographer {} could not deposit map into chest at {} — chest may be full",
+                                        villager.getUuidAsString(), chestPos.toShortString());
+                                // Drop it as item entity so it's not silently lost
+                                world.spawnEntity(new net.minecraft.entity.ItemEntity(world,
+                                        chestPos.getX() + 0.5, chestPos.getY() + 1.0, chestPos.getZ() + 0.5, finalizedMap));
+                            }
                         }
                         inventory.markDirty();
+                    } else {
+                        LOGGER.warn("Cartographer {} could not open chest at {} for map deposit",
+                                villager.getUuidAsString(), chestPos.toShortString());
                     }
 
                     clearWorkflowState();
@@ -500,13 +510,14 @@ public class CartographerMapExplorationGoal extends Goal {
 
         int scale = state.scale;
         int sampleStep = 1 << scale;
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
         for (int mapX = 0; mapX < 128; mapX++) {
             for (int mapZ = 0; mapZ < 128; mapZ++) {
                 int worldX = state.centerX + (mapX - 64) * sampleStep;
                 int worldZ = state.centerZ + (mapZ - 64) * sampleStep;
                 int topY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ) - 1;
-                BlockPos samplePos = new BlockPos(worldX, Math.max(world.getBottomY(), topY), worldZ);
-                MapColor mapColor = world.getBlockState(samplePos).getMapColor(world, samplePos);
+                mutablePos.set(worldX, Math.max(world.getBottomY(), topY), worldZ);
+                MapColor mapColor = world.getBlockState(mutablePos).getMapColor(world, mutablePos);
                 if (mapColor == MapColor.CLEAR) {
                     continue;
                 }
@@ -614,22 +625,48 @@ public class CartographerMapExplorationGoal extends Goal {
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
     }
 
+    /** Inserts stack into inventory; silently discards any remainder. */
     private void insertStack(Inventory inventory, ItemStack stack) {
+        insertStackChecked(inventory, stack);
+    }
+
+    /**
+     * Inserts stack into inventory. Returns {@code true} if all items were inserted,
+     * {@code false} if the inventory was too full to accept the full stack.
+     */
+    private boolean insertStackChecked(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
         for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
             ItemStack existing = inventory.getStack(slot);
             if (existing.isEmpty()) {
-                inventory.setStack(slot, stack);
-                return;
-            }
-            if (ItemStack.areItemsAndComponentsEqual(existing, stack) && existing.getCount() < existing.getMaxCount()) {
-                int move = Math.min(stack.getCount(), existing.getMaxCount() - existing.getCount());
-                existing.increment(move);
-                stack.decrement(move);
-                if (stack.isEmpty()) {
-                    return;
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
                 }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
             }
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
         }
+        return remaining.isEmpty();
     }
 
     private void moveTo(BlockPos pos) {
