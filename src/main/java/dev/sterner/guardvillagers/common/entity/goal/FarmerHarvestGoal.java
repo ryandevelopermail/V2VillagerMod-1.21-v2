@@ -148,6 +148,20 @@ public class FarmerHarvestGoal extends Goal {
         long day = world.getTimeOfDay() / 24000L;
         if (day != lastHarvestDay) {
             lastHarvestDay = day;
+            // Evaluate before committing to a daily run — if there is truly nothing actionable
+            // (no farmland, no crops, no seeds, no hoe-ready ground) skip the daily trip entirely.
+            // Without this guard, a farmer with no farmland walks to job and back every in-game day,
+            // creating a constant idle loop visible as "farmer standing still" between movements.
+            BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
+            boolean nothingActionable = !preflight.canHoeGround
+                    && !preflight.hasPlantTargets
+                    && !preflight.hasSeedsForPlanting
+                    && preflight.matureCropCount == 0
+                    && preflight.plantedCropCount == 0;
+            if (nothingActionable) {
+                nextCheckTime = world.getTime() + IDLE_BACKOFF_INTERVAL_TICKS;
+                return false;
+            }
             dailyHarvestRun = true;
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             return true;

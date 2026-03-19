@@ -45,13 +45,12 @@ public final class UnemployedLumberjackConversionHook {
             ));
         }
 
-        // Only fall back to world-bounds scan when no player-proximate candidates found.
-        // getWorldBounds() is the entire world-border-sized box — expensive, O(all entities).
-        // Moved to fallback branch so it is never computed when players are present nearby.
-        if (candidates.isEmpty()) {
-            Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-            candidates.addAll(world.getEntitiesByClass(VillagerEntity.class, worldBounds, UnemployedLumberjackConversionHook::isEligibleUnemployed));
-        }
+        // Player-proximity scan only. The world-bounds fallback was O(all entities) and fired
+        // every 40 ticks even when players are far from any unemployed villager, causing a
+        // constant server-tick performance penalty. Removed entirely: villagers outside player
+        // proximity will be picked up on the next tick cycle when a player approaches them.
+        // The VillagerConversionCandidateIndex and chunk-load hook handle the edge case of
+        // loading chunks with unemployed villagers near crafting tables.
 
         for (VillagerEntity villager : candidates) {
             if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, villager.getBlockPos(), "scheduled-unemployed-conversion")) {
