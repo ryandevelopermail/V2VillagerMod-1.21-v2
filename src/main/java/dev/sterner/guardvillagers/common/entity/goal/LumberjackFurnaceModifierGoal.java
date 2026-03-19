@@ -385,6 +385,12 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             }
 
             int moved = Math.min(stack.getCount(), amount);
+            // Cap to remaining space in the extracted stack to prevent oversized stacks.
+            if (!extracted.isEmpty()) {
+                int space = extracted.getMaxCount() - extracted.getCount();
+                if (space <= 0) break;
+                moved = Math.min(moved, space);
+            }
             ItemStack movedStack = stack.copyWithCount(moved);
             stack.decrement(moved);
             if (stack.isEmpty()) {
@@ -421,6 +427,12 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             }
 
             int moved = Math.min(stack.getCount(), amount);
+            // Cap to remaining space in the extracted stack to prevent oversized stacks.
+            if (!extracted.isEmpty()) {
+                int space = extracted.getMaxCount() - extracted.getCount();
+                if (space <= 0) break;
+                moved = Math.min(moved, space);
+            }
             ItemStack movedStack = stack.copyWithCount(moved);
             stack.decrement(moved);
             if (stack.isEmpty()) {

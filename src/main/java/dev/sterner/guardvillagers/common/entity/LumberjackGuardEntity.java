@@ -397,8 +397,16 @@ public class LumberjackGuardEntity extends GuardEntity {
             if (stack.isEmpty()) {
                 continue;
             }
-            NbtCompound stackNbt = new NbtCompound();
-            bufferList.add(stack.encode(this.getRegistryManager(), stackNbt));
+            // MC 1.21 ItemStack codec enforces count in [1,99]. Clamp and split oversized
+            // stacks defensively so a logic bug elsewhere never causes a save crash.
+            ItemStack remaining = stack.copy();
+            while (!remaining.isEmpty()) {
+                int allowed = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack chunk = remaining.copyWithCount(allowed);
+                remaining.decrement(allowed);
+                NbtCompound stackNbt = new NbtCompound();
+                bufferList.add(chunk.encode(this.getRegistryManager(), stackNbt));
+            }
         }
         nbt.put("LumberjackGatheredStackBuffer", bufferList);
     }
