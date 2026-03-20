@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.BedBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
@@ -21,7 +22,6 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
-import net.minecraft.world.poi.PointOfInterestStorage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.stream.Stream;
 
 /**
  * Shepherd places a 7×7 fence pen (27 fences + 1 gate) near their job block when:
@@ -69,8 +68,12 @@ public class ShepherdFencePlacerGoal extends Goal {
     /** Flat-ground tolerance: all floor Y must be within ±2 of the base Y. */
     private static final int FLAT_Y_TOLERANCE = 2;
 
-    /** Pen scan radius — same as crafting goal. */
-    private static final int PEN_SCAN_RADIUS = 300;
+    /**
+     * Pen scan radius — matches ShepherdFenceCraftingGoal.PEN_SCAN_RADIUS (64).
+     * Using 300 caused the live-scan fallback to detect unrelated fence structures
+     * far away and block placement; 64 keeps the check local to this shepherd's village.
+     */
+    private static final int PEN_SCAN_RADIUS = 64;
 
     /** How often to re-check if we can start (ticks). */
     private static final int CHECK_INTERVAL_TICKS = 1200;
@@ -149,6 +152,9 @@ public class ShepherdFencePlacerGoal extends Goal {
 
         int fenceCount = countTag(inv, ItemTags.FENCES);
         int gateCount = countTag(inv, ItemTags.FENCE_GATES);
+        LOGGER.info("ShepherdFencePlacer {}: canStart check — fences={}/{} gates={}/{} jobPos={} chestPos={}",
+                villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES,
+                jobPos.toShortString(), chestPos.toShortString());
         if (fenceCount < MIN_FENCES || gateCount < MIN_GATES) {
             LOGGER.info("ShepherdFencePlacer {}: insufficient materials — fences={}/{} gates={}/{}",
                     villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES);
@@ -412,20 +418,31 @@ public class ShepherdFencePlacerGoal extends Goal {
             }
         }
 
-        // Single POI check for the entire interior (5×5 inner area)
-        // More efficient than per-cell checks
-        BlockPos interiorCenter = new BlockPos(
-                origin.getX() + PEN_SIZE / 2,
-                origin.getY() + 1,
-                origin.getZ() + PEN_SIZE / 2);
-        PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
-        boolean hasPoi = poiStorage.getInSquare(
-                type -> true,
-                interiorCenter,
-                PEN_SIZE / 2 - 1,
-                PointOfInterestStorage.OccupationStatus.ANY
-        ).findAny().isPresent();
-        if (hasPoi) return false;
+        // Reject the site if any job-site or structural block we care about is inside the 5×5
+        // interior (one block inside the perimeter on each side).
+        // We deliberately do NOT use the POI storage here — it matches beds, bells, and every
+        // other workstation, which would reject virtually every village location. Instead, check
+        // only the concrete block types that would conflict physically: looms, crafting tables,
+        // chests, barrels, composters, and bed blocks.
+        BlockPos.Mutable inner = new BlockPos.Mutable();
+        for (int dx = 1; dx < PEN_SIZE - 1; dx++) {
+            for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
+                int x = origin.getX() + dx;
+                int z = origin.getZ() + dz;
+                // Sample at two heights: ground level and pen fence level
+                for (int dy = 0; dy <= 1; dy++) {
+                    inner.set(x, origin.getY() + dy, z);
+                    Block b = world.getBlockState(inner).getBlock();
+                    if (b == Blocks.LOOM || b == Blocks.CRAFTING_TABLE
+                            || b == Blocks.CHEST || b == Blocks.TRAPPED_CHEST
+                            || b == Blocks.BARREL || b == Blocks.COMPOSTER
+                            || b == Blocks.BELL || b == Blocks.LECTERN
+                            || b instanceof BedBlock) {
+                        return false;
+                    }
+                }
+            }
+        }
 
         return true;
     }
