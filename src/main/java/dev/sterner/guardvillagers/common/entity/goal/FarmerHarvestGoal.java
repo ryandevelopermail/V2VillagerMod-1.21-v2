@@ -35,12 +35,12 @@ import java.util.List;
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
     /**
-     * Hoeing scans for raw dirt/grass to convert to farmland. This should be kept tight —
-     * scanning 50 blocks for hoe-eligible ground causes the farmer to spend enormous time
-     * walking to and tilling distant dirt that is unrelated to its existing farm plot.
-     * 30 blocks is enough to expand a farm reasonably without excessive wandering.
+     * Hoeing scans for raw dirt/grass to convert to farmland. This must be kept very tight —
+     * the farmer's job block is a composter, which is placed adjacent to the farm plot.
+     * A large radius causes the farmer to walk far from the farm and hoe unrelated dirt.
+     * 10 blocks keeps hoeing anchored near the job block where the actual farmland is.
      */
-    private static final int HOE_RADIUS = 30;
+    private static final int HOE_RADIUS = 10;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
@@ -121,6 +121,12 @@ public class FarmerHarvestGoal extends Goal {
      */
     private boolean hasUnseededFarmlandObligation = false;
 
+    /**
+     * Used to suppress repeated INFO logging for the obligation path.
+     * We log INFO once when obligation is first detected; subsequent polls are DEBUG.
+     */
+    private boolean obligationLoggedThisCycle = false;
+
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
         setTargets(jobPos, chestPos);
@@ -144,6 +150,7 @@ public class FarmerHarvestGoal extends Goal {
         this.nextSeedForageRetryTick = 0L;
         this.seedForageRetryCount = 0;
         this.hasUnseededFarmlandObligation = false;
+        this.obligationLoggedThisCycle = false;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -183,10 +190,15 @@ public class FarmerHarvestGoal extends Goal {
         FarmlandCoverageStats coverage = getFarmlandCoverageStats(world);
         int unseededCount = Math.max(0, coverage.accessibleCells() - coverage.seededCells());
         if (unseededCount > 0) {
-            hasUnseededFarmlandObligation = true;
+            if (!hasUnseededFarmlandObligation) {
+                // Obligation newly detected — log once at INFO, then suppress to DEBUG until resolved.
+                hasUnseededFarmlandObligation = true;
+                obligationLoggedThisCycle = false;
+            }
         } else if (coverage.accessibleCells() > 0) {
             // Coverage is full — obligation satisfied
             hasUnseededFarmlandObligation = false;
+            obligationLoggedThisCycle = false;
         }
         // If accessibleCells == 0 (no farmland at all), leave obligation as-is
 
@@ -198,8 +210,14 @@ public class FarmerHarvestGoal extends Goal {
                 // Seeds exist — act immediately, clear any stale forage cooldown so
                 // the seed-gathering workflow isn't blocked by a previous retry timer.
                 clearSeedForageRetryCooldown(world, "unseeded farmland obligation with seeds available");
-                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
-                        villager.getUuidAsString(), unseededCount);
+                if (!obligationLoggedThisCycle) {
+                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
+                            villager.getUuidAsString(), unseededCount);
+                    obligationLoggedThisCycle = true;
+                } else {
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, seeds available — resuming",
+                            villager.getUuidAsString(), unseededCount);
+                }
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                 long day = world.getTimeOfDay() / 24000L;
                 if (day != lastHarvestDay) {
@@ -212,8 +230,14 @@ public class FarmerHarvestGoal extends Goal {
                 // Allow the goal to START so it can route into GATHER_WHEAT_SEEDS via
                 // routePostDepositFlow(). Blocking here creates a deadlock: the farmer
                 // can never gather seeds because it can never start.
-                LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
-                        villager.getUuidAsString(), unseededCount);
+                if (!obligationLoggedThisCycle) {
+                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
+                            villager.getUuidAsString(), unseededCount);
+                    obligationLoggedThisCycle = true;
+                } else {
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, no seeds — foraging",
+                            villager.getUuidAsString(), unseededCount);
+                }
                 wheatSeedForagingRequested = true;
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                 long day = world.getTimeOfDay() / 24000L;
@@ -509,6 +533,7 @@ public class FarmerHarvestGoal extends Goal {
                     FarmlandCoverageStats postPlantCoverage = getFarmlandCoverageStats(serverWorld);
                     if (postPlantCoverage.hasFullCoverage()) {
                         hasUnseededFarmlandObligation = false;
+                        obligationLoggedThisCycle = false;
                         LOGGER.debug("Farmer {} farmland obligation satisfied — coverage full ({}/{})",
                                 villager.getUuidAsString(), postPlantCoverage.seededCells(), postPlantCoverage.accessibleCells());
                     } else if (postPlantCoverage.accessibleCells() > postPlantCoverage.seededCells()) {
