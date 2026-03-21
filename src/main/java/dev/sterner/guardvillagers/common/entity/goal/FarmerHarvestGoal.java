@@ -211,7 +211,7 @@ public class FarmerHarvestGoal extends Goal {
                 // the seed-gathering workflow isn't blocked by a previous retry timer.
                 clearSeedForageRetryCooldown(world, "unseeded farmland obligation with seeds available");
                 if (!obligationLoggedThisCycle) {
-                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
                             villager.getUuidAsString(), unseededCount);
                     obligationLoggedThisCycle = true;
                 } else {
@@ -231,7 +231,7 @@ public class FarmerHarvestGoal extends Goal {
                 // routePostDepositFlow(). Blocking here creates a deadlock: the farmer
                 // can never gather seeds because it can never start.
                 if (!obligationLoggedThisCycle) {
-                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
                             villager.getUuidAsString(), unseededCount);
                     obligationLoggedThisCycle = true;
                 } else {

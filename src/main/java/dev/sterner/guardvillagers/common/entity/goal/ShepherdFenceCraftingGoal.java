@@ -36,8 +36,8 @@ import java.util.function.Predicate;
 public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenceCraftingGoal.FenceRecipe> {
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdFenceCraftingGoal.class);
 
-    /** Fence count target for a 7×7 pen perimeter (28 fences + 1 gate gap). */
-    static final int FENCE_TARGET = 28;
+    /** Fence count target for a 7×7 pen perimeter (23 fences placed + 1 spare = 24). */
+    static final int FENCE_TARGET = 24;
     /** One gate needed for the pen entrance. */
     private static final int GATE_TARGET = 1;
 
@@ -121,7 +121,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
         VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
         boolean penExists = registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent();
         if (penExists) {
-            LOGGER.info("ShepherdFence {}: pen found within {} blocks of job site — skipping fence crafting",
+            LOGGER.debug("ShepherdFence {}: pen found within {} blocks of job site — skipping fence crafting",
                     villager.getUuidAsString(), PEN_SCAN_RADIUS);
             return List.of();
         }
@@ -133,7 +133,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
         int planks = countTag(inventory, ItemTags.PLANKS);
         int sticks = countMatching(inventory, stack -> stack.isOf(Items.STICK));
 
-        LOGGER.info("ShepherdFence {}: fences={}/{} gates={}/{} planks={} sticks={} noPen=true",
+        LOGGER.debug("ShepherdFence {}: fences={}/{} gates={}/{} planks={} sticks={} noPen=true",
                 villager.getUuidAsString(), fencesInChest, FENCE_TARGET, gatesInChest, GATE_TARGET, planks, sticks);
 
         // Phase 1: craft fences until target reached
@@ -141,7 +141,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
             if (hasFenceIngredients(inventory)) {
                 recipes.add(FenceRecipe.FENCE);
             } else {
-                LOGGER.info("ShepherdFence {}: needs fences but insufficient ingredients (need 6 planks + 2 sticks, have {} + {})",
+                LOGGER.debug("ShepherdFence {}: needs fences but insufficient ingredients (need 6 planks + 2 sticks, have {} + {})",
                         villager.getUuidAsString(), planks, sticks);
             }
         }
@@ -150,7 +150,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
             if (hasGateIngredients(inventory)) {
                 recipes.add(FenceRecipe.GATE);
             } else {
-                LOGGER.info("ShepherdFence {}: needs gate but insufficient ingredients (need 2 planks + 2 sticks, have {} + {})",
+                LOGGER.debug("ShepherdFence {}: needs gate but insufficient ingredients (need 2 planks + 2 sticks, have {} + {})",
                         villager.getUuidAsString(), planks, sticks);
             }
         }
