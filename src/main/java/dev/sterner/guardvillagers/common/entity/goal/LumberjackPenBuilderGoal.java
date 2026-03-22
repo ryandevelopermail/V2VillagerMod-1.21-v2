@@ -57,6 +57,8 @@ public class LumberjackPenBuilderGoal extends Goal {
     private static final int SCAN_RADIUS = VillageGuardStandManager.BELL_EFFECT_RANGE;
     // How often to re-check whether we can start (in ticks)
     private static final int SCAN_INTERVAL_TICKS = 600;
+    // Max Y deviation across the 6×6 footprint for the site to be considered flat enough
+    private static final int FLAT_Y_TOLERANCE = 2;
 
     private final LumberjackGuardEntity guard;
 
@@ -230,27 +232,28 @@ public class LumberjackPenBuilderGoal extends Goal {
         BlockPos origin = findPenOrigin(world, anchorPos);
         if (origin == null) return false;
 
-        // Build perimeter list for a PEN_SIZE × PEN_SIZE rectangle
+        // Build perimeter list for a PEN_SIZE × PEN_SIZE rectangle.
+        // Fences are placed one block ABOVE the ground surface (surfY + 1) per-column,
+        // so they sit on the actual terrain even if it varies slightly within flatness tolerance.
         // The exterior perimeter of a 6×6 pen:
         // N face: z=origin.z, x from origin.x to origin.x+5
         // S face: z=origin.z+5, x from origin.x to origin.x+5
         // W face: x=origin.x, z from origin.z+1 to origin.z+4
         // E face: x=origin.x+5, z from origin.z+1 to origin.z+4
-        int y = origin.getY();
         List<BlockPos> fences = new ArrayList<>();
 
         for (int x = origin.getX(); x < origin.getX() + PEN_SIZE; x++) {
-            fences.add(new BlockPos(x, y, origin.getZ()));               // North
-            fences.add(new BlockPos(x, y, origin.getZ() + PEN_SIZE - 1)); // South
+            fences.add(fencePosAt(world, x, origin.getZ()));               // North
+            fences.add(fencePosAt(world, x, origin.getZ() + PEN_SIZE - 1)); // South
         }
         for (int z = origin.getZ() + 1; z < origin.getZ() + PEN_SIZE - 1; z++) {
-            fences.add(new BlockPos(origin.getX(), y, z));               // West
-            fences.add(new BlockPos(origin.getX() + PEN_SIZE - 1, y, z)); // East
+            fences.add(fencePosAt(world, origin.getX(), z));               // West
+            fences.add(fencePosAt(world, origin.getX() + PEN_SIZE - 1, z)); // East
         }
 
-        // Gate at south face midpoint
+        // Gate at south face midpoint — same per-column surface logic
         int gateMidX = origin.getX() + PEN_SIZE / 2;
-        BlockPos gatePos = new BlockPos(gateMidX, y, origin.getZ() + PEN_SIZE - 1);
+        BlockPos gatePos = fencePosAt(world, gateMidX, origin.getZ() + PEN_SIZE - 1);
         fences.remove(gatePos);
 
         // Filter out already-built positions (any fence type)
@@ -271,18 +274,22 @@ public class LumberjackPenBuilderGoal extends Goal {
 
     /**
      * Finds a flat, open 6×6 area within scan range of the anchor (QM chest).
-     * Prefers positions inside or near mason wall cobblestone (soft preference).
+     * Samples the surface Y per-column (same approach as ShepherdFencePlacerGoal) so
+     * sloped terrain is correctly rejected rather than producing fences embedded in dirt.
      */
     private BlockPos findPenOrigin(ServerWorld world, BlockPos anchorPos) {
         if (anchorPos == null) return null;
 
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
         int searchStep = 4;
         for (int dx = -SCAN_RADIUS + PEN_SIZE; dx <= SCAN_RADIUS - PEN_SIZE; dx += searchStep) {
             for (int dz = -SCAN_RADIUS + PEN_SIZE; dz <= SCAN_RADIUS - PEN_SIZE; dz += searchStep) {
-                BlockPos candidate = anchorPos.add(dx, 0, dz);
-                // Sample the surface Y at this candidate
-                int surfaceY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, candidate).getY();
-                BlockPos origin = new BlockPos(candidate.getX(), surfaceY, candidate.getZ());
+                int baseX = anchorPos.getX() + dx;
+                int baseZ = anchorPos.getZ() + dz;
+                // Sample the surface Y at the NW corner of this candidate area
+                mutable.set(baseX, anchorPos.getY(), baseZ);
+                int surfaceY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+                BlockPos origin = new BlockPos(baseX, surfaceY, baseZ);
                 if (isPenSiteValid(world, origin)) {
                     return origin;
                 }
@@ -291,17 +298,44 @@ public class LumberjackPenBuilderGoal extends Goal {
         return null;
     }
 
+    /**
+     * Validates that the 6×6 footprint with NW corner at {@code origin} is suitable for a pen:
+     * <ul>
+     *   <li>Per-column surface Y is within ±FLAT_Y_TOLERANCE of origin.Y (flatness check).</li>
+     *   <li>No DIRT_PATH blocks (natural road/gap — don't build here).</li>
+     *   <li>Solid top face at ground level (accepts slabs, stairs, etc.).</li>
+     *   <li>Replaceable space at fence level (surfY + 1) for all 36 positions.</li>
+     * </ul>
+     */
     private boolean isPenSiteValid(ServerWorld world, BlockPos origin) {
-        int y = origin.getY();
+        int baseY = origin.getY();
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+
         for (int dx = 0; dx < PEN_SIZE; dx++) {
             for (int dz = 0; dz < PEN_SIZE; dz++) {
-                BlockPos pos = new BlockPos(origin.getX() + dx, y, origin.getZ() + dz);
-                BlockPos ground = pos.down();
-                // Need solid ground below
-                if (!world.getBlockState(ground).isSolidBlock(world, ground)) return false;
-                // Need replaceable space at pen level and one above (covers carpet, flowers, cave_air, etc.)
-                if (!world.getBlockState(pos).isReplaceable()) return false;
-                if (!world.getBlockState(pos.up()).isReplaceable()) return false;
+                int x = origin.getX() + dx;
+                int z = origin.getZ() + dz;
+
+                // Per-column surface Y
+                mutable.set(x, baseY, z);
+                int surfY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+
+                // Flatness: reject if this column's surface deviates too much
+                if (Math.abs(surfY - baseY) > FLAT_Y_TOLERANCE) return false;
+
+                // Use the actual surface Y for block checks
+                mutable.set(x, surfY, z);
+                BlockState floor = world.getBlockState(mutable);
+
+                // Dirt path means a natural gap/road — don't build here
+                if (floor.isOf(Blocks.DIRT_PATH)) return false;
+
+                // Solid top face (isSideSolidFullSquare accepts slabs/stairs; isSolidBlock would reject them)
+                if (!floor.isSideSolidFullSquare(world, mutable.toImmutable(), Direction.UP)) return false;
+
+                // Fence/space level must be replaceable (air, grass, flowers, etc.)
+                mutable.set(x, surfY + 1, z);
+                if (!world.getBlockState(mutable).isReplaceable()) return false;
             }
         }
         return true;
@@ -372,6 +406,17 @@ public class LumberjackPenBuilderGoal extends Goal {
             }
         }
         return false;
+    }
+
+    /**
+     * Returns the position where a fence should be placed at column (x, z):
+     * one block above the solid surface (surfY + 1), so fences sit on the
+     * actual terrain rather than being embedded in it or floating.
+     */
+    private BlockPos fencePosAt(ServerWorld world, int x, int z) {
+        BlockPos.Mutable mutable = new BlockPos.Mutable(x, 0, z);
+        int surfY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+        return new BlockPos(x, surfY + 1, z);
     }
 
     private Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
