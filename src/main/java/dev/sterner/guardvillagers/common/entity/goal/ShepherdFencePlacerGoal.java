@@ -54,10 +54,10 @@ public class ShepherdFencePlacerGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ShepherdFencePlacerGoal.class);
 
-    /** Outer pen dimension. 7×7 exterior = 28 perimeter blocks, minus 1 gap = 27 fences. */
+    /** Outer pen dimension. 7×7 exterior = 24 unique perimeter blocks (4×7−4 corners), minus 1 gate = 23 fences. */
     private static final int PEN_SIZE = 7;
     /** Number of fence blocks placed (perimeter minus gate gap). */
-    private static final int FENCE_COUNT = 27;
+    private static final int FENCE_COUNT = 23;
     /** Min fences needed in chest before triggering. */
     private static final int MIN_FENCES = ShepherdFenceCraftingGoal.FENCE_TARGET;
     /** Gates needed. */
@@ -145,18 +145,18 @@ public class ShepherdFencePlacerGoal extends Goal {
         // Check chest has enough materials
         Optional<Inventory> invOpt = getChestInventory(world);
         if (invOpt.isEmpty()) {
-            LOGGER.info("ShepherdFencePlacer {}: no chest inventory at {}", villager.getUuidAsString(), chestPos.toShortString());
+            LOGGER.debug("ShepherdFencePlacer {}: no chest inventory at {}", villager.getUuidAsString(), chestPos.toShortString());
             return false;
         }
         Inventory inv = invOpt.get();
 
         int fenceCount = countTag(inv, ItemTags.FENCES);
         int gateCount = countTag(inv, ItemTags.FENCE_GATES);
-        LOGGER.info("ShepherdFencePlacer {}: canStart check — fences={}/{} gates={}/{} jobPos={} chestPos={}",
+        LOGGER.debug("ShepherdFencePlacer {}: canStart check — fences={}/{} gates={}/{} jobPos={} chestPos={}",
                 villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES,
                 jobPos.toShortString(), chestPos.toShortString());
         if (fenceCount < MIN_FENCES || gateCount < MIN_GATES) {
-            LOGGER.info("ShepherdFencePlacer {}: insufficient materials — fences={}/{} gates={}/{}",
+            LOGGER.debug("ShepherdFencePlacer {}: insufficient materials — fences={}/{} gates={}/{}",
                     villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES);
             return false;
         }
@@ -164,7 +164,7 @@ public class ShepherdFencePlacerGoal extends Goal {
         // Find a valid site
         PenPlan plan = findPenSite(world);
         if (plan == null) {
-            LOGGER.info("ShepherdFencePlacer {}: has materials (fences={} gates={}) but found no valid 7×7 site within {} blocks of job site {}",
+            LOGGER.debug("ShepherdFencePlacer {}: has materials (fences={} gates={}) but found no valid 7×7 site within {} blocks of job site {}",
                     villager.getUuidAsString(), fenceCount, gateCount, SITE_SEARCH_RADIUS, jobPos.toShortString());
             return false;
         }

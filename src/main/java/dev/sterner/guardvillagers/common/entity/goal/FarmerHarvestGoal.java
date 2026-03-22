@@ -61,6 +61,10 @@ public class FarmerHarvestGoal extends Goal {
     private static final int DEFAULT_WHEAT_SEED_RESERVE_CAP = 64;
     private static final int DEFAULT_WHEAT_SEED_BOOTSTRAP_FLOOR = 0;
     private static final int FULL_WHEAT_SEED_STACK = 64;
+    /** Seeds pulled from chest per incremental pickup cycle (no-hoe, no-seeds idle mode). */
+    private static final int SEED_INCREMENT_BATCH = 5;
+    /** How often to attempt incremental seed pickup when no seeds and no hoe are available. */
+    private static final int SEED_INCREMENT_INTERVAL_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -112,6 +116,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final int COVERAGE_CACHE_TTL = 200;
     private FarmlandCoverageStats cachedCoverage = null;
     private long coverageCacheTime = -1L;
+    /** World-time tick after which the next incremental chest seed pickup is allowed (no-seeds, no-hoe idle mode). */
+    private long nextIncrementalSeedPickupTick = 0L;
 
     /**
      * True when the farmer has confirmed unseeded farmland exists within its range.
@@ -122,8 +128,8 @@ public class FarmerHarvestGoal extends Goal {
     private boolean hasUnseededFarmlandObligation = false;
 
     /**
-     * Used to suppress repeated INFO logging for the obligation path.
-     * We log INFO once when obligation is first detected; subsequent polls are DEBUG.
+     * Used to suppress repeated logging for the obligation path.
+     * Logged once per obligation cycle at DEBUG; subsequent polls remain DEBUG.
      */
     private boolean obligationLoggedThisCycle = false;
 
@@ -151,6 +157,7 @@ public class FarmerHarvestGoal extends Goal {
         this.seedForageRetryCount = 0;
         this.hasUnseededFarmlandObligation = false;
         this.obligationLoggedThisCycle = false;
+        this.nextIncrementalSeedPickupTick = 0L;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -185,13 +192,28 @@ public class FarmerHarvestGoal extends Goal {
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
 
+        // Guard the expensive ~30k-block farmland scan behind resource availability.
+        // The coverage scan is only actionable when the farmer can plant (seeds) or prep ground (hoe).
+        // With neither, skip the scan entirely and instead pull a small seed batch from the chest
+        // on a slow timer so the farmer accumulates resources without burning cycles.
+        boolean hasSeedsAvailable = preflight.hasSeedsForPlanting || hasSeedsInChest(world);
+        boolean hasHoeAvailable   = hasHoeInInventory() || hasHoeInChest(world);
+        if (!hasSeedsAvailable && !hasHoeAvailable) {
+            if (world.getTime() >= nextIncrementalSeedPickupTick) {
+                nextIncrementalSeedPickupTick = world.getTime() + SEED_INCREMENT_INTERVAL_TICKS;
+                tryIncrementalSeedPickupFromChest(world);
+            }
+            nextCheckTime = world.getTime() + SEED_INCREMENT_INTERVAL_TICKS;
+            return false;
+        }
+
         // Update unseeded farmland obligation state — this persists between canStart() calls
         // so the farmer "remembers" that it has unfinished work even between goal ticks.
         FarmlandCoverageStats coverage = getFarmlandCoverageStats(world);
         int unseededCount = Math.max(0, coverage.accessibleCells() - coverage.seededCells());
         if (unseededCount > 0) {
             if (!hasUnseededFarmlandObligation) {
-                // Obligation newly detected — log once at INFO, then suppress to DEBUG until resolved.
+                // Obligation newly detected — log once at DEBUG per cycle.
                 hasUnseededFarmlandObligation = true;
                 obligationLoggedThisCycle = false;
             }
@@ -211,7 +233,7 @@ public class FarmerHarvestGoal extends Goal {
                 // the seed-gathering workflow isn't blocked by a previous retry timer.
                 clearSeedForageRetryCooldown(world, "unseeded farmland obligation with seeds available");
                 if (!obligationLoggedThisCycle) {
-                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, seeds available — starting immediately",
                             villager.getUuidAsString(), unseededCount);
                     obligationLoggedThisCycle = true;
                 } else {
@@ -231,7 +253,7 @@ public class FarmerHarvestGoal extends Goal {
                 // routePostDepositFlow(). Blocking here creates a deadlock: the farmer
                 // can never gather seeds because it can never start.
                 if (!obligationLoggedThisCycle) {
-                    LOGGER.info("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
+                    LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, no seeds — starting to forage",
                             villager.getUuidAsString(), unseededCount);
                     obligationLoggedThisCycle = true;
                 } else {
@@ -1089,7 +1111,7 @@ public class FarmerHarvestGoal extends Goal {
     private BootstrapPreflight evaluateBootstrapPreflight(ServerWorld world, boolean afterHoeing) {
         int matureCropCount = countMatureCrops(world);
         int plantedCropCount = countPlantedCropBlocks(world);
-        boolean canHoeGround = hasHoeableGroundInRange(world) && (hasHoeInInventory() || hasHoeInChest(world));
+        boolean canHoeGround = (hasHoeInInventory() || hasHoeInChest(world)) && hasHoeableGroundInRange(world);
         boolean hasPlantTargets = !plantTargets.isEmpty();
         boolean hasSeedsForPlanting = hasPlantablesForPlanting();
 
@@ -1472,6 +1494,43 @@ public class FarmerHarvestGoal extends Goal {
         }
         chestInventory.markDirty();
         villager.getInventory().markDirty();
+    }
+
+    /**
+     * Pulls at most {@link #SEED_INCREMENT_BATCH} plantable seeds from the paired chest into
+     * the villager's inventory. Used in no-seeds/no-hoe idle mode to accumulate resources
+     * incrementally without triggering a full farmland scan.
+     */
+    private void tryIncrementalSeedPickupFromChest(ServerWorld world) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return;
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
+        if (chestInventory == null) return;
+
+        int pulled = 0;
+        Item[] candidates = {Items.WHEAT_SEEDS, Items.CARROT, Items.POTATO, Items.BEETROOT_SEEDS};
+        outer:
+        for (Item candidate : candidates) {
+            for (int slot = 0; slot < chestInventory.size(); slot++) {
+                if (pulled >= SEED_INCREMENT_BATCH) break outer;
+                ItemStack stack = chestInventory.getStack(slot);
+                if (stack.isEmpty() || stack.getItem() != candidate) continue;
+                int take = Math.min(SEED_INCREMENT_BATCH - pulled, stack.getCount());
+                ItemStack toInsert = new ItemStack(candidate, take);
+                ItemStack remaining = insertStack(villager.getInventory(), toInsert);
+                int moved = take - remaining.getCount();
+                if (moved > 0) {
+                    stack.decrement(moved);
+                    if (stack.isEmpty()) chestInventory.setStack(slot, ItemStack.EMPTY);
+                    pulled += moved;
+                }
+            }
+        }
+        if (pulled > 0) {
+            chestInventory.markDirty();
+            villager.getInventory().markDirty();
+            LOGGER.debug("Farmer {} incremental seed pickup: {} item(s) from chest", villager.getUuidAsString(), pulled);
+        }
     }
 
     private Item findFirstPlantableInInventory(boolean prioritizeWheatSeeds) {
