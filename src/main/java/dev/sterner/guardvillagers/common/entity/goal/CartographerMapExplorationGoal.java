@@ -37,8 +37,9 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
     private static final int REQUIRED_MAP_BATCH = 4;
-    /** Maps needed in chest before triggering the cartography-table copy run. */
-    private static final int COPY_TRIGGER_COUNT = 8;
+    /** Maps needed in chest before triggering the cartography-table copy run.
+     *  After exploration deposits REQUIRED_MAP_BATCH (4) maps, the copy run fires immediately. */
+    private static final int COPY_TRIGGER_COUNT = 4;
     /** Number of map copies to produce at the cartography table (one per original tile). */
     private static final int MAPS_TO_COPY = 4;
 

@@ -1,7 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.decoration.ItemFrameEntity;
@@ -323,8 +325,15 @@ public class CartographerMapWallGoal extends Goal {
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         if (chestPos == null) return Optional.empty();
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
+        }
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
     // -------------------------------------------------------------------------

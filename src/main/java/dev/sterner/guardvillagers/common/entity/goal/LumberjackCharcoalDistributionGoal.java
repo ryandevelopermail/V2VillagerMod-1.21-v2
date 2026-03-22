@@ -2,9 +2,11 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -341,8 +343,15 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
     private Inventory getChestInventory(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return null;
-        return ChestBlock.getInventory(chestBlock, state, world, pos, false);
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return ChestBlock.getInventory(chestBlock, state, world, pos, false);
+        }
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(pos) instanceof BarrelBlockEntity barrel) {
+                return barrel;
+            }
+        }
+        return null;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {

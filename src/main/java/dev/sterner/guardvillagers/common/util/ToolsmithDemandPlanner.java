@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -87,8 +88,16 @@ public final class ToolsmithDemandPlanner {
         for (FishermanGuardEntity fisherman : world.getEntitiesByClass(FishermanGuardEntity.class, scanBox,
                 candidate -> candidate.isAlive() && !candidate.isBaby())) {
             BlockPos jobPos = fisherman.getPairedJobPos();
+            if (jobPos == null) {
+                continue;
+            }
             BlockPos chestPos = fisherman.getPairedChestPos();
-            if (jobPos == null || chestPos == null) {
+            // Guard against stale pre-fix state where the barrel self-matched as its own chest.
+            // If chestPos is null or equal to jobPos (barrel), resolve the real nearby chest instead.
+            if (chestPos == null || chestPos.equals(jobPos)) {
+                chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
+            }
+            if (chestPos == null) {
                 continue;
             }
             entries.add(new FishermanGuardEntry(fisherman, jobPos.toImmutable(), chestPos.toImmutable(),
