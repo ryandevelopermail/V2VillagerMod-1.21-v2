@@ -19,10 +19,13 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.poi.PointOfInterestStorage;
+import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
@@ -210,34 +213,41 @@ public class ShepherdBedPlacerGoal extends Goal {
     /**
      * Scans for existing bed blocks near the shepherd, then looks for a free
      * adjacent floor position where a new bed can be placed.
+     *
+     * <p>Bed discovery uses the POI storage (HOME type) instead of a triple-nested block
+     * scan. Vanilla registers each bed head as a HOME POI, so a POI query is O(bed count)
+     * rather than O(volume). The old manual scan over ±32×±8×±32 = ~72k positions caused
+     * measurable lag on every canStart() call (every 1200 ticks per shepherd).</p>
+     *
+     * <p>POI positions point to the head block; we back-calculate the foot using BedBlock.FACING
+     * on the head state.</p>
      */
     private BedSite findBedPlacementSite(ServerWorld world) {
         BlockPos villagerPos = villager.getBlockPos();
-        // Note: scan is a manual 3-nested loop (X/Z ±BED_ANCHOR_SCAN_RANGE, Y ±BED_ANCHOR_Y_RANGE)
-        // rather than a Box query because BedBlock is not a BlockEntity and requires a block scan.
 
-        // Collect all bed foot-block positions (avoid scanning heads).
-        // Use a BlockPos.Mutable to avoid allocating ~65k BlockPos objects per canStart() call.
-        // The triple-nested loop over ±32x ±8y ±32z = 65,536 positions would generate massive
-        // GC pressure with `new BlockPos(x, y, z)` per iteration. Mutable avoids all that.
+        // Use POI storage to find HOME POIs (bed heads) within BED_ANCHOR_SCAN_RANGE.
+        // This is O(bed count in radius) instead of O(volume), avoiding the 72k block scan.
+        PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         List<BlockPos> existingBedPositions = new ArrayList<>();
-        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
-        outer:
-        for (int x = (int)(villagerPos.getX() - BED_ANCHOR_SCAN_RANGE); x <= villagerPos.getX() + BED_ANCHOR_SCAN_RANGE; x++) {
-            for (int z = (int)(villagerPos.getZ() - BED_ANCHOR_SCAN_RANGE); z <= villagerPos.getZ() + BED_ANCHOR_SCAN_RANGE; z++) {
-                for (int y = villagerPos.getY() - BED_ANCHOR_Y_RANGE; y <= villagerPos.getY() + BED_ANCHOR_Y_RANGE; y++) {
-                    mutablePos.set(x, y, z);
-                    BlockState state = world.getBlockState(mutablePos);
-                    if (state.getBlock() instanceof BedBlock
-                            && state.get(BedBlock.PART) == BedPart.FOOT) {
-                        existingBedPositions.add(mutablePos.toImmutable());
-                        if (existingBedPositions.size() >= MAX_BED_ANCHOR_CANDIDATES) {
-                            break outer;
-                        }
-                    }
-                }
+        poiStorage.getInSquare(
+                registryEntry -> registryEntry.matchesKey(PointOfInterestTypes.HOME),
+                villagerPos,
+                (int) BED_ANCHOR_SCAN_RANGE,
+                PointOfInterestStorage.OccupationStatus.ANY
+        ).map(poi -> poi.getPos()).forEach(headPos -> {
+            if (existingBedPositions.size() >= MAX_BED_ANCHOR_CANDIDATES) return;
+            // POI is at head block; resolve to the foot by following FACING opposite
+            BlockState headState = world.getBlockState(headPos);
+            if (!(headState.getBlock() instanceof BedBlock)) return;
+            if (headState.get(BedBlock.PART) != BedPart.HEAD) return;
+            Direction facing = headState.get(BedBlock.FACING);
+            BlockPos footPos = headPos.offset(facing.getOpposite());
+            BlockState footState = world.getBlockState(footPos);
+            if (footState.getBlock() instanceof BedBlock
+                    && footState.get(BedBlock.PART) == BedPart.FOOT) {
+                existingBedPositions.add(footPos.toImmutable());
             }
-        }
+        });
 
         if (existingBedPositions.isEmpty()) {
             LOGGER.info("Shepherd {} found no existing placed beds to anchor placement near", villager.getUuidAsString());
@@ -245,8 +255,7 @@ public class ShepherdBedPlacerGoal extends Goal {
         }
 
         // Sort by distance to shepherd
-        existingBedPositions.sort((a, b) -> Double.compare(
-                a.getSquaredDistance(villagerPos), b.getSquaredDistance(villagerPos)));
+        existingBedPositions.sort(Comparator.comparingDouble(pos -> pos.getSquaredDistance(villagerPos)));
 
         // For each existing bed, try to find a free adjacent slot.
         // buildAdjacentCandidates generates candidate foot-positions based solely on anchor geometry.

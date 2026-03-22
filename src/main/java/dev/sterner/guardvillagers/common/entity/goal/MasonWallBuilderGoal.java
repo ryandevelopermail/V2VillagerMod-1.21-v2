@@ -91,6 +91,16 @@ public class MasonWallBuilderGoal extends Goal {
     private List<TransferTask> pendingTransfers = new ArrayList<>();
     private int currentTransferIndex = 0;
 
+    /**
+     * Cached wall rectangle from the last successful computeWallRect() call.
+     * Re-used across canStart() cycles as long as the anchor position hasn't changed.
+     * This avoids the expensive POI stream scan + heightmap lookups every 400 ticks.
+     * Invalidated when the anchor changes or the wall is marked complete.
+     */
+    private WallRect cachedWallRect = null;
+    /** Anchor position that produced {@link #cachedWallRect}. Null = no cache. */
+    private BlockPos cachedWallRectAnchor = null;
+
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
         this.setControls(EnumSet.of(Control.MOVE));
@@ -172,14 +182,25 @@ public class MasonWallBuilderGoal extends Goal {
      * @param anchorPos the QM chest position — used as the geographic village center
      */
     private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos anchorPos) {
-        // 1. Compute wall rectangle
-        Optional<WallRect> rectOpt = computeWallRect(world, anchorPos);
-        if (rectOpt.isEmpty()) {
-            LOGGER.debug("MasonWallBuilder {}: no village bounds found near anchor {}",
-                    guard.getUuidAsString(), anchorPos.toShortString());
-            return false;
+        // 1. Compute (or reuse cached) wall rectangle.
+        // computeWallRect does a full POI stream scan + per-perimeter heightmap lookups — expensive.
+        // Cache it per anchor so we only recompute when the village anchor changes.
+        WallRect rect;
+        if (cachedWallRect != null && anchorPos.equals(cachedWallRectAnchor)) {
+            rect = cachedWallRect;
+        } else {
+            Optional<WallRect> rectOpt = computeWallRect(world, anchorPos);
+            if (rectOpt.isEmpty()) {
+                LOGGER.debug("MasonWallBuilder {}: no village bounds found near anchor {}",
+                        guard.getUuidAsString(), anchorPos.toShortString());
+                cachedWallRect = null;
+                cachedWallRectAnchor = null;
+                return false;
+            }
+            rect = rectOpt.get();
+            cachedWallRect = rect;
+            cachedWallRectAnchor = anchorPos.toImmutable();
         }
-        WallRect rect = rectOpt.get();
 
         // 2. Compute all wall segment positions for the rectangle
         List<BlockPos> allSegments = computeWallSegments(world, rect);
@@ -313,6 +334,9 @@ public class MasonWallBuilderGoal extends Goal {
         if (currentSegmentIndex >= pendingSegments.size()) {
             stage = Stage.DONE;
             guard.clearWallSegments();
+            // Invalidate cached rect so next cycle recomputes with updated village bounds
+            cachedWallRect = null;
+            cachedWallRectAnchor = null;
             return;
         }
 
@@ -330,6 +354,8 @@ public class MasonWallBuilderGoal extends Goal {
         if (currentSegmentIndex >= pendingSegments.size()) {
             stage = Stage.DONE;
             guard.clearWallSegments();
+            cachedWallRect = null;
+            cachedWallRectAnchor = null;
             return;
         }
 

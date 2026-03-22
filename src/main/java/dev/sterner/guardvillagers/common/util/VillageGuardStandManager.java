@@ -83,7 +83,11 @@ public final class VillageGuardStandManager {
             }
 
             GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos.get());
-            if (INITIALIZED_ANCHORS.add(globalAnchorPos)) {
+            // INITIALIZED_ANCHORS.add() returns true only on first insertion.
+            // If already initialized, skip the expensive countVillageGuards + pairGuardsWithStands
+            // entirely — no need to re-evaluate the stand pairing every 40 ticks.
+            if (!INITIALIZED_ANCHORS.contains(globalAnchorPos)) {
+                INITIALIZED_ANCHORS.add(globalAnchorPos);
                 int guardCount = countVillageGuards(world, anchorPos.get());
                 GUARD_COUNTS.put(globalAnchorPos, guardCount);
                 pairGuardsWithStands(world, anchorPos.get());
