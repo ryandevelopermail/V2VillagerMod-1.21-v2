@@ -1,22 +1,25 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
-import net.minecraft.item.FilledMapItem;
 import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.item.map.MapState;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
-import java.util.List;
 import java.util.Optional;
 
+/**
+ * Previously distributed cartographer FILLED_MAP items to librarians.
+ * This goal is now fully disabled — cartographers retain all filled maps in their
+ * paired chest for the copy/display workflow (map wall placement when 8 maps
+ * + 4 item frames are ready).
+ *
+ * <p>The goal registration is preserved in CartographerBehavior so the goal
+ * infrastructure remains wired; no maps will ever be distributed out.
+ */
 public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDistributionGoal {
-    private static final double RECIPIENT_SCAN_RANGE = 24.0D;
 
     public CartographerToLibrarianDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -24,112 +27,26 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        // Maps are retained in the cartographer's paired chest — they are NOT distributed to librarians.
-        // This goal is kept in place for potential future overflow handling of other cartographer items.
         return false;
     }
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (canStartOverflowTransfer(world, inventory, stack -> isValidFilledMap(stack, world))) {
-            return true;
-        }
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isValidFilledMap(stack, world)) {
-                continue;
-            }
-            if (!DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty()) {
-                return true;
-            }
-        }
         return false;
     }
 
     @Override
     protected boolean selectPendingTransfer(ServerWorld world, Inventory inventory) {
-        if (inventory == null) {
-            return false;
-        }
-        if (trySelectOverflowTransfer(world, inventory, stack -> isValidFilledMap(stack, world))) {
-            return true;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
-        if (recipients.isEmpty()) {
-            return false;
-        }
-
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!isValidFilledMap(stack, world)) {
-                continue;
-            }
-
-            DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
-            ItemStack extracted = stack.split(1);
-            inventory.setStack(slot, stack);
-            inventory.markDirty();
-
-            pendingItem = extracted;
-            pendingTargetId = recipient.recipient().getUuid();
-            pendingTargetPos = recipient.chestPos();
-            return true;
-        }
-
         return false;
     }
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, stack -> isValidFilledMap(stack, world))) {
-            return true;
-        }
-        if (!isValidFilledMap(pendingItem, world)) {
-            return false;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
-        if (recipients.isEmpty()) {
-            return false;
-        }
-
-        if (pendingTargetId != null) {
-            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
-                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
-                    pendingTargetPos = recipient.chestPos();
-                    return true;
-                }
-            }
-        }
-
-        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
-        pendingTargetId = recipient.recipient().getUuid();
-        pendingTargetPos = recipient.chestPos();
-        return true;
+        return false;
     }
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
-        if (pendingItem.isEmpty() || pendingTargetPos == null) {
-            return false;
-        }
-
-        Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
-        if (targetInventory.isEmpty()) {
-            return false;
-        }
-
-        ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
-        targetInventory.get().markDirty();
-        if (remaining.isEmpty()) {
-            return true;
-        }
-
-        pendingItem = remaining;
         return false;
     }
 
@@ -139,7 +56,7 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
+        return Optional.empty();
     }
 
     @Override
@@ -161,13 +78,4 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
     protected boolean placePendingItemOnStand(ServerWorld world, ArmorStandEntity stand) {
         return false;
     }
-
-    private boolean isValidFilledMap(ItemStack stack, ServerWorld world) {
-        if (world == null || !stack.isOf(Items.FILLED_MAP)) {
-            return false;
-        }
-        MapState state = FilledMapItem.getMapState(stack, world);
-        return state != null;
-    }
-
 }
