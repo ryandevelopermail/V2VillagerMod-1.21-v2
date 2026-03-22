@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
@@ -16,6 +17,7 @@ import net.minecraft.item.ShearsItem;
 import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
@@ -36,14 +38,30 @@ public final class ToolsmithDemandPlanner {
 
     public static DemandSnapshot buildSnapshot(ServerWorld world, VillagerEntity toolsmith, Inventory sourceInventory) {
         EnumMap<ToolType, ToolDemand> demandByType = new EnumMap<>(ToolType.class);
+
+        // Handle all non-fisherman tool types via the standard VillagerEntity recipient path.
         for (ToolType toolType : ToolType.values()) {
+            if (toolType == ToolType.FISHING_ROD) {
+                continue; // handled separately below
+            }
             List<DistributionRecipientHelper.RecipientRecord> recipients = findRecipients(world, toolsmith, toolType);
             List<RecipientDemand> rankedRecipients = rankRecipients(world, recipients, toolType);
             int sourceStock = countItemInInventory(sourceInventory, toolType.exactItem(), toolType.itemClass());
             int demandDeficit = recipients.size() - (sourceStock / toolType.targetPerRecipient());
             demandByType.put(toolType, new ToolDemand(toolType, sourceStock, recipients.size(), demandDeficit, rankedRecipients));
         }
-        return new DemandSnapshot(demandByType);
+
+        // FISHING_ROD: FishermanGuardEntity extends GuardEntity, not VillagerEntity.
+        // Scan for them directly and store ranked entries in a separate list within DemandSnapshot.
+        List<FishermanGuardEntry> fishermanEntries = findFishermanGuardEntries(world, toolsmith);
+        int rodStock = countItemInInventory(sourceInventory, ToolType.FISHING_ROD.exactItem(), ToolType.FISHING_ROD.itemClass());
+        List<FishermanGuardEntry> rankedFishermen = fishermanEntries.stream()
+                .filter(e -> e.deficit(world) > 0)
+                .toList(); // already sorted by squaredDistance in findFishermanGuardEntries
+        int fishermanDeficit = fishermanEntries.size() - (rodStock / ToolType.FISHING_ROD.targetPerRecipient());
+        demandByType.put(ToolType.FISHING_ROD, new ToolDemand(ToolType.FISHING_ROD, rodStock, fishermanEntries.size(), fishermanDeficit, List.of()));
+
+        return new DemandSnapshot(demandByType, rankedFishermen);
     }
 
     private static List<DistributionRecipientHelper.RecipientRecord> findRecipients(ServerWorld world, VillagerEntity toolsmith, ToolType toolType) {
@@ -51,10 +69,45 @@ public final class ToolsmithDemandPlanner {
             case HOE -> List.of(route(VillagerProfession.FARMER));
             case PICKAXE -> List.of(route(VillagerProfession.MASON));
             case SHEARS -> List.of(route(VillagerProfession.SHEPHERD));
-            case FISHING_ROD -> List.of(route(VillagerProfession.FISHERMAN));
-            case SHOVEL -> List.of();
+            // FISHING_ROD: FishermanGuardEntity is not a VillagerEntity — never reached here.
+            default -> List.of();
         };
-        return DistributionRouteEngine.findEligibleRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE, routes);
+        return new ArrayList<>(DistributionRouteEngine.findEligibleRecipients(world, toolsmith, RECIPIENT_SCAN_RANGE, routes));
+    }
+
+    /**
+     * Finds FishermanGuardEntity instances near the toolsmith. Returns {@link FishermanGuardEntry}
+     * objects (which ARE NOT RecipientRecord — they carry a GuardEntity reference).
+     * Callers that care about the FISHING_ROD path must use this method directly; the standard
+     * RecipientRecord list never contains fisherman guards.
+     */
+    public static List<FishermanGuardEntry> findFishermanGuardEntries(ServerWorld world, VillagerEntity toolsmith) {
+        List<FishermanGuardEntry> entries = new ArrayList<>();
+        Box scanBox = new Box(toolsmith.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
+        for (FishermanGuardEntity fisherman : world.getEntitiesByClass(FishermanGuardEntity.class, scanBox,
+                candidate -> candidate.isAlive() && !candidate.isBaby())) {
+            BlockPos jobPos = fisherman.getPairedJobPos();
+            BlockPos chestPos = fisherman.getPairedChestPos();
+            if (jobPos == null || chestPos == null) {
+                continue;
+            }
+            entries.add(new FishermanGuardEntry(fisherman, jobPos.toImmutable(), chestPos.toImmutable(),
+                    toolsmith.squaredDistanceTo(fisherman)));
+        }
+        entries.sort(Comparator.comparingDouble(FishermanGuardEntry::squaredDistance)
+                .thenComparing(e -> e.guard().getUuid(), java.util.UUID::compareTo));
+        return entries;
+    }
+
+    /** Lightweight entry for a FishermanGuardEntity recipient — avoids the VillagerEntity requirement of RecipientRecord. */
+    public record FishermanGuardEntry(FishermanGuardEntity guard, BlockPos jobPos, BlockPos chestPos, double squaredDistance) {
+        public int rodStockInChest(ServerWorld world) {
+            return countItemInRecipientStorage(world, chestPos, ToolType.FISHING_ROD);
+        }
+
+        public int deficit(ServerWorld world) {
+            return Math.max(0, ToolType.FISHING_ROD.targetPerRecipient() - rodStockInChest(world));
+        }
     }
 
     private static DistributionRouteEngine.ProfessionRoute route(VillagerProfession profession) {
@@ -185,7 +238,7 @@ public final class ToolsmithDemandPlanner {
                              List<RecipientDemand> rankedRecipients) {
     }
 
-    public record DemandSnapshot(EnumMap<ToolType, ToolDemand> demandByType) {
+    public record DemandSnapshot(EnumMap<ToolType, ToolDemand> demandByType, List<FishermanGuardEntry> rankedFishermanEntries) {
         public ToolDemand demandFor(ToolType toolType) {
             return demandByType.get(toolType);
         }
@@ -196,6 +249,10 @@ public final class ToolsmithDemandPlanner {
         }
 
         public List<RecipientDemand> rankedRecipientsFor(ToolType toolType) {
+            // FISHING_ROD recipients are FishermanGuardEntry — use rankedFishermanEntries() for that path.
+            if (toolType == ToolType.FISHING_ROD) {
+                return List.of();
+            }
             ToolDemand demand = demandFor(toolType);
             return demand == null ? List.of() : demand.rankedRecipients();
         }

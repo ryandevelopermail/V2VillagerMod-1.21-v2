@@ -242,7 +242,7 @@ public class ToolsmithCraftingGoal extends Goal {
                 continue;
             }
             if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0) {
-                boolean practicalRodNeed = hasPracticalFishingRodNeed(toolDemand, deficit);
+                boolean practicalRodNeed = hasPracticalFishingRodNeed(toolDemand, deficit, demandSnapshot.rankedFishermanEntries().size());
                 if (!practicalRodNeed) {
                     if (toolDemand != null) {
                         CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: no practical recipient need (aggregate "
@@ -270,11 +270,14 @@ public class ToolsmithCraftingGoal extends Goal {
                 || stack.isOf(Items.FISHING_ROD);
     }
 
-    static boolean hasPracticalFishingRodNeed(@Nullable ToolsmithDemandPlanner.ToolDemand toolDemand, int demandDeficit) {
+    static boolean hasPracticalFishingRodNeed(@Nullable ToolsmithDemandPlanner.ToolDemand toolDemand,
+                                               int demandDeficit,
+                                               int fishermanEntryCount) {
         if (toolDemand == null || demandDeficit != 0) {
             return false;
         }
-        return !toolDemand.rankedRecipients().isEmpty();
+        // Practical need exists when at least one fisherman guard still needs a rod.
+        return fishermanEntryCount > 0;
     }
 
     private boolean hasNonTableCraftableRecipe(ServerWorld world) {
