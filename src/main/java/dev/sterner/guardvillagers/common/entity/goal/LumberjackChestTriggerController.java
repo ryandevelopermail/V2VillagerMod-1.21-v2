@@ -872,6 +872,13 @@ public final class LumberjackChestTriggerController {
         }
 
         if (stage != UpgradeStage.CHEST_PAIRED) {
+            // A chest exists but was never recorded by the lumberjack (e.g. player-placed,
+            // or state lost after reload). Auto-promote so the V2 table can be placed next cycle.
+            if (stage == UpgradeStage.UNPAIRED) {
+                LOGGER.debug("[upgrade] auto-hydrate CHEST_PAIRED for villager={} jobPos={} (chest found at {})",
+                        villager.getUuid(), jobPos.toShortString(), chestPos.toShortString());
+                transitionUpgradeStageToChestPaired(world, villager.getUuid(), jobPos);
+            }
             return false;
         }
 
