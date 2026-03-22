@@ -386,11 +386,18 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
     private Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
+        Set<BlockPos> positions = new HashSet<>();
+
+        if (state.getBlock() instanceof net.minecraft.block.BarrelBlock) {
+            // Barrel is a single-block container — just watch the one position.
+            positions.add(chestPos.toImmutable());
+            return positions;
+        }
+
         if (!(state.getBlock() instanceof ChestBlock)) {
             return Set.of();
         }
 
-        Set<BlockPos> positions = new HashSet<>();
         positions.add(chestPos.toImmutable());
 
         ChestType chestType = state.get(ChestBlock.CHEST_TYPE);
