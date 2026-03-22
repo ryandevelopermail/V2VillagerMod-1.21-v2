@@ -35,6 +35,10 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
     private static final int REQUIRED_MAP_BATCH = 4;
+    /** Maps needed in chest before triggering the cartography-table copy run. */
+    private static final int COPY_TRIGGER_COUNT = 8;
+    /** Number of map copies to produce at the cartography table (one per original tile). */
+    private static final int MAPS_TO_COPY = 4;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -43,6 +47,8 @@ public class CartographerMapExplorationGoal extends Goal {
     private long nextCheckTime;
     private boolean immediateCheckPending;
     private int mapScale = DEFAULT_MAP_SCALE;
+    /** True once the cartography-table copy run has been completed for the current mapping cycle. */
+    private boolean mapsCopiedThisCycle = false;
     private final Set<Long> mappedTargets = new HashSet<>();
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private final List<MapTarget> workflowTargets = new ArrayList<>();
@@ -218,16 +224,61 @@ public class CartographerMapExplorationGoal extends Goal {
                         villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
                     }
 
-                    refreshMappedTargets(world);
-                    buildTargets(world);
-                    if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
-                        stage = Stage.ACQUIRE_MAPS;
+                    // If chest now has ≥8 filled maps and we haven't done the copy run yet,
+                    // head to the cartography table to produce 4 duplicates.
+                    if (!mapsCopiedThisCycle && countFilledMaps(world) >= COPY_TRIGGER_COUNT) {
+                        LOGGER.info("Cartographer {}: {} filled maps in chest — heading to cartography table to copy",
+                                villager.getUuidAsString(), countFilledMaps(world));
+                        stage = Stage.GO_TO_TABLE_FOR_COPY;
+                        moveTo(jobPos);
                     } else {
-                        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                        stage = Stage.DONE;
+                        refreshMappedTargets(world);
+                        buildTargets(world);
+                        if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                            stage = Stage.ACQUIRE_MAPS;
+                        } else {
+                            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                            stage = Stage.DONE;
+                        }
                     }
                 } else {
                     moveTo(chestPos);
+                }
+            }
+            case GO_TO_TABLE_FOR_COPY -> {
+                if (isNear(jobPos)) {
+                    stage = Stage.COPY_MAPS;
+                } else {
+                    moveTo(jobPos);
+                }
+            }
+            case COPY_MAPS -> {
+                // Simulate cartography-table duplication: insert MAPS_TO_COPY additional filled
+                // map copies into the chest (one duplicate per original tile map).
+                Inventory inventory = getChestInventory(world).orElse(null);
+                if (inventory != null) {
+                    List<ItemStack> originals = collectFilledMaps(world, MAPS_TO_COPY);
+                    int copied = 0;
+                    for (ItemStack original : originals) {
+                        ItemStack copy = original.copy();
+                        if (insertStackChecked(inventory, copy)) {
+                            copied++;
+                        } else {
+                            LOGGER.warn("Cartographer {}: chest full, could not insert map copy", villager.getUuidAsString());
+                            break;
+                        }
+                    }
+                    inventory.markDirty();
+                    LOGGER.info("Cartographer {}: cartography table copy run complete — {} map(s) duplicated", villager.getUuidAsString(), copied);
+                }
+                mapsCopiedThisCycle = true;
+                refreshMappedTargets(world);
+                buildTargets(world);
+                if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                    stage = Stage.ACQUIRE_MAPS;
+                } else {
+                    nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                    stage = Stage.DONE;
                 }
             }
             case IDLE, DONE -> {
@@ -324,6 +375,11 @@ public class CartographerMapExplorationGoal extends Goal {
         activeMap = ItemStack.EMPTY;
     }
 
+    private void resetMappingCycle() {
+        clearWorkflowState();
+        mapsCopiedThisCycle = false;
+    }
+
     public void onChestInventoryChanged(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
@@ -399,6 +455,7 @@ public class CartographerMapExplorationGoal extends Goal {
         if (allMapped) {
             LOGGER.info("Cartographer {} all 4 tiles already mapped — resetting for next mapping cycle", villager.getUuidAsString());
             mappedTargets.clear();
+            mapsCopiedThisCycle = false;
         }
 
         for (int[] offset : offsets) {
@@ -572,6 +629,36 @@ public class CartographerMapExplorationGoal extends Goal {
         state.markDirty();
     }
 
+    /** Counts all FILLED_MAP items in the paired chest. */
+    private int countFilledMaps(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return 0;
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.FILLED_MAP)) count += stack.getCount();
+        }
+        return count;
+    }
+
+    /**
+     * Returns up to {@code max} filled-map stacks (one copy per stack) from the
+     * paired chest to use as originals for the cartography-table copy run.
+     * Does NOT consume the originals — they stay in the chest.
+     */
+    private List<ItemStack> collectFilledMaps(ServerWorld world, int max) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return List.of();
+        List<ItemStack> result = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size() && result.size() < max; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.FILLED_MAP)) {
+                result.add(stack.copyWithCount(1));
+            }
+        }
+        return result;
+    }
+
     private int countEmptyMaps(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
@@ -706,6 +793,8 @@ public class CartographerMapExplorationGoal extends Goal {
         GO_TO_TARGET,
         EXPLORE_MAP,
         RETURN_TO_CHEST,
+        GO_TO_TABLE_FOR_COPY,
+        COPY_MAPS,
         DONE
     }
 

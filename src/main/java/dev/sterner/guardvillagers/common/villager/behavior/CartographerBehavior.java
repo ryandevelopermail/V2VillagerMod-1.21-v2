@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.CartographerCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.CartographerMapExplorationGoal;
+import dev.sterner.guardvillagers.common.entity.goal.CartographerMapWallGoal;
 import dev.sterner.guardvillagers.common.entity.goal.CartographerToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
@@ -28,9 +29,11 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final int EXPLORATION_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
+    private static final int MAP_WALL_GOAL_PRIORITY = 6;
     private static final Map<VillagerEntity, CartographerMapExplorationGoal> EXPLORATION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, CartographerMapWallGoal> MAP_WALL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
 
@@ -85,6 +88,16 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        CartographerMapWallGoal wallGoal = MAP_WALL_GOALS.get(villager);
+        if (wallGoal == null) {
+            wallGoal = new CartographerMapWallGoal(villager, jobPos, chestPos);
+            MAP_WALL_GOALS.put(villager, wallGoal);
+            villager.goalSelector.add(MAP_WALL_GOAL_PRIORITY, wallGoal);
+        } else {
+            wallGoal.setTargets(jobPos, chestPos);
+        }
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -135,6 +148,16 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         distributionGoal.requestImmediateDistribution();
+
+        CartographerMapWallGoal wallGoal = MAP_WALL_GOALS.get(villager);
+        if (wallGoal == null) {
+            wallGoal = new CartographerMapWallGoal(villager, jobPos, chestPos);
+            MAP_WALL_GOALS.put(villager, wallGoal);
+            villager.goalSelector.add(MAP_WALL_GOAL_PRIORITY, wallGoal);
+        } else {
+            wallGoal.setTargets(jobPos, chestPos);
+        }
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -193,6 +216,8 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         if (distributionGoal != null) {
             distributionGoal.requestImmediateDistribution();
         }
+
+        // No explicit wake-up needed for CartographerMapWallGoal — it polls on its own scan interval.
     }
 
     private void clearChestListener(VillagerEntity villager) {
