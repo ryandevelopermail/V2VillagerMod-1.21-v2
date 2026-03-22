@@ -427,7 +427,6 @@ public class CartographerMapExplorationGoal extends Goal {
         waypointIndex = 0;
 
         int mapSize = getMapSize(mapScale);
-        int y = jobPos.getY();
         int half = mapSize / 2;
         int inset = Math.max(8, mapSize / 16);
 
@@ -438,16 +437,32 @@ public class CartographerMapExplorationGoal extends Goal {
         int midX = target.centerX();
         int midZ = target.centerZ();
 
-        explorationWaypoints.add(new BlockPos(midX, y, midZ));
-        explorationWaypoints.add(new BlockPos(westX, y, northZ));
-        explorationWaypoints.add(new BlockPos(midX, y, northZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, northZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, midZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, southZ));
-        explorationWaypoints.add(new BlockPos(midX, y, southZ));
-        explorationWaypoints.add(new BlockPos(westX, y, southZ));
-        explorationWaypoints.add(new BlockPos(westX, y, midZ));
-        explorationWaypoints.add(new BlockPos(midX, y, midZ));
+        // Use surface heightmap Y per waypoint so the navigator is never sent
+        // into a tree trunk, underground, or mid-air on hilly terrain.
+        explorationWaypoints.add(surfacePos(midX, midZ));
+        explorationWaypoints.add(surfacePos(westX, northZ));
+        explorationWaypoints.add(surfacePos(midX, northZ));
+        explorationWaypoints.add(surfacePos(eastX, northZ));
+        explorationWaypoints.add(surfacePos(eastX, midZ));
+        explorationWaypoints.add(surfacePos(eastX, southZ));
+        explorationWaypoints.add(surfacePos(midX, southZ));
+        explorationWaypoints.add(surfacePos(westX, southZ));
+        explorationWaypoints.add(surfacePos(westX, midZ));
+        explorationWaypoints.add(surfacePos(midX, midZ));
+    }
+
+    /**
+     * Returns a surface-level BlockPos at (x, z) using the MOTION_BLOCKING_NO_LEAVES
+     * heightmap so waypoints land on walkable ground and are never inside tree trunks.
+     * Falls back to WORLD_SURFACE if the world isn't a ServerWorld (should never occur
+     * in practice since this goal guards on instanceof ServerWorld in canStart/tick).
+     */
+    private BlockPos surfacePos(int x, int z) {
+        if (villager.getWorld() instanceof ServerWorld world) {
+            int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+            return new BlockPos(x, y, z);
+        }
+        return new BlockPos(x, jobPos.getY(), z);
     }
 
     private void tickActiveMap(ServerWorld world) {

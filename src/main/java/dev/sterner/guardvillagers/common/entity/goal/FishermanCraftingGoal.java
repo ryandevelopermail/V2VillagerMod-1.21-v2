@@ -70,6 +70,29 @@ public class FishermanCraftingGoal extends Goal {
         nextCheckTime = 0L;
     }
 
+    private static final int NON_TABLE_GRID_SIZE = 2;
+
+    private boolean hasValidCraftingTable(ServerWorld world) {
+        return craftingTablePos != null && world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
+    }
+
+    private boolean canUseRecipeWithoutCraftingTable(net.minecraft.recipe.CraftingRecipe recipe) {
+        return recipe.fits(NON_TABLE_GRID_SIZE, NON_TABLE_GRID_SIZE);
+    }
+
+    private boolean hasNonTableCraftableRecipe(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return false;
+        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            CraftingRecipe recipe = entry.value();
+            ItemStack result = recipe.getResult(world.getRegistryManager());
+            if (!isFishermanOutput(result)) continue;
+            if (!canUseRecipeWithoutCraftingTable(recipe)) continue;
+            if (canCraft(inventory, recipe)) return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
@@ -81,10 +104,13 @@ public class FishermanCraftingGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.FISHERMAN) {
             return false;
         }
-        if (craftingTablePos == null || chestPos == null) {
+        if (chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+        // Require crafting table only if no non-table recipe is craftable.
+        // Fishing rod (sticks + string) fits a 2×2 grid and never needs a table.
+        boolean hasCraftingTable = hasValidCraftingTable(world);
+        if (!hasCraftingTable && !hasNonTableCraftableRecipe(world)) {
             return false;
         }
         refreshDailyLimit(world);
@@ -110,8 +136,13 @@ public class FishermanCraftingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+        if (villager.getWorld() instanceof ServerWorld world && hasValidCraftingTable(world)) {
+            stage = Stage.GO_TO_TABLE;
+            moveTo(craftingTablePos);
+        } else {
+            // No crafting table — craft in place (only 2×2 recipes are eligible)
+            stage = Stage.CRAFT;
+        }
     }
 
     @Override
@@ -225,11 +256,16 @@ public class FishermanCraftingGoal extends Goal {
     }
 
     private List<FishermanRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+        boolean hasCraftingTable = hasValidCraftingTable(world);
         List<FishermanRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (!isFishermanOutput(result)) {
+                continue;
+            }
+            // Without a crafting table, only 2×2 recipes are available
+            if (!hasCraftingTable && !canUseRecipeWithoutCraftingTable(recipe)) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {

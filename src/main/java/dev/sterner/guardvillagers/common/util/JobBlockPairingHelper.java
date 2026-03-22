@@ -58,6 +58,10 @@ public final class JobBlockPairingHelper {
     static {
         registerPairingBlock(Blocks.CHEST);
         registerPairingBlock(Blocks.TRAPPED_CHEST);
+        // Barrels are used as paired storage by the fisherman (job block = BARREL).
+        // Without this, findNearbyChest() returns empty for barrel-paired workers,
+        // breaking toolsmith demand detection and rod distribution entirely.
+        registerPairingBlock(Blocks.BARREL);
     }
 
     private JobBlockPairingHelper() {
