@@ -76,7 +76,8 @@ public final class DistributionRecipientHelper {
 
             double squaredDistance = source.squaredDistanceTo(villager);
             recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), jobPos.toImmutable(), squaredDistance));
-            JobBlockPairingHelper.findNearbyChest(world, jobPos)
+            // Exclude jobPos so the fisherman's barrel job block does not self-match as its own chest.
+            JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
                     .ifPresent(chestPos -> recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), chestPos.toImmutable(), squaredDistance)));
         }
 

@@ -167,7 +167,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
                 continue;
             }
 
-            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos)
+            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
                     .filter(foundChestPos -> jobPos.isWithinDistance(foundChestPos, 3.0D));
 
             tryConvertWithRod(world, villager, jobPos, chestPos.orElse(null));

@@ -150,7 +150,7 @@ public final class LumberjackChestTriggerController {
             if (jobPos == null) {
                 continue;
             }
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
                     && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 return UpgradeDemand.v1Chest();
             }
@@ -201,7 +201,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()) {
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()) {
                 count++;
             }
         }
@@ -228,7 +228,7 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
-        return JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+        return JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()
                 && findNearbyCraftingTable(world, jobPos) != null;
     }
 
@@ -469,7 +469,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
             BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
-            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(context.world(), jobPos).isPresent()) {
+            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(context.world(), jobPos, jobPos).isPresent()) {
                 continue;
             }
 
@@ -865,7 +865,7 @@ public final class LumberjackChestTriggerController {
 
         UpgradeStage stage = getTrackedUpgradeStage(world, villager.getUuid(), jobPos);
 
-        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (chestPos == null) {
             clearUpgradeState(world, villager.getUuid(), jobPos);
             return false;
@@ -930,7 +930,7 @@ public final class LumberjackChestTriggerController {
 
             UpgradeStage stage = getTrackedUpgradeStage(world, villagerId, jobPos);
             if (stage == UpgradeStage.CHEST_PAIRED
-                    && (!JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+                    && (!JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()
                     || findNearbyCraftingTable(world, jobPos) != null)) {
                 clearUpgradeState(world, villagerId, jobPos);
             }
@@ -1045,7 +1045,7 @@ public final class LumberjackChestTriggerController {
     }
 
     private static BlockPos findPlacementNearJobAndPairedChest(ServerWorld world, BlockPos jobPos, double range) {
-        BlockPos pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (pairedChestPos == null) {
             return null;
         }
@@ -1058,7 +1058,7 @@ public final class LumberjackChestTriggerController {
             return true;
         }
 
-        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (chestPos == null) {
             return false;
         }

@@ -222,7 +222,7 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
         if (nearbyChest.isEmpty()) {
             return;
         }
@@ -282,7 +282,8 @@ public final class JobBlockPairingHelper {
 
         BlockPos jobPos = globalPos.pos();
         VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        // Exclude jobPos itself so that a fisherman's barrel job block doesn't self-match as its chest.
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
         nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
 
         if (nearbyChest.isPresent()) {
@@ -352,7 +353,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        if (findNearbyChest(world, jobPos).isEmpty()) {
+        if (findNearbyChest(world, jobPos, jobPos).isEmpty()) {
             return false;
         }
 
@@ -389,7 +390,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        if (findNearbyChest(world, jobPos).isEmpty()) {
+        if (findNearbyChest(world, jobPos, jobPos).isEmpty()) {
             return false;
         }
 
@@ -575,8 +576,22 @@ public final class JobBlockPairingHelper {
     }
 
     public static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center) {
+        return findNearbyChest(world, center, null);
+    }
+
+    /**
+     * Finds the nearest pairing block (chest, trapped chest, barrel) within
+     * {@link #JOB_BLOCK_PAIRING_RANGE} of {@code center}, optionally excluding
+     * {@code excludePos}. The exclusion is used when {@code center} IS the job block
+     * (e.g. a fisherman's barrel) so that the job block doesn't self-match as its
+     * own paired storage.
+     */
+    public static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center, BlockPos excludePos) {
         int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
         for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            if (excludePos != null && checkPos.equals(excludePos)) {
+                continue;
+            }
             if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isPairingBlock(world.getBlockState(checkPos))) {
                 return Optional.of(checkPos.toImmutable());
             }
