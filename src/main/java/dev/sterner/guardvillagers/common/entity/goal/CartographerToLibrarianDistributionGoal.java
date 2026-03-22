@@ -24,7 +24,9 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return stack.isOf(Items.FILLED_MAP);
+        // Maps are retained in the cartographer's paired chest — they are NOT distributed to librarians.
+        // This goal is kept in place for potential future overflow handling of other cartographer items.
+        return false;
     }
 
     @Override

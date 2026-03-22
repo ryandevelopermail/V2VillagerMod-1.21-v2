@@ -634,6 +634,10 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         for (Direction direction : Direction.values()) {
             BlockPos adjacent = candidate.offset(direction);
             BlockState state = world.getBlockState(adjacent);
+            // Crafting tables are placed BY lumberjacks for other villagers — never treat them as foreign job blocks.
+            if (state.isOf(net.minecraft.block.Blocks.CRAFTING_TABLE)) {
+                continue;
+            }
             if (!isAnyKnownJobBlock(state)) {
                 continue;
             }

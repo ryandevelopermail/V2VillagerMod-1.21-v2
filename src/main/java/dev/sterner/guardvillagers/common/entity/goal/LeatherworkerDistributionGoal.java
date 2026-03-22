@@ -184,8 +184,19 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             return List.of();
         }
 
-        return DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE)
-                .stream()
+        // Item frames go to cartographers (for map display walls) first; librarians are a fallback.
+        // All other leatherworker items route to librarians only.
+        java.util.stream.Stream<DistributionRecipientHelper.RecipientRecord> candidates;
+        if (stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME)) {
+            candidates = java.util.stream.Stream.concat(
+                    DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream(),
+                    DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream()
+            );
+        } else {
+            candidates = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream();
+        }
+
+        return candidates
                 .filter(recipient -> !excludedRecipients.contains(recipient.recipient().getUuid()))
                 .filter(recipient -> canRecipientAccept(world, recipient.chestPos(), stack))
                 .toList();
