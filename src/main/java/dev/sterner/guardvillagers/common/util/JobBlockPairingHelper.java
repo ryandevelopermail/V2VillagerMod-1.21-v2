@@ -45,6 +45,7 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.jetbrains.annotations.Nullable;
 
 public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
@@ -189,7 +190,8 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE);
+        // Exclude jobPos so that a fisherman's barrel job block doesn't self-match as its own chest.
+        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE, jobPos);
         if (nearbyChest.isEmpty()) {
             return;
         }
@@ -600,12 +602,20 @@ public final class JobBlockPairingHelper {
     }
 
 
-    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range) {
+    /**
+     * Finds the nearest pairing block within {@code range} of BOTH centers, optionally excluding
+     * {@code excludePos}. The exclusion prevents a fisherman's barrel job block from self-matching
+     * as its own paired storage when the crafting table is placed nearby.
+     */
+    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range, @Nullable BlockPos excludePos) {
         int blockRange = (int) Math.ceil(range);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos checkPos : BlockPos.iterate(primaryCenter.add(-blockRange, -blockRange, -blockRange), primaryCenter.add(blockRange, blockRange, blockRange))) {
+            if (excludePos != null && checkPos.equals(excludePos)) {
+                continue;
+            }
             if (!primaryCenter.isWithinDistance(checkPos, range) || !secondaryCenter.isWithinDistance(checkPos, range)) {
                 continue;
             }

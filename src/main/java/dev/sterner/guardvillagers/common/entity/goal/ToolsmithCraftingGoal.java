@@ -4,9 +4,11 @@ import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.behavior.ToolsmithBehavior;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -403,11 +405,15 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
-        return Optional.ofNullable(inventory);
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
     private void moveTo(BlockPos target) {
