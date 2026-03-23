@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -91,12 +92,7 @@ public final class ToolsmithDemandPlanner {
             if (jobPos == null) {
                 continue;
             }
-            BlockPos chestPos = fisherman.getPairedChestPos();
-            // Guard against stale pre-fix state where the barrel self-matched as its own chest.
-            // If chestPos is null or equal to jobPos (barrel), resolve the real nearby chest instead.
-            if (chestPos == null || chestPos.equals(jobPos)) {
-                chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
-            }
+            BlockPos chestPos = resolveFishermanStoragePos(world, fisherman, jobPos);
             if (chestPos == null) {
                 continue;
             }
@@ -106,6 +102,61 @@ public final class ToolsmithDemandPlanner {
         entries.sort(Comparator.comparingDouble(FishermanGuardEntry::squaredDistance)
                 .thenComparing(e -> e.guard().getUuid(), java.util.UUID::compareTo));
         return entries;
+    }
+
+    @Nullable
+    private static BlockPos resolveFishermanStoragePos(ServerWorld world, FishermanGuardEntity fisherman, BlockPos jobPos) {
+        BlockPos pairedChestPos = fisherman.getPairedChestPos();
+        if (isValidFishermanStorage(world, pairedChestPos, jobPos) && pairedChestPos != null) {
+            return pairedChestPos.toImmutable();
+        }
+
+        // Recovery path for stale pairings or missing chest memory:
+        // resolve a nearby storage candidate, preferring chest/trapped chest over barrels.
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        BlockPos bestPos = null;
+        int bestPriority = Integer.MAX_VALUE;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (BlockPos candidate : BlockPos.iterate(jobPos.add(-range, -range, -range), jobPos.add(range, range, range))) {
+            if (candidate.equals(jobPos) || !jobPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(candidate);
+            if (!JobBlockPairingHelper.isPairingBlock(state) || !getStorageInventory(world, candidate).isPresent()) {
+                continue;
+            }
+
+            int priority = storagePriority(state);
+            double distance = jobPos.getSquaredDistance(candidate);
+            if (priority < bestPriority || (priority == bestPriority && distance < bestDistance)) {
+                bestPriority = priority;
+                bestDistance = distance;
+                bestPos = candidate.toImmutable();
+            }
+        }
+
+        return bestPos;
+    }
+
+    private static boolean isValidFishermanStorage(ServerWorld world, @Nullable BlockPos chestPos, BlockPos jobPos) {
+        if (chestPos == null || chestPos.equals(jobPos)) {
+            return false;
+        }
+        if (!jobPos.isWithinDistance(chestPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+            return false;
+        }
+        return getStorageInventory(world, chestPos).isPresent();
+    }
+
+    private static int storagePriority(BlockState state) {
+        if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) {
+            return 0;
+        }
+        if (state.isOf(Blocks.BARREL)) {
+            return 1;
+        }
+        return 2;
     }
 
     /** Lightweight entry for a FishermanGuardEntity recipient — avoids the VillagerEntity requirement of RecipientRecord. */
