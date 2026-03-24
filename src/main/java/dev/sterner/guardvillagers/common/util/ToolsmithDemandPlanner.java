@@ -6,7 +6,9 @@ import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.HoeItem;
@@ -19,6 +21,7 @@ import net.minecraft.item.ShovelItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
@@ -26,7 +29,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 
 public final class ToolsmithDemandPlanner {
     // 64 blocks — generous enough to reach profession job blocks across a typical village
@@ -54,11 +59,11 @@ public final class ToolsmithDemandPlanner {
 
         // FISHING_ROD: FishermanGuardEntity extends GuardEntity, not VillagerEntity.
         // Scan for them directly and store ranked entries in a separate list within DemandSnapshot.
-        List<FishermanGuardEntry> fishermanEntries = findFishermanGuardEntries(world, toolsmith);
+        List<FishermanRodEntry> fishermanEntries = findFishermanRodEntries(world, toolsmith);
         int rodStock = countItemInInventory(sourceInventory, ToolType.FISHING_ROD.exactItem(), ToolType.FISHING_ROD.itemClass());
-        List<FishermanGuardEntry> rankedFishermen = fishermanEntries.stream()
+        List<FishermanRodEntry> rankedFishermen = fishermanEntries.stream()
                 .filter(e -> e.deficit(world) > 0)
-                .toList(); // already sorted by squaredDistance in findFishermanGuardEntries
+                .toList(); // already sorted by squaredDistance in findFishermanRodEntries
         int fishermanDeficit = fishermanEntries.size() - (rodStock / ToolType.FISHING_ROD.targetPerRecipient());
         demandByType.put(ToolType.FISHING_ROD, new ToolDemand(ToolType.FISHING_ROD, rodStock, fishermanEntries.size(), fishermanDeficit, List.of()));
 
@@ -77,39 +82,126 @@ public final class ToolsmithDemandPlanner {
     }
 
     /**
-     * Finds FishermanGuardEntity instances near the toolsmith. Returns {@link FishermanGuardEntry}
-     * objects (which ARE NOT RecipientRecord — they carry a GuardEntity reference).
-     * Callers that care about the FISHING_ROD path must use this method directly; the standard
-     * RecipientRecord list never contains fisherman guards.
+     * Finds fishing-rod recipients near the toolsmith. Includes both v2 fisherman guards
+     * and vanilla fisherman villagers (pre-conversion). Returns {@link FishermanRodEntry}
+     * objects; the standard RecipientRecord path intentionally does not handle this mixed case.
      */
-    public static List<FishermanGuardEntry> findFishermanGuardEntries(ServerWorld world, VillagerEntity toolsmith) {
-        List<FishermanGuardEntry> entries = new ArrayList<>();
+    public static List<FishermanRodEntry> findFishermanRodEntries(ServerWorld world, VillagerEntity toolsmith) {
+        List<FishermanRodEntry> entries = new ArrayList<>();
         Box scanBox = new Box(toolsmith.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
+
         for (FishermanGuardEntity fisherman : world.getEntitiesByClass(FishermanGuardEntity.class, scanBox,
                 candidate -> candidate.isAlive() && !candidate.isBaby())) {
             BlockPos jobPos = fisherman.getPairedJobPos();
             if (jobPos == null) {
                 continue;
             }
-            BlockPos chestPos = fisherman.getPairedChestPos();
-            // Guard against stale pre-fix state where the barrel self-matched as its own chest.
-            // If chestPos is null or equal to jobPos (barrel), resolve the real nearby chest instead.
-            if (chestPos == null || chestPos.equals(jobPos)) {
-                chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
-            }
+            BlockPos chestPos = resolveFishermanStoragePos(world, fisherman, jobPos);
             if (chestPos == null) {
                 continue;
             }
-            entries.add(new FishermanGuardEntry(fisherman, jobPos.toImmutable(), chestPos.toImmutable(),
+            entries.add(new FishermanRodEntry(
+                    fisherman.getUuid(),
+                    RecipientKind.FISHERMAN_GUARD,
+                    jobPos.toImmutable(),
+                    chestPos.toImmutable(),
                     toolsmith.squaredDistanceTo(fisherman)));
         }
-        entries.sort(Comparator.comparingDouble(FishermanGuardEntry::squaredDistance)
-                .thenComparing(e -> e.guard().getUuid(), java.util.UUID::compareTo));
+
+        for (VillagerEntity fishermanVillager : world.getEntitiesByClass(VillagerEntity.class, scanBox,
+                candidate -> candidate.isAlive()
+                        && !candidate.isBaby()
+                        && candidate.getVillagerData().getProfession() == VillagerProfession.FISHERMAN)) {
+            Optional<GlobalPos> jobSiteMemory = fishermanVillager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSiteMemory.isEmpty() || !Objects.equals(jobSiteMemory.get().dimension(), world.getRegistryKey())) {
+                continue;
+            }
+
+            BlockPos jobPos = jobSiteMemory.get().pos();
+            if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+                continue;
+            }
+
+            BlockPos storagePos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(jobPos);
+            if (!getStorageInventory(world, storagePos).isPresent()) {
+                continue;
+            }
+
+            entries.add(new FishermanRodEntry(
+                    fishermanVillager.getUuid(),
+                    RecipientKind.FISHERMAN_VILLAGER,
+                    jobPos.toImmutable(),
+                    storagePos.toImmutable(),
+                    toolsmith.squaredDistanceTo(fishermanVillager)));
+        }
+
+        entries.sort(Comparator.comparingDouble(FishermanRodEntry::squaredDistance)
+                .thenComparing(FishermanRodEntry::recipientId, UUID::compareTo));
         return entries;
     }
 
-    /** Lightweight entry for a FishermanGuardEntity recipient — avoids the VillagerEntity requirement of RecipientRecord. */
-    public record FishermanGuardEntry(FishermanGuardEntity guard, BlockPos jobPos, BlockPos chestPos, double squaredDistance) {
+    @Nullable
+    private static BlockPos resolveFishermanStoragePos(ServerWorld world, FishermanGuardEntity fisherman, BlockPos jobPos) {
+        BlockPos pairedChestPos = fisherman.getPairedChestPos();
+        if (isValidFishermanStorage(world, pairedChestPos, jobPos) && pairedChestPos != null) {
+            return pairedChestPos.toImmutable();
+        }
+
+        // Recovery path for stale pairings or missing chest memory:
+        // resolve a nearby storage candidate, preferring chest/trapped chest over barrels.
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        BlockPos bestPos = null;
+        int bestPriority = Integer.MAX_VALUE;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (BlockPos candidate : BlockPos.iterate(jobPos.add(-range, -range, -range), jobPos.add(range, range, range))) {
+            if (candidate.equals(jobPos) || !jobPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(candidate);
+            if (!JobBlockPairingHelper.isPairingBlock(state) || !getStorageInventory(world, candidate).isPresent()) {
+                continue;
+            }
+
+            int priority = storagePriority(state);
+            double distance = jobPos.getSquaredDistance(candidate);
+            if (priority < bestPriority || (priority == bestPriority && distance < bestDistance)) {
+                bestPriority = priority;
+                bestDistance = distance;
+                bestPos = candidate.toImmutable();
+            }
+        }
+
+        return bestPos;
+    }
+
+    private static boolean isValidFishermanStorage(ServerWorld world, @Nullable BlockPos chestPos, BlockPos jobPos) {
+        if (chestPos == null || chestPos.equals(jobPos)) {
+            return false;
+        }
+        if (!jobPos.isWithinDistance(chestPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+            return false;
+        }
+        return getStorageInventory(world, chestPos).isPresent();
+    }
+
+    private static int storagePriority(BlockState state) {
+        if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) {
+            return 0;
+        }
+        if (state.isOf(Blocks.BARREL)) {
+            return 1;
+        }
+        return 2;
+    }
+
+    public enum RecipientKind {
+        FISHERMAN_GUARD,
+        FISHERMAN_VILLAGER
+    }
+
+    /** Lightweight fishing-rod recipient entry that supports both v2 fisherman guards and villager fishermen. */
+    public record FishermanRodEntry(UUID recipientId, RecipientKind recipientKind, BlockPos jobPos, BlockPos chestPos, double squaredDistance) {
         public int rodStockInChest(ServerWorld world) {
             return countItemInRecipientStorage(world, chestPos, ToolType.FISHING_ROD);
         }
@@ -247,7 +339,7 @@ public final class ToolsmithDemandPlanner {
                              List<RecipientDemand> rankedRecipients) {
     }
 
-    public record DemandSnapshot(EnumMap<ToolType, ToolDemand> demandByType, List<FishermanGuardEntry> rankedFishermanEntries) {
+    public record DemandSnapshot(EnumMap<ToolType, ToolDemand> demandByType, List<FishermanRodEntry> rankedFishermanEntries) {
         public ToolDemand demandFor(ToolType toolType) {
             return demandByType.get(toolType);
         }
@@ -258,7 +350,7 @@ public final class ToolsmithDemandPlanner {
         }
 
         public List<RecipientDemand> rankedRecipientsFor(ToolType toolType) {
-            // FISHING_ROD recipients are FishermanGuardEntry — use rankedFishermanEntries() for that path.
+            // FISHING_ROD recipients use FishermanRodEntry — use rankedFishermanEntries() for that path.
             if (toolType == ToolType.FISHING_ROD) {
                 return List.of();
             }

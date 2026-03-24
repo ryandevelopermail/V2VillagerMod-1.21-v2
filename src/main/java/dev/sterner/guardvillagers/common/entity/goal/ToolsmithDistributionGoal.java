@@ -92,9 +92,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             return false;
         }
 
-        // FISHING_ROD: recipient is a FishermanGuardEntry, not a RecipientDemand.
+        // FISHING_ROD: recipient is a FishermanRodEntry, not a RecipientDemand.
         if (selected.toolType() == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
-            ToolsmithDemandPlanner.FishermanGuardEntry fisherman = selected.fishermanEntry();
+            ToolsmithDemandPlanner.FishermanRodEntry fisherman = selected.fishermanEntry();
             if (fisherman == null) {
                 return false;
             }
@@ -102,14 +102,15 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             inventory.setStack(selected.slot(), sourceStack);
             inventory.markDirty();
             pendingItem = extracted;
-            pendingTargetId = fisherman.guard().getUuid();
+            pendingTargetId = fisherman.recipientId();
             pendingTargetPos = fisherman.chestPos();
             pendingUniversalRoute = false;
             pendingOverflowTransfer = false;
             CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
             CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());
             CraftingCheckLogger.report(world, "Toolsmith", "crafted tool selected for transfer: fishing_rod"
-                    + " -> fisherman barrel chest " + fisherman.chestPos().toShortString());
+                    + " -> " + fisherman.recipientKind().name().toLowerCase(java.util.Locale.ROOT)
+                    + " storage " + fisherman.chestPos().toShortString());
             return true;
         }
 
@@ -152,22 +153,22 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
 
         ToolsmithDemandPlanner.DemandSnapshot demandSnapshot = ToolsmithDemandPlanner.buildSnapshot(world, villager, source.get());
 
-        // FISHING_ROD: re-target against the FishermanGuardEntry list.
+        // FISHING_ROD: re-target against the FishermanRodEntry list.
         if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
-            List<ToolsmithDemandPlanner.FishermanGuardEntry> entries = demandSnapshot.rankedFishermanEntries();
+            List<ToolsmithDemandPlanner.FishermanRodEntry> entries = demandSnapshot.rankedFishermanEntries();
             if (entries.isEmpty()) {
                 return false;
             }
             if (pendingTargetId != null) {
-                for (ToolsmithDemandPlanner.FishermanGuardEntry entry : entries) {
-                    if (entry.guard().getUuid().equals(pendingTargetId)) {
+                for (ToolsmithDemandPlanner.FishermanRodEntry entry : entries) {
+                    if (entry.recipientId().equals(pendingTargetId)) {
                         pendingTargetPos = entry.chestPos();
                         return true;
                     }
                 }
             }
-            ToolsmithDemandPlanner.FishermanGuardEntry first = entries.getFirst();
-            pendingTargetId = first.guard().getUuid();
+            ToolsmithDemandPlanner.FishermanRodEntry first = entries.getFirst();
+            pendingTargetId = first.recipientId();
             pendingTargetPos = first.chestPos();
             return true;
         }
@@ -230,13 +231,14 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
 
             // FISHING_ROD: use the FishermanGuardEntry list directly.
             if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
-                List<ToolsmithDemandPlanner.FishermanGuardEntry> fishermen = demandSnapshot.rankedFishermanEntries();
+                List<ToolsmithDemandPlanner.FishermanRodEntry> fishermen = demandSnapshot.rankedFishermanEntries();
                 if (fishermen.isEmpty()) {
                     continue;
                 }
-                ToolsmithDemandPlanner.FishermanGuardEntry top = fishermen.getFirst();
+                ToolsmithDemandPlanner.FishermanRodEntry top = fishermen.getFirst();
                 int demandScore = demandSnapshot.deficitFor(toolType);
-                String reason = "fishing_rod selected: fisherman guard deficit " + top.deficit(world);
+                String reason = "fishing_rod selected: " + top.recipientKind().name().toLowerCase(java.util.Locale.ROOT)
+                        + " deficit " + top.deficit(world);
                 candidates.add(new ToolDistributionCandidate(slot, toolType, List.of(), demandScore, reason, top));
                 continue;
             }
@@ -406,7 +408,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             List<ToolsmithDemandPlanner.RecipientDemand> rankedRecipients,
             int demandScore,
             String selectionReason,
-            @org.jetbrains.annotations.Nullable ToolsmithDemandPlanner.FishermanGuardEntry fishermanEntry
+            @org.jetbrains.annotations.Nullable ToolsmithDemandPlanner.FishermanRodEntry fishermanEntry
     ) {
     }
 }
