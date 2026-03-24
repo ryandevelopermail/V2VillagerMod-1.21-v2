@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.CartographerMapChestUtil;
 import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -38,6 +39,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import org.jetbrains.annotations.Nullable;
 
 public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
@@ -58,6 +60,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int ROOT_STRUCTURE_HORIZONTAL_RADIUS = 2;
     private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
     private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
+    private static final int MAPPED_BOUNDS_ANCHOR_RADIUS = 300;
 
     /**
      * Logs within this horizontal radius of a bell block are considered part of a village
@@ -905,55 +908,152 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private List<BlockPos> findTreeTargets(ServerWorld world) {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();
-        BlockPos center = chest == null
-                ? table
-                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+        BlockPos center = getPairedBaseCenter(table, chest);
 
-        // Cache bell positions once for the entire scan so isNearBell() doesn't
-        // re-scan a 13×9×13 box for every log candidate. In a typical forest
-        // this saves tens of thousands of block reads per session start.
-        Set<BlockPos> nearbyBells = collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
+        MappedBoundsSearchContext mappedContext = resolveMappedBoundsSearchContext(world, center);
+        boolean mappedMode = mappedContext != null;
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds mode active={} (center={})",
+                this.guard.getUuidAsString(),
+                mappedMode,
+                center.toShortString());
 
-        Set<BlockPos> uniqueRoots = new HashSet<>();
-        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+        Set<BlockPos> nearbyBells = mappedMode
+                ? Set.of()
+                : collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
 
-        for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            BlockPos pos = cursor.toImmutable();
-            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
-                continue;
-            }
-            BlockState state = world.getBlockState(pos);
-            if (!state.isIn(BlockTags.LOGS)) {
-                continue;
-            }
-            BlockPos root = normalizeRoot(world, pos);
-            if (!isEligibleRootImpl(world, root, nearbyBells)) {
-                continue;
-            }
-            if (hasMinimumTreeStructure(world, root)) {
-                uniqueRoots.add(root);
-            }
-        }
-
-        // If the cartographer has completed mapping for this village, restrict harvesting
-        // to within the mapped region. This prevents the lumberjack from straying into
-        // adjacent biomes or other villages' territory.
-        VillageMappedBoundsState.MappedBounds mappedBounds = VillageMappedBoundsState
-                .get(world.getServer())
-                .getBoundsNear(world.getRegistryKey(), center, 300)
-                .orElse(null);
-
-        if (mappedBounds != null) {
-            uniqueRoots.removeIf(root -> !mappedBounds.contains(root));
-            LOGGER.debug("Lumberjack Guard {} mapped-bounds filter applied; {} root(s) within bounds",
-                    this.guard.getUuidAsString(),
-                    uniqueRoots.size());
-        }
+        ScanBounds scanBounds = mappedMode
+                ? ScanBounds.fromMapped(center, mappedContext.bounds())
+                : ScanBounds.fromLocalRadius(center);
+        Set<BlockPos> uniqueRoots = collectQualifiedRootsInBounds(world, scanBounds, center, mappedContext, nearbyBells);
 
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
         sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
+        LOGGER.debug("Lumberjack Guard {} tree target scan complete mode={} candidates={} accepted={}",
+                this.guard.getUuidAsString(),
+                mappedMode ? "mapped-bounds" : "local-radius",
+                scanBounds.candidateCount(),
+                sorted.size());
         return sorted;
+    }
+
+    private Set<BlockPos> collectQualifiedRootsInBounds(ServerWorld world,
+                                                        ScanBounds scanBounds,
+                                                        BlockPos center,
+                                                        @Nullable MappedBoundsSearchContext mappedContext,
+                                                        Set<BlockPos> nearbyBells) {
+        int candidateLogs = 0;
+        int acceptedRoots = 0;
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+
+        for (BlockPos cursor : BlockPos.iterate(scanBounds.min(), scanBounds.max())) {
+            BlockPos pos = cursor.toImmutable();
+            if (!isCandidateInScanMode(center, pos, mappedContext == null ? null : mappedContext.bounds())) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            candidateLogs++;
+            if (tryAddQualifiedRoot(world, pos, mappedContext == null ? nearbyBells : null, uniqueRoots)) {
+                acceptedRoots++;
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} tree root qualification mode={} candidateLogs={} acceptedRoots={}",
+                this.guard.getUuidAsString(),
+                mappedContext == null ? "local-radius" : "mapped-bounds",
+                candidateLogs,
+                acceptedRoots);
+        return uniqueRoots;
+    }
+
+    private boolean tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
+        BlockPos root = normalizeRoot(world, candidateLog);
+        if (!isEligibleRootImpl(world, root, cachedBells)) {
+            return false;
+        }
+        if (!hasMinimumTreeStructure(world, root)) {
+            return false;
+        }
+        return uniqueRoots.add(root);
+    }
+
+    private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
+        VillageMappedBoundsState boundsState = VillageMappedBoundsState.get(world.getServer());
+        List<VillageMappedBoundsState.AnchorMappedBounds> candidates = boundsState
+                .getBoundsEntriesNear(world.getRegistryKey(), center, MAPPED_BOUNDS_ANCHOR_RADIUS);
+
+        if (candidates.isEmpty()) {
+            LOGGER.debug("Lumberjack Guard {} no mapped-bounds anchors found within {} blocks",
+                    this.guard.getUuidAsString(),
+                    MAPPED_BOUNDS_ANCHOR_RADIUS);
+            return null;
+        }
+
+        // Choice: nearest anchor wins. This keeps mode selection deterministic when villages
+        // are close together and avoids accidental multi-village unions.
+        for (VillageMappedBoundsState.AnchorMappedBounds candidate : candidates) {
+            int filledMaps = CartographerMapChestUtil.countFilledMapsInChest(world, candidate.anchorPos());
+            boolean hasFilledMap = filledMaps >= 1;
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds candidate anchor={} distanceSq={} filledMaps={} bounds=[{},{} -> {},{}]",
+                    this.guard.getUuidAsString(),
+                    candidate.anchorPos().toShortString(),
+                    candidate.distanceSq(),
+                    filledMaps,
+                    candidate.bounds().minX(),
+                    candidate.bounds().minZ(),
+                    candidate.bounds().maxX(),
+                    candidate.bounds().maxZ());
+            if (hasFilledMap) {
+                LOGGER.debug("Lumberjack Guard {} mapped-bounds anchor chosen={} (nearest with filled map)",
+                        this.guard.getUuidAsString(),
+                        candidate.anchorPos().toShortString());
+                return new MappedBoundsSearchContext(candidate.anchorPos(), candidate.bounds(), candidate.distanceSq(), filledMaps);
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds anchors found but none had filled maps in paired chest",
+                this.guard.getUuidAsString());
+        return null;
+    }
+
+    private static BlockPos getPairedBaseCenter(BlockPos table, @Nullable BlockPos chest) {
+        return chest == null
+                ? table
+                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+    }
+
+    static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
+        if (mappedBounds != null) {
+            return mappedBounds.contains(candidate);
+        }
+        return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
+    }
+
+    private record MappedBoundsSearchContext(BlockPos anchorPos,
+                                             VillageMappedBoundsState.MappedBounds bounds,
+                                             long anchorDistanceSq,
+                                             int filledMapCount) {
+    }
+
+    private record ScanBounds(BlockPos min, BlockPos max, long candidateCount) {
+        static ScanBounds fromLocalRadius(BlockPos center) {
+            BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
+            BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+            long width = (long) (max.getX() - min.getX() + 1);
+            long height = (long) (max.getY() - min.getY() + 1);
+            long depth = (long) (max.getZ() - min.getZ() + 1);
+            return new ScanBounds(min, max, width * height * depth);
+        }
+
+        static ScanBounds fromMapped(BlockPos center, VillageMappedBoundsState.MappedBounds bounds) {
+            BlockPos min = new BlockPos(bounds.minX(), center.getY() - TREE_SEARCH_HEIGHT, bounds.minZ());
+            BlockPos max = new BlockPos(bounds.maxX(), center.getY() + TREE_SEARCH_HEIGHT, bounds.maxZ());
+            long width = (long) (max.getX() - min.getX() + 1);
+            long height = (long) (max.getY() - min.getY() + 1);
+            long depth = (long) (max.getZ() - min.getZ() + 1);
+            return new ScanBounds(min, max, width * height * depth);
+        }
     }
 
     /** Collect all bell block positions within {@code radius} blocks of {@code center}. */
