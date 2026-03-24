@@ -156,6 +156,8 @@ public class CartographerMapExplorationGoal extends Goal {
             return;
         }
 
+        applyChestDrivenColdProtection(world);
+
         if (enforceBatchTimeout(world)) {
             return;
         }
@@ -820,6 +822,35 @@ public class CartographerMapExplorationGoal extends Goal {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * If the paired chest contains leather boots, treat the cartographer as cold-protected for
+     * this tick (same gameplay intent as wearing leather boots in snow workflows).
+     */
+    private void applyChestDrivenColdProtection(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+        if (!hasItem(inventory, Items.LEATHER_BOOTS)) {
+            return;
+        }
+
+        // Prevent freeze buildup/damage in cold biomes and powder snow while this chest policy is active.
+        if (villager.getFrozenTicks() > 0) {
+            villager.setFrozenTicks(0);
+        }
+    }
+
+    private boolean hasItem(Inventory inventory, net.minecraft.item.Item item) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Inserts stack into inventory; silently discards any remainder. */
