@@ -35,6 +35,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
+    private static final int MAPPING_BATCH_TIMEOUT_TICKS = 20 * 360;
     private static final int RETURN_TRAVEL_TIMEOUT_TICKS = 20 * 180;
     private static final int TABLE_TRAVEL_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
@@ -64,6 +65,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private final List<BlockPos> explorationWaypoints = new ArrayList<>();
     private int waypointIndex;
     private long mapExploreStartTick;
+    private long workflowBatchStartTick;
     private long returnTravelStartTick;
     private long tableTravelStartTick;
 
@@ -134,6 +136,7 @@ public class CartographerMapExplorationGoal extends Goal {
         clearWorkflowState();
         returnTravelStartTick = 0L;
         tableTravelStartTick = 0L;
+        workflowBatchStartTick = 0L;
     }
 
     @Override
@@ -150,6 +153,10 @@ public class CartographerMapExplorationGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
+            return;
+        }
+
+        if (enforceBatchTimeout(world)) {
             return;
         }
 
@@ -178,6 +185,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
 
                 workflowIndex = 0;
+                workflowBatchStartTick = world.getTime();
                 setCurrentWorkflowTarget(world);
             }
             case GO_TO_TARGET -> {
@@ -319,6 +327,29 @@ public class CartographerMapExplorationGoal extends Goal {
         }
     }
 
+    private boolean isMappingStage() {
+        return stage == Stage.GO_TO_TARGET || stage == Stage.EXPLORE_MAP;
+    }
+
+    private boolean enforceBatchTimeout(ServerWorld world) {
+        if (!isMappingStage() || workflowBatchStartTick <= 0L) {
+            return false;
+        }
+        if (!shouldAbortMappingBatch(world.getTime(), workflowBatchStartTick)) {
+            return false;
+        }
+
+        LOGGER.warn("Cartographer {} mapping batch exceeded {} ticks (completed {}/{}); returning to chest with partial maps",
+                villager.getUuidAsString(),
+                MAPPING_BATCH_TIMEOUT_TICKS,
+                workflowIndex,
+                workflowTargets.size());
+        stage = Stage.RETURN_TO_CHEST;
+        returnTravelStartTick = world.getTime();
+        moveTo(chestPos);
+        return true;
+    }
+
     private void setCurrentWorkflowTarget(ServerWorld world) {
         if (workflowIndex < 0 || workflowIndex >= workflowTargets.size() || workflowIndex >= workflowMaps.size()) {
             stage = Stage.RETURN_TO_CHEST;
@@ -332,6 +363,11 @@ public class CartographerMapExplorationGoal extends Goal {
         villager.setStackInHand(Hand.MAIN_HAND, activeMap);
         prepareExplorationPath(currentTarget);
         stage = Stage.GO_TO_TARGET;
+        LOGGER.info("Cartographer {} starting territory {}/{} at {}",
+                villager.getUuidAsString(),
+                workflowIndex + 1,
+                workflowTargets.size(),
+                currentTarget.toPos(jobPos.getY()).toShortString());
         moveTo(explorationWaypoints.get(waypointIndex));
         mapExploreStartTick = world.getTime();
     }
@@ -361,6 +397,10 @@ public class CartographerMapExplorationGoal extends Goal {
 
     static boolean hasTimedOut(long worldTime, long startTick, int timeoutTicks) {
         return worldTime - startTick >= timeoutTicks;
+    }
+
+    static boolean shouldAbortMappingBatch(long worldTime, long batchStartTick) {
+        return batchStartTick > 0L && hasTimedOut(worldTime, batchStartTick, MAPPING_BATCH_TIMEOUT_TICKS);
     }
 
     private void recoverStalledTravel(ServerWorld world, BlockPos destination) {
@@ -422,6 +462,7 @@ public class CartographerMapExplorationGoal extends Goal {
         workflowIndex = 0;
         currentTarget = null;
         activeMap = ItemStack.EMPTY;
+        workflowBatchStartTick = 0L;
     }
 
     private void resetMappingCycle() {
