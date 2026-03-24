@@ -35,6 +35,8 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
+    private static final int RETURN_TRAVEL_TIMEOUT_TICKS = 20 * 180;
+    private static final int TABLE_TRAVEL_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
     private static final int REQUIRED_MAP_BATCH = 4;
     /** Maps needed in chest before triggering the cartography-table copy run.
@@ -62,6 +64,8 @@ public class CartographerMapExplorationGoal extends Goal {
     private final List<BlockPos> explorationWaypoints = new ArrayList<>();
     private int waypointIndex;
     private long mapExploreStartTick;
+    private long returnTravelStartTick;
+    private long tableTravelStartTick;
 
     public CartographerMapExplorationGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -128,6 +132,8 @@ public class CartographerMapExplorationGoal extends Goal {
         stage = Stage.ACQUIRE_MAPS;
         immediateCheckPending = false;
         clearWorkflowState();
+        returnTravelStartTick = 0L;
+        tableTravelStartTick = 0L;
     }
 
     @Override
@@ -180,6 +186,13 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(waypoint)) {
                     stage = Stage.EXPLORE_MAP;
                     mapExploreStartTick = world.getTime();
+                } else if (hasTimedOut(world.getTime(), mapExploreStartTick, MAP_EXPLORE_TIMEOUT_TICKS)) {
+                    LOGGER.warn("Cartographer {} timed out before reaching exploration waypoint {} for tile {}/{}; forcing completion",
+                            villager.getUuidAsString(),
+                            waypoint.toShortString(),
+                            workflowIndex + 1,
+                            workflowTargets.size());
+                    completeCurrentTerritory(world, true);
                 } else {
                     moveTo(waypoint);
                 }
@@ -233,6 +246,7 @@ public class CartographerMapExplorationGoal extends Goal {
                         LOGGER.info("Cartographer {}: {} filled maps in chest — heading to cartography table to copy",
                                 villager.getUuidAsString(), countFilledMaps(world));
                         stage = Stage.GO_TO_TABLE_FOR_COPY;
+                        tableTravelStartTick = world.getTime();
                         moveTo(jobPos);
                     } else {
                         refreshMappedTargets(world);
@@ -245,6 +259,14 @@ public class CartographerMapExplorationGoal extends Goal {
                         }
                     }
                 } else {
+                    if (hasTimedOut(world.getTime(), returnTravelStartTick, RETURN_TRAVEL_TIMEOUT_TICKS)) {
+                        LOGGER.warn("Cartographer {} return-to-chest stalled for {} ticks; performing recovery teleport near {}",
+                                villager.getUuidAsString(),
+                                world.getTime() - returnTravelStartTick,
+                                chestPos.toShortString());
+                        recoverStalledTravel(world, chestPos);
+                        returnTravelStartTick = world.getTime();
+                    }
                     moveTo(chestPos);
                 }
             }
@@ -252,6 +274,14 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(jobPos)) {
                     stage = Stage.COPY_MAPS;
                 } else {
+                    if (hasTimedOut(world.getTime(), tableTravelStartTick, TABLE_TRAVEL_TIMEOUT_TICKS)) {
+                        LOGGER.warn("Cartographer {} table travel stalled for {} ticks; performing recovery teleport near {}",
+                                villager.getUuidAsString(),
+                                world.getTime() - tableTravelStartTick,
+                                jobPos.toShortString());
+                        recoverStalledTravel(world, jobPos);
+                        tableTravelStartTick = world.getTime();
+                    }
                     moveTo(jobPos);
                 }
             }
@@ -292,6 +322,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private void setCurrentWorkflowTarget(ServerWorld world) {
         if (workflowIndex < 0 || workflowIndex >= workflowTargets.size() || workflowIndex >= workflowMaps.size()) {
             stage = Stage.RETURN_TO_CHEST;
+            returnTravelStartTick = world.getTime();
             moveTo(chestPos);
             return;
         }
@@ -323,8 +354,23 @@ public class CartographerMapExplorationGoal extends Goal {
             emitMappedBoundsToRegistry(world);
             activeMap = ItemStack.EMPTY;
             stage = Stage.RETURN_TO_CHEST;
+            returnTravelStartTick = world.getTime();
             moveTo(chestPos);
         }
+    }
+
+    static boolean hasTimedOut(long worldTime, long startTick, int timeoutTicks) {
+        return worldTime - startTick >= timeoutTicks;
+    }
+
+    private void recoverStalledTravel(ServerWorld world, BlockPos destination) {
+        int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, destination.getX(), destination.getZ());
+        double tx = destination.getX() + 0.5D;
+        double ty = surfaceY;
+        double tz = destination.getZ() + 0.5D;
+        villager.getNavigation().stop();
+        villager.requestTeleport(tx, ty, tz);
+        villager.getNavigation().startMovingTo(tx, ty, tz, MOVE_SPEED);
     }
 
     /**
