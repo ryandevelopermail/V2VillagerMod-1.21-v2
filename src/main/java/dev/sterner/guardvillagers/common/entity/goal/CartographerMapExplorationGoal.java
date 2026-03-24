@@ -46,6 +46,11 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int COPY_TRIGGER_COUNT = 4;
     /** Number of map copies to produce at the cartography table (one per original tile). */
     private static final int MAPS_TO_COPY = 4;
+    /**
+     * Disabled by default: automatic copy runs were causing duplicate map output during
+     * normal exploration/deposit loops.
+     */
+    private static final boolean AUTO_COPY_ENABLED = false;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -109,7 +114,7 @@ public class CartographerMapExplorationGoal extends Goal {
         int pending = pendingTargets.size();
 
         if (emptyMaps < REQUIRED_MAP_BATCH || pending < REQUIRED_MAP_BATCH) {
-            LOGGER.info("Cartographer {} canStart=false: emptyMaps={} (need {}) pendingTiles={} (need {}) mappedTiles={}",
+            LOGGER.debug("Cartographer {} canStart=false: emptyMaps={} (need {}) pendingTiles={} (need {}) mappedTiles={}",
                     villager.getUuidAsString(), emptyMaps, REQUIRED_MAP_BATCH, pending, REQUIRED_MAP_BATCH, mappedTargets.size());
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             immediateCheckPending = false;
@@ -260,7 +265,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
                     // If chest now has ≥8 filled maps and we haven't done the copy run yet,
                     // head to the cartography table to produce 4 duplicates.
-                    if (!mapsCopiedThisCycle && countFilledMaps(world) >= COPY_TRIGGER_COUNT) {
+                    if (AUTO_COPY_ENABLED && !mapsCopiedThisCycle && countFilledMaps(world) >= COPY_TRIGGER_COUNT) {
                         LOGGER.info("Cartographer {}: {} filled maps in chest — heading to cartography table to copy",
                                 villager.getUuidAsString(), countFilledMaps(world));
                         stage = Stage.GO_TO_TABLE_FOR_COPY;
