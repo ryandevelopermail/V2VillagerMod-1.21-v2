@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 public class CartographerMapExplorationGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerMapExplorationGoal.class);
@@ -59,6 +60,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private final List<MapTarget> workflowTargets = new ArrayList<>();
     private final List<ItemStack> workflowMaps = new ArrayList<>();
+    private final Set<Integer> completedWorkflowIndices = new HashSet<>();
     private int workflowIndex;
     private MapTarget currentTarget;
     private ItemStack activeMap = ItemStack.EMPTY;
@@ -180,6 +182,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
                 workflowTargets.clear();
                 workflowMaps.clear();
+                completedWorkflowIndices.clear();
                 for (int i = 0; i < REQUIRED_MAP_BATCH; i++) {
                     MapTarget target = pendingTargets.remove(0);
                     workflowTargets.add(target);
@@ -227,8 +230,9 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null) {
-                        for (ItemStack workflowMap : workflowMaps) {
-                            ItemStack finalizedMap = workflowMap.copy();
+                        List<ItemStack> mapsToDeposit = collectCompletedWorkflowMapsForDeposit(workflowMaps, completedWorkflowIndices);
+                        for (ItemStack workflowMap : mapsToDeposit) {
+                            ItemStack finalizedMap = workflowMap.copyWithCount(1);
                             forceCompleteMapStack(world, finalizedMap);
                             boolean inserted = insertStackChecked(inventory, finalizedMap);
                             if (!inserted) {
@@ -240,6 +244,10 @@ public class CartographerMapExplorationGoal extends Goal {
                             }
                         }
                         inventory.markDirty();
+                        LOGGER.info("Cartographer {} deposited {} completed map(s) to chest {}",
+                                villager.getUuidAsString(),
+                                mapsToDeposit.size(),
+                                chestPos.toShortString());
                     } else {
                         LOGGER.warn("Cartographer {} could not open chest at {} for map deposit",
                                 villager.getUuidAsString(), chestPos.toShortString());
@@ -377,6 +385,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private void completeCurrentTerritory(ServerWorld world, boolean timedOut) {
         mappedTargets.add(currentTarget.key());
         forceCompleteMapStack(world, activeMap);
+        completedWorkflowIndices.add(workflowIndex);
         LOGGER.info("Cartographer {} completed territory {}/{} at {} (timeout={})",
                 villager.getUuidAsString(),
                 workflowIndex + 1,
@@ -461,10 +470,29 @@ public class CartographerMapExplorationGoal extends Goal {
     private void clearWorkflowState() {
         workflowTargets.clear();
         workflowMaps.clear();
+        completedWorkflowIndices.clear();
         workflowIndex = 0;
         currentTarget = null;
         activeMap = ItemStack.EMPTY;
         workflowBatchStartTick = 0L;
+    }
+
+    static List<ItemStack> collectCompletedWorkflowMapsForDeposit(List<ItemStack> workflowMaps, Set<Integer> completedIndices) {
+        if (workflowMaps.isEmpty() || completedIndices.isEmpty()) {
+            return List.of();
+        }
+
+        List<ItemStack> result = new ArrayList<>();
+        for (Integer index : new TreeSet<>(completedIndices)) {
+            if (index == null || index < 0 || index >= workflowMaps.size()) {
+                continue;
+            }
+            ItemStack stack = workflowMaps.get(index);
+            if (!stack.isEmpty()) {
+                result.add(stack);
+            }
+        }
+        return result;
     }
 
     private void resetMappingCycle() {
