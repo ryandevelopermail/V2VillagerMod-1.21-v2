@@ -37,11 +37,12 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
     private static final int REQUIRED_MAP_BATCH = 4;
-    /** Maps needed in chest before triggering the cartography-table copy run.
-     *  After exploration deposits REQUIRED_MAP_BATCH (4) maps, the copy run fires immediately. */
-    private static final int COPY_TRIGGER_COUNT = 4;
-    /** Number of map copies to produce at the cartography table (one per original tile). */
-    private static final int MAPS_TO_COPY = 4;
+    /** Number of filled-map originals required before running a cartography-table copy batch. */
+    static final int ORIGINALS_REQUIRED_FOR_COPY = 4;
+    /** Number of blank maps consumed by one cartography-table copy batch. */
+    static final int BLANKS_REQUIRED_FOR_COPY = 4;
+    /** Number of duplicated filled maps produced by one cartography-table copy batch. */
+    static final int COPIES_TO_CREATE = 4;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -227,11 +228,9 @@ public class CartographerMapExplorationGoal extends Goal {
                         villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
                     }
 
-                    // If chest now has ≥8 filled maps and we haven't done the copy run yet,
-                    // head to the cartography table to produce 4 duplicates.
-                    if (!mapsCopiedThisCycle && countFilledMaps(world) >= COPY_TRIGGER_COUNT) {
-                        LOGGER.info("Cartographer {}: {} filled maps in chest — heading to cartography table to copy",
-                                villager.getUuidAsString(), countFilledMaps(world));
+                    if (shouldRunCopyBatch(world)) {
+                        LOGGER.info("Cartographer {}: copy batch ready (filledMaps={} blankMaps={}) — heading to cartography table",
+                                villager.getUuidAsString(), countFilledMaps(world), countBlankMapsForCopy(world));
                         stage = Stage.GO_TO_TABLE_FOR_COPY;
                         moveTo(jobPos);
                     } else {
@@ -256,25 +255,19 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
             }
             case COPY_MAPS -> {
-                // Simulate cartography-table duplication: insert MAPS_TO_COPY additional filled
-                // map copies into the chest (one duplicate per original tile map).
                 Inventory inventory = getChestInventory(world).orElse(null);
                 if (inventory != null) {
-                    List<ItemStack> originals = collectFilledMaps(world, MAPS_TO_COPY);
-                    int copied = 0;
-                    for (ItemStack original : originals) {
-                        ItemStack copy = original.copy();
-                        if (insertStackChecked(inventory, copy)) {
-                            copied++;
-                        } else {
-                            LOGGER.warn("Cartographer {}: chest full, could not insert map copy", villager.getUuidAsString());
-                            break;
-                        }
+                    CopyBatchResult result = runCopyBatch(inventory, ORIGINALS_REQUIRED_FOR_COPY, BLANKS_REQUIRED_FOR_COPY, COPIES_TO_CREATE);
+                    if (result.success()) {
+                        mapsCopiedThisCycle = true;
+                        LOGGER.info("Cartographer {}: cartography table copy run complete — {} map(s) duplicated; {} blank map(s) consumed",
+                                villager.getUuidAsString(), result.copiesCreated(), result.blanksConsumed());
+                    } else {
+                        LOGGER.warn("Cartographer {}: cartography table copy run aborted ({})",
+                                villager.getUuidAsString(), result.reason());
                     }
                     inventory.markDirty();
-                    LOGGER.info("Cartographer {}: cartography table copy run complete — {} map(s) duplicated", villager.getUuidAsString(), copied);
                 }
-                mapsCopiedThisCycle = true;
                 refreshMappedTargets(world);
                 buildTargets(world);
                 if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
@@ -644,22 +637,21 @@ public class CartographerMapExplorationGoal extends Goal {
         return count;
     }
 
-    /**
-     * Returns up to {@code max} filled-map stacks (one copy per stack) from the
-     * paired chest to use as originals for the cartography-table copy run.
-     * Does NOT consume the originals — they stay in the chest.
-     */
-    private List<ItemStack> collectFilledMaps(ServerWorld world, int max) {
+    /** Counts blank MAP items reserved for cartography-table copy batches. */
+    private int countBlankMapsForCopy(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
-        if (inventory == null) return List.of();
-        List<ItemStack> result = new ArrayList<>();
-        for (int slot = 0; slot < inventory.size() && result.size() < max; slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (stack.isOf(Items.FILLED_MAP)) {
-                result.add(stack.copyWithCount(1));
-            }
-        }
-        return result;
+        if (inventory == null) return 0;
+        return countMapsForCopy(inventory);
+    }
+
+    private boolean shouldRunCopyBatch(ServerWorld world) {
+        return shouldRunCopyBatch(countFilledMaps(world), countBlankMapsForCopy(world), mapsCopiedThisCycle);
+    }
+
+    static boolean shouldRunCopyBatch(int filledMaps, int blankMaps, boolean mapsCopiedThisCycle) {
+        return !mapsCopiedThisCycle
+                && filledMaps >= ORIGINALS_REQUIRED_FOR_COPY
+                && blankMaps >= BLANKS_REQUIRED_FOR_COPY;
     }
 
     private int countEmptyMaps(ServerWorld world) {
@@ -777,6 +769,164 @@ public class CartographerMapExplorationGoal extends Goal {
             remaining.decrement(moved);
         }
         return remaining.isEmpty();
+    }
+
+    private static int countMapsForCopy(Inventory inventory) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.MAP)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    static CopyBatchResult runCopyBatch(Inventory inventory, int originalsRequired, int blanksRequired, int copiesToCreate) {
+        List<ItemStack> originals = collectFilledMaps(inventory, originalsRequired);
+        if (originals.size() < originalsRequired) {
+            return CopyBatchResult.failure("insufficient originals");
+        }
+
+        List<ItemStack> copies = new ArrayList<>();
+        for (int i = 0; i < copiesToCreate; i++) {
+            copies.add(originals.get(i % originals.size()).copy());
+        }
+
+        if (!canInsertAll(inventory, copies)) {
+            return CopyBatchResult.failure("insufficient chest space");
+        }
+
+        List<ItemStack> consumedBlanks = removeBlankMaps(inventory, blanksRequired);
+        if (consumedBlanks.size() < blanksRequired) {
+            restoreItems(inventory, consumedBlanks);
+            return CopyBatchResult.failure("insufficient blank maps");
+        }
+
+        int inserted = 0;
+        for (ItemStack copy : copies) {
+            if (insertStackCheckedStatic(inventory, copy)) {
+                inserted++;
+                continue;
+            }
+            restoreItems(inventory, consumedBlanks);
+            return CopyBatchResult.failure("copy insertion failed");
+        }
+
+        return CopyBatchResult.success(inserted, blanksRequired);
+    }
+
+    private static List<ItemStack> collectFilledMaps(Inventory inventory, int max) {
+        List<ItemStack> result = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size() && result.size() < max; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.FILLED_MAP) && !stack.isEmpty()) {
+                int take = Math.min(max - result.size(), stack.getCount());
+                for (int i = 0; i < take; i++) {
+                    result.add(stack.copyWithCount(1));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static List<ItemStack> removeBlankMaps(Inventory inventory, int amount) {
+        List<ItemStack> removed = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size() && removed.size() < amount; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isOf(Items.MAP)) {
+                continue;
+            }
+            while (!stack.isEmpty() && removed.size() < amount) {
+                ItemStack split = stack.split(1);
+                if (!split.isEmpty()) {
+                    removed.add(split);
+                }
+            }
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+        }
+        return removed;
+    }
+
+    private static void restoreItems(Inventory inventory, List<ItemStack> stacks) {
+        for (ItemStack stack : stacks) {
+            insertStackCheckedStatic(inventory, stack);
+        }
+    }
+
+    private static boolean canInsertAll(Inventory inventory, List<ItemStack> stacks) {
+        List<ItemStack> simulated = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            simulated.add(inventory.getStack(slot).copy());
+        }
+        for (ItemStack stack : stacks) {
+            if (!insertStackCheckedStatic(simulated, stack, inventory)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean insertStackCheckedStatic(Inventory inventory, ItemStack stack) {
+        List<ItemStack> target = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            target.add(inventory.getStack(slot).copy());
+        }
+        boolean inserted = insertStackCheckedStatic(target, stack, inventory);
+        if (!inserted) {
+            return false;
+        }
+        for (int slot = 0; slot < target.size(); slot++) {
+            inventory.setStack(slot, target.get(slot));
+        }
+        return true;
+    }
+
+    private static boolean insertStackCheckedStatic(List<ItemStack> target, ItemStack stack, Inventory validityInventory) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < target.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
+            ItemStack existing = target.get(slot);
+            if (existing.isEmpty()) {
+                if (!validityInventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                target.set(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+            if (!validityInventory.isValid(slot, remaining)) {
+                continue;
+            }
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+        return remaining.isEmpty();
+    }
+
+    record CopyBatchResult(boolean success, int copiesCreated, int blanksConsumed, String reason) {
+        static CopyBatchResult success(int copiesCreated, int blanksConsumed) {
+            return new CopyBatchResult(true, copiesCreated, blanksConsumed, "ok");
+        }
+
+        static CopyBatchResult failure(String reason) {
+            return new CopyBatchResult(false, 0, 0, reason);
+        }
     }
 
     private void moveTo(BlockPos pos) {
