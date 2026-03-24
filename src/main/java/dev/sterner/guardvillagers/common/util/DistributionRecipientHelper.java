@@ -35,6 +35,10 @@ public final class DistributionRecipientHelper {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.FARMER, Blocks.COMPOSTER);
     }
 
+    public static List<RecipientRecord> findEligibleCartographerRecipients(ServerWorld world, VillagerEntity source, double range) {
+        return findEligibleVillagerRecipients(world, source, range, VillagerProfession.CARTOGRAPHER, Blocks.CARTOGRAPHY_TABLE);
+    }
+
     public static List<RecipientRecord> findEligibleLibrarianRecipients(ServerWorld world, VillagerEntity source, double range) {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.LIBRARIAN, Blocks.LECTERN);
     }
@@ -72,7 +76,8 @@ public final class DistributionRecipientHelper {
 
             double squaredDistance = source.squaredDistanceTo(villager);
             recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), jobPos.toImmutable(), squaredDistance));
-            JobBlockPairingHelper.findNearbyChest(world, jobPos)
+            // Exclude jobPos so the fisherman's barrel job block does not self-match as its own chest.
+            JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
                     .ifPresent(chestPos -> recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), chestPos.toImmutable(), squaredDistance)));
         }
 

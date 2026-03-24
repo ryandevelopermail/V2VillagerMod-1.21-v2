@@ -45,6 +45,7 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import org.jetbrains.annotations.Nullable;
 
 public final class JobBlockPairingHelper {
     public static final double JOB_BLOCK_PAIRING_RANGE = 3.0D;
@@ -58,6 +59,10 @@ public final class JobBlockPairingHelper {
     static {
         registerPairingBlock(Blocks.CHEST);
         registerPairingBlock(Blocks.TRAPPED_CHEST);
+        // Barrels are used as paired storage by the fisherman (job block = BARREL).
+        // Without this, findNearbyChest() returns empty for barrel-paired workers,
+        // breaking toolsmith demand detection and rod distribution entirely.
+        registerPairingBlock(Blocks.BARREL);
     }
 
     private JobBlockPairingHelper() {
@@ -110,8 +115,14 @@ public final class JobBlockPairingHelper {
     }
 
     private static Collection<VillagerEntity> findEmployedVillagersWithJobSiteNear(ServerWorld world, BlockPos placedPos, double range) {
-        Box worldBounds = getWorldBounds(world);
-        return world.getEntitiesByClass(VillagerEntity.class, worldBounds, villager -> {
+        // Use a tight search box around the placed block instead of getWorldBounds().
+        // getWorldBounds() = entire world border (~60k×60k) → O(all entities) per chest placement.
+        // Any villager whose JOB_SITE is within `range` of placedPos must themselves be within
+        // JOB_BLOCK_PAIRING_RANGE (3.0) of that job site, so they are at most range + 3 blocks
+        // from placedPos. Use a generous 64-block box to safely cover all realistic cases.
+        double scanRadius = range + 64.0D;
+        Box searchBox = new Box(placedPos).expand(scanRadius);
+        return world.getEntitiesByClass(VillagerEntity.class, searchBox, villager -> {
             if (!isEmployedVillager(villager)) {
                 return false;
             }
@@ -179,7 +190,8 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE);
+        // Exclude jobPos so that a fisherman's barrel job block doesn't self-match as its own chest.
+        Optional<BlockPos> nearbyChest = findNearbyChestWithinRangeOfBoth(world, jobPos, placedPos, JOB_BLOCK_PAIRING_RANGE, jobPos);
         if (nearbyChest.isEmpty()) {
             return;
         }
@@ -212,7 +224,7 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
         if (nearbyChest.isEmpty()) {
             return;
         }
@@ -272,7 +284,8 @@ public final class JobBlockPairingHelper {
 
         BlockPos jobPos = globalPos.pos();
         VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
-        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos);
+        // Exclude jobPos itself so that a fisherman's barrel job block doesn't self-match as its chest.
+        Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
         nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
 
         if (nearbyChest.isPresent()) {
@@ -342,7 +355,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        if (findNearbyChest(world, jobPos).isEmpty()) {
+        if (findNearbyChest(world, jobPos, jobPos).isEmpty()) {
             return false;
         }
 
@@ -379,7 +392,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        if (findNearbyChest(world, jobPos).isEmpty()) {
+        if (findNearbyChest(world, jobPos, jobPos).isEmpty()) {
             return false;
         }
 
@@ -565,8 +578,22 @@ public final class JobBlockPairingHelper {
     }
 
     public static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center) {
+        return findNearbyChest(world, center, null);
+    }
+
+    /**
+     * Finds the nearest pairing block (chest, trapped chest, barrel) within
+     * {@link #JOB_BLOCK_PAIRING_RANGE} of {@code center}, optionally excluding
+     * {@code excludePos}. The exclusion is used when {@code center} IS the job block
+     * (e.g. a fisherman's barrel) so that the job block doesn't self-match as its
+     * own paired storage.
+     */
+    public static Optional<BlockPos> findNearbyChest(ServerWorld world, BlockPos center, BlockPos excludePos) {
         int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
         for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
+            if (excludePos != null && checkPos.equals(excludePos)) {
+                continue;
+            }
             if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isPairingBlock(world.getBlockState(checkPos))) {
                 return Optional.of(checkPos.toImmutable());
             }
@@ -575,12 +602,20 @@ public final class JobBlockPairingHelper {
     }
 
 
-    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range) {
+    /**
+     * Finds the nearest pairing block within {@code range} of BOTH centers, optionally excluding
+     * {@code excludePos}. The exclusion prevents a fisherman's barrel job block from self-matching
+     * as its own paired storage when the crafting table is placed nearby.
+     */
+    private static Optional<BlockPos> findNearbyChestWithinRangeOfBoth(ServerWorld world, BlockPos primaryCenter, BlockPos secondaryCenter, double range, @Nullable BlockPos excludePos) {
         int blockRange = (int) Math.ceil(range);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos checkPos : BlockPos.iterate(primaryCenter.add(-blockRange, -blockRange, -blockRange), primaryCenter.add(blockRange, blockRange, blockRange))) {
+            if (excludePos != null && checkPos.equals(excludePos)) {
+                continue;
+            }
             if (!primaryCenter.isWithinDistance(checkPos, range) || !secondaryCenter.isWithinDistance(checkPos, range)) {
                 continue;
             }

@@ -150,13 +150,11 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     }
 
     public static void tryConvertFishermenWithRod(ServerWorld world) {
+        // Use the candidate index only — no world-bounds fallback scan.
+        // getWorldBounds() = entire world-border box (~60k×60k), O(all entities), called every 40 ticks.
+        // The candidate index covers all newly-promoted fishermen; the loop body already filters by JOB_SITE,
+        // so any villager not in the index with a job site will be picked up on the next index mark cycle.
         Set<VillagerEntity> candidates = new LinkedHashSet<>(VillagerConversionCandidateIndex.pollCandidates(world, VillagerProfession.FISHERMAN));
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
-        candidates.addAll(world.getEntitiesByClass(
-                VillagerEntity.class,
-                worldBounds,
-                villager -> villager.isAlive() && villager.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
-        ));
 
         for (VillagerEntity villager : candidates) {
             Optional<BlockPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE).map(net.minecraft.util.math.GlobalPos::pos);
@@ -169,7 +167,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
                 continue;
             }
 
-            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos)
+            Optional<BlockPos> chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
                     .filter(foundChestPos -> jobPos.isWithinDistance(foundChestPos, 3.0D));
 
             tryConvertWithRod(world, villager, jobPos, chestPos.orElse(null));
@@ -226,7 +224,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
         if (chestPos != null) {
             BlockState chestState = world.getBlockState(chestPos);
             if (chestState.getBlock() instanceof ChestBlock chestBlock) {
-                Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, true);
+                Inventory chestInventory = ChestBlock.getInventory(chestBlock, chestState, world, chestPos, false);
                 if (chestInventory != null) {
                     inventories.add(chestInventory);
                 }
@@ -287,15 +285,21 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     }
 
     public static void onBarrelInventoryMutated(ServerWorld world, BlockPos barrelPos) {
-        Set<VillagerEntity> villagers = new LinkedHashSet<>();
-
         Set<VillagerEntity> watchedVillagers = BARREL_WATCHERS_BY_POS.get(barrelPos);
+
+        // If the watcher map already has live entries for this barrel, use them directly
+        // and skip the expensive world entity scan.
         if (watchedVillagers != null && !watchedVillagers.isEmpty()) {
-            villagers.addAll(watchedVillagers);
+            Set<VillagerEntity> snapshot = Set.copyOf(watchedVillagers);
+            if (snapshot.stream().anyMatch(v -> v.isAlive() && v.getWorld() == world)) {
+                handleStorageMutation(world, snapshot);
+                return;
+            }
         }
 
+        // Fallback scan: watcher map is empty or stale (fisherman just converted/died).
         Box scanBox = new Box(barrelPos).expand(24.0D);
-        villagers.addAll(world.getEntitiesByClass(
+        Set<VillagerEntity> villagers = new java.util.LinkedHashSet<>(world.getEntitiesByClass(
                 VillagerEntity.class,
                 scanBox,
                 villager -> villager.isAlive()
@@ -382,11 +386,18 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
     private Set<BlockPos> getObservedChestPositions(ServerWorld world, BlockPos chestPos) {
         BlockState state = world.getBlockState(chestPos);
+        Set<BlockPos> positions = new HashSet<>();
+
+        if (state.getBlock() instanceof net.minecraft.block.BarrelBlock) {
+            // Barrel is a single-block container — just watch the one position.
+            positions.add(chestPos.toImmutable());
+            return positions;
+        }
+
         if (!(state.getBlock() instanceof ChestBlock)) {
             return Set.of();
         }
 
-        Set<BlockPos> positions = new HashSet<>();
         positions.add(chestPos.toImmutable());
 
         ChestType chestType = state.get(ChestBlock.CHEST_TYPE);

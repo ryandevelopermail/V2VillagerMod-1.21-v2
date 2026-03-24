@@ -1,16 +1,14 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.Optional;
@@ -121,28 +119,19 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
     }
 
     private Optional<BlockPos> resolveBellChestTarget(ServerWorld world) {
-        Optional<GlobalPos> meetingPoint = villager.getBrain().getOptionalMemory(MemoryModuleType.MEETING_POINT);
-        if (meetingPoint.isEmpty()) {
+        // Use the nearest QM chest as the distribution target (the village bank).
+        // Skip if the nearest QM chest is our own chest (no self-distribution).
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, jobPos, 300);
+        if (nearestQm.isEmpty()) {
             return Optional.empty();
         }
-
-        GlobalPos globalPos = meetingPoint.get();
-        if (!globalPos.dimension().equals(world.getRegistryKey())) {
+        BlockPos target = nearestQm.get();
+        // Don't distribute back into our own chest
+        if (target.equals(chestPos)) {
             return Optional.empty();
         }
-
-        BlockPos bellPos = globalPos.pos();
-        Optional<BlockPos> mappedChest = VillageBellChestPlacementHelper.getMappedChestPos(world, bellPos);
-        if (mappedChest.isPresent() && !mappedChest.get().equals(chestPos)) {
-            return mappedChest;
-        }
-
-        Optional<BlockPos> reconciledChest = VillageBellChestPlacementHelper.reconcileBellChestForBell(world, bellPos);
-        if (reconciledChest.isPresent() && !reconciledChest.get().equals(chestPos)) {
-            return reconciledChest;
-        }
-
-        return Optional.empty();
+        return Optional.of(target);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
@@ -150,6 +139,6 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
     }
 }

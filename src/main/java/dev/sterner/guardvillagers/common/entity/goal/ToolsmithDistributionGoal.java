@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.PairedStorageHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.Block;
 import net.minecraft.block.BarrelBlock;
@@ -20,6 +21,8 @@ import net.minecraft.item.ShearsItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 
 public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ToolsmithDistributionGoal.class);
     private static final int TARGET_REFRESH_LOG_INTERVAL_TICKS = 100;
     private long lastTargetRefreshLogTick = Long.MIN_VALUE;
     private String lastTargetRefreshLogMessage = "";
@@ -52,7 +56,17 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
                 continue;
             }
             ToolsmithDemandPlanner.ToolType toolType = ToolsmithDemandPlanner.ToolType.fromStack(stack);
-            if (toolType != null && demandSnapshot.rankedRecipientsFor(toolType).stream()
+            if (toolType == null) {
+                continue;
+            }
+            // FISHING_ROD targets FishermanGuardEntity — handled via separate entry list.
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
+                if (!demandSnapshot.rankedFishermanEntries().isEmpty()) {
+                    return true;
+                }
+                continue;
+            }
+            if (demandSnapshot.rankedRecipientsFor(toolType).stream()
                     .anyMatch(recipient -> isValidToolRecipient(world, toolType, recipient))) {
                 return true;
             }
@@ -73,12 +87,34 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         }
 
         ToolDistributionCandidate selected = candidates.getFirst();
-        ToolsmithDemandPlanner.RecipientDemand recipient = selected.rankedRecipients().getFirst();
         ItemStack sourceStack = inventory.getStack(selected.slot());
         if (sourceStack.isEmpty()) {
             return false;
         }
 
+        // FISHING_ROD: recipient is a FishermanRodEntry, not a RecipientDemand.
+        if (selected.toolType() == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
+            ToolsmithDemandPlanner.FishermanRodEntry fisherman = selected.fishermanEntry();
+            if (fisherman == null) {
+                return false;
+            }
+            ItemStack extracted = sourceStack.split(1);
+            inventory.setStack(selected.slot(), sourceStack);
+            inventory.markDirty();
+            pendingItem = extracted;
+            pendingTargetId = fisherman.recipientId();
+            pendingTargetPos = fisherman.chestPos();
+            pendingUniversalRoute = false;
+            pendingOverflowTransfer = false;
+            CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
+            CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());
+            CraftingCheckLogger.report(world, "Toolsmith", "crafted tool selected for transfer: fishing_rod"
+                    + " -> " + fisherman.recipientKind().name().toLowerCase(java.util.Locale.ROOT)
+                    + " storage " + fisherman.chestPos().toShortString());
+            return true;
+        }
+
+        ToolsmithDemandPlanner.RecipientDemand recipient = selected.rankedRecipients().getFirst();
         ItemStack extracted = sourceStack.split(1);
         inventory.setStack(selected.slot(), sourceStack);
         inventory.markDirty();
@@ -116,6 +152,27 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         }
 
         ToolsmithDemandPlanner.DemandSnapshot demandSnapshot = ToolsmithDemandPlanner.buildSnapshot(world, villager, source.get());
+
+        // FISHING_ROD: re-target against the FishermanRodEntry list.
+        if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
+            List<ToolsmithDemandPlanner.FishermanRodEntry> entries = demandSnapshot.rankedFishermanEntries();
+            if (entries.isEmpty()) {
+                return false;
+            }
+            if (pendingTargetId != null) {
+                for (ToolsmithDemandPlanner.FishermanRodEntry entry : entries) {
+                    if (entry.recipientId().equals(pendingTargetId)) {
+                        pendingTargetPos = entry.chestPos();
+                        return true;
+                    }
+                }
+            }
+            ToolsmithDemandPlanner.FishermanRodEntry first = entries.getFirst();
+            pendingTargetId = first.recipientId();
+            pendingTargetPos = first.chestPos();
+            return true;
+        }
+
         List<ToolsmithDemandPlanner.RecipientDemand> rankedRecipients = demandSnapshot.rankedRecipientsFor(toolType).stream()
                 .filter(recipient -> isValidToolRecipient(world, toolType, recipient))
                 .toList();
@@ -172,6 +229,20 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
                 continue;
             }
 
+            // FISHING_ROD: use the FishermanGuardEntry list directly.
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
+                List<ToolsmithDemandPlanner.FishermanRodEntry> fishermen = demandSnapshot.rankedFishermanEntries();
+                if (fishermen.isEmpty()) {
+                    continue;
+                }
+                ToolsmithDemandPlanner.FishermanRodEntry top = fishermen.getFirst();
+                int demandScore = demandSnapshot.deficitFor(toolType);
+                String reason = "fishing_rod selected: " + top.recipientKind().name().toLowerCase(java.util.Locale.ROOT)
+                        + " deficit " + top.deficit(world);
+                candidates.add(new ToolDistributionCandidate(slot, toolType, List.of(), demandScore, reason, top));
+                continue;
+            }
+
             List<ToolsmithDemandPlanner.RecipientDemand> rankedRecipients = demandSnapshot.rankedRecipientsFor(toolType).stream()
                     .filter(recipient -> isValidToolRecipient(world, toolType, recipient))
                     .toList();
@@ -184,12 +255,17 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             String reason = toolType.label() + " selected: "
                     + topRecipient.record().recipient().getVillagerData().getProfession() + " deficit "
                     + Math.max(demandScore, topRecipient.deficit());
-            candidates.add(new ToolDistributionCandidate(slot, toolType, rankedRecipients, demandScore, reason));
+            candidates.add(new ToolDistributionCandidate(slot, toolType, rankedRecipients, demandScore, reason, null));
         }
 
         candidates.sort(Comparator
                 .comparingInt(ToolDistributionCandidate::demandScore).reversed()
-                .thenComparing(Comparator.comparingInt((ToolDistributionCandidate candidate) -> candidate.rankedRecipients().getFirst().deficit()).reversed()));
+                .thenComparing(c -> {
+                    if (c.toolType() == ToolsmithDemandPlanner.ToolType.FISHING_ROD) {
+                        return c.fishermanEntry() != null ? c.fishermanEntry().deficit(world) : 0;
+                    }
+                    return c.rankedRecipients().isEmpty() ? 0 : c.rankedRecipients().getFirst().deficit();
+                }, Comparator.reverseOrder()));
         return candidates;
     }
 
@@ -197,22 +273,52 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
                                          ToolsmithDemandPlanner.ToolType toolType,
                                          ToolsmithDemandPlanner.RecipientDemand recipient) {
         if (world == null) {
+            logRecipientRejection("WORLD_NULL", recipient, null);
             return false;
         }
 
         VillagerProfession expectedProfession = expectedProfessionFor(toolType);
         if (expectedProfession == null || recipient.record().recipient().getVillagerData().getProfession() != expectedProfession) {
+            logRecipientRejection("PROFESSION_MISMATCH", recipient, null);
             return false;
         }
 
         Block expectedJobBlock = expectedJobBlockFor(toolType);
         if (expectedJobBlock == null || !world.getBlockState(recipient.record().jobPos()).isOf(expectedJobBlock)) {
+            logRecipientRejection("JOB_BLOCK_MISMATCH", recipient, null);
             return false;
         }
 
-        return JobBlockPairingHelper.findNearbyChest(world, recipient.record().jobPos())
-                .map(chestPos -> chestPos.equals(recipient.record().chestPos()))
-                .orElse(false);
+        BlockPos recipientChestPos = recipient.record().chestPos();
+        BlockState recipientChestState = world.getBlockState(recipientChestPos);
+        if (!(recipientChestState.getBlock() instanceof ChestBlock)
+                && !(recipientChestState.getBlock() instanceof BarrelBlock)) {
+            logRecipientRejection("RECIPIENT_STORAGE_INVALID", recipient, null);
+            return false;
+        }
+
+        Optional<BlockPos> resolvedChestPos = JobBlockPairingHelper.findNearbyChest(world, recipient.record().jobPos());
+        if (resolvedChestPos.isPresent()) {
+            if (!PairedStorageHelper.areEquivalentStoragePositions(world, resolvedChestPos.get(), recipientChestPos)) {
+                logRecipientRejection("PAIRING_MISMATCH", recipient, resolvedChestPos.get());
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void logRecipientRejection(String reasonCode,
+                                       ToolsmithDemandPlanner.RecipientDemand recipient,
+                                       BlockPos resolvedChestPos) {
+        String resolved = resolvedChestPos == null ? "<none>" : resolvedChestPos.toShortString();
+        LOGGER.debug("Toolsmith recipient rejected [{}]: villager={} profession={} jobPos={} chestPos={} resolvedChestPos={}",
+                reasonCode,
+                recipient.record().recipient().getUuidAsString(),
+                recipient.record().recipient().getVillagerData().getProfession(),
+                recipient.record().jobPos().toShortString(),
+                recipient.record().chestPos().toShortString(),
+                resolved);
     }
 
     private VillagerProfession expectedProfessionFor(ToolsmithDemandPlanner.ToolType toolType) {
@@ -284,7 +390,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
     private Optional<Inventory> getRecipientInventory(ServerWorld world, BlockPos position) {
         BlockState state = world.getBlockState(position);
         if (state.getBlock() instanceof ChestBlock chestBlock) {
-            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
         }
         if (state.getBlock() instanceof BarrelBlock) {
             BlockEntity blockEntity = world.getBlockEntity(position);
@@ -301,7 +407,8 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             ToolsmithDemandPlanner.ToolType toolType,
             List<ToolsmithDemandPlanner.RecipientDemand> rankedRecipients,
             int demandScore,
-            String selectionReason
+            String selectionReason,
+            @org.jetbrains.annotations.Nullable ToolsmithDemandPlanner.FishermanRodEntry fishermanEntry
     ) {
     }
 }

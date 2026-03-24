@@ -244,7 +244,10 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        // Pass open=false: we are reading inventory programmatically, not via player interaction.
+        // open=true would trigger the ViewerCountManager → play open-chest sound / animate lid
+        // every time canStart() polls the chest, which is audibly noticeable to players.
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 

@@ -4,9 +4,11 @@ import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.behavior.ToolsmithBehavior;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -241,9 +243,15 @@ public class ToolsmithCraftingGoal extends Goal {
             if (toolType == ToolsmithDemandPlanner.ToolType.SHEARS && deficit <= 0) {
                 continue;
             }
-            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0 && toolDemand != null) {
-                CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: stock cap reached (" + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
-                continue;
+            if (toolType == ToolsmithDemandPlanner.ToolType.FISHING_ROD && deficit <= 0) {
+                boolean practicalRodNeed = hasPracticalFishingRodNeed(toolDemand, deficit, demandSnapshot.rankedFishermanEntries().size());
+                if (!practicalRodNeed) {
+                    if (toolDemand != null) {
+                        CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: no practical recipient need (aggregate "
+                                + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
+                    }
+                    continue;
+                }
             }
             if (canCraft(inventory, recipe)) {
                 recipes.add(new ToolRecipe(recipe, result, toolType, deficit, toolType.fallbackPriority()));
@@ -262,6 +270,16 @@ public class ToolsmithCraftingGoal extends Goal {
                 || stack.getItem() instanceof HoeItem
                 || stack.getItem() instanceof ShearsItem
                 || stack.isOf(Items.FISHING_ROD);
+    }
+
+    static boolean hasPracticalFishingRodNeed(@Nullable ToolsmithDemandPlanner.ToolDemand toolDemand,
+                                               int demandDeficit,
+                                               int fishermanEntryCount) {
+        if (toolDemand == null || demandDeficit != 0) {
+            return false;
+        }
+        // Practical need exists when at least one fisherman guard still needs a rod.
+        return fishermanEntryCount > 0;
     }
 
     private boolean hasNonTableCraftableRecipe(ServerWorld world) {
@@ -387,11 +405,15 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-        return Optional.ofNullable(inventory);
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
     private void moveTo(BlockPos target) {

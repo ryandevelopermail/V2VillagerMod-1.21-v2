@@ -12,7 +12,9 @@ import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoa
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackChestTriggerController;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardDepositLogsGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackCharcoalDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackFurnaceModifierGoal;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackPenBuilderGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RaiseShieldGoal;
 import dev.sterner.guardvillagers.common.entity.goal.RunToClericGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WalkBackToCheckPointGoal;
@@ -249,6 +251,8 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.goalSelector.add(3, new LumberjackFurnaceModifierGoal(this));
         this.goalSelector.add(4, new LumberjackGuardCraftingGoal(this));
         this.goalSelector.add(5, new LumberjackGuardDepositLogsGoal(this));
+        this.goalSelector.add(6, new LumberjackPenBuilderGoal(this));
+        this.goalSelector.add(7, new LumberjackCharcoalDistributionGoal(this));
         if (GuardVillagersConfig.guardEntitysRunFromPolarBears) {
             this.goalSelector.add(3, new FleeEntityGoal<>(this, PolarBearEntity.class, 12.0F, 1.0D, 1.2D));
         }
@@ -395,8 +399,16 @@ public class LumberjackGuardEntity extends GuardEntity {
             if (stack.isEmpty()) {
                 continue;
             }
-            NbtCompound stackNbt = new NbtCompound();
-            bufferList.add(stack.encode(this.getRegistryManager(), stackNbt));
+            // MC 1.21 ItemStack codec enforces count in [1,99]. Clamp and split oversized
+            // stacks defensively so a logic bug elsewhere never causes a save crash.
+            ItemStack remaining = stack.copy();
+            while (!remaining.isEmpty()) {
+                int allowed = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack chunk = remaining.copyWithCount(allowed);
+                remaining.decrement(allowed);
+                NbtCompound stackNbt = new NbtCompound();
+                bufferList.add(chunk.encode(this.getRegistryManager(), stackNbt));
+            }
         }
         nbt.put("LumberjackGatheredStackBuffer", bufferList);
     }

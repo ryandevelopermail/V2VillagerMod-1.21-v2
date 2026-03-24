@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import dev.sterner.guardvillagers.common.util.ArmorerStandMemoryHolder;
 import dev.sterner.guardvillagers.common.util.LeatherworkerCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
+import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
 import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandMemoryHolder;
@@ -32,7 +33,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Mixin(VillagerEntity.class)
-public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder {
+public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder, VillageMembershipTracker.VillageMembershipHolder {
     private static final String WEAPONSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastWeaponsmithCrafted";
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
@@ -68,6 +69,28 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private final Map<BlockPos, Long> guardvillagers$nextReservedVisualResetTickByPos = new HashMap<>();
     @Unique
     private long guardvillagers$nextReservedVisualResetTickForVillager = Long.MIN_VALUE;
+
+    // -------------------------------------------------------------------------
+    // Village membership — home bell tag (Cluster 1B)
+    // -------------------------------------------------------------------------
+    private static final String HOME_BELL_DIM_KEY = "GuardVillagersHomeBellDim";
+    private static final String HOME_BELL_X_KEY = "GuardVillagersHomeBellX";
+    private static final String HOME_BELL_Y_KEY = "GuardVillagersHomeBellY";
+    private static final String HOME_BELL_Z_KEY = "GuardVillagersHomeBellZ";
+
+    @Unique
+    @Nullable
+    private GlobalPos guardvillagers$homeBellPos;
+
+    @Override
+    public GlobalPos guardvillagers$getHomeBellPos() {
+        return guardvillagers$homeBellPos;
+    }
+
+    @Override
+    public void guardvillagers$setHomeBellPos(GlobalPos bellPos) {
+        guardvillagers$homeBellPos = bellPos;
+    }
 
     @Override
     public Map<UUID, ArmorerStandManager.StandProgress> guardvillagers$getArmorerStandMemory() {
@@ -230,6 +253,44 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         } else {
             nbt.remove(LEATHERWORKER_LAST_CRAFTED_KEY);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Village membership NBT persistence
+    // -------------------------------------------------------------------------
+
+    @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
+    private void guardvillagers$readHomeBell(NbtCompound nbt, CallbackInfo ci) {
+        guardvillagers$homeBellPos = null;
+        if (!nbt.contains(HOME_BELL_DIM_KEY, 8)) {
+            return;
+        }
+        Identifier dimId = Identifier.tryParse(nbt.getString(HOME_BELL_DIM_KEY));
+        if (dimId == null) {
+            return;
+        }
+        if (!nbt.contains(HOME_BELL_X_KEY) || !nbt.contains(HOME_BELL_Y_KEY) || !nbt.contains(HOME_BELL_Z_KEY)) {
+            return;
+        }
+        net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey =
+                net.minecraft.registry.RegistryKey.of(net.minecraft.registry.RegistryKeys.WORLD, dimId);
+        BlockPos bellPos = new BlockPos(nbt.getInt(HOME_BELL_X_KEY), nbt.getInt(HOME_BELL_Y_KEY), nbt.getInt(HOME_BELL_Z_KEY));
+        guardvillagers$homeBellPos = GlobalPos.create(worldKey, bellPos);
+    }
+
+    @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
+    private void guardvillagers$writeHomeBell(NbtCompound nbt, CallbackInfo ci) {
+        if (guardvillagers$homeBellPos == null) {
+            nbt.remove(HOME_BELL_DIM_KEY);
+            nbt.remove(HOME_BELL_X_KEY);
+            nbt.remove(HOME_BELL_Y_KEY);
+            nbt.remove(HOME_BELL_Z_KEY);
+            return;
+        }
+        nbt.putString(HOME_BELL_DIM_KEY, guardvillagers$homeBellPos.dimension().getValue().toString());
+        nbt.putInt(HOME_BELL_X_KEY, guardvillagers$homeBellPos.pos().getX());
+        nbt.putInt(HOME_BELL_Y_KEY, guardvillagers$homeBellPos.pos().getY());
+        nbt.putInt(HOME_BELL_Z_KEY, guardvillagers$homeBellPos.pos().getZ());
     }
 
     @Inject(method = "mobTick", at = @At("TAIL"))

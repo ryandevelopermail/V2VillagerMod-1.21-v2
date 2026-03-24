@@ -1,12 +1,12 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.util.GuardStandEquipmentSync;
-import net.minecraft.block.BellBlock;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
-import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -27,14 +27,12 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 public final class VillageGuardStandManager {
-    private static final int BELL_SEARCH_RANGE = 32;
     public static final int BELL_EFFECT_RANGE = 300;
     private static final int VILLAGE_ENTITY_RANGE = BELL_EFFECT_RANGE;
     private static final int ARMOR_STAND_SEARCH_RANGE = BELL_EFFECT_RANGE;
@@ -44,7 +42,7 @@ public final class VillageGuardStandManager {
     public static final String GUARD_STAND_TAG = "guardvillagers:auto_armor_stand";
 
     private static final Map<GlobalPos, Integer> GUARD_COUNTS = new HashMap<>();
-    private static final Set<GlobalPos> INITIALIZED_BELLS = new HashSet<>();
+    private static final Set<GlobalPos> INITIALIZED_ANCHORS = new HashSet<>();
 
     private VillageGuardStandManager() {
     }
@@ -59,16 +57,16 @@ public final class VillageGuardStandManager {
             }
         }
 
-        Optional<BlockPos> bellPos = findBell(world, guard, sourceVillager);
-        if (bellPos.isEmpty()) {
+        Optional<BlockPos> anchorPos = findAnchor(world, guard);
+        if (anchorPos.isEmpty()) {
             return;
         }
 
-        GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos.get());
-        int guardCount = countVillageGuards(world, bellPos.get());
-        GUARD_COUNTS.put(globalBellPos, guardCount);
+        GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos.get());
+        int guardCount = countVillageGuards(world, anchorPos.get());
+        GUARD_COUNTS.put(globalAnchorPos, guardCount);
 
-        pairGuardsWithStands(world, bellPos.get());
+        pairGuardsWithStands(world, anchorPos.get());
     }
 
     public static void handlePlayerNearby(ServerWorld world, PlayerEntity player) {
@@ -79,76 +77,56 @@ public final class VillageGuardStandManager {
         Box searchBox = player.getBoundingBox().expand(PLAYER_APPROACH_RANGE);
         List<GuardEntity> guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
         for (GuardEntity guard : guards) {
-            Optional<BlockPos> bellPos = findBell(world, guard, null);
-            if (bellPos.isEmpty()) {
+            Optional<BlockPos> anchorPos = findAnchor(world, guard);
+            if (anchorPos.isEmpty()) {
                 continue;
             }
 
-            GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos.get());
-            if (INITIALIZED_BELLS.add(globalBellPos)) {
-                int guardCount = countVillageGuards(world, bellPos.get());
-                GUARD_COUNTS.put(globalBellPos, guardCount);
-                pairGuardsWithStands(world, bellPos.get());
+            GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos.get());
+            // INITIALIZED_ANCHORS.add() returns true only on first insertion.
+            // If already initialized, skip the expensive countVillageGuards + pairGuardsWithStands
+            // entirely — no need to re-evaluate the stand pairing every 40 ticks.
+            if (!INITIALIZED_ANCHORS.contains(globalAnchorPos)) {
+                INITIALIZED_ANCHORS.add(globalAnchorPos);
+                int guardCount = countVillageGuards(world, anchorPos.get());
+                GUARD_COUNTS.put(globalAnchorPos, guardCount);
+                pairGuardsWithStands(world, anchorPos.get());
             }
         }
     }
 
-    public static void refreshBellInventory(ServerWorld world, BlockPos bellPos) {
-        GlobalPos globalBellPos = GlobalPos.create(world.getRegistryKey(), bellPos);
-        int guardCount = countVillageGuards(world, bellPos);
-        GUARD_COUNTS.put(globalBellPos, guardCount);
-        INITIALIZED_BELLS.add(globalBellPos);
+    public static void refreshBellInventory(ServerWorld world, BlockPos anchorPos) {
+        GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos);
+        int guardCount = countVillageGuards(world, anchorPos);
+        GUARD_COUNTS.put(globalAnchorPos, guardCount);
+        INITIALIZED_ANCHORS.add(globalAnchorPos);
     }
 
-    private static Optional<BlockPos> findBell(ServerWorld world, GuardEntity guard, @Nullable VillagerEntity sourceVillager) {
-        Optional<BlockPos> meetingPoint = getMeetingPoint(sourceVillager);
-        if (meetingPoint.isPresent()) {
-            return meetingPoint;
-        }
-
-        return findNearestBell(world, guard.getBlockPos());
-    }
-
-    private static Optional<BlockPos> getMeetingPoint(@Nullable VillagerEntity villager) {
-        if (villager == null) {
-            return Optional.empty();
-        }
-
-        return villager.getBrain().getOptionalMemory(MemoryModuleType.MEETING_POINT)
-                .filter(globalPos -> Objects.equals(globalPos.dimension(), villager.getWorld().getRegistryKey()))
-                .map(GlobalPos::pos)
-                .filter(pos -> villager.getWorld().getBlockState(pos).getBlock() instanceof BellBlock);
-    }
-
-    private static Optional<BlockPos> findNearestBell(ServerWorld world, BlockPos center) {
-        BlockPos closest = null;
-        double distance = Double.MAX_VALUE;
-
-        for (BlockPos pos : BlockPos.iterateOutwards(center, BELL_SEARCH_RANGE, BELL_SEARCH_RANGE, BELL_SEARCH_RANGE)) {
-            if (!center.isWithinDistance(pos, BELL_SEARCH_RANGE)) {
-                continue;
-            }
-
-            if (world.getBlockState(pos).getBlock() instanceof BellBlock) {
-                double currentDistance = pos.getSquaredDistance(Vec3d.ofCenter(center));
-                if (currentDistance < distance) {
-                    distance = currentDistance;
-                    closest = pos.toImmutable();
-                }
-            }
-        }
-
-        return Optional.ofNullable(closest);
+    /**
+     * Finds the nearest QM chest (village anchor) within {@link #BELL_EFFECT_RANGE} of the guard.
+     * Falls back to the guard position itself if no anchor is registered — this means the platform
+     * will not be built until a Quartermaster is present, which is the intended behavior.
+     */
+    private static Optional<BlockPos> findAnchor(ServerWorld world, GuardEntity guard) {
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        return anchorState.getNearestQmChest(world, guard.getBlockPos(), BELL_EFFECT_RANGE);
     }
 
     private static int countVillageGuards(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
-        return world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive).size();
+        // Only count pure GuardVillagers.GUARD_VILLAGER type — not specialist subtypes
+        // (MasonGuardEntity, LumberjackGuardEntity, etc. extend GuardEntity but are NOT
+        // stand-display guards; including them causes the armor-stand platform to grow
+        // to match specialist counts and display specialist guards on the platform).
+        return world.getEntitiesByClass(GuardEntity.class, searchBox,
+                e -> e.isAlive() && e.getType() == GuardVillagers.GUARD_VILLAGER).size();
     }
 
     private static List<GuardEntity> getGuardsInRange(ServerWorld world, BlockPos bellPos) {
         Box searchBox = new Box(bellPos).expand(VILLAGE_ENTITY_RANGE);
-        return world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
+        // Filter to only pure GUARD_VILLAGER type — excludes specialist guard subtypes.
+        return world.getEntitiesByClass(GuardEntity.class, searchBox,
+                e -> e.isAlive() && e.getType() == GuardVillagers.GUARD_VILLAGER);
     }
 
     public static List<ArmorStandEntity> getGuardArmorStands(ServerWorld world, BlockPos bellPos) {
@@ -158,6 +136,7 @@ public final class VillageGuardStandManager {
     }
 
     private static List<ArmorStandEntity> ensureArmorStands(ServerWorld world, BlockPos bellPos, int guardCount) {
+        // Each registered QM chest (village anchor) gets its own guard stand platform.
         Optional<CobblePad> cobblePad = prepareCobblePad(world, bellPos);
         if (cobblePad.isEmpty()) {
             return List.of();

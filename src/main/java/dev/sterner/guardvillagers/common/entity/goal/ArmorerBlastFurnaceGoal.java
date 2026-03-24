@@ -350,7 +350,7 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private void moveTo(BlockPos pos) {

@@ -1,6 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.CartographerMapChestUtil;
+import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
+import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -32,8 +35,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
+import org.jetbrains.annotations.Nullable;
 
 public class LumberjackGuardChopTreesGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardChopTreesGoal.class);
@@ -54,6 +61,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int ROOT_STRUCTURE_HORIZONTAL_RADIUS = 2;
     private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
     private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
+    private static final int CARTOGRAPHER_INFLUENCE_RADIUS = 300;
+
+    /**
+     * Logs within this horizontal radius of a bell block are considered part of a village
+     * structure and are never chopped. Village bells sit in the center of build areas;
+     * any tree this close to a bell is almost certainly a decoration, not a harvestable tree.
+     */
+    private static final int BELL_EXCLUSION_RADIUS = 6;
     private static final double ITEM_PICKUP_RADIUS = 2.5D;
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
@@ -572,13 +587,41 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return false;
         }
 
-        return world.breakBlock(pos, true, this.guard);
+        BlockEntity blockEntity = world.getBlockEntity(pos);
+        return breakObstacleAndBufferDrops(
+                () -> Block.getDroppedStacks(state, world, pos, blockEntity, this.guard, ItemStack.EMPTY),
+                () -> world.removeBlock(pos, false),
+                this::bufferStack
+        );
+    }
+
+    static boolean breakObstacleAndBufferDrops(
+            Supplier<List<ItemStack>> dropsSupplier,
+            BooleanSupplier removeBlock,
+            Consumer<ItemStack> dropBuffer
+    ) {
+        List<ItemStack> drops = dropsSupplier.get();
+        if (!removeBlock.getAsBoolean()) {
+            return false;
+        }
+
+        for (ItemStack drop : drops) {
+            if (!drop.isEmpty()) {
+                dropBuffer.accept(drop.copy());
+            }
+        }
+        return true;
     }
 
     private boolean isAxeBreakablePathObstacle(BlockState state) {
+        // NOTE: Logs are intentionally excluded here.
+        // A log in the path is either part of a building (must not be broken) or a tree
+        // that should be properly targeted via the session mechanism — not silently
+        // chewed through as a "path obstacle". Leaves and other axe-mineable blocks
+        // (e.g. dead bushes, bamboo, etc.) are safe to clear.
         return !state.isAir()
+                && !state.isIn(BlockTags.LOGS)
                 && (state.isIn(BlockTags.LEAVES)
-                || state.isIn(BlockTags.LOGS)
                 || state.isIn(BlockTags.AXE_MINEABLE));
     }
 
@@ -758,29 +801,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private static boolean isEligibleRootStatic(ServerWorld world, BlockPos pos) {
-        BlockState state = world.getBlockState(pos);
-        if (!state.isIn(BlockTags.LOGS)) {
-            return false;
-        }
-        BlockState below = world.getBlockState(pos.down());
-        if (below.isIn(BlockTags.LOGS)) {
-            return false;
-        }
-        if (!(below.isOf(Blocks.DIRT)
-                || below.isOf(Blocks.GRASS_BLOCK)
-                || below.isOf(Blocks.PODZOL)
-                || below.isOf(Blocks.COARSE_DIRT)
-                || below.isOf(Blocks.ROOTED_DIRT)
-                || below.isOf(Blocks.MOSS_BLOCK)
-                || below.isOf(Blocks.MYCELIUM))) {
-            return false;
-        }
-
-        return hasMinimumTreeStructureStatic(world, pos);
+        return isEligibleRootImpl(world, pos, null);
     }
 
     private static boolean hasMinimumTreeStructureStatic(ServerWorld world, BlockPos root) {
-        if (!world.getBlockState(root.up()).isIn(BlockTags.LOGS) && !hasNearbyNaturalLeavesStatic(world, root)) {
+        return hasMinimumTreeStructureImpl(world, root);
+    }
+
+    /**
+     * Returns {@code true} if {@code root} has at least {@value MIN_ROOT_STRUCTURE_LOGS}
+     * connected log blocks forming a trunk column, AND natural (non-persistent) leaves are
+     * connected to the crown of this specific column (not just present somewhere nearby).
+     *
+     * <p>Requiring crown-attached leaves (rather than any leaves within a flat radius of the
+     * root) prevents village house log pillars from being classified as harvestable trees.
+     * A house log sitting next to a real tree would previously pass the old "leaves nearby"
+     * check; now the leaves must actually be adjacent to the top of <em>this</em> column.
+     */
+    private static boolean hasMinimumTreeStructureImpl(ServerWorld world, BlockPos root) {
+        if (!hasCrownAttachedNaturalLeaves(world, root)) {
             return false;
         }
 
@@ -831,38 +870,234 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return false;
     }
 
+    /**
+     * Returns {@code true} if natural (non-persistent) leaves are directly attached to the
+     * crown of the log column rooted at {@code root}.
+     *
+     * <p>Unlike the old "leaves anywhere within radius 3" check, this walks up to the top of
+     * the log column and then checks the immediate neighbourhood of the topmost log block.
+     * This prevents village house pillars from qualifying: a house pillar has no leaves
+     * coming off its own top — nearby tree canopy no longer counts.
+     *
+     * <p>The crown search checks a 3×3×3 neighbourhood around the topmost log, then expands
+     * one more level up for tall trees where the canopy starts slightly above the last trunk
+     * block.
+     */
+    private static boolean hasCrownAttachedNaturalLeaves(ServerWorld world, BlockPos root) {
+        // Walk to the top of this log column.
+        BlockPos crown = root;
+        for (int i = 0; i < ROOT_STRUCTURE_MAX_HEIGHT; i++) {
+            BlockPos above = crown.up();
+            if (!world.getBlockState(above).isIn(BlockTags.LOGS)) {
+                break;
+            }
+            crown = above;
+        }
+
+        // Search a tight box around the crown for non-persistent leaves.
+        BlockPos min = crown.add(-ROOT_CANOPY_SEARCH_RADIUS, -1, -ROOT_CANOPY_SEARCH_RADIUS);
+        BlockPos max = crown.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_RADIUS + 1, ROOT_CANOPY_SEARCH_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (state.getBlock() instanceof LeavesBlock && !state.get(LeavesBlock.PERSISTENT)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private List<BlockPos> findTreeTargets(ServerWorld world) {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();
-        BlockPos center = chest == null
-                ? table
-                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
-        Set<BlockPos> uniqueRoots = new HashSet<>();
+        BlockPos center = getPairedBaseCenter(table, chest);
 
-        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+        MappedBoundsSearchContext mappedContext = resolveMappedBoundsSearchContext(world, center);
+        boolean mappedMode = mappedContext != null;
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds mode active={} (center={})",
+                this.guard.getUuidAsString(),
+                mappedMode,
+                center.toShortString());
 
-        for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            BlockPos pos = cursor.toImmutable();
-            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
-                continue;
-            }
-            BlockState state = world.getBlockState(pos);
-            if (!isEligibleLog(world, pos) || !state.isIn(BlockTags.LOGS)) {
-                continue;
-            }
-            BlockPos root = normalizeRoot(world, pos);
-            if (!hasMinimumTreeStructure(world, root)) {
-                continue;
-            }
-            if (isEligibleRoot(world, root)) {
-                uniqueRoots.add(root);
-            }
-        }
+        Set<BlockPos> nearbyBells = mappedMode
+                ? Set.of()
+                : collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
+
+        ScanBounds scanBounds = ScanBounds.fromLocalRadius(center);
+        Set<BlockPos> uniqueRoots = mappedMode
+                ? collectQualifiedRootsInMappedBounds(world, center, mappedContext)
+                : collectQualifiedRootsInBounds(world, scanBounds, center, nearbyBells);
 
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
         sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
+        LOGGER.debug("Lumberjack Guard {} tree target scan complete mode={} candidates={} accepted={}",
+                this.guard.getUuidAsString(),
+                mappedMode ? "mapped-bounds" : "local-radius",
+                scanBounds.candidateCount(),
+                sorted.size());
         return sorted;
+    }
+
+    private Set<BlockPos> collectQualifiedRootsInMappedBounds(ServerWorld world,
+                                                              BlockPos center,
+                                                              MappedBoundsSearchContext mappedContext) {
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+        int candidateLogs = 0;
+        int acceptedRoots = 0;
+        long candidateVolume = 0L;
+
+        for (VillageMappedBoundsState.MappedBounds bounds : mappedContext.bounds()) {
+            ScanBounds scanBounds = ScanBounds.fromMapped(center, bounds);
+            candidateVolume += scanBounds.candidateCount();
+            for (BlockPos cursor : BlockPos.iterate(scanBounds.min(), scanBounds.max())) {
+                BlockPos pos = cursor.toImmutable();
+                if (!bounds.contains(pos)) {
+                    continue;
+                }
+                if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                    continue;
+                }
+                candidateLogs++;
+                if (tryAddQualifiedRoot(world, pos, null, uniqueRoots)) {
+                    acceptedRoots++;
+                }
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds qualification cartographers={} mappedBoxes={} candidateVolume={} candidateLogs={} acceptedRoots={}",
+                this.guard.getUuidAsString(),
+                mappedContext.cartographerCount(),
+                mappedContext.bounds().size(),
+                candidateVolume,
+                candidateLogs,
+                acceptedRoots);
+        return uniqueRoots;
+    }
+
+    private Set<BlockPos> collectQualifiedRootsInBounds(ServerWorld world,
+                                                        ScanBounds scanBounds,
+                                                        BlockPos center,
+                                                        Set<BlockPos> nearbyBells) {
+        int candidateLogs = 0;
+        int acceptedRoots = 0;
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+
+        for (BlockPos cursor : BlockPos.iterate(scanBounds.min(), scanBounds.max())) {
+            BlockPos pos = cursor.toImmutable();
+            if (!isCandidateInScanMode(center, pos, null)) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            candidateLogs++;
+            if (tryAddQualifiedRoot(world, pos, nearbyBells, uniqueRoots)) {
+                acceptedRoots++;
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} tree root qualification mode={} candidateLogs={} acceptedRoots={}",
+                this.guard.getUuidAsString(),
+                "local-radius",
+                candidateLogs,
+                acceptedRoots);
+        return uniqueRoots;
+    }
+
+    private boolean tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
+        BlockPos root = normalizeRoot(world, candidateLog);
+        if (!isEligibleRootImpl(world, root, cachedBells)) {
+            return false;
+        }
+        if (!hasMinimumTreeStructure(world, root)) {
+            return false;
+        }
+        return uniqueRoots.add(root);
+    }
+
+    private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
+        List<CartographerBehavior.CartographerPairing> nearbyCartographers =
+                CartographerBehavior.getNearbyPairings(world, center, CARTOGRAPHER_INFLUENCE_RADIUS);
+
+        if (nearbyCartographers.isEmpty()) {
+            LOGGER.debug("Lumberjack Guard {} no cartographer job-sites found within {} blocks",
+                    this.guard.getUuidAsString(),
+                    CARTOGRAPHER_INFLUENCE_RADIUS);
+            return null;
+        }
+
+        List<VillageMappedBoundsState.MappedBounds> allBounds = new ArrayList<>();
+        for (CartographerBehavior.CartographerPairing candidate : nearbyCartographers) {
+            List<VillageMappedBoundsState.MappedBounds> chestBounds =
+                    CartographerMapChestUtil.collectPopulatedMapBounds(world, candidate.chestPos());
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds candidate cartographerJob={} chest={} populatedMaps={}",
+                    this.guard.getUuidAsString(),
+                    candidate.jobPos().toShortString(),
+                    candidate.chestPos().toShortString(),
+                    chestBounds.size());
+            allBounds.addAll(chestBounds);
+        }
+
+        if (allBounds.isEmpty()) {
+            LOGGER.debug("Lumberjack Guard {} nearby cartographers found but no populated maps in paired chests",
+                    this.guard.getUuidAsString());
+            return null;
+        }
+
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} populated map bounds",
+                this.guard.getUuidAsString(),
+                nearbyCartographers.size(),
+                allBounds.size());
+        return new MappedBoundsSearchContext(allBounds, nearbyCartographers.size());
+    }
+
+    private static BlockPos getPairedBaseCenter(BlockPos table, @Nullable BlockPos chest) {
+        return chest == null
+                ? table
+                : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+    }
+
+    static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
+        if (mappedBounds != null) {
+            return mappedBounds.contains(candidate);
+        }
+        return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
+    }
+
+    private record MappedBoundsSearchContext(List<VillageMappedBoundsState.MappedBounds> bounds,
+                                             int cartographerCount) {
+    }
+
+    private record ScanBounds(BlockPos min, BlockPos max, long candidateCount) {
+        static ScanBounds fromLocalRadius(BlockPos center) {
+            BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
+            BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+            long width = (long) (max.getX() - min.getX() + 1);
+            long height = (long) (max.getY() - min.getY() + 1);
+            long depth = (long) (max.getZ() - min.getZ() + 1);
+            return new ScanBounds(min, max, width * height * depth);
+        }
+
+        static ScanBounds fromMapped(BlockPos center, VillageMappedBoundsState.MappedBounds bounds) {
+            BlockPos min = new BlockPos(bounds.minX(), center.getY() - TREE_SEARCH_HEIGHT, bounds.minZ());
+            BlockPos max = new BlockPos(bounds.maxX(), center.getY() + TREE_SEARCH_HEIGHT, bounds.maxZ());
+            long width = (long) (max.getX() - min.getX() + 1);
+            long height = (long) (max.getY() - min.getY() + 1);
+            long depth = (long) (max.getZ() - min.getZ() + 1);
+            return new ScanBounds(min, max, width * height * depth);
+        }
+    }
+
+    /** Collect all bell block positions within {@code radius} blocks of {@code center}. */
+    private static Set<BlockPos> collectBellsNear(ServerWorld world, BlockPos center, int radius) {
+        Set<BlockPos> bells = new HashSet<>();
+        BlockPos min = center.add(-radius, -8, -radius);
+        BlockPos max = center.add(radius, 8, radius);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                bells.add(cursor.toImmutable());
+            }
+        }
+        return bells;
     }
 
     private BlockPos normalizeRoot(ServerWorld world, BlockPos pos) {
@@ -874,64 +1109,98 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private boolean isEligibleRoot(ServerWorld world, BlockPos pos) {
+        return isEligibleRootImpl(world, pos, null);
+    }
+
+    /**
+     * Shared eligibility logic for both the instance and static code paths.
+     *
+     * <p>A log position qualifies as a harvestable tree root when ALL of the following hold:
+     * <ol>
+     *   <li>It is tagged {@code #logs}.</li>
+     *   <li>The block immediately below it is a natural ground block (not a log, not planks,
+     *       not stone, not any other artificial material).</li>
+     *   <li>The block two below is not a log (catches stilted/stacked log cabins where the
+     *       direct ground check passes but the structure continues below).</li>
+     *   <li>No {@link Blocks#BELL} exists within {@value BELL_EXCLUSION_RADIUS} horizontal
+     *       blocks (village-center decorative trees are excluded).</li>
+     *   <li>It passes the minimum tree-structure check (≥4 connected logs + canopy).</li>
+     * </ol>
+     *
+     * @param cachedBells pre-collected bell positions for the scan area, or {@code null} to
+     *                    scan the world on demand (slower — only use for one-off checks)
+     */
+    private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return false;
         }
+
         BlockState below = world.getBlockState(pos.down());
         if (below.isIn(BlockTags.LOGS)) {
             return false;
         }
-        if (!(below.isOf(Blocks.DIRT)
-                || below.isOf(Blocks.GRASS_BLOCK)
-                || below.isOf(Blocks.PODZOL)
-                || below.isOf(Blocks.COARSE_DIRT)
-                || below.isOf(Blocks.ROOTED_DIRT)
-                || below.isOf(Blocks.MOSS_BLOCK)
-                || below.isOf(Blocks.MYCELIUM))) {
+        if (!isNaturalGroundBlock(below)) {
             return false;
         }
 
-        return hasMinimumTreeStructure(world, pos);
+        // Stilted structure guard: if the block two below is also a log, this is not a tree root
+        // (e.g. a log cabin whose bottom row sits on dirt but continues below as another log layer).
+        if (world.getBlockState(pos.down(2)).isIn(BlockTags.LOGS)) {
+            return false;
+        }
+
+        // Bell-proximity guard: skip logs that are decorative village-center trees.
+        // Use pre-cached bell set when available to avoid repeated world scans.
+        if (isNearBell(world, pos, cachedBells)) {
+            return false;
+        }
+
+        return hasMinimumTreeStructureImpl(world, pos);
+    }
+
+    private static boolean isNaturalGroundBlock(BlockState state) {
+        return state.isOf(Blocks.DIRT)
+                || state.isOf(Blocks.GRASS_BLOCK)
+                || state.isOf(Blocks.PODZOL)
+                || state.isOf(Blocks.COARSE_DIRT)
+                || state.isOf(Blocks.ROOTED_DIRT)
+                || state.isOf(Blocks.MOSS_BLOCK)
+                || state.isOf(Blocks.MYCELIUM);
+    }
+
+    /**
+     * Returns {@code true} if any bell block exists within {@value BELL_EXCLUSION_RADIUS}
+     * horizontal blocks (and ±4 vertical) of {@code pos}.
+     *
+     * <p>If {@code cachedBells} is non-null, the check is O(n) over the cached set with no
+     * block reads. Otherwise falls back to a world scan (only for one-off call sites).
+     */
+    private static boolean isNearBell(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
+        if (cachedBells != null) {
+            for (BlockPos bell : cachedBells) {
+                int dx = Math.abs(bell.getX() - pos.getX());
+                int dy = Math.abs(bell.getY() - pos.getY());
+                int dz = Math.abs(bell.getZ() - pos.getZ());
+                if (dx <= BELL_EXCLUSION_RADIUS && dy <= 4 && dz <= BELL_EXCLUSION_RADIUS) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Fallback: scan the world (one-off use only, e.g. recovery session targeting)
+        BlockPos min = pos.add(-BELL_EXCLUSION_RADIUS, -4, -BELL_EXCLUSION_RADIUS);
+        BlockPos max = pos.add(BELL_EXCLUSION_RADIUS, 4, BELL_EXCLUSION_RADIUS);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            if (world.getBlockState(cursor).isOf(Blocks.BELL)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
-        if (!isEligibleLog(world, root.up()) && !hasNearbyNaturalLeaves(world, root)) {
-            return false;
-        }
-
-        Set<BlockPos> visited = new HashSet<>();
-        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
-        queue.add(root);
-
-        int minY = root.getY();
-        int maxY = root.getY() + ROOT_STRUCTURE_MAX_HEIGHT;
-
-        while (!queue.isEmpty()) {
-            BlockPos current = queue.poll();
-            if (!visited.add(current)) {
-                continue;
-            }
-            if (visited.size() >= MIN_ROOT_STRUCTURE_LOGS) {
-                return true;
-            }
-
-            for (BlockPos adjacent : getTrunkAdjacent(current)) {
-                if (adjacent.getY() < minY || adjacent.getY() > maxY) {
-                    continue;
-                }
-                if (Math.abs(adjacent.getX() - root.getX()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS
-                        || Math.abs(adjacent.getZ() - root.getZ()) > ROOT_STRUCTURE_HORIZONTAL_RADIUS) {
-                    continue;
-                }
-                if (visited.contains(adjacent) || !isEligibleLog(world, adjacent)) {
-                    continue;
-                }
-                queue.add(adjacent.toImmutable());
-            }
-        }
-
-        return false;
+        return hasMinimumTreeStructureImpl(world, root);
     }
 
     private boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
@@ -1216,7 +1485,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return null;
         }
 
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private int countByPredicate(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {

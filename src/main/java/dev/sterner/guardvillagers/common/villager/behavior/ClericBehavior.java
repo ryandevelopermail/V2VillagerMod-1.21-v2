@@ -156,6 +156,10 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             if (goal != null) {
                 goal.requestImmediateBrew();
             }
+            ClericCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
+                craftingGoal.requestImmediateCraft(serverWorld);
+            }
             ClericDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
@@ -170,7 +174,7 @@ public class ClericBehavior implements VillagerProfessionBehavior {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {

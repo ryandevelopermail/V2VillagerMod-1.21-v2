@@ -1,17 +1,20 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.recipe.Ingredient;
 import net.minecraft.recipe.RecipeEntry;
 import net.minecraft.recipe.RecipeType;
 import net.minecraft.recipe.StonecuttingRecipe;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayList;
@@ -28,6 +31,8 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private static final int HALF_STACK_INPUT = 32;
     private static final int FULL_STACK_INPUT = 64;
     private static final double MAX_JOB_WANDER_DISTANCE_SQUARED = 24.0D * 24.0D;
+    private static final int COBBLESTONE_RESERVE = 8;
+    private static final double LUMBERJACK_SUPPORT_SCAN_RADIUS = 24.0D;
 
     private final MasonGuardEntity guard;
     private long nextCheckTime;
@@ -144,6 +149,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<MasonRecipe> recipes = new ArrayList<>();
+        boolean reserveCobblestone = requiresCobblestoneReserve(world);
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.craft(new net.minecraft.recipe.input.SingleStackRecipeInput(ItemStack.EMPTY), world.getRegistryManager());
@@ -151,7 +157,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 continue;
             }
 
-            int batchInputCount = resolveBatchInputCount(inventory, recipe, result);
+            int batchInputCount = resolveBatchInputCount(inventory, recipe, result, reserveCobblestone);
             if (batchInputCount <= 0) {
                 continue;
             }
@@ -177,13 +183,13 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return alternatives.get(guard.getRandom().nextInt(alternatives.size()));
     }
 
-    private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output) {
+    private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output, boolean reserveCobblestone) {
         Ingredient ingredient = getPrimaryIngredient(recipe);
         if (ingredient == null || ingredient.isEmpty()) {
             return 0;
         }
 
-        int availableIngredients = countMatchingItems(inventory, ingredient);
+        int availableIngredients = getEligibleIngredientCount(inventory, ingredient, reserveCobblestone);
         if (availableIngredients <= 0) {
             return 0;
         }
@@ -202,8 +208,19 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return 0;
     }
 
+    static int getEligibleIngredientCount(Inventory inventory, Ingredient ingredient, boolean reserveCobblestone) {
+        int availableIngredients = countMatchingItems(inventory, ingredient);
+        if (!reserveCobblestone || !ingredient.test(new ItemStack(Items.COBBLESTONE))) {
+            return availableIngredients;
+        }
 
-    private int countMatchingItems(Inventory inventory, Ingredient ingredient) {
+        int cobblestoneAvailable = countMatchingSpecificItem(inventory, ingredient, Items.COBBLESTONE);
+        int cobblestoneEligible = Math.max(0, cobblestoneAvailable - COBBLESTONE_RESERVE);
+        return availableIngredients - cobblestoneAvailable + cobblestoneEligible;
+    }
+
+
+    private static int countMatchingItems(Inventory inventory, Ingredient ingredient) {
         int count = 0;
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
@@ -212,6 +229,27 @@ public class MasonGuardStonecuttingGoal extends Goal {
             }
         }
         return count;
+    }
+
+    private static int countMatchingSpecificItem(Inventory inventory, Ingredient ingredient, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || stack.getItem() != item || !ingredient.test(stack)) {
+                continue;
+            }
+            count += stack.getCount();
+        }
+        return count;
+    }
+
+    private boolean requiresCobblestoneReserve(ServerWorld world) {
+        Box searchBox = guard.getBoundingBox().expand(LUMBERJACK_SUPPORT_SCAN_RADIUS);
+        return !world.getEntitiesByClass(
+                LumberjackGuardEntity.class,
+                searchBox,
+                lumberjack -> lumberjack.isAlive() && lumberjack.getPairedFurnaceModifierPos() == null
+        ).isEmpty();
     }
 
     private boolean consumeIngredient(Inventory inventory, StonecuttingRecipe recipe, int amount) {
@@ -251,7 +289,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 

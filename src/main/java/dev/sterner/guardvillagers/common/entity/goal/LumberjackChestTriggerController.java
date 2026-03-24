@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -48,6 +49,22 @@ public final class LumberjackChestTriggerController {
     private static final Map<BlockPos, UpgradeStage> UPGRADE_STAGE_BY_JOB_SITE = new HashMap<>();
     private static final Map<UUID, Long> CHEST_PAIRED_TICKS_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, Long> CHEST_PAIRED_TICKS_BY_JOB_SITE = new HashMap<>();
+    private static final Set<VillagerProfession> CHECKED_JOB_PROFESSIONS = Set.of(
+            VillagerProfession.NONE,
+            VillagerProfession.ARMORER,
+            VillagerProfession.BUTCHER,
+            VillagerProfession.CARTOGRAPHER,
+            VillagerProfession.CLERIC,
+            VillagerProfession.FARMER,
+            VillagerProfession.FISHERMAN,
+            VillagerProfession.FLETCHER,
+            VillagerProfession.LIBRARIAN,
+            VillagerProfession.LEATHERWORKER,
+            VillagerProfession.MASON,
+            VillagerProfession.SHEPHERD,
+            VillagerProfession.TOOLSMITH,
+            VillagerProfession.WEAPONSMITH
+    );
 
     private static final List<TriggerRule> RULES = List.of(
             new TriggerRule("craft_place_furnace_modifier", 100,
@@ -133,7 +150,7 @@ public final class LumberjackChestTriggerController {
             if (jobPos == null) {
                 continue;
             }
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
                     && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 return UpgradeDemand.v1Chest();
             }
@@ -152,6 +169,23 @@ public final class LumberjackChestTriggerController {
             }
         }
 
+        // Cluster 5A: once all V1/V2 demands are satisfied, produce fences + gates for pen building.
+        // Only demand these if the lumberjack has a crafting table (base pairing is complete).
+        if (guard.getPairedCraftingTablePos() != null) {
+            Inventory chestInv = resolveChestInventory(world, guard);
+            if (chestInv != null) {
+                int fences = countItems(chestInv, Items.OAK_FENCE);
+                int gates = countItems(chestInv, Items.OAK_FENCE_GATE);
+                // Target: enough for a 6×6 pen (20 fence segments + 1 gate)
+                if (fences < 20) {
+                    return UpgradeDemand.v3Fence();
+                }
+                if (gates < 1) {
+                    return UpgradeDemand.v3FenceGate();
+                }
+            }
+        }
+
         return null;
     }
 
@@ -167,7 +201,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos).isEmpty()) {
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()) {
                 count++;
             }
         }
@@ -194,7 +228,7 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
-        return JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+        return JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()
                 && findNearbyCraftingTable(world, jobPos) != null;
     }
 
@@ -267,40 +301,57 @@ public final class LumberjackChestTriggerController {
     private static boolean shouldCraftOrPlaceFurnace(TriggerContext context) {
         BlockPos modifierPos = context.guard().getPairedFurnaceModifierPos();
         if (modifierPos != null && context.world().getBlockState(modifierPos).isOf(Blocks.FURNACE)) {
-            return false;
+            if (belongsToPairedLumberjackZone(context.world(), context.guard(), modifierPos)) {
+                return false;
+            }
+            LOGGER.debug("Clearing lumberjack furnace modifier: position no longer belongs to paired zone pos={}", modifierPos.toShortString());
+            context.guard().setPairedFurnaceModifierPos(null);
         }
         if (modifierPos != null && !context.world().getBlockState(modifierPos).isAir()) {
             context.guard().setPairedFurnaceModifierPos(null);
+            return false;
+        }
+        BlockPos existing = findOwnedExistingFurnace(context.world(), context.guard());
+        if (existing != null) {
+            context.guard().setPairedFurnaceModifierPos(existing);
+            LOGGER.debug("Paired existing lumberjack furnace modifier in zone: pos={} source=workflow_existing", existing.toShortString());
             return false;
         }
         return countByItem(context, Items.COBBLESTONE) >= 8;
     }
 
     private static boolean craftOrPlaceFurnace(TriggerContext context) {
-        BlockPos tablePos = context.guard().getPairedCraftingTablePos();
-        if (tablePos == null) {
+        FurnacePlacementCandidate candidate = findBestFurnacePlacementCandidate(context.world(), context.guard());
+        if (candidate == null) {
+            LOGGER.debug("Skip lumberjack furnace modifier placement: no workflow candidate");
             return false;
         }
+
+        BlockPos existing = findOwnedExistingFurnace(context.world(), context.guard());
+        if (existing != null) {
+            context.guard().setPairedFurnaceModifierPos(existing);
+            LOGGER.debug("Paired existing lumberjack furnace modifier in zone: pos={} source=workflow_existing", existing.toShortString());
+            return true;
+        }
+
         if (!consumeByItem(context, Items.COBBLESTONE, 8)) {
             return false;
         }
 
-        for (Direction direction : Direction.Type.HORIZONTAL) {
-            BlockPos candidate = tablePos.offset(direction);
-            BlockPos below = candidate.down();
-            if (!context.world().getBlockState(candidate).isAir()) {
-                continue;
-            }
-            if (!context.world().getBlockState(below).isSolidBlock(context.world(), below)) {
-                continue;
-            }
-            if (context.world().setBlockState(candidate, Blocks.FURNACE.getDefaultState())) {
-                context.guard().setPairedFurnaceModifierPos(candidate);
+        if (context.world().setBlockState(candidate.pos(), Blocks.FURNACE.getDefaultState())) {
+            if (belongsToPairedLumberjackZone(context.world(), context.guard(), candidate.pos())) {
+                context.guard().setPairedFurnaceModifierPos(candidate.pos());
+                LOGGER.debug("Placed lumberjack furnace modifier: pos={} source={} score={}",
+                        candidate.pos().toShortString(), candidate.source(), candidate.score());
                 return true;
             }
+            LOGGER.debug("Placed furnace rejected for pairing: pos={} source={} score={}",
+                    candidate.pos().toShortString(), candidate.source(), candidate.score());
         }
 
         addToBuffer(context.guard(), new ItemStack(Items.FURNACE));
+        LOGGER.debug("Failed to place lumberjack furnace modifier in world; buffered furnace item source={} score={}",
+                candidate.source(), candidate.score());
         return true;
     }
 
@@ -418,7 +469,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
             BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
-            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(context.world(), jobPos).isPresent()) {
+            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(context.world(), jobPos, jobPos).isPresent()) {
                 continue;
             }
 
@@ -814,13 +865,20 @@ public final class LumberjackChestTriggerController {
 
         UpgradeStage stage = getTrackedUpgradeStage(world, villager.getUuid(), jobPos);
 
-        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (chestPos == null) {
             clearUpgradeState(world, villager.getUuid(), jobPos);
             return false;
         }
 
         if (stage != UpgradeStage.CHEST_PAIRED) {
+            // A chest exists but was never recorded by the lumberjack (e.g. player-placed,
+            // or state lost after reload). Auto-promote so the V2 table can be placed next cycle.
+            if (stage == UpgradeStage.UNPAIRED) {
+                LOGGER.debug("[upgrade] auto-hydrate CHEST_PAIRED for villager={} jobPos={} (chest found at {})",
+                        villager.getUuid(), jobPos.toShortString(), chestPos.toShortString());
+                transitionUpgradeStageToChestPaired(world, villager.getUuid(), jobPos);
+            }
             return false;
         }
 
@@ -872,7 +930,7 @@ public final class LumberjackChestTriggerController {
 
             UpgradeStage stage = getTrackedUpgradeStage(world, villagerId, jobPos);
             if (stage == UpgradeStage.CHEST_PAIRED
-                    && (!JobBlockPairingHelper.findNearbyChest(world, jobPos).isPresent()
+                    && (!JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()
                     || findNearbyCraftingTable(world, jobPos) != null)) {
                 clearUpgradeState(world, villagerId, jobPos);
             }
@@ -987,7 +1045,7 @@ public final class LumberjackChestTriggerController {
     }
 
     private static BlockPos findPlacementNearJobAndPairedChest(ServerWorld world, BlockPos jobPos, double range) {
-        BlockPos pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos pairedChestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (pairedChestPos == null) {
             return null;
         }
@@ -1000,7 +1058,7 @@ public final class LumberjackChestTriggerController {
             return true;
         }
 
-        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos).orElse(null);
+        BlockPos chestPos = JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).orElse(null);
         if (chestPos == null) {
             return false;
         }
@@ -1057,6 +1115,159 @@ public final class LumberjackChestTriggerController {
         }
 
         return best;
+    }
+
+    private static BlockPos findOwnedExistingFurnace(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos tablePos = guard.getPairedCraftingTablePos();
+        if (chestPos == null || tablePos == null) {
+            return null;
+        }
+
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 2);
+        BlockPos min = BlockPos.ofFloored(
+                Math.min(chestPos.getX(), tablePos.getX()) - range,
+                Math.min(chestPos.getY(), tablePos.getY()) - 1,
+                Math.min(chestPos.getZ(), tablePos.getZ()) - range
+        );
+        BlockPos max = BlockPos.ofFloored(
+                Math.max(chestPos.getX(), tablePos.getX()) + range,
+                Math.max(chestPos.getY(), tablePos.getY()) + 1,
+                Math.max(chestPos.getZ(), tablePos.getZ()) + range
+        );
+
+        BlockPos best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (BlockPos pos : BlockPos.iterate(min, max)) {
+            if (!world.getBlockState(pos).isOf(Blocks.FURNACE)) {
+                continue;
+            }
+            if (!belongsToPairedLumberjackZone(world, guard, pos)) {
+                continue;
+            }
+            int score = scoreWorkflowPosition(world, pos, chestPos, tablePos);
+            if (score > bestScore) {
+                best = pos.toImmutable();
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private static FurnacePlacementCandidate findBestFurnacePlacementCandidate(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos tablePos = guard.getPairedCraftingTablePos();
+        if (chestPos == null || tablePos == null) {
+            return null;
+        }
+
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 2);
+        BlockPos min = BlockPos.ofFloored(
+                Math.min(chestPos.getX(), tablePos.getX()) - range,
+                Math.min(chestPos.getY(), tablePos.getY()) - 1,
+                Math.min(chestPos.getZ(), tablePos.getZ()) - range
+        );
+        BlockPos max = BlockPos.ofFloored(
+                Math.max(chestPos.getX(), tablePos.getX()) + range,
+                Math.max(chestPos.getY(), tablePos.getY()) + 1,
+                Math.max(chestPos.getZ(), tablePos.getZ()) + range
+        );
+
+        FurnacePlacementCandidate best = null;
+        for (BlockPos pos : BlockPos.iterate(min, max)) {
+            if (!world.getBlockState(pos).isAir()) {
+                continue;
+            }
+            BlockPos below = pos.down();
+            if (!world.getBlockState(below).isSolidBlock(world, below)) {
+                continue;
+            }
+            if (!belongsToPairedLumberjackZone(world, guard, pos)) {
+                continue;
+            }
+
+            int score = scoreWorkflowPosition(world, pos, chestPos, tablePos);
+            if (best == null || score > best.score()) {
+                best = new FurnacePlacementCandidate(pos.toImmutable(), score, "workflow_scored");
+            }
+        }
+        return best;
+    }
+
+    private static int scoreWorkflowPosition(ServerWorld world, BlockPos candidate, BlockPos chestPos, BlockPos tablePos) {
+        int score = 0;
+        score -= (int) candidate.getSquaredDistance(chestPos);
+        score -= (int) candidate.getSquaredDistance(tablePos);
+        if (isAdjacent(candidate, chestPos)) {
+            score += 6;
+        }
+        if (isAdjacent(candidate, tablePos)) {
+            score += 6;
+        }
+        if (hasNearbyModifier(world, candidate)) {
+            score += 8;
+        }
+        return score;
+    }
+
+    private static boolean belongsToPairedLumberjackZone(ServerWorld world, LumberjackGuardEntity guard, BlockPos pos) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos tablePos = guard.getPairedCraftingTablePos();
+        if (chestPos == null || tablePos == null) {
+            return false;
+        }
+        double range = JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 2.0D;
+        if (!pos.isWithinDistance(chestPos, range) || !pos.isWithinDistance(tablePos, range)) {
+            return false;
+        }
+        return !isAdjacentToUnrelatedJobBlock(world, pos, chestPos, tablePos);
+    }
+
+    private static boolean isAdjacentToUnrelatedJobBlock(ServerWorld world, BlockPos candidate, BlockPos chestPos, BlockPos tablePos) {
+        for (Direction direction : Direction.values()) {
+            BlockPos adjacent = candidate.offset(direction);
+            BlockState state = world.getBlockState(adjacent);
+            // Crafting tables are placed BY lumberjacks for other villagers — never treat them as foreign job blocks.
+            if (state.isOf(Blocks.CRAFTING_TABLE)) {
+                continue;
+            }
+            if (!isAnyKnownJobBlock(state)) {
+                continue;
+            }
+            if (adjacent.equals(tablePos) || adjacent.equals(chestPos)) {
+                continue;
+            }
+            if (adjacent.isWithinDistance(tablePos, 1.5D) || adjacent.isWithinDistance(chestPos, 1.5D)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isAnyKnownJobBlock(BlockState state) {
+        for (VillagerProfession profession : CHECKED_JOB_PROFESSIONS) {
+            if (ProfessionDefinitions.isExpectedJobBlock(profession, state)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasNearbyModifier(ServerWorld world, BlockPos pos) {
+        for (BlockPos checkPos : BlockPos.iterateOutwards(pos, 1, 1, 1)) {
+            if (world.getBlockState(checkPos).isOf(dev.sterner.guardvillagers.GuardVillagers.GUARD_STAND_MODIFIER)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isAdjacent(BlockPos a, BlockPos b) {
+        return a.getManhattanDistance(b) == 1;
+    }
+
+    private record FurnacePlacementCandidate(BlockPos pos, int score, String source) {
     }
 
     private static boolean hasAnyAxeAvailable(TriggerContext context) {
@@ -1148,7 +1359,7 @@ public final class LumberjackChestTriggerController {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return null;
         }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
     private static int countByItem(TriggerContext context, Item item) {
@@ -1157,6 +1368,11 @@ public final class LumberjackChestTriggerController {
 
     private static int countMatching(TriggerContext context, Predicate<ItemStack> predicate) {
         return countMatching(context.chestInventory(), predicate) + countMatching(context.guard().getGatheredStackBuffer(), predicate);
+    }
+
+    /** Simple item count helper used by resolveNextUpgradeDemand. */
+    private static int countItems(Inventory inventory, Item item) {
+        return countMatching(inventory, stack -> stack.isOf(item));
     }
 
     private static int countMatching(Inventory inventory, Predicate<ItemStack> predicate) {
@@ -1326,13 +1542,28 @@ public final class LumberjackChestTriggerController {
         }
     }
 
-    public record UpgradeDemand(Item outputItem, int planksCost) {
+    public record UpgradeDemand(Item outputItem, int planksCost, int stickCost) {
+        /** Back-compat constructor for callers that don't use sticks. */
+        public UpgradeDemand(Item outputItem, int planksCost) {
+            this(outputItem, planksCost, 0);
+        }
+
         public static UpgradeDemand v1Chest() {
-            return new UpgradeDemand(Items.CHEST, 8);
+            return new UpgradeDemand(Items.CHEST, 8, 0);
         }
 
         public static UpgradeDemand v2CraftingTable() {
-            return new UpgradeDemand(Items.CRAFTING_TABLE, 4);
+            return new UpgradeDemand(Items.CRAFTING_TABLE, 4, 0);
+        }
+
+        // Cluster 5A — fence: 4 planks + 2 sticks → 3 fences (vanilla recipe)
+        public static UpgradeDemand v3Fence() {
+            return new UpgradeDemand(Items.OAK_FENCE, 4, 2);
+        }
+
+        // Cluster 5A — fence gate: 2 planks + 4 sticks → 1 gate (vanilla recipe)
+        public static UpgradeDemand v3FenceGate() {
+            return new UpgradeDemand(Items.OAK_FENCE_GATE, 2, 4);
         }
     }
 

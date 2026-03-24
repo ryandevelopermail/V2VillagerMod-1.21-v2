@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.CartographerCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.CartographerMapExplorationGoal;
+import dev.sterner.guardvillagers.common.entity.goal.CartographerMapWallGoal;
 import dev.sterner.guardvillagers.common.entity.goal.CartographerToLibrarianDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
@@ -19,6 +20,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -28,11 +32,14 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final int EXPLORATION_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
+    private static final int MAP_WALL_GOAL_PRIORITY = 6;
     private static final Map<VillagerEntity, CartographerMapExplorationGoal> EXPLORATION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerToLibrarianDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, CartographerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, CartographerMapWallGoal> MAP_WALL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, CartographerPairing> ACTIVE_PAIRINGS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -47,6 +54,9 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            LOGGER.info("Cartographer {} pairing rejected: chest {} is {} blocks from job site {} (need <=3)",
+                    villager.getUuidAsString(), chestPos.toShortString(),
+                    (int) Math.sqrt(jobPos.getSquaredDistance(chestPos)), jobPos.toShortString());
             clearChestListener(villager);
             return;
         }
@@ -55,6 +65,7 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
+        ACTIVE_PAIRINGS.put(villager, new CartographerPairing(jobPos.toImmutable(), chestPos.toImmutable()));
 
         CartographerMapExplorationGoal explorationGoal = EXPLORATION_GOALS.get(villager);
         if (explorationGoal == null) {
@@ -82,6 +93,16 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
+
+        CartographerMapWallGoal wallGoal = MAP_WALL_GOALS.get(villager);
+        if (wallGoal == null) {
+            wallGoal = new CartographerMapWallGoal(villager, jobPos, chestPos);
+            MAP_WALL_GOALS.put(villager, wallGoal);
+            villager.goalSelector.add(MAP_WALL_GOAL_PRIORITY, wallGoal);
+        } else {
+            wallGoal.setTargets(jobPos, chestPos);
+        }
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -101,6 +122,7 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             clearChestListener(villager);
             return;
         }
+        ACTIVE_PAIRINGS.put(villager, new CartographerPairing(jobPos.toImmutable(), chestPos.toImmutable()));
 
         CartographerCraftingGoal goal = CRAFTING_GOALS.get(villager);
         if (goal == null) {
@@ -132,6 +154,16 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         distributionGoal.requestImmediateDistribution();
+
+        CartographerMapWallGoal wallGoal = MAP_WALL_GOALS.get(villager);
+        if (wallGoal == null) {
+            wallGoal = new CartographerMapWallGoal(villager, jobPos, chestPos);
+            MAP_WALL_GOALS.put(villager, wallGoal);
+            villager.goalSelector.add(MAP_WALL_GOAL_PRIORITY, wallGoal);
+        } else {
+            wallGoal.setTargets(jobPos, chestPos);
+        }
+
         updateChestListener(world, villager, chestPos);
     }
 
@@ -190,6 +222,8 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         if (distributionGoal != null) {
             distributionGoal.requestImmediateDistribution();
         }
+
+        // No explicit wake-up needed for CartographerMapWallGoal — it polls on its own scan interval.
     }
 
     private void clearChestListener(VillagerEntity villager) {
@@ -197,6 +231,36 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             removeChestListener(existing);
         }
+        ACTIVE_PAIRINGS.remove(villager);
+    }
+
+    public static List<CartographerPairing> getNearbyPairings(ServerWorld world, BlockPos origin, int radius) {
+        long radiusSq = (long) radius * radius;
+        List<CartographerPairing> result = new ArrayList<>();
+
+        List<VillagerEntity> stale = new ArrayList<>();
+        for (Map.Entry<VillagerEntity, CartographerPairing> entry : ACTIVE_PAIRINGS.entrySet()) {
+            VillagerEntity villager = entry.getKey();
+            if (villager == null || !villager.isAlive() || villager.getWorld() != world) {
+                stale.add(villager);
+                continue;
+            }
+
+            CartographerPairing pairing = entry.getValue();
+            long dx = pairing.jobPos().getX() - origin.getX();
+            long dz = pairing.jobPos().getZ() - origin.getZ();
+            long distSq = dx * dx + dz * dz;
+            if (distSq <= radiusSq) {
+                result.add(pairing);
+            }
+        }
+
+        for (VillagerEntity villager : stale) {
+            ACTIVE_PAIRINGS.remove(villager);
+        }
+
+        result.sort(Comparator.comparingDouble(pairing -> pairing.jobPos().getSquaredDistance(origin)));
+        return result;
     }
 
     private void removeChestListener(ChestRegistration existing) {
@@ -242,5 +306,8 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
             this.villager = villager;
             this.observedChestPositions = Set.copyOf(observedChestPositions);
         }
+    }
+
+    public record CartographerPairing(BlockPos jobPos, BlockPos chestPos) {
     }
 }

@@ -3,8 +3,10 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -200,11 +202,15 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             return Optional.empty();
         }
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-        return Optional.ofNullable(inventory);
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
     protected void moveTo(BlockPos target) {
@@ -472,7 +478,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
     }
 
     protected enum Stage {
@@ -675,7 +681,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             return false;
         }
 
-        Inventory targetInventory = ChestBlock.getInventory(chestBlock, state, world, pendingTargetPos, true);
+        Inventory targetInventory = ChestBlock.getInventory(chestBlock, state, world, pendingTargetPos, false);
         if (targetInventory == null) {
             return false;
         }

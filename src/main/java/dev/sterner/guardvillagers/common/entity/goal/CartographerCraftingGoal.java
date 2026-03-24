@@ -235,7 +235,7 @@ public class CartographerCraftingGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 
@@ -320,7 +320,10 @@ public class CartographerCraftingGoal extends Goal {
         SUGAR_CANE_TO_PAPER(new ItemStack(Items.PAPER, 3), new IngredientRequirement(stack -> stack.isOf(Items.SUGAR_CANE), 3)),
         PAPER_TO_MAP(new ItemStack(Items.MAP), new IngredientRequirement(stack -> stack.isOf(Items.PAPER), 8)),
         COMPASS_TO_ORIENTED_MAP(new ItemStack(Items.FILLED_MAP), new IngredientRequirement(stack -> stack.isOf(Items.COMPASS), 1), new IngredientRequirement(stack -> stack.isOf(Items.MAP), 1)),
-        IRON_REDSTONE_TO_COMPASS(new ItemStack(Items.COMPASS), new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 4), new IngredientRequirement(stack -> stack.isOf(Items.REDSTONE), 1));
+        IRON_REDSTONE_TO_COMPASS(new ItemStack(Items.COMPASS), new IngredientRequirement(stack -> stack.isOf(Items.IRON_INGOT), 4), new IngredientRequirement(stack -> stack.isOf(Items.REDSTONE), 1)),
+        // Item frames: 8 sticks + 1 leather → 1 item frame (vanilla recipe).
+        // Cartographers produce these so leatherworkers can route leather here and maps can be displayed.
+        STICKS_LEATHER_TO_ITEM_FRAME(new ItemStack(Items.ITEM_FRAME), new IngredientRequirement(stack -> stack.isOf(Items.STICK), 8), new IngredientRequirement(stack -> stack.isOf(Items.LEATHER), 1));
 
         private final ItemStack output;
         private final IngredientRequirement[] requirements;

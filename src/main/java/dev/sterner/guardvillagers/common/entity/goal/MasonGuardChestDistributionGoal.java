@@ -1,8 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -520,13 +520,37 @@ public class MasonGuardChestDistributionGoal extends Goal {
             case ORE -> normalizeRecipients(findRecipients(world, VillagerProfession.ARMORER, Blocks.BLAST_FURNACE));
             case SEEDS -> normalizeRecipients(findRecipients(world, VillagerProfession.FARMER, Blocks.COMPOSTER));
             case COBBLESTONE -> {
-                Block lumberjackJobBlock = ProfessionDefinitions.get(VillagerProfession.NONE)
-                        .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst())
-                        .orElse(Blocks.CRAFTING_TABLE);
-                yield normalizeRecipients(findRecipients(world, VillagerProfession.NONE, lumberjackJobBlock));
+                // LumberjackGuardEntity extends GuardEntity (not VillagerEntity), so scanning for
+                // VillagerEntity.class with profession NONE misses them entirely. Scan directly
+                // for LumberjackGuardEntity instances that have a paired chest.
+                List<RecipientRecord> lumberjackRecipients = findLumberjackRecipients(world);
+                yield normalizeRecipients(lumberjackRecipients);
             }
             default -> List.of();
         };
+    }
+
+    /**
+     * Finds lumberjack guard entities near the mason that have a paired chest.
+     * Lumberjacks are {@link LumberjackGuardEntity} (extends GuardEntity, not VillagerEntity),
+     * so the standard VillagerEntity-based profession scan cannot find them.
+     */
+    private List<RecipientRecord> findLumberjackRecipients(ServerWorld world) {
+        List<RecipientRecord> recipients = new ArrayList<>();
+        Box scanBox = new Box(guard.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
+        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, scanBox,
+                candidate -> candidate.isAlive() && !candidate.isBaby())) {
+            BlockPos chestPos = lumberjack.getPairedChestPos();
+            if (chestPos == null) {
+                continue;
+            }
+            Optional<Inventory> targetInventory = getChestInventory(world, chestPos);
+            if (targetInventory.isEmpty()) {
+                continue;
+            }
+            recipients.add(new RecipientRecord(targetInventory.get(), chestPos.toImmutable(), guard.squaredDistanceTo(lumberjack)));
+        }
+        return recipients;
     }
 
     private List<RecipientRecord> findRecipients(ServerWorld world, VillagerProfession profession, Block expectedJobBlock) {
@@ -611,7 +635,7 @@ public class MasonGuardChestDistributionGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
     }
 
 

@@ -15,7 +15,7 @@ public final class DistributionInventoryAccess {
         if (!(world.getBlockState(chestPos).getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, world.getBlockState(chestPos), world, chestPos, true));
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, world.getBlockState(chestPos), world, chestPos, false));
     }
 
     public static double getInventoryFullness(Inventory inventory) {

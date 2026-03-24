@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -35,7 +36,6 @@ public final class UnemployedLumberjackConversionHook {
 
     public static void tryConvertUnemployedVillagersNearCraftingTables(ServerWorld world) {
         Set<VillagerEntity> candidates = new LinkedHashSet<>();
-        Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
 
         for (PlayerEntity player : world.getPlayers()) {
             candidates.addAll(world.getEntitiesByClass(
@@ -45,9 +45,12 @@ public final class UnemployedLumberjackConversionHook {
             ));
         }
 
-        if (candidates.isEmpty()) {
-            candidates.addAll(world.getEntitiesByClass(VillagerEntity.class, worldBounds, UnemployedLumberjackConversionHook::isEligibleUnemployed));
-        }
+        // Player-proximity scan only. The world-bounds fallback was O(all entities) and fired
+        // every 40 ticks even when players are far from any unemployed villager, causing a
+        // constant server-tick performance penalty. Removed entirely: villagers outside player
+        // proximity will be picked up on the next tick cycle when a player approaches them.
+        // The VillagerConversionCandidateIndex and chunk-load hook handle the edge case of
+        // loading chunks with unemployed villagers near crafting tables.
 
         for (VillagerEntity villager : candidates) {
             if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, villager.getBlockPos(), "scheduled-unemployed-conversion")) {
@@ -83,7 +86,28 @@ public final class UnemployedLumberjackConversionHook {
         if (profession == VillagerProfession.NITWIT) {
             return false;
         }
-        return profession == VillagerProfession.NONE;
+        if (profession != VillagerProfession.NONE) {
+            return false;
+        }
+        // Do NOT grab a villager that is already heading toward a non-crafting-table job site.
+        // Vanilla sets POTENTIAL_JOB_SITE in the brain when a villager starts walking to claim
+        // a job block. If that target is anything other than a CRAFTING_TABLE, this villager is
+        // in the process of adopting a different profession — hands off.
+        if (villager.getWorld() instanceof ServerWorld serverWorld) {
+            GlobalPos potentialJobSite = villager.getBrain()
+                    .getOptionalMemory(MemoryModuleType.POTENTIAL_JOB_SITE)
+                    .orElse(null);
+            if (potentialJobSite != null
+                    && potentialJobSite.dimension() == serverWorld.getRegistryKey()) {
+                BlockState targetState =
+                        serverWorld.getBlockState(potentialJobSite.pos());
+                if (!targetState.isOf(Blocks.CRAFTING_TABLE)) {
+                    // Villager is already trying to claim a different job block — leave it alone.
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static Optional<BlockPos> findReachableCraftingTable(ServerWorld world, VillagerEntity villager) {
@@ -120,15 +144,23 @@ public final class UnemployedLumberjackConversionHook {
     }
 
     private static boolean isCraftingTableAlreadyPaired(ServerWorld world, BlockPos tablePos) {
-        Box scanBox = new Box(tablePos).expand(300.0D);
+        // Lumberjacks roam widely so we need a broad box to find the one whose
+        // pairedCraftingTablePos points to this exact table. Keep it at BELL_EFFECT_RANGE.
+        // The reservation manager is the primary guard; this scan is a secondary safeguard
+        // for cases where the reservation wasn't persisted (e.g., server restart before persist).
+        Box lumberjackScanBox = new Box(tablePos).expand(VillageGuardStandManager.BELL_EFFECT_RANGE);
 
-        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, scanBox, LumberjackGuardEntity::isAlive)) {
+        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, lumberjackScanBox, LumberjackGuardEntity::isAlive)) {
             if (tablePos.equals(lumberjack.getPairedCraftingTablePos())) {
                 return true;
             }
         }
 
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, UnemployedLumberjackConversionHook::isEmployedVillager)) {
+        // Any villager whose job site is paired to this table must be within JOB_BLOCK_PAIRING_RANGE
+        // of it (by definition of the pairing geometry). No need to scan further.
+        Box villagerScanBox = new Box(tablePos).expand(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 1.0D);
+
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, villagerScanBox, UnemployedLumberjackConversionHook::isEmployedVillager)) {
             BlockPos jobPos = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                     .filter(globalPos -> globalPos.dimension() == world.getRegistryKey())
                     .map(GlobalPos::pos)

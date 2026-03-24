@@ -1,12 +1,15 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.recipe.CraftingRecipe;
@@ -16,6 +19,7 @@ import net.minecraft.recipe.RecipeType;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.random.Random;
 import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 
@@ -29,6 +33,7 @@ public class FishermanCraftingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
+    private static final int MIN_OPERATIONAL_ROD_STOCK = 1;
 
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
@@ -67,6 +72,29 @@ public class FishermanCraftingGoal extends Goal {
         nextCheckTime = 0L;
     }
 
+    private static final int NON_TABLE_GRID_SIZE = 2;
+
+    private boolean hasValidCraftingTable(ServerWorld world) {
+        return craftingTablePos != null && world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
+    }
+
+    private boolean canUseRecipeWithoutCraftingTable(net.minecraft.recipe.CraftingRecipe recipe) {
+        return recipe.fits(NON_TABLE_GRID_SIZE, NON_TABLE_GRID_SIZE);
+    }
+
+    private boolean hasNonTableCraftableRecipe(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return false;
+        for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            CraftingRecipe recipe = entry.value();
+            ItemStack result = recipe.getResult(world.getRegistryManager());
+            if (!isFishermanOutput(result)) continue;
+            if (!canUseRecipeWithoutCraftingTable(recipe)) continue;
+            if (canCraft(inventory, recipe)) return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
@@ -78,10 +106,13 @@ public class FishermanCraftingGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.FISHERMAN) {
             return false;
         }
-        if (craftingTablePos == null || chestPos == null) {
+        if (chestPos == null) {
             return false;
         }
-        if (!world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+        // Require crafting table only if no non-table recipe is craftable.
+        // Fishing rod (sticks + string) fits a 2×2 grid and never needs a table.
+        boolean hasCraftingTable = hasValidCraftingTable(world);
+        if (!hasCraftingTable && !hasNonTableCraftableRecipe(world)) {
             return false;
         }
         refreshDailyLimit(world);
@@ -107,8 +138,13 @@ public class FishermanCraftingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.GO_TO_TABLE;
-        moveTo(craftingTablePos);
+        if (villager.getWorld() instanceof ServerWorld world && hasValidCraftingTable(world)) {
+            stage = Stage.GO_TO_TABLE;
+            moveTo(craftingTablePos);
+        } else {
+            // No crafting table — craft in place (only 2×2 recipes are eligible)
+            stage = Stage.CRAFT;
+        }
     }
 
     @Override
@@ -172,7 +208,13 @@ public class FishermanCraftingGoal extends Goal {
             return;
         }
 
-        FishermanRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        List<ItemStack> outputs = craftable.stream().map(FishermanRecipe::output).toList();
+        int selectedIndex = selectRecipeIndex(outputs, isFishingRodNeeded(inventory), villager.getRandom());
+        if (selectedIndex < 0) {
+            return;
+        }
+
+        FishermanRecipe recipe = craftable.get(selectedIndex);
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -184,12 +226,48 @@ public class FishermanCraftingGoal extends Goal {
         }
     }
 
+    private boolean isFishingRodNeeded(Inventory inventory) {
+        return countItem(inventory, Items.FISHING_ROD) < MIN_OPERATIONAL_ROD_STOCK;
+    }
+
+    static int selectRecipeIndex(List<ItemStack> outputs, boolean fishingRodNeeded, Random random) {
+        if (outputs.isEmpty()) {
+            return -1;
+        }
+
+        if (fishingRodNeeded) {
+            for (int i = 0; i < outputs.size(); i++) {
+                if (outputs.get(i).isOf(Items.FISHING_ROD)) {
+                    return i;
+                }
+            }
+        }
+
+        return random.nextInt(outputs.size());
+    }
+
+    private int countItem(Inventory inventory, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
     private List<FishermanRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+        boolean hasCraftingTable = hasValidCraftingTable(world);
         List<FishermanRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (!isFishermanOutput(result)) {
+                continue;
+            }
+            // Without a crafting table, only 2×2 recipes are available
+            if (!hasCraftingTable && !canUseRecipeWithoutCraftingTable(recipe)) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
@@ -273,11 +351,15 @@ public class FishermanCraftingGoal extends Goal {
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
-        return Optional.ofNullable(inventory);
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
     private void moveTo(BlockPos target) {

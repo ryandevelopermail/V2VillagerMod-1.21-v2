@@ -15,6 +15,9 @@ import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationM
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
+import dev.sterner.guardvillagers.common.util.VillageLumberjackSpawnManager;
+import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
+import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
@@ -136,6 +139,9 @@ public class GuardVillagers implements ModInitializer {
     }
 
     public static void onBellRung(ServerWorld world, BlockPos bellPos) {
+        // Tag all villagers within range with this primary bell (Cluster 1B)
+        VillageMembershipTracker.tagVillagersNearBell(world, bellPos);
+
         BellVillageReport report = VillagerBellTracker.snapshotBellVillageReport(world, bellPos);
         VillagerBellTracker.logBellVillagerStats(world, bellPos, report);
         VillagerBellTracker.writeBellReportBooks(world, bellPos, report);
@@ -270,7 +276,9 @@ public class GuardVillagers implements ModInitializer {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
                 }
                 VillagerBellTracker.tickVillagerReports(world);
-                if (world.getTime() % 100L == 0L) {
+                // 1200 ticks = 60 s. Bell-chest reconciliation can place block states;
+                // running it every 5 seconds was unnecessarily hot.
+                if (world.getTime() % 1200L == 7L) {
                     VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
                 }
                 if (GuardVillagersConfig.villagerConversionFallbackSweepEnabled
@@ -278,6 +286,8 @@ public class GuardVillagers implements ModInitializer {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
                 LumberjackPopulationBalancingService.tick(world);
+                VillageLumberjackSpawnManager.tick(world);
+                VillagePenRegistry.tick(world);
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
@@ -322,26 +332,61 @@ public class GuardVillagers implements ModInitializer {
         ProfessionDefinitions.runConversionHooks(world);
     }
 
+    /** Scan radius (blocks) for per-schedule guard reconciliation — covers normal village spread. */
+    private static final double RECONCILIATION_SCAN_RADIUS = 800.0D;
+
     private static void reconcileConvertedWorkerReservations(ServerWorld world, String source) {
         ReconciliationStats stats = new ReconciliationStats();
 
-        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        // Use a player-proximity box instead of world-bounds to avoid scanning the entire world.
+        // Guards more than 800 blocks from all players will be reconciled on next world-load instead.
+        Box scanBox = buildPlayerProximityBox(world, RECONCILIATION_SCAN_RADIUS);
+        if (scanBox == null) {
+            // No players online — skip this pass entirely.
+            return;
+        }
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedSmokerPos(), VillagerProfession.BUTCHER, source + " butcher", stats,
                     () -> guard.setPairedSmokerPos(null));
         }
 
-        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        for (MasonGuardEntity guard : world.getEntitiesByClass(MasonGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.MASON, source + " mason", stats,
                     () -> guard.setPairedJobPos(null));
         }
 
-        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, JobBlockPairingHelper.getWorldBounds(world), Entity::isAlive)) {
+        for (FishermanGuardEntity guard : world.getEntitiesByClass(FishermanGuardEntity.class, scanBox, Entity::isAlive)) {
             reconcileGuardReservation(world, guard, guard.getPairedJobPos(), VillagerProfession.FISHERMAN, source + " fisherman", stats,
                     () -> guard.setPairedJobPos(null));
         }
 
         LOGGER.debug("Converted worker reservation reconciliation pass (world={}, source={}): added={}, removed={}",
                 world.getRegistryKey().getValue(), source, stats.added, stats.removed);
+    }
+
+    /**
+     * Returns a Box that encompasses all players in {@code world} expanded by {@code radius},
+     * or {@code null} if there are no players online in that world.
+     */
+    @Nullable
+    private static Box buildPlayerProximityBox(ServerWorld world, double radius) {
+        var players = world.getPlayers();
+        if (players.isEmpty()) {
+            return null;
+        }
+        double minX = Double.MAX_VALUE, minY = Double.MAX_VALUE, minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE, maxY = -Double.MAX_VALUE, maxZ = -Double.MAX_VALUE;
+        for (var p : players) {
+            minX = Math.min(minX, p.getX());
+            minY = Math.min(minY, p.getY());
+            minZ = Math.min(minZ, p.getZ());
+            maxX = Math.max(maxX, p.getX());
+            maxY = Math.max(maxY, p.getY());
+            maxZ = Math.max(maxZ, p.getZ());
+        }
+        return new Box(minX - radius, minY - radius, minZ - radius,
+                       maxX + radius, maxY + radius, maxZ + radius);
     }
 
     private static void reconcileGuardReservation(ServerWorld world,

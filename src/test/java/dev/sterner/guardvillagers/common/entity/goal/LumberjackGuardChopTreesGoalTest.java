@@ -5,6 +5,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -136,6 +137,21 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.OAK_SAPLING)));
         assertTrue(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.APPLE)));
         assertFalse(LumberjackGuardChopTreesGoal.isGatherableTreeDrop(new ItemStack(Items.DIRT)));
+    }
+
+    @Test
+    void breakObstacleAndBufferDrops_success_buffersLogDropsImmediately() {
+        List<ItemStack> bufferedDrops = new ArrayList<>();
+
+        boolean broken = LumberjackGuardChopTreesGoal.breakObstacleAndBufferDrops(
+                () -> List.of(new ItemStack(Items.OAK_LOG), ItemStack.EMPTY),
+                () -> true,
+                bufferedDrops::add
+        );
+
+        assertTrue(broken);
+        assertEquals(1, bufferedDrops.size());
+        assertTrue(bufferedDrops.get(0).isOf(Items.OAK_LOG));
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {

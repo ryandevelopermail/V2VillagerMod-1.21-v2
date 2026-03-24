@@ -79,4 +79,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int bellChestBedSearchRadius = 6;
     @Entry(min=1)
     public static int masonTableDailyCraftLimit = 4;
+    @Entry(min=1)
+    public static int farmerWheatSeedReserveCap = 64;
+    @Entry(min=0)
+    public static int farmerWheatSeedBootstrapFloor = 0;
 }

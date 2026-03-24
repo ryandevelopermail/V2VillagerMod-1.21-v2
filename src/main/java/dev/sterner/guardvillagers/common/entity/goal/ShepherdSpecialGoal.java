@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
-import dev.sterner.guardvillagers.common.villager.ShepherdBannerTracker;
+import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
@@ -1261,6 +1261,29 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private List<PenTarget> findShearPensWithBanners(ServerWorld world) {
+        // Use VillagePenRegistry (geometry-only, no banner required) instead of banner scan.
+        BlockPos villagerPos = villager.getBlockPos();
+        List<VillagePenRegistry.PenEntry> registryPens =
+                VillagePenRegistry.get(world.getServer()).getNearestBellPens(world, villagerPos, PEN_SCAN_RANGE * 2);
+
+        if (registryPens.isEmpty()) {
+            // Fall back to legacy banner scan if registry hasn't populated yet.
+            return findShearPensLegacyBannerScan(world);
+        }
+
+        List<PenTarget> pens = new ArrayList<>();
+        for (VillagePenRegistry.PenEntry entry : registryPens) {
+            // Use center as the "banner" position for compatibility with shearing stage logic.
+            PenTarget pen = new PenTarget(entry.center(), entry.center(), entry.gate());
+            pens.add(pen);
+        }
+        pens.sort(Comparator.comparingDouble(pen -> villagerPos.getSquaredDistance(pen.gate())));
+        LOGGER.info("Shepherd {} found {} shear pen(s) via VillagePenRegistry", villager.getUuidAsString(), pens.size());
+        return pens;
+    }
+
+    /** Legacy banner-based pen scan used as fallback when the registry is empty. */
+    private List<PenTarget> findShearPensLegacyBannerScan(ServerWorld world) {
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
@@ -1930,7 +1953,7 @@ public class ShepherdSpecialGoal extends Goal {
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, true);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inventory);
     }
 
@@ -2067,12 +2090,12 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private BlockPos resolveGatherBanner(ServerWorld world) {
-        Optional<BlockPos> trackedBanner = ShepherdBannerTracker.getBanner(villager)
-                .filter(pos -> world.getBlockState(pos).isIn(BlockTags.BANNERS));
-        if (trackedBanner.isPresent()) {
-            return trackedBanner.get();
-        }
-        return findNearestGroundBanner(world);
+        // Registry-based: use nearest pen center as gather anchor.
+        BlockPos villagerPos = villager.getBlockPos();
+        return VillagePenRegistry.get(world.getServer())
+                .getNearestPen(world, villagerPos, PEN_SCAN_RANGE * 2)
+                .map(VillagePenRegistry.PenEntry::center)
+                .orElseGet(() -> findNearestGroundBanner(world));
     }
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
@@ -2263,20 +2286,30 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenTarget resolveNearestGatherPen(ServerWorld world) {
-        Optional<BlockPos> trackedBanner = ShepherdBannerTracker.getBanner(villager)
-                .filter(pos -> world.getBlockState(pos).isIn(BlockTags.BANNERS));
-        if (trackedBanner.isPresent()) {
-            PenTarget trackedPen = findNearestPenWithBanner(world, trackedBanner.get());
-            if (trackedPen != null) {
-                return trackedPen;
+        // Use VillagePenRegistry first; fall back to banner scan if empty.
+        BlockPos villagerPos = villager.getBlockPos();
+        List<VillagePenRegistry.PenEntry> registryPens =
+                VillagePenRegistry.get(world.getServer()).getNearestBellPens(world, villagerPos, PEN_SCAN_RANGE * 2);
+
+        if (!registryPens.isEmpty()) {
+            VillagePenRegistry.PenEntry nearest = registryPens.get(0);
+            double nearestDist = villagerPos.getSquaredDistance(nearest.gate());
+            for (VillagePenRegistry.PenEntry entry : registryPens) {
+                double dist = villagerPos.getSquaredDistance(entry.gate());
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearest = entry;
+                }
             }
+            return new PenTarget(nearest.center(), nearest.center(), nearest.gate());
         }
 
-        List<PenTarget> pens = findShearPensWithBanners(world);
+        // Legacy fallback: banner-based scan.
+        List<PenTarget> pens = findShearPensLegacyBannerScan(world);
         if (pens.isEmpty()) {
             return null;
         }
-        pens.sort(Comparator.comparingDouble(pen -> villager.getBlockPos().getSquaredDistance(pen.banner())));
+        pens.sort(Comparator.comparingDouble(pen -> villagerPos.getSquaredDistance(pen.banner())));
         return pens.get(0);
     }
 

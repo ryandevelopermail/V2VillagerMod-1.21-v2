@@ -1,8 +1,12 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
+import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
+import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.MapColor;
+import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -24,6 +28,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 public class CartographerMapExplorationGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerMapExplorationGoal.class);
@@ -31,8 +36,21 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MAP_EXPLORE_TIMEOUT_TICKS = 20 * 120;
+    private static final int MAPPING_BATCH_TIMEOUT_TICKS = 20 * 360;
+    private static final int RETURN_TRAVEL_TIMEOUT_TICKS = 20 * 180;
+    private static final int TABLE_TRAVEL_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
     private static final int REQUIRED_MAP_BATCH = 4;
+    /** Maps needed in chest before triggering the cartography-table copy run.
+     *  After exploration deposits REQUIRED_MAP_BATCH (4) maps, the copy run fires immediately. */
+    private static final int COPY_TRIGGER_COUNT = 4;
+    /** Number of map copies to produce at the cartography table (one per original tile). */
+    private static final int MAPS_TO_COPY = 4;
+    /**
+     * Disabled by default: automatic copy runs were causing duplicate map output during
+     * normal exploration/deposit loops.
+     */
+    private static final boolean AUTO_COPY_ENABLED = false;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -41,16 +59,22 @@ public class CartographerMapExplorationGoal extends Goal {
     private long nextCheckTime;
     private boolean immediateCheckPending;
     private int mapScale = DEFAULT_MAP_SCALE;
+    /** True once the cartography-table copy run has been completed for the current mapping cycle. */
+    private boolean mapsCopiedThisCycle = false;
     private final Set<Long> mappedTargets = new HashSet<>();
     private final List<MapTarget> pendingTargets = new ArrayList<>();
     private final List<MapTarget> workflowTargets = new ArrayList<>();
     private final List<ItemStack> workflowMaps = new ArrayList<>();
+    private final Set<Integer> completedWorkflowIndices = new HashSet<>();
     private int workflowIndex;
     private MapTarget currentTarget;
     private ItemStack activeMap = ItemStack.EMPTY;
     private final List<BlockPos> explorationWaypoints = new ArrayList<>();
     private int waypointIndex;
     private long mapExploreStartTick;
+    private long workflowBatchStartTick;
+    private long returnTravelStartTick;
+    private long tableTravelStartTick;
 
     public CartographerMapExplorationGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -86,10 +110,23 @@ public class CartographerMapExplorationGoal extends Goal {
         refreshMappedTargets(world);
         buildTargets(world);
 
-        if (countEmptyMaps(world) < REQUIRED_MAP_BATCH || pendingTargets.size() < REQUIRED_MAP_BATCH) {
+        int emptyMaps = countEmptyMaps(world);
+        int pending = pendingTargets.size();
+
+        if (emptyMaps < REQUIRED_MAP_BATCH || pending < REQUIRED_MAP_BATCH) {
+            LOGGER.debug("Cartographer {} canStart=false: emptyMaps={} (need {}) pendingTiles={} (need {}) mappedTiles={}",
+                    villager.getUuidAsString(), emptyMaps, REQUIRED_MAP_BATCH, pending, REQUIRED_MAP_BATCH, mappedTargets.size());
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             immediateCheckPending = false;
             return false;
+        }
+
+        // Log first tile destination so the user can confirm cartographer is about to move
+        if (!pendingTargets.isEmpty()) {
+            MapTarget first = pendingTargets.get(0);
+            int dist = (int) Math.sqrt(villager.squaredDistanceTo(first.centerX(), villager.getY(), first.centerZ()));
+            LOGGER.info("Cartographer {} canStart=true: emptyMaps={} pendingTiles={} firstTarget=({},{}) approxDist={}",
+                    villager.getUuidAsString(), emptyMaps, pending, first.centerX(), first.centerZ(), dist);
         }
         return true;
     }
@@ -104,6 +141,9 @@ public class CartographerMapExplorationGoal extends Goal {
         stage = Stage.ACQUIRE_MAPS;
         immediateCheckPending = false;
         clearWorkflowState();
+        returnTravelStartTick = 0L;
+        tableTravelStartTick = 0L;
+        workflowBatchStartTick = 0L;
     }
 
     @Override
@@ -120,6 +160,12 @@ public class CartographerMapExplorationGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
+            return;
+        }
+
+        applyChestDrivenColdProtection(world);
+
+        if (enforceBatchTimeout(world)) {
             return;
         }
 
@@ -141,6 +187,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
                 workflowTargets.clear();
                 workflowMaps.clear();
+                completedWorkflowIndices.clear();
                 for (int i = 0; i < REQUIRED_MAP_BATCH; i++) {
                     MapTarget target = pendingTargets.remove(0);
                     workflowTargets.add(target);
@@ -148,6 +195,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
 
                 workflowIndex = 0;
+                workflowBatchStartTick = world.getTime();
                 setCurrentWorkflowTarget(world);
             }
             case GO_TO_TARGET -> {
@@ -156,6 +204,13 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(waypoint)) {
                     stage = Stage.EXPLORE_MAP;
                     mapExploreStartTick = world.getTime();
+                } else if (hasTimedOut(world.getTime(), mapExploreStartTick, MAP_EXPLORE_TIMEOUT_TICKS)) {
+                    LOGGER.warn("Cartographer {} timed out before reaching exploration waypoint {} for tile {}/{}; forcing completion",
+                            villager.getUuidAsString(),
+                            waypoint.toShortString(),
+                            workflowIndex + 1,
+                            workflowTargets.size());
+                    completeCurrentTerritory(world, true);
                 } else {
                     moveTo(waypoint);
                 }
@@ -180,12 +235,27 @@ public class CartographerMapExplorationGoal extends Goal {
                 if (isNear(chestPos)) {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null) {
-                        for (ItemStack workflowMap : workflowMaps) {
-                            ItemStack finalizedMap = workflowMap.copy();
+                        List<ItemStack> mapsToDeposit = collectCompletedWorkflowMapsForDeposit(workflowMaps, completedWorkflowIndices);
+                        for (ItemStack workflowMap : mapsToDeposit) {
+                            ItemStack finalizedMap = workflowMap.copyWithCount(1);
                             forceCompleteMapStack(world, finalizedMap);
-                            insertStack(inventory, finalizedMap);
+                            boolean inserted = insertStackChecked(inventory, finalizedMap);
+                            if (!inserted) {
+                                LOGGER.warn("Cartographer {} could not deposit map into chest at {} — chest may be full",
+                                        villager.getUuidAsString(), chestPos.toShortString());
+                                // Drop it as item entity so it's not silently lost
+                                world.spawnEntity(new net.minecraft.entity.ItemEntity(world,
+                                        chestPos.getX() + 0.5, chestPos.getY() + 1.0, chestPos.getZ() + 0.5, finalizedMap));
+                            }
                         }
                         inventory.markDirty();
+                        LOGGER.info("Cartographer {} deposited {} completed map(s) to chest {}",
+                                villager.getUuidAsString(),
+                                mapsToDeposit.size(),
+                                chestPos.toShortString());
+                    } else {
+                        LOGGER.warn("Cartographer {} could not open chest at {} for map deposit",
+                                villager.getUuidAsString(), chestPos.toShortString());
                     }
 
                     clearWorkflowState();
@@ -193,16 +263,78 @@ public class CartographerMapExplorationGoal extends Goal {
                         villager.setStackInHand(Hand.MAIN_HAND, ItemStack.EMPTY);
                     }
 
-                    refreshMappedTargets(world);
-                    buildTargets(world);
-                    if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
-                        stage = Stage.ACQUIRE_MAPS;
+                    // If chest now has ≥8 filled maps and we haven't done the copy run yet,
+                    // head to the cartography table to produce 4 duplicates.
+                    if (AUTO_COPY_ENABLED && !mapsCopiedThisCycle && countFilledMaps(world) >= COPY_TRIGGER_COUNT) {
+                        LOGGER.info("Cartographer {}: {} filled maps in chest — heading to cartography table to copy",
+                                villager.getUuidAsString(), countFilledMaps(world));
+                        stage = Stage.GO_TO_TABLE_FOR_COPY;
+                        tableTravelStartTick = world.getTime();
+                        moveTo(jobPos);
                     } else {
-                        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                        stage = Stage.DONE;
+                        refreshMappedTargets(world);
+                        buildTargets(world);
+                        if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                            stage = Stage.ACQUIRE_MAPS;
+                        } else {
+                            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                            stage = Stage.DONE;
+                        }
                     }
                 } else {
+                    if (hasTimedOut(world.getTime(), returnTravelStartTick, RETURN_TRAVEL_TIMEOUT_TICKS)) {
+                        LOGGER.warn("Cartographer {} return-to-chest stalled for {} ticks; performing recovery teleport near {}",
+                                villager.getUuidAsString(),
+                                world.getTime() - returnTravelStartTick,
+                                chestPos.toShortString());
+                        recoverStalledTravel(world, chestPos);
+                        returnTravelStartTick = world.getTime();
+                    }
                     moveTo(chestPos);
+                }
+            }
+            case GO_TO_TABLE_FOR_COPY -> {
+                if (isNear(jobPos)) {
+                    stage = Stage.COPY_MAPS;
+                } else {
+                    if (hasTimedOut(world.getTime(), tableTravelStartTick, TABLE_TRAVEL_TIMEOUT_TICKS)) {
+                        LOGGER.warn("Cartographer {} table travel stalled for {} ticks; performing recovery teleport near {}",
+                                villager.getUuidAsString(),
+                                world.getTime() - tableTravelStartTick,
+                                jobPos.toShortString());
+                        recoverStalledTravel(world, jobPos);
+                        tableTravelStartTick = world.getTime();
+                    }
+                    moveTo(jobPos);
+                }
+            }
+            case COPY_MAPS -> {
+                // Simulate cartography-table duplication: insert MAPS_TO_COPY additional filled
+                // map copies into the chest (one duplicate per original tile map).
+                Inventory inventory = getChestInventory(world).orElse(null);
+                if (inventory != null) {
+                    List<ItemStack> originals = collectFilledMaps(world, MAPS_TO_COPY);
+                    int copied = 0;
+                    for (ItemStack original : originals) {
+                        ItemStack copy = original.copy();
+                        if (insertStackChecked(inventory, copy)) {
+                            copied++;
+                        } else {
+                            LOGGER.warn("Cartographer {}: chest full, could not insert map copy", villager.getUuidAsString());
+                            break;
+                        }
+                    }
+                    inventory.markDirty();
+                    LOGGER.info("Cartographer {}: cartography table copy run complete — {} map(s) duplicated", villager.getUuidAsString(), copied);
+                }
+                mapsCopiedThisCycle = true;
+                refreshMappedTargets(world);
+                buildTargets(world);
+                if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                    stage = Stage.ACQUIRE_MAPS;
+                } else {
+                    nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                    stage = Stage.DONE;
                 }
             }
             case IDLE, DONE -> {
@@ -210,9 +342,33 @@ public class CartographerMapExplorationGoal extends Goal {
         }
     }
 
+    private boolean isMappingStage() {
+        return stage == Stage.GO_TO_TARGET || stage == Stage.EXPLORE_MAP;
+    }
+
+    private boolean enforceBatchTimeout(ServerWorld world) {
+        if (!isMappingStage() || workflowBatchStartTick <= 0L) {
+            return false;
+        }
+        if (!shouldAbortMappingBatch(world.getTime(), workflowBatchStartTick)) {
+            return false;
+        }
+
+        LOGGER.warn("Cartographer {} mapping batch exceeded {} ticks (completed {}/{}); returning to chest with partial maps",
+                villager.getUuidAsString(),
+                MAPPING_BATCH_TIMEOUT_TICKS,
+                workflowIndex,
+                workflowTargets.size());
+        stage = Stage.RETURN_TO_CHEST;
+        returnTravelStartTick = world.getTime();
+        moveTo(chestPos);
+        return true;
+    }
+
     private void setCurrentWorkflowTarget(ServerWorld world) {
         if (workflowIndex < 0 || workflowIndex >= workflowTargets.size() || workflowIndex >= workflowMaps.size()) {
             stage = Stage.RETURN_TO_CHEST;
+            returnTravelStartTick = world.getTime();
             moveTo(chestPos);
             return;
         }
@@ -222,6 +378,11 @@ public class CartographerMapExplorationGoal extends Goal {
         villager.setStackInHand(Hand.MAIN_HAND, activeMap);
         prepareExplorationPath(currentTarget);
         stage = Stage.GO_TO_TARGET;
+        LOGGER.info("Cartographer {} starting territory {}/{} at {}",
+                villager.getUuidAsString(),
+                workflowIndex + 1,
+                workflowTargets.size(),
+                currentTarget.toPos(jobPos.getY()).toShortString());
         moveTo(explorationWaypoints.get(waypointIndex));
         mapExploreStartTick = world.getTime();
     }
@@ -229,6 +390,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private void completeCurrentTerritory(ServerWorld world, boolean timedOut) {
         mappedTargets.add(currentTarget.key());
         forceCompleteMapStack(world, activeMap);
+        completedWorkflowIndices.add(workflowIndex);
         LOGGER.info("Cartographer {} completed territory {}/{} at {} (timeout={})",
                 villager.getUuidAsString(),
                 workflowIndex + 1,
@@ -240,18 +402,107 @@ public class CartographerMapExplorationGoal extends Goal {
         if (workflowIndex < workflowTargets.size()) {
             setCurrentWorkflowTarget(world);
         } else {
+            // All 4 maps complete — compute mapped bounds and store them.
+            emitMappedBoundsToRegistry(world);
             activeMap = ItemStack.EMPTY;
             stage = Stage.RETURN_TO_CHEST;
+            returnTravelStartTick = world.getTime();
             moveTo(chestPos);
         }
+    }
+
+    static boolean hasTimedOut(long worldTime, long startTick, int timeoutTicks) {
+        return worldTime - startTick >= timeoutTicks;
+    }
+
+    static boolean shouldAbortMappingBatch(long worldTime, long batchStartTick) {
+        return batchStartTick > 0L && hasTimedOut(worldTime, batchStartTick, MAPPING_BATCH_TIMEOUT_TICKS);
+    }
+
+    private void recoverStalledTravel(ServerWorld world, BlockPos destination) {
+        int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, destination.getX(), destination.getZ());
+        double tx = destination.getX() + 0.5D;
+        double ty = surfaceY;
+        double tz = destination.getZ() + 0.5D;
+        villager.getNavigation().stop();
+        villager.requestTeleport(tx, ty, tz);
+        villager.getNavigation().startMovingTo(tx, ty, tz, MOVE_SPEED);
+    }
+
+    /**
+     * Computes the bounding box that covers all 4 completed map tiles and writes it to
+     * {@link VillageMappedBoundsState}, keyed by the nearest QM chest to the cartographer's job site.
+     */
+    private void emitMappedBoundsToRegistry(ServerWorld world) {
+        if (workflowTargets.isEmpty()) {
+            return;
+        }
+
+        int mapSize = getMapSize(mapScale);
+        int half = mapSize / 2;
+
+        int minX = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (MapTarget target : workflowTargets) {
+            minX = Math.min(minX, target.centerX() - half);
+            maxX = Math.max(maxX, target.centerX() + half);
+            minZ = Math.min(minZ, target.centerZ() - half);
+            maxZ = Math.max(maxZ, target.centerZ() + half);
+        }
+
+        // Find the nearest QM chest to the job site — this is the village anchor key.
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, jobPos, 300);
+        if (nearestQm.isEmpty()) {
+            LOGGER.warn("Cartographer {} could not find a nearby QM chest to key mapped bounds; skipping registry write",
+                    villager.getUuidAsString());
+            return;
+        }
+        BlockPos anchorPos = nearestQm.get();
+
+        VillageMappedBoundsState boundsState = VillageMappedBoundsState.get(world.getServer());
+        VillageMappedBoundsState.MappedBounds bounds = new VillageMappedBoundsState.MappedBounds(minX, maxX, minZ, maxZ);
+        boundsState.putBounds(world.getRegistryKey(), anchorPos, bounds);
+
+        LOGGER.info("Cartographer {} wrote mapped bounds for QM chest {} → [{},{} to {},{}]",
+                villager.getUuidAsString(),
+                anchorPos.toShortString(),
+                minX, minZ, maxX, maxZ);
     }
 
     private void clearWorkflowState() {
         workflowTargets.clear();
         workflowMaps.clear();
+        completedWorkflowIndices.clear();
         workflowIndex = 0;
         currentTarget = null;
         activeMap = ItemStack.EMPTY;
+        workflowBatchStartTick = 0L;
+    }
+
+    static List<ItemStack> collectCompletedWorkflowMapsForDeposit(List<ItemStack> workflowMaps, Set<Integer> completedIndices) {
+        if (workflowMaps.isEmpty() || completedIndices.isEmpty()) {
+            return List.of();
+        }
+
+        List<ItemStack> result = new ArrayList<>();
+        for (Integer index : new TreeSet<>(completedIndices)) {
+            if (index == null || index < 0 || index >= workflowMaps.size()) {
+                continue;
+            }
+            ItemStack stack = workflowMaps.get(index);
+            if (!stack.isEmpty()) {
+                result.add(stack);
+            }
+        }
+        return result;
+    }
+
+    private void resetMappingCycle() {
+        clearWorkflowState();
+        mapsCopiedThisCycle = false;
     }
 
     public void onChestInventoryChanged(ServerWorld world) {
@@ -316,6 +567,22 @@ public class CartographerMapExplorationGoal extends Goal {
                 {1, 1}
         };
 
+        // If all 4 tiles are already mapped, clear mappedTargets so the cartographer
+        // can do a fresh remapping cycle on the next check. Otherwise it would sit idle forever.
+        boolean allMapped = true;
+        for (int[] offset : offsets) {
+            long key = packKey(baseIndexX + offset[0], baseIndexZ + offset[1]);
+            if (!mappedTargets.contains(key)) {
+                allMapped = false;
+                break;
+            }
+        }
+        if (allMapped) {
+            LOGGER.info("Cartographer {} all 4 tiles already mapped — resetting for next mapping cycle", villager.getUuidAsString());
+            mappedTargets.clear();
+            mapsCopiedThisCycle = false;
+        }
+
         for (int[] offset : offsets) {
             int mapIndexX = baseIndexX + offset[0];
             int mapIndexZ = baseIndexZ + offset[1];
@@ -342,7 +609,6 @@ public class CartographerMapExplorationGoal extends Goal {
         waypointIndex = 0;
 
         int mapSize = getMapSize(mapScale);
-        int y = jobPos.getY();
         int half = mapSize / 2;
         int inset = Math.max(8, mapSize / 16);
 
@@ -353,16 +619,32 @@ public class CartographerMapExplorationGoal extends Goal {
         int midX = target.centerX();
         int midZ = target.centerZ();
 
-        explorationWaypoints.add(new BlockPos(midX, y, midZ));
-        explorationWaypoints.add(new BlockPos(westX, y, northZ));
-        explorationWaypoints.add(new BlockPos(midX, y, northZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, northZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, midZ));
-        explorationWaypoints.add(new BlockPos(eastX, y, southZ));
-        explorationWaypoints.add(new BlockPos(midX, y, southZ));
-        explorationWaypoints.add(new BlockPos(westX, y, southZ));
-        explorationWaypoints.add(new BlockPos(westX, y, midZ));
-        explorationWaypoints.add(new BlockPos(midX, y, midZ));
+        // Use surface heightmap Y per waypoint so the navigator is never sent
+        // into a tree trunk, underground, or mid-air on hilly terrain.
+        explorationWaypoints.add(surfacePos(midX, midZ));
+        explorationWaypoints.add(surfacePos(westX, northZ));
+        explorationWaypoints.add(surfacePos(midX, northZ));
+        explorationWaypoints.add(surfacePos(eastX, northZ));
+        explorationWaypoints.add(surfacePos(eastX, midZ));
+        explorationWaypoints.add(surfacePos(eastX, southZ));
+        explorationWaypoints.add(surfacePos(midX, southZ));
+        explorationWaypoints.add(surfacePos(westX, southZ));
+        explorationWaypoints.add(surfacePos(westX, midZ));
+        explorationWaypoints.add(surfacePos(midX, midZ));
+    }
+
+    /**
+     * Returns a surface-level BlockPos at (x, z) using the MOTION_BLOCKING_NO_LEAVES
+     * heightmap so waypoints land on walkable ground and are never inside tree trunks.
+     * Falls back to WORLD_SURFACE if the world isn't a ServerWorld (should never occur
+     * in practice since this goal guards on instanceof ServerWorld in canStart/tick).
+     */
+    private BlockPos surfacePos(int x, int z) {
+        if (villager.getWorld() instanceof ServerWorld world) {
+            int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+            return new BlockPos(x, y, z);
+        }
+        return new BlockPos(x, jobPos.getY(), z);
     }
 
     private void tickActiveMap(ServerWorld world) {
@@ -425,13 +707,14 @@ public class CartographerMapExplorationGoal extends Goal {
 
         int scale = state.scale;
         int sampleStep = 1 << scale;
+        BlockPos.Mutable mutablePos = new BlockPos.Mutable();
         for (int mapX = 0; mapX < 128; mapX++) {
             for (int mapZ = 0; mapZ < 128; mapZ++) {
                 int worldX = state.centerX + (mapX - 64) * sampleStep;
                 int worldZ = state.centerZ + (mapZ - 64) * sampleStep;
                 int topY = world.getTopY(Heightmap.Type.WORLD_SURFACE, worldX, worldZ) - 1;
-                BlockPos samplePos = new BlockPos(worldX, Math.max(world.getBottomY(), topY), worldZ);
-                MapColor mapColor = world.getBlockState(samplePos).getMapColor(world, samplePos);
+                mutablePos.set(worldX, Math.max(world.getBottomY(), topY), worldZ);
+                MapColor mapColor = world.getBlockState(mutablePos).getMapColor(world, mutablePos);
                 if (mapColor == MapColor.CLEAR) {
                     continue;
                 }
@@ -469,6 +752,36 @@ public class CartographerMapExplorationGoal extends Goal {
             }
         }
         state.markDirty();
+    }
+
+    /** Counts all FILLED_MAP items in the paired chest. */
+    private int countFilledMaps(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return 0;
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.FILLED_MAP)) count += stack.getCount();
+        }
+        return count;
+    }
+
+    /**
+     * Returns up to {@code max} filled-map stacks (one copy per stack) from the
+     * paired chest to use as originals for the cartography-table copy run.
+     * Does NOT consume the originals — they stay in the chest.
+     */
+    private List<ItemStack> collectFilledMaps(ServerWorld world, int max) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) return List.of();
+        List<ItemStack> result = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size() && result.size() < max; slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isOf(Items.FILLED_MAP)) {
+                result.add(stack.copyWithCount(1));
+            }
+        }
+        return result;
     }
 
     private int countEmptyMaps(ServerWorld world) {
@@ -533,28 +846,88 @@ public class CartographerMapExplorationGoal extends Goal {
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
         }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, true));
+        if (state.getBlock() instanceof BarrelBlock) {
+            if (world.getBlockEntity(chestPos) instanceof BarrelBlockEntity barrel) {
+                return Optional.of(barrel);
+            }
+        }
+        return Optional.empty();
     }
 
-    private void insertStack(Inventory inventory, ItemStack stack) {
+    /**
+     * If the paired chest contains leather boots, treat the cartographer as cold-protected for
+     * this tick (same gameplay intent as wearing leather boots in snow workflows).
+     */
+    private void applyChestDrivenColdProtection(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+        if (!hasItem(inventory, Items.LEATHER_BOOTS)) {
+            return;
+        }
+
+        // Prevent freeze buildup/damage in cold biomes and powder snow while this chest policy is active.
+        if (villager.getFrozenTicks() > 0) {
+            villager.setFrozenTicks(0);
+        }
+    }
+
+    private boolean hasItem(Inventory inventory, net.minecraft.item.Item item) {
         for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                inventory.setStack(slot, stack);
-                return;
-            }
-            if (ItemStack.areItemsAndComponentsEqual(existing, stack) && existing.getCount() < existing.getMaxCount()) {
-                int move = Math.min(stack.getCount(), existing.getMaxCount() - existing.getCount());
-                existing.increment(move);
-                stack.decrement(move);
-                if (stack.isEmpty()) {
-                    return;
-                }
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                return true;
             }
         }
+        return false;
+    }
+
+    /** Inserts stack into inventory; silently discards any remainder. */
+    private void insertStack(Inventory inventory, ItemStack stack) {
+        insertStackChecked(inventory, stack);
+    }
+
+    /**
+     * Inserts stack into inventory. Returns {@code true} if all items were inserted,
+     * {@code false} if the inventory was too full to accept the full stack.
+     */
+    private boolean insertStackChecked(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                continue;
+            }
+            if (!inventory.isValid(slot, remaining)) {
+                continue;
+            }
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+        return remaining.isEmpty();
     }
 
     private void moveTo(BlockPos pos) {
@@ -579,6 +952,8 @@ public class CartographerMapExplorationGoal extends Goal {
         GO_TO_TARGET,
         EXPLORE_MAP,
         RETURN_TO_CHEST,
+        GO_TO_TABLE_FOR_COPY,
+        COPY_MAPS,
         DONE
     }
 
