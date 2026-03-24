@@ -15,8 +15,11 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.world.PersistentState;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Comparator;
+import java.util.ArrayList;
 
 /**
  * Stores the world-coordinate bounding box that a village cartographer has fully mapped.
@@ -43,6 +46,12 @@ public class VillageMappedBoundsState extends PersistentState {
             return pos.getX() >= minX && pos.getX() <= maxX
                     && pos.getZ() >= minZ && pos.getZ() <= maxZ;
         }
+    }
+
+    /**
+     * Pairing of an anchor position and the mapped bounds associated with that anchor.
+     */
+    public record AnchorMappedBounds(BlockPos anchorPos, MappedBounds bounds, long distanceSq) {
     }
 
     private final Map<GlobalPos, MappedBounds> bellToBounds = new HashMap<>();
@@ -141,5 +150,30 @@ public class VillageMappedBoundsState extends PersistentState {
         }
 
         return Optional.ofNullable(nearest);
+    }
+
+    /**
+     * Returns all mapped bounds keyed by anchors within {@code searchRadius} of {@code pos},
+     * sorted nearest-first by horizontal distance.
+     */
+    public List<AnchorMappedBounds> getBoundsEntriesNear(RegistryKey<net.minecraft.world.World> worldKey,
+                                                         BlockPos pos,
+                                                         int searchRadius) {
+        long radiusSq = (long) searchRadius * searchRadius;
+        List<AnchorMappedBounds> entries = new ArrayList<>();
+        for (Map.Entry<GlobalPos, MappedBounds> entry : bellToBounds.entrySet()) {
+            if (!entry.getKey().dimension().equals(worldKey)) {
+                continue;
+            }
+            BlockPos anchorPos = entry.getKey().pos();
+            long dx = anchorPos.getX() - pos.getX();
+            long dz = anchorPos.getZ() - pos.getZ();
+            long distSq = dx * dx + dz * dz;
+            if (distSq <= radiusSq) {
+                entries.add(new AnchorMappedBounds(anchorPos.toImmutable(), entry.getValue(), distSq));
+            }
+        }
+        entries.sort(Comparator.comparingLong(AnchorMappedBounds::distanceSq));
+        return entries;
     }
 }
