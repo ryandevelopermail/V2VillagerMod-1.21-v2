@@ -925,7 +925,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         ScanBounds scanBounds = ScanBounds.fromLocalRadius(center);
         Set<BlockPos> uniqueRoots = mappedMode
                 ? collectQualifiedRootsInMappedBounds(world, center, mappedContext)
-                : collectQualifiedRootsInBounds(world, scanBounds, center, null, nearbyBells);
+                : collectQualifiedRootsInBounds(world, scanBounds, center, nearbyBells);
 
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
         sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
@@ -976,7 +976,6 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private Set<BlockPos> collectQualifiedRootsInBounds(ServerWorld world,
                                                         ScanBounds scanBounds,
                                                         BlockPos center,
-                                                        @Nullable MappedBoundsSearchContext mappedContext,
                                                         Set<BlockPos> nearbyBells) {
         int candidateLogs = 0;
         int acceptedRoots = 0;
@@ -984,21 +983,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         for (BlockPos cursor : BlockPos.iterate(scanBounds.min(), scanBounds.max())) {
             BlockPos pos = cursor.toImmutable();
-            if (!isCandidateInScanMode(center, pos, mappedContext == null ? null : mappedContext.bounds())) {
+            if (!isCandidateInScanMode(center, pos, null)) {
                 continue;
             }
             if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
                 continue;
             }
             candidateLogs++;
-            if (tryAddQualifiedRoot(world, pos, mappedContext == null ? nearbyBells : null, uniqueRoots)) {
+            if (tryAddQualifiedRoot(world, pos, nearbyBells, uniqueRoots)) {
                 acceptedRoots++;
             }
         }
 
         LOGGER.debug("Lumberjack Guard {} tree root qualification mode={} candidateLogs={} acceptedRoots={}",
                 this.guard.getUuidAsString(),
-                mappedContext == null ? "local-radius" : "mapped-bounds",
+                "local-radius",
                 candidateLogs,
                 acceptedRoots);
         return uniqueRoots;
