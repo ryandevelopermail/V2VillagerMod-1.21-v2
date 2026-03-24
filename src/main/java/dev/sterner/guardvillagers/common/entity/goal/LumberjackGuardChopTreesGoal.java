@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.CartographerMapChestUtil;
 import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
+import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -60,7 +61,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int ROOT_STRUCTURE_HORIZONTAL_RADIUS = 2;
     private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
     private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
-    private static final int MAPPED_BOUNDS_ANCHOR_RADIUS = 300;
+    private static final int CARTOGRAPHER_INFLUENCE_RADIUS = 300;
 
     /**
      * Logs within this horizontal radius of a bell block are considered part of a village
@@ -921,10 +922,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 ? Set.of()
                 : collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
 
-        ScanBounds scanBounds = mappedMode
-                ? ScanBounds.fromMapped(center, mappedContext.bounds())
-                : ScanBounds.fromLocalRadius(center);
-        Set<BlockPos> uniqueRoots = collectQualifiedRootsInBounds(world, scanBounds, center, mappedContext, nearbyBells);
+        ScanBounds scanBounds = ScanBounds.fromLocalRadius(center);
+        Set<BlockPos> uniqueRoots = mappedMode
+                ? collectQualifiedRootsInMappedBounds(world, center, mappedContext)
+                : collectQualifiedRootsInBounds(world, scanBounds, center, null, nearbyBells);
 
         List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
         sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
@@ -934,6 +935,42 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 scanBounds.candidateCount(),
                 sorted.size());
         return sorted;
+    }
+
+    private Set<BlockPos> collectQualifiedRootsInMappedBounds(ServerWorld world,
+                                                              BlockPos center,
+                                                              MappedBoundsSearchContext mappedContext) {
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+        int candidateLogs = 0;
+        int acceptedRoots = 0;
+        long candidateVolume = 0L;
+
+        for (VillageMappedBoundsState.MappedBounds bounds : mappedContext.bounds()) {
+            ScanBounds scanBounds = ScanBounds.fromMapped(center, bounds);
+            candidateVolume += scanBounds.candidateCount();
+            for (BlockPos cursor : BlockPos.iterate(scanBounds.min(), scanBounds.max())) {
+                BlockPos pos = cursor.toImmutable();
+                if (!bounds.contains(pos)) {
+                    continue;
+                }
+                if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                    continue;
+                }
+                candidateLogs++;
+                if (tryAddQualifiedRoot(world, pos, null, uniqueRoots)) {
+                    acceptedRoots++;
+                }
+            }
+        }
+
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds qualification cartographers={} mappedBoxes={} candidateVolume={} candidateLogs={} acceptedRoots={}",
+                this.guard.getUuidAsString(),
+                mappedContext.cartographerCount(),
+                mappedContext.bounds().size(),
+                candidateVolume,
+                candidateLogs,
+                acceptedRoots);
+        return uniqueRoots;
     }
 
     private Set<BlockPos> collectQualifiedRootsInBounds(ServerWorld world,
@@ -979,42 +1016,39 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
-        VillageMappedBoundsState boundsState = VillageMappedBoundsState.get(world.getServer());
-        List<VillageMappedBoundsState.AnchorMappedBounds> candidates = boundsState
-                .getBoundsEntriesNear(world.getRegistryKey(), center, MAPPED_BOUNDS_ANCHOR_RADIUS);
+        List<CartographerBehavior.CartographerPairing> nearbyCartographers =
+                CartographerBehavior.getNearbyPairings(world, center, CARTOGRAPHER_INFLUENCE_RADIUS);
 
-        if (candidates.isEmpty()) {
-            LOGGER.debug("Lumberjack Guard {} no mapped-bounds anchors found within {} blocks",
+        if (nearbyCartographers.isEmpty()) {
+            LOGGER.debug("Lumberjack Guard {} no cartographer job-sites found within {} blocks",
                     this.guard.getUuidAsString(),
-                    MAPPED_BOUNDS_ANCHOR_RADIUS);
+                    CARTOGRAPHER_INFLUENCE_RADIUS);
             return null;
         }
 
-        // Choice: nearest anchor wins. This keeps mode selection deterministic when villages
-        // are close together and avoids accidental multi-village unions.
-        for (VillageMappedBoundsState.AnchorMappedBounds candidate : candidates) {
-            int filledMaps = CartographerMapChestUtil.countFilledMapsInChest(world, candidate.anchorPos());
-            boolean hasFilledMap = filledMaps >= 1;
-            LOGGER.debug("Lumberjack Guard {} mapped-bounds candidate anchor={} distanceSq={} filledMaps={} bounds=[{},{} -> {},{}]",
+        List<VillageMappedBoundsState.MappedBounds> allBounds = new ArrayList<>();
+        for (CartographerBehavior.CartographerPairing candidate : nearbyCartographers) {
+            List<VillageMappedBoundsState.MappedBounds> chestBounds =
+                    CartographerMapChestUtil.collectPopulatedMapBounds(world, candidate.chestPos());
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds candidate cartographerJob={} chest={} populatedMaps={}",
                     this.guard.getUuidAsString(),
-                    candidate.anchorPos().toShortString(),
-                    candidate.distanceSq(),
-                    filledMaps,
-                    candidate.bounds().minX(),
-                    candidate.bounds().minZ(),
-                    candidate.bounds().maxX(),
-                    candidate.bounds().maxZ());
-            if (hasFilledMap) {
-                LOGGER.debug("Lumberjack Guard {} mapped-bounds anchor chosen={} (nearest with filled map)",
-                        this.guard.getUuidAsString(),
-                        candidate.anchorPos().toShortString());
-                return new MappedBoundsSearchContext(candidate.anchorPos(), candidate.bounds(), candidate.distanceSq(), filledMaps);
-            }
+                    candidate.jobPos().toShortString(),
+                    candidate.chestPos().toShortString(),
+                    chestBounds.size());
+            allBounds.addAll(chestBounds);
         }
 
-        LOGGER.debug("Lumberjack Guard {} mapped-bounds anchors found but none had filled maps in paired chest",
-                this.guard.getUuidAsString());
-        return null;
+        if (allBounds.isEmpty()) {
+            LOGGER.debug("Lumberjack Guard {} nearby cartographers found but no populated maps in paired chests",
+                    this.guard.getUuidAsString());
+            return null;
+        }
+
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} populated map bounds",
+                this.guard.getUuidAsString(),
+                nearbyCartographers.size(),
+                allBounds.size());
+        return new MappedBoundsSearchContext(allBounds, nearbyCartographers.size());
     }
 
     private static BlockPos getPairedBaseCenter(BlockPos table, @Nullable BlockPos chest) {
@@ -1030,10 +1064,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
     }
 
-    private record MappedBoundsSearchContext(BlockPos anchorPos,
-                                             VillageMappedBoundsState.MappedBounds bounds,
-                                             long anchorDistanceSq,
-                                             int filledMapCount) {
+    private record MappedBoundsSearchContext(List<VillageMappedBoundsState.MappedBounds> bounds,
+                                             int cartographerCount) {
     }
 
     private record ScanBounds(BlockPos min, BlockPos max, long candidateCount) {
