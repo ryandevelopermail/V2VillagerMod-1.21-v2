@@ -66,8 +66,8 @@ public class ShepherdFencePlacerGoal extends Goal {
 
     /** How far from the job block to search for a valid pen site. */
     private static final int SITE_SEARCH_RADIUS = 32;
-    /** Flat-ground tolerance: all floor Y must be within ±2 of the base Y. */
-    private static final int FLAT_Y_TOLERANCE = 2;
+    /** Strict flat-ground tolerance. 0 means all sampled columns must share identical surface Y. */
+    private static final int FLAT_Y_DELTA = 0;
 
     /**
      * Pen scan radius — matches ShepherdFenceCraftingGoal.PEN_SCAN_RADIUS (64).
@@ -371,19 +371,19 @@ public class ShepherdFencePlacerGoal extends Goal {
      * Uses BlockPos.Mutable to avoid GC pressure.
      */
     private PenPlan findPenSite(ServerWorld world) {
-        BlockPos.Mutable mutable = new BlockPos.Mutable();
-
         for (int dx = -SITE_SEARCH_RADIUS; dx <= SITE_SEARCH_RADIUS - PEN_SIZE; dx++) {
             for (int dz = -SITE_SEARCH_RADIUS; dz <= SITE_SEARCH_RADIUS - PEN_SIZE; dz++) {
                 int baseX = jobPos.getX() + dx;
                 int baseZ = jobPos.getZ() + dz;
 
-                // Sample surface Y at the northwest corner of the candidate area
-                mutable.set(baseX, jobPos.getY(), baseZ);
-                int surfaceY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+                int[] surfaceYMap = sampleSurfaceYMap(world, baseX, baseZ);
+                if (!isPerimeterFlat(surfaceYMap, FLAT_Y_DELTA)) continue;
 
-                BlockPos origin = new BlockPos(baseX, surfaceY, baseZ);
-                if (isSiteValid(world, origin)) {
+                Integer flatY = getSharedFlatY(surfaceYMap, FLAT_Y_DELTA);
+                if (flatY == null) continue;
+
+                BlockPos origin = new BlockPos(baseX, flatY, baseZ);
+                if (isSiteValid(world, origin, surfaceYMap, flatY)) {
                     return buildPenPlan(world, origin);
                 }
             }
@@ -394,31 +394,26 @@ public class ShepherdFencePlacerGoal extends Goal {
     /**
      * Validates a 7×7 site with northwest corner at {@code origin}:
      * <ul>
-     *   <li>All floor Y within ±FLAT_Y_TOLERANCE of origin.getY()</li>
+     *   <li>Surface Y is sampled for all 49 columns and must be strictly flat (delta ≤ {@link #FLAT_Y_DELTA})</li>
      *   <li>No DIRT_PATH blocks anywhere in the 7×7 footprint</li>
      *   <li>No job-site POI inside the 5×5 interior</li>
      *   <li>Solid floor + replaceable space at pen level for all 49 positions</li>
      * </ul>
      */
     private boolean isSiteValid(ServerWorld world, BlockPos origin) {
-        int baseY = origin.getY();
+        int[] surfaceYMap = sampleSurfaceYMap(world, origin.getX(), origin.getZ());
+        Integer flatY = getSharedFlatY(surfaceYMap, FLAT_Y_DELTA);
+        return flatY != null && isSiteValid(world, new BlockPos(origin.getX(), flatY, origin.getZ()), surfaceYMap, flatY);
+    }
+
+    private boolean isSiteValid(ServerWorld world, BlockPos origin, int[] surfaceYMap, int flatY) {
         BlockPos.Mutable mutable = new BlockPos.Mutable();
-        int minSurfaceY = Integer.MAX_VALUE;
-        int maxSurfaceY = Integer.MIN_VALUE;
 
         for (int dx = 0; dx < PEN_SIZE; dx++) {
             for (int dz = 0; dz < PEN_SIZE; dz++) {
                 int x = origin.getX() + dx;
                 int z = origin.getZ() + dz;
-
-                // Sample actual surface at this column
-                mutable.set(x, baseY, z);
-                int surfY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
-                minSurfaceY = Math.min(minSurfaceY, surfY);
-                maxSurfaceY = Math.max(maxSurfaceY, surfY);
-
-                // Flatness check
-                if (Math.abs(surfY - baseY) > FLAT_Y_TOLERANCE) return false;
+                int surfY = surfaceYMap[indexFor(dx, dz)];
 
                 // Use the actual surface Y for block checks
                 mutable.set(x, surfY, z);
@@ -433,14 +428,11 @@ public class ShepherdFencePlacerGoal extends Goal {
                 if (!floor.isSideSolidFullSquare(world, mutable.toImmutable(), net.minecraft.util.math.Direction.UP)) return false;
 
                 // Space at pen level must be replaceable
-                mutable.set(x, surfY + 1, z);
+                mutable.set(x, flatY + 1, z);
                 if (!world.getBlockState(mutable).isReplaceable()) return false;
 
             }
         }
-
-        // Guard against plans that satisfy corner-relative tolerance but still mix extreme highs/lows.
-        if (maxSurfaceY - minSurfaceY > FLAT_Y_TOLERANCE * 2) return false;
 
         // Reject the site if any job-site or structural block we care about is inside the 5×5
         // interior (one block inside the perimeter on each side).
@@ -469,6 +461,67 @@ public class ShepherdFencePlacerGoal extends Goal {
         }
 
         return true;
+    }
+
+    private int[] sampleSurfaceYMap(ServerWorld world, int baseX, int baseZ) {
+        int[] surfaceYMap = new int[PEN_SIZE * PEN_SIZE];
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            for (int dz = 0; dz < PEN_SIZE; dz++) {
+                int x = baseX + dx;
+                int z = baseZ + dz;
+                mutable.set(x, jobPos.getY(), z);
+                surfaceYMap[indexFor(dx, dz)] = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+            }
+        }
+        return surfaceYMap;
+    }
+
+    static boolean isPerimeterFlat(int[] surfaceYMap, int allowedDelta) {
+        int referenceY = surfaceYMap[indexFor(0, 0)];
+        for (int i = 0; i < PEN_SIZE; i++) {
+            if (Math.abs(surfaceYMap[indexFor(i, 0)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(i, PEN_SIZE - 1)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(0, i)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(PEN_SIZE - 1, i)] - referenceY) > allowedDelta) return false;
+        }
+        return true;
+    }
+
+    static Integer getSharedFlatY(int[] surfaceYMap, int allowedDelta) {
+        int referenceY = surfaceYMap[0];
+        for (int y : surfaceYMap) {
+            if (Math.abs(y - referenceY) > allowedDelta) {
+                return null;
+            }
+        }
+        return referenceY;
+    }
+
+    private static int indexFor(int dx, int dz) {
+        return dx * PEN_SIZE + dz;
+    }
+
+    /**
+     * Test helper for validating scan order behavior independent of world/block rules.
+     */
+    static BlockPos findFirstFlatCandidateForTest(int jobX, int jobZ, int searchRadius, IntBinaryOperator surfaceYAt, int allowedDelta) {
+        for (int dx = -searchRadius; dx <= searchRadius - PEN_SIZE; dx++) {
+            for (int dz = -searchRadius; dz <= searchRadius - PEN_SIZE; dz++) {
+                int baseX = jobX + dx;
+                int baseZ = jobZ + dz;
+                int[] surfaceYMap = new int[PEN_SIZE * PEN_SIZE];
+                for (int localX = 0; localX < PEN_SIZE; localX++) {
+                    for (int localZ = 0; localZ < PEN_SIZE; localZ++) {
+                        surfaceYMap[indexFor(localX, localZ)] = surfaceYAt.applyAsInt(baseX + localX, baseZ + localZ);
+                    }
+                }
+                if (!isPerimeterFlat(surfaceYMap, allowedDelta)) continue;
+                Integer sharedY = getSharedFlatY(surfaceYMap, allowedDelta);
+                if (sharedY != null) return new BlockPos(baseX, sharedY, baseZ);
+            }
+        }
+        return null;
     }
 
     /**
