@@ -4,6 +4,9 @@ import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.util.math.BlockPos;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,5 +30,17 @@ class LumberjackGuardChopTreesMappedBoundsModeTest {
 
         assertTrue(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, nearCandidate, null));
         assertFalse(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, farCandidate, null));
+    }
+
+    @Test
+    void mergeOverlappingMappedBounds_combinesOverlapsIntoMinimalScanRegion() {
+        List<VillageMappedBoundsState.MappedBounds> merged = LumberjackGuardChopTreesGoal.mergeOverlappingMappedBounds(List.of(
+                new VillageMappedBoundsState.MappedBounds(-64, 64, -64, 64),
+                new VillageMappedBoundsState.MappedBounds(60, 180, -64, 64),
+                new VillageMappedBoundsState.MappedBounds(300, 360, 300, 360)
+        ));
+
+        assertEquals(2, merged.size());
+        assertTrue(merged.stream().anyMatch(bounds -> bounds.contains(new BlockPos(140, 64, 0))));
     }
 }
