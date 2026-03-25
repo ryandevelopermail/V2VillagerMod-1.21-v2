@@ -55,6 +55,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private BlockPos chestPos;
     private Stage stage = Stage.IDLE;
     private long nextCheckTime;
+    private long nextMapWorkEligibleTick;
     private boolean immediateCheckPending;
     private int mapScale = DEFAULT_MAP_SCALE;
     /** True once the cartography-table copy run has been completed for the current mapping cycle. */
@@ -84,6 +85,7 @@ public class CartographerMapExplorationGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.stage = Stage.IDLE;
+        this.nextMapWorkEligibleTick = 0L;
         clearWorkflowState();
     }
 
@@ -91,6 +93,8 @@ public class CartographerMapExplorationGoal extends Goal {
         immediateCheckPending = true;
         nextCheckTime = 0L;
         refreshMappedTargets(world);
+        LOGGER.debug("Cartographer {} immediate check requested: queueDepth={} nextMapWorkEligibleTick={}",
+                villager.getUuidAsString(), getQueueLength(world), nextMapWorkEligibleTick);
     }
 
     @Override
@@ -111,11 +115,21 @@ public class CartographerMapExplorationGoal extends Goal {
         int emptyMaps = countEmptyMaps(world);
         int pending = pendingTargets.size();
         int queueLength = getQueueLength(world);
+        long now = world.getTime();
+        long remainingCooldown = Math.max(0L, nextMapWorkEligibleTick - now);
+
+        if (remainingCooldown > 0L) {
+            LOGGER.debug("Cartographer {} canStart=false: queueLength={} emptyMaps={} pendingTiles={} nextMapWorkEligibleTick={} remainingCooldownTicks={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, nextMapWorkEligibleTick, remainingCooldown);
+            scheduleNextCheck(now);
+            immediateCheckPending = false;
+            return false;
+        }
 
         if (queueLength <= 0 || pending <= 0) {
-            LOGGER.debug("Cartographer {} canStart=false: queueLength={} emptyMaps={} pendingTiles={} mappedTiles={}",
-                    villager.getUuidAsString(), queueLength, emptyMaps, pending, mappedTargets.size());
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            LOGGER.debug("Cartographer {} canStart=false: queueLength={} emptyMaps={} pendingTiles={} mappedTiles={} nextMapWorkEligibleTick={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, mappedTargets.size(), nextMapWorkEligibleTick);
+            scheduleNextCheck(now);
             immediateCheckPending = false;
             return false;
         }
@@ -124,8 +138,8 @@ public class CartographerMapExplorationGoal extends Goal {
         if (!pendingTargets.isEmpty()) {
             MapTarget first = pendingTargets.get(0);
             int dist = (int) Math.sqrt(villager.squaredDistanceTo(first.centerX(), villager.getY(), first.centerZ()));
-            LOGGER.info("Cartographer {} canStart=true: queueLength={} emptyMaps={} pendingTiles={} firstTarget=({},{}) approxDist={}",
-                    villager.getUuidAsString(), queueLength, emptyMaps, pending, first.centerX(), first.centerZ(), dist);
+            LOGGER.info("Cartographer {} canStart=true: queueLength={} emptyMaps={} pendingTiles={} nextMapWorkEligibleTick={} firstTarget=({},{}) approxDist={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, nextMapWorkEligibleTick, first.centerX(), first.centerZ(), dist);
         }
         return true;
     }
@@ -170,6 +184,14 @@ public class CartographerMapExplorationGoal extends Goal {
 
         switch (stage) {
             case ACQUIRE_MAPS -> {
+                if (world.getTime() < nextMapWorkEligibleTick) {
+                    LOGGER.debug("Cartographer {} acquire deferred: queueDepth={} nextMapWorkEligibleTick={} currentTick={}",
+                            villager.getUuidAsString(), getQueueLength(world), nextMapWorkEligibleTick, world.getTime());
+                    stage = Stage.DONE;
+                    scheduleNextCheck(world.getTime());
+                    return;
+                }
+
                 Inventory inventory = getChestInventory(world).orElse(null);
                 if (inventory == null || pendingTargets.isEmpty()) {
                     stage = Stage.DONE;
@@ -233,6 +255,7 @@ public class CartographerMapExplorationGoal extends Goal {
                     Inventory inventory = getChestInventory(world).orElse(null);
                     if (inventory != null) {
                         List<ItemStack> mapsToDeposit = collectCompletedWorkflowMapsForDeposit(workflowMaps, completedWorkflowIndices);
+                        int depositedCount = 0;
                         for (ItemStack workflowMap : mapsToDeposit) {
                             ItemStack finalizedMap = workflowMap.copyWithCount(1);
                             forceCompleteMapStack(world, finalizedMap);
@@ -243,12 +266,20 @@ public class CartographerMapExplorationGoal extends Goal {
                                 // Drop it as item entity so it's not silently lost
                                 world.spawnEntity(new net.minecraft.entity.ItemEntity(world,
                                         chestPos.getX() + 0.5, chestPos.getY() + 1.0, chestPos.getZ() + 0.5, finalizedMap));
+                            } else {
+                                depositedCount++;
                             }
                         }
                         inventory.markDirty();
+                        if (depositedCount > 0) {
+                            int cooldownTicks = 1200 + world.random.nextInt(2401);
+                            nextMapWorkEligibleTick = world.getTime() + cooldownTicks;
+                            LOGGER.info("Cartographer {} map deposit cooldown set: queueDepth={} nextMapWorkEligibleTick={} cooldownTicks={}",
+                                    villager.getUuidAsString(), getQueueLength(world), nextMapWorkEligibleTick, cooldownTicks);
+                        }
                         LOGGER.info("Cartographer {} deposited {} completed map(s) to chest {}",
                                 villager.getUuidAsString(),
-                                mapsToDeposit.size(),
+                                depositedCount,
                                 chestPos.toShortString());
                     } else {
                         LOGGER.warn("Cartographer {} could not open chest at {} for map deposit",
@@ -271,10 +302,10 @@ public class CartographerMapExplorationGoal extends Goal {
                     } else {
                         refreshMappedTargets(world);
                         buildTargets(world);
-                        if (getQueueLength(world) > 0) {
+                        if (getQueueLength(world) > 0 && world.getTime() >= nextMapWorkEligibleTick) {
                             stage = Stage.ACQUIRE_MAPS;
                         } else {
-                            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                            scheduleNextCheck(world.getTime());
                             stage = Stage.DONE;
                         }
                     }
@@ -327,10 +358,10 @@ public class CartographerMapExplorationGoal extends Goal {
                 mapsCopiedThisCycle = true;
                 refreshMappedTargets(world);
                 buildTargets(world);
-                if (getQueueLength(world) > 0) {
+                if (getQueueLength(world) > 0 && world.getTime() >= nextMapWorkEligibleTick) {
                     stage = Stage.ACQUIRE_MAPS;
                 } else {
-                    nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                    scheduleNextCheck(world.getTime());
                     stage = Stage.DONE;
                 }
             }
@@ -595,6 +626,15 @@ public class CartographerMapExplorationGoal extends Goal {
 
     private int worldToMapIndex(int coordinate, int mapSize) {
         return Math.floorDiv(coordinate + 64, mapSize);
+    }
+
+    private void scheduleNextCheck(long worldTime) {
+        long intervalTick = worldTime + CHECK_INTERVAL_TICKS;
+        if (nextMapWorkEligibleTick > worldTime) {
+            nextCheckTime = Math.min(nextMapWorkEligibleTick, intervalTick);
+            return;
+        }
+        nextCheckTime = intervalTick;
     }
 
     private int mapIndexToCenter(int mapIndex, int mapSize) {
