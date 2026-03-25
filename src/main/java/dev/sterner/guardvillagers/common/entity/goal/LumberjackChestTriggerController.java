@@ -1542,28 +1542,33 @@ public final class LumberjackChestTriggerController {
         }
     }
 
-    public record UpgradeDemand(Item outputItem, int planksCost, int stickCost) {
+    public record UpgradeDemand(Item outputItem, int outputCount, int planksCost, int stickCost) {
         /** Back-compat constructor for callers that don't use sticks. */
         public UpgradeDemand(Item outputItem, int planksCost) {
-            this(outputItem, planksCost, 0);
+            this(outputItem, 1, planksCost, 0);
+        }
+
+        /** Back-compat constructor for callers that don't set output count explicitly. */
+        public UpgradeDemand(Item outputItem, int planksCost, int stickCost) {
+            this(outputItem, 1, planksCost, stickCost);
         }
 
         public static UpgradeDemand v1Chest() {
-            return new UpgradeDemand(Items.CHEST, 8, 0);
+            return new UpgradeDemand(Items.CHEST, 1, 8, 0);
         }
 
         public static UpgradeDemand v2CraftingTable() {
-            return new UpgradeDemand(Items.CRAFTING_TABLE, 4, 0);
+            return new UpgradeDemand(Items.CRAFTING_TABLE, 1, 4, 0);
         }
 
         // Cluster 5A — fence: 4 planks + 2 sticks → 3 fences (vanilla recipe)
         public static UpgradeDemand v3Fence() {
-            return new UpgradeDemand(Items.OAK_FENCE, 4, 2);
+            return new UpgradeDemand(Items.OAK_FENCE, 3, 4, 2);
         }
 
         // Cluster 5A — fence gate: 2 planks + 4 sticks → 1 gate (vanilla recipe)
         public static UpgradeDemand v3FenceGate() {
-            return new UpgradeDemand(Items.OAK_FENCE_GATE, 2, 4);
+            return new UpgradeDemand(Items.OAK_FENCE_GATE, 1, 2, 4);
         }
     }
 
