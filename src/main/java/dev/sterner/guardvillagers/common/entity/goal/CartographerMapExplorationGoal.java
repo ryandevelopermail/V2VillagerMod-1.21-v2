@@ -60,8 +60,16 @@ public class CartographerMapExplorationGoal extends Goal {
     private int mapScale = DEFAULT_MAP_SCALE;
     /** True once the cartography-table copy run has been completed for the current mapping cycle. */
     private boolean mapsCopiedThisCycle = false;
+    private static final int[][] TERRITORY_SLOT_OFFSETS = {
+            {0, 0},
+            {1, 0},
+            {0, 1},
+            {1, 1}
+    };
     private final Set<Long> mappedTargets = new HashSet<>();
-    private final List<MapTarget> pendingTargets = new ArrayList<>();
+    private final MapTarget[] territorySlots = new MapTarget[TERRITORY_SLOT_OFFSETS.length];
+    private final boolean[] slotCompleted = new boolean[TERRITORY_SLOT_OFFSETS.length];
+    private int dequeueCursor;
     private final List<MapTarget> workflowTargets = new ArrayList<>();
     private final List<ItemStack> workflowMaps = new ArrayList<>();
     private final Set<Integer> completedWorkflowIndices = new HashSet<>();
@@ -113,7 +121,7 @@ public class CartographerMapExplorationGoal extends Goal {
         buildTargets(world);
 
         int emptyMaps = countEmptyMaps(world);
-        int pending = pendingTargets.size();
+        int pending = getUnmappedSlotCount();
         int queueLength = getQueueLength(world);
         long now = world.getTime();
         long remainingCooldown = Math.max(0L, nextMapWorkEligibleTick - now);
@@ -135,11 +143,12 @@ public class CartographerMapExplorationGoal extends Goal {
         }
 
         // Log first tile destination so the user can confirm cartographer is about to move
-        if (!pendingTargets.isEmpty()) {
-            MapTarget first = pendingTargets.get(0);
+        if (pending > 0) {
+            int nextSlotIndex = peekNextUnmappedSlotIndex();
+            MapTarget first = territorySlots[nextSlotIndex];
             int dist = (int) Math.sqrt(villager.squaredDistanceTo(first.centerX(), villager.getY(), first.centerZ()));
-            LOGGER.info("Cartographer {} canStart=true: queueLength={} emptyMaps={} pendingTiles={} nextMapWorkEligibleTick={} firstTarget=({},{}) approxDist={}",
-                    villager.getUuidAsString(), queueLength, emptyMaps, pending, nextMapWorkEligibleTick, first.centerX(), first.centerZ(), dist);
+            LOGGER.info("Cartographer {} canStart=true: queueLength={} emptyMaps={} pendingTiles={} nextMapWorkEligibleTick={} firstSlot={} firstTarget=({},{}) approxDist={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, nextMapWorkEligibleTick, nextSlotIndex, first.centerX(), first.centerZ(), dist);
         }
         return true;
     }
@@ -193,7 +202,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 }
 
                 Inventory inventory = getChestInventory(world).orElse(null);
-                if (inventory == null || pendingTargets.isEmpty()) {
+                if (inventory == null || getUnmappedSlotCount() <= 0) {
                     stage = Stage.DONE;
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
@@ -209,9 +218,21 @@ public class CartographerMapExplorationGoal extends Goal {
                 workflowTargets.clear();
                 workflowMaps.clear();
                 completedWorkflowIndices.clear();
-                MapTarget target = pendingTargets.remove(0);
+                DequeuedTarget dequeuedTarget = dequeueNextUnmappedTarget(world);
+                if (dequeuedTarget == null) {
+                    stage = Stage.DONE;
+                    scheduleNextCheck(world.getTime());
+                    return;
+                }
+                MapTarget target = dequeuedTarget.target();
                 workflowTargets.add(target);
                 workflowMaps.add(FilledMapItem.createMap(world, target.centerX(), target.centerZ(), (byte) mapScale, true, false));
+                int remainingQueueDepth = Math.max(0, getQueueLength(world) - 1);
+                LOGGER.info("Cartographer {} dequeued territory slot {} at {} (remainingQueueDepth={})",
+                        villager.getUuidAsString(),
+                        dequeuedTarget.slotIndex(),
+                        target.toPos(jobPos.getY()).toShortString(),
+                        remainingQueueDepth);
 
                 workflowIndex = 0;
                 workflowBatchStartTick = world.getTime();
@@ -417,6 +438,7 @@ public class CartographerMapExplorationGoal extends Goal {
 
     private void completeCurrentTerritory(ServerWorld world, boolean timedOut) {
         mappedTargets.add(currentTarget.key());
+        markSlotCompleted(currentTarget.key());
         forceCompleteMapStack(world, activeMap);
         completedWorkflowIndices.add(workflowIndex);
         LOGGER.info("Cartographer {} completed territory {}/{} at {} (timeout={})",
@@ -531,6 +553,11 @@ public class CartographerMapExplorationGoal extends Goal {
     private void resetMappingCycle() {
         clearWorkflowState();
         mapsCopiedThisCycle = false;
+        mappedTargets.clear();
+        for (int i = 0; i < slotCompleted.length; i++) {
+            slotCompleted[i] = false;
+        }
+        dequeueCursor = 0;
     }
 
     public void onChestInventoryChanged(ServerWorld world) {
@@ -580,47 +607,88 @@ public class CartographerMapExplorationGoal extends Goal {
             int mapIndexZ = worldToMapIndex(state.centerZ, mapSize);
             mappedTargets.add(packKey(mapIndexX, mapIndexZ));
         }
+        initializeTerritorySlots(world);
+        for (int i = 0; i < territorySlots.length; i++) {
+            MapTarget slot = territorySlots[i];
+            slotCompleted[i] = slot != null && mappedTargets.contains(slot.key());
+        }
     }
 
     private void buildTargets(ServerWorld world) {
-        pendingTargets.clear();
+        initializeTerritorySlots(world);
         int mapSize = getMapSize(mapScale);
         int baseIndexX = worldToMapIndex(jobPos.getX(), mapSize);
         int baseIndexZ = worldToMapIndex(jobPos.getZ(), mapSize);
+        for (int slot = 0; slot < TERRITORY_SLOT_OFFSETS.length; slot++) {
+            int mapIndexX = baseIndexX + TERRITORY_SLOT_OFFSETS[slot][0];
+            int mapIndexZ = baseIndexZ + TERRITORY_SLOT_OFFSETS[slot][1];
+            slotCompleted[slot] = mappedTargets.contains(packKey(mapIndexX, mapIndexZ));
+        }
+    }
 
-        int[][] offsets = {
-                {0, 0},
-                {1, 0},
-                {0, 1},
-                {1, 1}
-        };
+    private void initializeTerritorySlots(ServerWorld world) {
+        int mapSize = getMapSize(mapScale);
+        int baseIndexX = worldToMapIndex(jobPos.getX(), mapSize);
+        int baseIndexZ = worldToMapIndex(jobPos.getZ(), mapSize);
+        for (int slot = 0; slot < TERRITORY_SLOT_OFFSETS.length; slot++) {
+            int mapIndexX = baseIndexX + TERRITORY_SLOT_OFFSETS[slot][0];
+            int mapIndexZ = baseIndexZ + TERRITORY_SLOT_OFFSETS[slot][1];
+            territorySlots[slot] = new MapTarget(
+                    mapIndexToCenter(mapIndexX, mapSize),
+                    mapIndexToCenter(mapIndexZ, mapSize),
+                    packKey(mapIndexX, mapIndexZ));
+        }
+        for (int slot = 0; slot < territorySlots.length; slot++) {
+            slotCompleted[slot] = mappedTargets.contains(territorySlots[slot].key());
+        }
+    }
 
-        // If all 4 tiles are already mapped, clear mappedTargets so the cartographer
-        // can do a fresh remapping cycle on the next check. Otherwise it would sit idle forever.
-        boolean allMapped = true;
-        for (int[] offset : offsets) {
-            long key = packKey(baseIndexX + offset[0], baseIndexZ + offset[1]);
-            if (!mappedTargets.contains(key)) {
-                allMapped = false;
-                break;
+    private int getUnmappedSlotCount() {
+        int count = 0;
+        for (boolean completed : slotCompleted) {
+            if (!completed) {
+                count++;
             }
         }
-        if (allMapped) {
-            LOGGER.info("Cartographer {} all 4 tiles already mapped — resetting for next mapping cycle", villager.getUuidAsString());
-            mappedTargets.clear();
-            mapsCopiedThisCycle = false;
-        }
+        return count;
+    }
 
-        for (int[] offset : offsets) {
-            int mapIndexX = baseIndexX + offset[0];
-            int mapIndexZ = baseIndexZ + offset[1];
-            long key = packKey(mapIndexX, mapIndexZ);
-            if (mappedTargets.contains(key)) {
+    private int peekNextUnmappedSlotIndex() {
+        for (int i = 0; i < slotCompleted.length; i++) {
+            int slot = (dequeueCursor + i) % slotCompleted.length;
+            if (!slotCompleted[slot]) {
+                return slot;
+            }
+        }
+        return 0;
+    }
+
+    private DequeuedTarget dequeueNextUnmappedTarget(ServerWorld world) {
+        for (int i = 0; i < slotCompleted.length; i++) {
+            int slot = (dequeueCursor + i) % slotCompleted.length;
+            if (slotCompleted[slot]) {
                 continue;
             }
-            int centerX = mapIndexToCenter(mapIndexX, mapSize);
-            int centerZ = mapIndexToCenter(mapIndexZ, mapSize);
-            pendingTargets.add(new MapTarget(centerX, centerZ, key));
+            dequeueCursor = (slot + 1) % slotCompleted.length;
+            return new DequeuedTarget(slot, territorySlots[slot]);
+        }
+
+        LOGGER.info("Cartographer {} all {} slots complete — resetting mapped slot progress for remap cycle",
+                villager.getUuidAsString(),
+                slotCompleted.length);
+        resetMappingCycle();
+        initializeTerritorySlots(world);
+        dequeueCursor = 1 % slotCompleted.length;
+        return new DequeuedTarget(0, territorySlots[0]);
+    }
+
+    private void markSlotCompleted(long key) {
+        for (int i = 0; i < territorySlots.length; i++) {
+            MapTarget slot = territorySlots[i];
+            if (slot != null && slot.key() == key) {
+                slotCompleted[i] = true;
+                return;
+            }
         }
     }
 
@@ -837,7 +905,7 @@ public class CartographerMapExplorationGoal extends Goal {
     }
 
     private int getQueueLength(ServerWorld world) {
-        return Math.min(countEmptyMaps(world), pendingTargets.size());
+        return Math.min(countEmptyMaps(world), getUnmappedSlotCount());
     }
 
     private List<ItemStack> takeEmptyMapsFromChest(ServerWorld world, int amount) {
@@ -1002,5 +1070,8 @@ public class CartographerMapExplorationGoal extends Goal {
         BlockPos toPos(int y) {
             return new BlockPos(centerX, y, centerZ);
         }
+    }
+
+    private record DequeuedTarget(int slotIndex, MapTarget target) {
     }
 }
