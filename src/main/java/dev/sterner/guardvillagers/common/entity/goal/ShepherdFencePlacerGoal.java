@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.IntBinaryOperator;
 
 /**
  * Shepherd places a 7×7 fence pen (27 fences + 1 gate) near their job block when:
@@ -259,6 +260,14 @@ public class ShepherdFencePlacerGoal extends Goal {
             stage = Stage.MOVE_TO_FENCE;
             return;
         }
+        // Re-validate that this final position is still placeable.
+        if (!world.getBlockState(target).isReplaceable()) {
+            LOGGER.debug("ShepherdFencePlacer {}: fence spot {} no longer replaceable, skipping",
+                    villager.getUuidAsString(), target.toShortString());
+            currentIndex++;
+            stage = Stage.MOVE_TO_FENCE;
+            return;
+        }
 
         // Consume one fence from chest
         Optional<Inventory> invOpt = getChestInventory(world);
@@ -298,6 +307,14 @@ public class ShepherdFencePlacerGoal extends Goal {
     private void tickPlaceGate(ServerWorld world) {
         if (pendingGatePos == null
                 || world.getBlockState(pendingGatePos).getBlock() instanceof FenceGateBlock) {
+            stage = Stage.DONE;
+            triggerRescan(world);
+            return;
+        }
+        if (!world.getBlockState(pendingGatePos).isReplaceable()) {
+            LOGGER.debug("ShepherdFencePlacer {}: gate spot {} no longer replaceable, aborting gate placement",
+                    villager.getUuidAsString(), pendingGatePos.toShortString());
+            pendingGatePos = null;
             stage = Stage.DONE;
             triggerRescan(world);
             return;
@@ -367,7 +384,7 @@ public class ShepherdFencePlacerGoal extends Goal {
 
                 BlockPos origin = new BlockPos(baseX, surfaceY, baseZ);
                 if (isSiteValid(world, origin)) {
-                    return buildPenPlan(origin);
+                    return buildPenPlan(world, origin);
                 }
             }
         }
@@ -386,6 +403,8 @@ public class ShepherdFencePlacerGoal extends Goal {
     private boolean isSiteValid(ServerWorld world, BlockPos origin) {
         int baseY = origin.getY();
         BlockPos.Mutable mutable = new BlockPos.Mutable();
+        int minSurfaceY = Integer.MAX_VALUE;
+        int maxSurfaceY = Integer.MIN_VALUE;
 
         for (int dx = 0; dx < PEN_SIZE; dx++) {
             for (int dz = 0; dz < PEN_SIZE; dz++) {
@@ -395,6 +414,8 @@ public class ShepherdFencePlacerGoal extends Goal {
                 // Sample actual surface at this column
                 mutable.set(x, baseY, z);
                 int surfY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+                minSurfaceY = Math.min(minSurfaceY, surfY);
+                maxSurfaceY = Math.max(maxSurfaceY, surfY);
 
                 // Flatness check
                 if (Math.abs(surfY - baseY) > FLAT_Y_TOLERANCE) return false;
@@ -417,6 +438,9 @@ public class ShepherdFencePlacerGoal extends Goal {
 
             }
         }
+
+        // Guard against plans that satisfy corner-relative tolerance but still mix extreme highs/lows.
+        if (maxSurfaceY - minSurfaceY > FLAT_Y_TOLERANCE * 2) return false;
 
         // Reject the site if any job-site or structural block we care about is inside the 5×5
         // interior (one block inside the perimeter on each side).
@@ -452,42 +476,60 @@ public class ShepherdFencePlacerGoal extends Goal {
      * The pen exterior is the outer ring of the 7×7. Gate is at south face center (dx=3).
      * Gate faces SOUTH (inward opening direction is north).
      */
-    private PenPlan buildPenPlan(BlockPos origin) {
-        // Determine the actual Y for the pen level (surface + 1)
-        // Use a consistent Y by reading the surface at the origin corner
-        // We'll place fences at the surfaceY+1 level, adapting per column
+    private PenPlan buildPenPlan(ServerWorld world, BlockPos origin) {
         int baseX = origin.getX();
         int baseZ = origin.getZ();
-        int penY = origin.getY() + 1; // fences sit on top of the ground
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        IntBinaryOperator surfaceYAt = (x, z) -> {
+            mutable.set(x, origin.getY(), z);
+            return world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+        };
 
-        List<BlockPos> fences = new ArrayList<>();
-
-        // North face (dz=0): all 7 columns
-        for (int dx = 0; dx < PEN_SIZE; dx++) {
-            fences.add(new BlockPos(baseX + dx, penY, baseZ));
-        }
-        // South face (dz=PEN_SIZE-1): all 7 columns
-        for (int dx = 0; dx < PEN_SIZE; dx++) {
-            fences.add(new BlockPos(baseX + dx, penY, baseZ + PEN_SIZE - 1));
-        }
-        // West face (dx=0): interior Z only (skip corners already covered)
-        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
-            fences.add(new BlockPos(baseX, penY, baseZ + dz));
-        }
-        // East face (dx=PEN_SIZE-1): interior Z only
-        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
-            fences.add(new BlockPos(baseX + PEN_SIZE - 1, penY, baseZ + dz));
-        }
-
-        // Gate at south face center: dx = PEN_SIZE/2 = 3
-        int gateDx = PEN_SIZE / 2; // = 3 for PEN_SIZE=7
-        BlockPos gatePos = new BlockPos(baseX + gateDx, penY, baseZ + PEN_SIZE - 1);
-        fences.remove(gatePos); // Remove the gate slot from fence list
+        List<BlockPos> fences = computePerimeterFencePositions(baseX, baseZ, surfaceYAt);
+        BlockPos gatePos = computeGatePosition(baseX, baseZ, surfaceYAt);
 
         // Gate faces NORTH — opens inward toward pen interior
         Direction gateFacing = Direction.NORTH;
 
-        return new PenPlan(origin, new ArrayList<>(fences), gatePos, gateFacing);
+        return new PenPlan(origin, fences, gatePos, gateFacing);
+    }
+
+    static List<BlockPos> computePerimeterFencePositions(int baseX, int baseZ, IntBinaryOperator surfaceYAt) {
+        List<BlockPos> fences = new ArrayList<>();
+
+        // North face (dz=0): all 7 columns
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            int x = baseX + dx;
+            int z = baseZ;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // South face (dz=PEN_SIZE-1): all 7 columns
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            int x = baseX + dx;
+            int z = baseZ + PEN_SIZE - 1;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // West face (dx=0): interior Z only (skip corners already covered)
+        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
+            int x = baseX;
+            int z = baseZ + dz;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // East face (dx=PEN_SIZE-1): interior Z only
+        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
+            int x = baseX + PEN_SIZE - 1;
+            int z = baseZ + dz;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+
+        fences.remove(computeGatePosition(baseX, baseZ, surfaceYAt));
+        return fences;
+    }
+
+    static BlockPos computeGatePosition(int baseX, int baseZ, IntBinaryOperator surfaceYAt) {
+        int gateX = baseX + PEN_SIZE / 2;
+        int gateZ = baseZ + PEN_SIZE - 1;
+        return new BlockPos(gateX, surfaceYAt.applyAsInt(gateX, gateZ) + 1, gateZ);
     }
 
     // -------------------------------------------------------------------------
