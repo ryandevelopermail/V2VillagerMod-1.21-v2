@@ -79,6 +79,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
     private static final int TREE_SCAN_BLOCK_BUDGET_PER_TICK = 8000;
     private static final int INITIAL_SCAN_ACCEPTED_ROOT_TARGET = SESSION_TARGET_MAX;
+    private static final int INITIAL_SCAN_LOCAL_ROOT_TARGET = 1;
+    private static final int MAX_REGION_BLOCK_VISITS_PER_PASS = 12000;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -1154,6 +1156,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
     }
 
+    static boolean shouldEarlyCompleteScanPass(boolean hasMappedBounds, int passIndex, int acceptedRoots, int acceptedLocalRoots) {
+        if (acceptedRoots >= INITIAL_SCAN_ACCEPTED_ROOT_TARGET) {
+            return true;
+        }
+        return passIndex == 0
+                && hasMappedBounds
+                && acceptedLocalRoots >= INITIAL_SCAN_LOCAL_ROOT_TARGET;
+    }
+
     private record MappedBoundsSearchContext(List<VillageMappedBoundsState.MappedBounds> bounds,
                                              int cartographerCount) {
     }
@@ -1226,11 +1237,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private final @Nullable Set<BlockPos> nearbyBells;
         private final Set<BlockPos> uniqueRoots = new HashSet<>();
         private final ScanMetrics metrics = new ScanMetrics();
+        private final int[] regionLayerIndices;
+        private final int[] regionX;
+        private final int[] regionZ;
+        private final boolean[] regionCursorInitialized;
+        private final int[] regionVisitsThisPass;
         private int regionIndex;
         private int layerIndex;
         private int x;
         private int z;
         private int passIndex;
+        private int localAcceptedRoots;
         private boolean complete;
 
         private TreeTargetScanSession(BlockPos center,
@@ -1243,6 +1260,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.cartographerCount = cartographerCount;
             this.regions = regions;
             this.nearbyBells = nearbyBells;
+            this.regionLayerIndices = new int[regions.size()];
+            this.regionX = new int[regions.size()];
+            this.regionZ = new int[regions.size()];
+            this.regionCursorInitialized = new boolean[regions.size()];
+            this.regionVisitsThisPass = new int[regions.size()];
         }
 
         void scanNextBudget(ServerWorld world, int budget, RootCollector collector) {
@@ -1253,9 +1275,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     continue;
                 }
                 ScanBounds region = this.regions.get(this.regionIndex);
-                if (this.x == 0 && this.z == 0) {
-                    this.x = region.min().getX();
-                    this.z = region.min().getZ();
+                if (this.x == 0 && this.z == 0 && this.layerIndex == 0) {
+                    initializeOrRestoreRegionCursor(region);
                 }
 
                 int y = this.center.getY() + activeLayers().get(this.layerIndex);
@@ -1267,6 +1288,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 BlockPos pos = new BlockPos(this.x, y, this.z);
                 remaining--;
                 this.metrics.visited();
+                this.regionVisitsThisPass[this.regionIndex]++;
 
                 if (region.mappedBounds() != null && !isWithinAnyMappedBounds(pos, this.regions, this.center)) {
                     this.metrics.skipped("out_of_bounds");
@@ -1279,6 +1301,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
                     if (collector.tryAdd(world, pos, bellExclusion, this.uniqueRoots)) {
                         this.metrics.accepted();
+                        if (region.usesLocalBellExclusion()) {
+                            this.localAcceptedRoots++;
+                        }
+                        if (shouldEarlyCompleteCurrentPass()) {
+                            this.complete = true;
+                            saveRegionCursor();
+                            break;
+                        }
                     } else {
                         this.metrics.skipped("rejected_root");
                     }
@@ -1292,6 +1322,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                         this.z = region.min().getZ();
                         advanceLayer(region);
                     }
+                }
+
+                if (!this.complete
+                        && this.regionIndex < this.regions.size()
+                        && this.regionVisitsThisPass[this.regionIndex] >= MAX_REGION_BLOCK_VISITS_PER_PASS) {
+                    this.metrics.skipped("region_visit_cap");
+                    advanceRegionWithCheckpoint();
                 }
             }
         }
@@ -1316,22 +1353,66 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.layerIndex++;
             if (this.layerIndex >= activeLayers().size()) {
                 this.layerIndex = 0;
-                this.regionIndex++;
-                this.x = 0;
-                this.z = 0;
+                advanceRegionWithCheckpoint();
             }
         }
 
         private void advancePassIfNeeded() {
+            if (shouldEarlyCompleteCurrentPass()) {
+                this.complete = true;
+                return;
+            }
             if (this.passIndex == 0 && this.uniqueRoots.size() < INITIAL_SCAN_ACCEPTED_ROOT_TARGET) {
                 this.passIndex = 1;
                 this.regionIndex = 0;
                 this.layerIndex = 0;
                 this.x = 0;
                 this.z = 0;
+                for (int i = 0; i < this.regionVisitsThisPass.length; i++) {
+                    this.regionVisitsThisPass[i] = 0;
+                }
                 return;
             }
             this.complete = true;
+        }
+
+        private boolean shouldEarlyCompleteCurrentPass() {
+            return shouldEarlyCompleteScanPass(
+                    this.hasMappedBounds,
+                    this.passIndex,
+                    this.uniqueRoots.size(),
+                    this.localAcceptedRoots);
+        }
+
+        private void advanceRegionWithCheckpoint() {
+            saveRegionCursor();
+            this.regionIndex++;
+            this.layerIndex = 0;
+            this.x = 0;
+            this.z = 0;
+        }
+
+        private void initializeOrRestoreRegionCursor(ScanBounds region) {
+            if (!this.regionCursorInitialized[this.regionIndex]) {
+                this.layerIndex = this.regionLayerIndices[this.regionIndex];
+                this.x = region.min().getX();
+                this.z = region.min().getZ();
+                this.regionCursorInitialized[this.regionIndex] = true;
+                return;
+            }
+            this.layerIndex = this.regionLayerIndices[this.regionIndex];
+            this.x = this.regionX[this.regionIndex];
+            this.z = this.regionZ[this.regionIndex];
+        }
+
+        private void saveRegionCursor() {
+            if (this.regionIndex < 0 || this.regionIndex >= this.regions.size()) {
+                return;
+            }
+            this.regionLayerIndices[this.regionIndex] = this.layerIndex;
+            this.regionX[this.regionIndex] = this.x;
+            this.regionZ[this.regionIndex] = this.z;
+            this.regionCursorInitialized[this.regionIndex] = true;
         }
 
         boolean complete() {

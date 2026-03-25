@@ -54,4 +54,22 @@ class LumberjackGuardChopTreesMappedBoundsModeTest {
         assertEquals(2, merged.size());
         assertTrue(merged.stream().anyMatch(bounds -> bounds.contains(new BlockPos(140, 64, 0))));
     }
+
+    @Test
+    void mapsPresent_withLocalActionableRoots_canCompleteInitialPassImmediately() {
+        assertTrue(LumberjackGuardChopTreesGoal.shouldEarlyCompleteScanPass(
+                true,
+                0,
+                1,
+                1));
+    }
+
+    @Test
+    void mapsPresent_withoutLocalRoots_keepsMappedExpansionPathActive() {
+        assertFalse(LumberjackGuardChopTreesGoal.shouldEarlyCompleteScanPass(
+                true,
+                0,
+                0,
+                0));
+    }
 }
