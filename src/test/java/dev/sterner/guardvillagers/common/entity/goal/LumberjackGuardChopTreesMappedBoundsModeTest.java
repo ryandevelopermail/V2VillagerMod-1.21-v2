@@ -32,6 +32,17 @@ class LumberjackGuardChopTreesMappedBoundsModeTest {
         assertFalse(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, farCandidate, null));
     }
 
+
+    @Test
+    void mappedBoundsMode_remainsEnabledUntilLastValidBoundIsRemovedAcrossScanCycles() {
+        VillageMappedBoundsState.MappedBounds a = new VillageMappedBoundsState.MappedBounds(-64, 64, -64, 64);
+        VillageMappedBoundsState.MappedBounds b = new VillageMappedBoundsState.MappedBounds(256, 384, 256, 384);
+
+        assertTrue(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of(a, b, a)));
+        assertTrue(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of(b)));
+        assertFalse(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of()));
+    }
+
     @Test
     void mergeOverlappingMappedBounds_combinesOverlapsIntoMinimalScanRegion() {
         List<VillageMappedBoundsState.MappedBounds> merged = LumberjackGuardChopTreesGoal.mergeOverlappingMappedBounds(List.of(

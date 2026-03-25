@@ -964,9 +964,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             regions.add(ScanBounds.fromLocalRadius(center));
         }
 
-        LOGGER.debug("Lumberjack Guard {} mapped-bounds mode active={} (center={})",
+        int uniqueBoundsCount = mappedContext == null ? 0 : mappedContext.bounds().size();
+        LOGGER.debug("Lumberjack Guard {} mapped-mode={} uniqueBounds={} center={}",
                 this.guard.getUuidAsString(),
-                mappedMode,
+                mappedMode ? "on" : "off",
+                uniqueBoundsCount,
                 center.toShortString());
         return new TreeTargetScanSession(center,
                 mappedMode,
@@ -1075,19 +1077,42 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             allBounds.addAll(chestBounds);
         }
 
-        if (allBounds.isEmpty()) {
-            LOGGER.debug("Lumberjack Guard {} nearby cartographers found but no populated maps in paired chests",
+        List<VillageMappedBoundsState.MappedBounds> uniqueValidBounds = uniqueValidMappedBounds(allBounds);
+        if (!isMappedModeEnabled(uniqueValidBounds)) {
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds fallback: zero valid populated map bounds remain",
                     this.guard.getUuidAsString());
             return null;
         }
 
-        List<VillageMappedBoundsState.MappedBounds> mergedBounds = mergeOverlappingMappedBounds(allBounds);
-        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} populated map bounds (merged={})",
+        List<VillageMappedBoundsState.MappedBounds> mergedBounds = mergeOverlappingMappedBounds(uniqueValidBounds);
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} valid unique populated map bounds (merged={})",
                 this.guard.getUuidAsString(),
                 nearbyCartographers.size(),
-                allBounds.size(),
+                uniqueValidBounds.size(),
                 mergedBounds.size());
         return new MappedBoundsSearchContext(mergedBounds, nearbyCartographers.size());
+    }
+
+    static boolean isMappedModeEnabled(List<VillageMappedBoundsState.MappedBounds> bounds) {
+        return !uniqueValidMappedBounds(bounds).isEmpty();
+    }
+
+    static List<VillageMappedBoundsState.MappedBounds> uniqueValidMappedBounds(List<VillageMappedBoundsState.MappedBounds> bounds) {
+        if (bounds.isEmpty()) {
+            return List.of();
+        }
+
+        List<VillageMappedBoundsState.MappedBounds> uniqueValid = new ArrayList<>();
+        Set<VillageMappedBoundsState.MappedBounds> seen = new HashSet<>();
+        for (VillageMappedBoundsState.MappedBounds candidate : bounds) {
+            if (candidate.minX() > candidate.maxX() || candidate.minZ() > candidate.maxZ()) {
+                continue;
+            }
+            if (seen.add(candidate)) {
+                uniqueValid.add(candidate);
+            }
+        }
+        return uniqueValid;
     }
 
     static List<VillageMappedBoundsState.MappedBounds> mergeOverlappingMappedBounds(List<VillageMappedBoundsState.MappedBounds> bounds) {
