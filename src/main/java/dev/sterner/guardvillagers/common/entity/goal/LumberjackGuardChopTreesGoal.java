@@ -950,28 +950,26 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         BlockPos center = getPairedBaseCenter(table, chest);
 
         MappedBoundsSearchContext mappedContext = resolveMappedBoundsSearchContext(world, center);
-        boolean mappedMode = mappedContext != null;
-        Set<BlockPos> nearbyBells = mappedMode
-                ? Set.of()
-                : collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
+        boolean hasMappedBounds = mappedContext != null;
+        Set<BlockPos> nearbyBells = collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
 
         List<ScanBounds> regions = new ArrayList<>();
-        if (mappedMode) {
+        regions.add(ScanBounds.fromLocalRadius(center));
+        if (hasMappedBounds) {
             for (VillageMappedBoundsState.MappedBounds bounds : mappedContext.bounds()) {
                 regions.add(ScanBounds.fromMapped(center, bounds));
             }
-        } else {
-            regions.add(ScanBounds.fromLocalRadius(center));
         }
 
         int uniqueBoundsCount = mappedContext == null ? 0 : mappedContext.bounds().size();
-        LOGGER.debug("Lumberjack Guard {} mapped-mode={} uniqueBounds={} center={}",
+        String scanMode = hasMappedBounds ? "local+mapped" : "local-only";
+        LOGGER.debug("Lumberjack Guard {} scan-mode={} uniqueBounds={} center={}",
                 this.guard.getUuidAsString(),
-                mappedMode ? "on" : "off",
+                scanMode,
                 uniqueBoundsCount,
                 center.toShortString());
         return new TreeTargetScanSession(center,
-                mappedMode,
+                hasMappedBounds,
                 mappedContext == null ? 0 : mappedContext.cartographerCount(),
                 regions,
                 nearbyBells);
@@ -1160,14 +1158,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                                              int cartographerCount) {
     }
 
-    private record ScanBounds(BlockPos min, BlockPos max, long candidateCount) {
+    private record ScanBounds(BlockPos min,
+                              BlockPos max,
+                              long candidateCount,
+                              @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
+                              boolean usesLocalBellExclusion) {
         static ScanBounds fromLocalRadius(BlockPos center) {
             BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
             BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
             long width = (long) (max.getX() - min.getX() + 1);
             long height = (long) (max.getY() - min.getY() + 1);
             long depth = (long) (max.getZ() - min.getZ() + 1);
-            return new ScanBounds(min, max, width * height * depth);
+            return new ScanBounds(min, max, width * height * depth, null, true);
         }
 
         static ScanBounds fromMapped(BlockPos center, VillageMappedBoundsState.MappedBounds bounds) {
@@ -1176,7 +1178,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             long width = (long) (max.getX() - min.getX() + 1);
             long height = (long) (max.getY() - min.getY() + 1);
             long depth = (long) (max.getZ() - min.getZ() + 1);
-            return new ScanBounds(min, max, width * height * depth);
+            return new ScanBounds(min, max, width * height * depth, bounds, false);
         }
     }
 
@@ -1218,7 +1220,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private static final List<Integer> SECONDARY_LAYER_OFFSETS = List.of(4, -3, 5, -4, 6, -5, 7, -6, 8, -7, 9, -8, 10, -9, -10);
 
         private final BlockPos center;
-        private final boolean mappedMode;
+        private final boolean hasMappedBounds;
         private final int cartographerCount;
         private final List<ScanBounds> regions;
         private final @Nullable Set<BlockPos> nearbyBells;
@@ -1232,12 +1234,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private boolean complete;
 
         private TreeTargetScanSession(BlockPos center,
-                                      boolean mappedMode,
+                                      boolean hasMappedBounds,
                                       int cartographerCount,
                                       List<ScanBounds> regions,
                                       @Nullable Set<BlockPos> nearbyBells) {
             this.center = center;
-            this.mappedMode = mappedMode;
+            this.hasMappedBounds = hasMappedBounds;
             this.cartographerCount = cartographerCount;
             this.regions = regions;
             this.nearbyBells = nearbyBells;
@@ -1266,13 +1268,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 remaining--;
                 this.metrics.visited();
 
-                if (this.mappedMode && !isWithinAnyMappedBounds(pos, this.regions, this.center)) {
+                if (region.mappedBounds() != null && !isWithinAnyMappedBounds(pos, this.regions, this.center)) {
+                    this.metrics.skipped("out_of_bounds");
+                } else if (!isCandidateInScanMode(this.center, pos, region.mappedBounds())) {
                     this.metrics.skipped("out_of_bounds");
                 } else if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
                     this.metrics.skipped("non_log");
                 } else {
                     this.metrics.candidate();
-                    if (collector.tryAdd(world, pos, this.nearbyBells, this.uniqueRoots)) {
+                    Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
+                    if (collector.tryAdd(world, pos, bellExclusion, this.uniqueRoots)) {
                         this.metrics.accepted();
                     } else {
                         this.metrics.skipped("rejected_root");
@@ -1293,9 +1298,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         private static boolean isWithinAnyMappedBounds(BlockPos pos, List<ScanBounds> regions, BlockPos center) {
             for (ScanBounds region : regions) {
-                VillageMappedBoundsState.MappedBounds bounds = new VillageMappedBoundsState.MappedBounds(
-                        region.min().getX(), region.max().getX(), region.min().getZ(), region.max().getZ());
-                if (isCandidateInScanMode(center, pos, bounds)) {
+                if (region.mappedBounds() == null) {
+                    continue;
+                }
+                if (isCandidateInScanMode(center, pos, region.mappedBounds())) {
                     return true;
                 }
             }
@@ -1341,7 +1347,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         void logMetrics(String guardId) {
             LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} skipped={}",
                     guardId,
-                    this.mappedMode ? "mapped-bounds" : "local-radius",
+                    this.hasMappedBounds ? "local+mapped" : "local-only",
                     this.cartographerCount,
                     this.regions.size(),
                     this.metrics.elapsedMs(),
