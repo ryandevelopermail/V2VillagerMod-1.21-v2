@@ -199,8 +199,12 @@ public class LeatherworkerCraftingGoal extends Goal {
         }
 
         boolean framePriority = hasNearbyCartographerFrameDemand(world);
-        LeatherRecipe recipe = selectRecipe(craftable, framePriority)
-                .orElseGet(() -> craftable.get(villager.getRandom().nextInt(craftable.size())));
+        int recipeIndex = selectRecipeIndex(
+                craftable.stream().map(LeatherRecipe::output).toList(),
+                framePriority,
+                villager.getRandom()
+        );
+        LeatherRecipe recipe = craftable.get(recipeIndex);
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -217,13 +221,21 @@ public class LeatherworkerCraftingGoal extends Goal {
         }
     }
 
-    private Optional<LeatherRecipe> selectRecipe(List<LeatherRecipe> craftable, boolean framePriority) {
+    static int selectRecipeIndex(List<ItemStack> craftableOutputs, boolean framePriority, net.minecraft.util.math.random.Random random) {
+        if (craftableOutputs.isEmpty()) {
+            throw new IllegalArgumentException("craftableOutputs must not be empty");
+        }
+        Optional<Integer> prioritizedIndex = selectRecipe(craftableOutputs, framePriority);
+        return prioritizedIndex.orElseGet(() -> random.nextInt(craftableOutputs.size()));
+    }
+
+    private static Optional<Integer> selectRecipe(List<ItemStack> craftableOutputs, boolean framePriority) {
         if (!framePriority) {
             return Optional.empty();
         }
-        for (LeatherRecipe recipe : craftable) {
-            if (recipe.output.isOf(Items.ITEM_FRAME)) {
-                return Optional.of(recipe);
+        for (int i = 0; i < craftableOutputs.size(); i++) {
+            if (craftableOutputs.get(i).isOf(Items.ITEM_FRAME)) {
+                return Optional.of(i);
             }
         }
         return Optional.empty();
