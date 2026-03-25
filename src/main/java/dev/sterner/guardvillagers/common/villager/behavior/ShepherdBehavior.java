@@ -26,6 +26,10 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 public class ShepherdBehavior implements VillagerProfessionBehavior {
+    enum FenceCraftingOwner {
+        NONE,
+        DEDICATED_FENCE_GOAL
+    }
     private static final long SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS = 10L;
     private static final long SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final int SPECIAL_GOAL_PRIORITY = 3;
@@ -45,6 +49,10 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
+
+    static FenceCraftingOwner resolveFenceCraftingOwner(boolean craftingTablePaired) {
+        return craftingTablePaired ? FenceCraftingOwner.DEDICATED_FENCE_GOAL : FenceCraftingOwner.NONE;
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -102,19 +110,6 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         bedPlacerGoal.requestImmediateCheck();
 
-        // Fence crafting (does NOT require a crafting table — simulated craft into chest).
-        // Registered here in onChestPaired so it works without a crafting table being paired.
-        // onCraftingTablePaired will update targets if a table is later paired.
-        ShepherdFenceCraftingGoal fenceCraftingGoalFromChest = FENCE_CRAFTING_GOALS.get(villager);
-        if (fenceCraftingGoalFromChest == null) {
-            fenceCraftingGoalFromChest = new ShepherdFenceCraftingGoal(villager, jobPos, chestPos, null);
-            FENCE_CRAFTING_GOALS.put(villager, fenceCraftingGoalFromChest);
-            villager.goalSelector.add(FENCE_CRAFTING_GOAL_PRIORITY, fenceCraftingGoalFromChest);
-        } else {
-            fenceCraftingGoalFromChest.setTargets(jobPos, chestPos, fenceCraftingGoalFromChest.getCraftingTablePos());
-        }
-        fenceCraftingGoalFromChest.requestImmediateCraft(world);
-
         // Fence placer (runs on chest-pair; no crafting table needed — only places blocks)
         ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
         if (fencePlacerGoal == null) {
@@ -153,16 +148,18 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         bedCraftingGoal.requestImmediateCraft(world);
 
-        // Fence crafting (requires crafting table; lower priority than bed crafting)
-        ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
-        if (fenceCraftingGoal == null) {
-            fenceCraftingGoal = new ShepherdFenceCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
-            FENCE_CRAFTING_GOALS.put(villager, fenceCraftingGoal);
-            villager.goalSelector.add(FENCE_CRAFTING_GOAL_PRIORITY, fenceCraftingGoal);
-        } else {
-            fenceCraftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        if (resolveFenceCraftingOwner(true) == FenceCraftingOwner.DEDICATED_FENCE_GOAL) {
+            // Fence crafting ownership lives in ShepherdFenceCraftingGoal and is table-paired only.
+            ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
+            if (fenceCraftingGoal == null) {
+                fenceCraftingGoal = new ShepherdFenceCraftingGoal(villager, jobPos, chestPos, craftingTablePos);
+                FENCE_CRAFTING_GOALS.put(villager, fenceCraftingGoal);
+                villager.goalSelector.add(FENCE_CRAFTING_GOAL_PRIORITY, fenceCraftingGoal);
+            } else {
+                fenceCraftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
+            }
+            fenceCraftingGoal.requestImmediateCraft(world);
         }
-        fenceCraftingGoal.requestImmediateCraft(world);
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -250,9 +247,11 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             bedPlacerGoal.requestImmediateCheck();
         }
 
-        ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
-        if (fenceCraftingGoal != null) {
-            fenceCraftingGoal.requestImmediateCraft(world);
+        if (resolveFenceCraftingOwner(FENCE_CRAFTING_GOALS.containsKey(villager)) == FenceCraftingOwner.DEDICATED_FENCE_GOAL) {
+            ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
+            if (fenceCraftingGoal != null) {
+                fenceCraftingGoal.requestImmediateCraft(world);
+            }
         }
 
         ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
