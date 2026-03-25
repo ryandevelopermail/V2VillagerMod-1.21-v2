@@ -40,9 +40,7 @@ public class CartographerMapExplorationGoal extends Goal {
     private static final int RETURN_TRAVEL_TIMEOUT_TICKS = 20 * 180;
     private static final int TABLE_TRAVEL_TIMEOUT_TICKS = 20 * 120;
     private static final int DEFAULT_MAP_SCALE = 0;
-    private static final int REQUIRED_MAP_BATCH = 4;
-    /** Maps needed in chest before triggering the cartography-table copy run.
-     *  After exploration deposits REQUIRED_MAP_BATCH (4) maps, the copy run fires immediately. */
+    /** Filled maps needed in chest before triggering the cartography-table copy run. */
     private static final int COPY_TRIGGER_COUNT = 4;
     /** Number of map copies to produce at the cartography table (one per original tile). */
     private static final int MAPS_TO_COPY = 4;
@@ -112,10 +110,11 @@ public class CartographerMapExplorationGoal extends Goal {
 
         int emptyMaps = countEmptyMaps(world);
         int pending = pendingTargets.size();
+        int queueLength = getQueueLength(world);
 
-        if (emptyMaps < REQUIRED_MAP_BATCH || pending < REQUIRED_MAP_BATCH) {
-            LOGGER.debug("Cartographer {} canStart=false: emptyMaps={} (need {}) pendingTiles={} (need {}) mappedTiles={}",
-                    villager.getUuidAsString(), emptyMaps, REQUIRED_MAP_BATCH, pending, REQUIRED_MAP_BATCH, mappedTargets.size());
+        if (queueLength <= 0 || pending <= 0) {
+            LOGGER.debug("Cartographer {} canStart=false: queueLength={} emptyMaps={} pendingTiles={} mappedTiles={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, mappedTargets.size());
             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
             immediateCheckPending = false;
             return false;
@@ -125,8 +124,8 @@ public class CartographerMapExplorationGoal extends Goal {
         if (!pendingTargets.isEmpty()) {
             MapTarget first = pendingTargets.get(0);
             int dist = (int) Math.sqrt(villager.squaredDistanceTo(first.centerX(), villager.getY(), first.centerZ()));
-            LOGGER.info("Cartographer {} canStart=true: emptyMaps={} pendingTiles={} firstTarget=({},{}) approxDist={}",
-                    villager.getUuidAsString(), emptyMaps, pending, first.centerX(), first.centerZ(), dist);
+            LOGGER.info("Cartographer {} canStart=true: queueLength={} emptyMaps={} pendingTiles={} firstTarget=({},{}) approxDist={}",
+                    villager.getUuidAsString(), queueLength, emptyMaps, pending, first.centerX(), first.centerZ(), dist);
         }
         return true;
     }
@@ -172,14 +171,14 @@ public class CartographerMapExplorationGoal extends Goal {
         switch (stage) {
             case ACQUIRE_MAPS -> {
                 Inventory inventory = getChestInventory(world).orElse(null);
-                if (inventory == null || pendingTargets.size() < REQUIRED_MAP_BATCH) {
+                if (inventory == null || pendingTargets.isEmpty()) {
                     stage = Stage.DONE;
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
                 }
 
-                List<ItemStack> emptyMaps = takeEmptyMapsFromChest(world, REQUIRED_MAP_BATCH);
-                if (emptyMaps.size() < REQUIRED_MAP_BATCH) {
+                List<ItemStack> emptyMaps = takeEmptyMapsFromChest(world, 1);
+                if (emptyMaps.isEmpty()) {
                     stage = Stage.DONE;
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
                     return;
@@ -188,11 +187,9 @@ public class CartographerMapExplorationGoal extends Goal {
                 workflowTargets.clear();
                 workflowMaps.clear();
                 completedWorkflowIndices.clear();
-                for (int i = 0; i < REQUIRED_MAP_BATCH; i++) {
-                    MapTarget target = pendingTargets.remove(0);
-                    workflowTargets.add(target);
-                    workflowMaps.add(FilledMapItem.createMap(world, target.centerX(), target.centerZ(), (byte) mapScale, true, false));
-                }
+                MapTarget target = pendingTargets.remove(0);
+                workflowTargets.add(target);
+                workflowMaps.add(FilledMapItem.createMap(world, target.centerX(), target.centerZ(), (byte) mapScale, true, false));
 
                 workflowIndex = 0;
                 workflowBatchStartTick = world.getTime();
@@ -274,7 +271,7 @@ public class CartographerMapExplorationGoal extends Goal {
                     } else {
                         refreshMappedTargets(world);
                         buildTargets(world);
-                        if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                        if (getQueueLength(world) > 0) {
                             stage = Stage.ACQUIRE_MAPS;
                         } else {
                             nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -330,7 +327,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 mapsCopiedThisCycle = true;
                 refreshMappedTargets(world);
                 buildTargets(world);
-                if (countEmptyMaps(world) >= REQUIRED_MAP_BATCH && pendingTargets.size() >= REQUIRED_MAP_BATCH) {
+                if (getQueueLength(world) > 0) {
                     stage = Stage.ACQUIRE_MAPS;
                 } else {
                     nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -797,6 +794,10 @@ public class CartographerMapExplorationGoal extends Goal {
             }
         }
         return count;
+    }
+
+    private int getQueueLength(ServerWorld world) {
+        return Math.min(countEmptyMaps(world), pendingTargets.size());
     }
 
     private List<ItemStack> takeEmptyMapsFromChest(ServerWorld world, int amount) {
