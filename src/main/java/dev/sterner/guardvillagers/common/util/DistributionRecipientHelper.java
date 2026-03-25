@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -37,6 +38,16 @@ public final class DistributionRecipientHelper {
 
     public static List<RecipientRecord> findEligibleCartographerRecipients(ServerWorld world, VillagerEntity source, double range) {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.CARTOGRAPHER, Blocks.CARTOGRAPHY_TABLE);
+    }
+
+    public static List<RecipientRecord> findEligibleV2CartographerRecipients(ServerWorld world, VillagerEntity source, double range) {
+        return findEligibleRecipients(
+                world,
+                source,
+                range,
+                VillagerProfession.CARTOGRAPHER,
+                Blocks.CARTOGRAPHY_TABLE,
+                recipient -> isEligibleV2CartographerRecipient(world, recipient));
     }
 
     public static List<RecipientRecord> findEligibleLibrarianRecipients(ServerWorld world, VillagerEntity source, double range) {
@@ -223,6 +234,28 @@ public final class DistributionRecipientHelper {
                 && !villager.isBaby()
                 && profession != VillagerProfession.NONE
                 && profession != VillagerProfession.NITWIT;
+    }
+
+    private static boolean isEligibleV2CartographerRecipient(ServerWorld world, RecipientRecord recipient) {
+        if (!JobBlockPairingHelper.findNearbyChest(world, recipient.jobPos())
+                .map(chest -> chest.equals(recipient.chestPos()))
+                .orElse(false)) {
+            return false;
+        }
+
+        boolean hasActivePairing = CartographerBehavior.getNearbyPairings(world, recipient.jobPos(), 0).stream()
+                .anyMatch(pairing -> pairing.jobPos().equals(recipient.jobPos()) && pairing.chestPos().equals(recipient.chestPos()));
+        if (!hasActivePairing) {
+            return false;
+        }
+
+        Optional<BlockPos> craftingTable = JobBlockPairingHelper.findNearbyCraftingTable(world, recipient.jobPos());
+        if (craftingTable.isEmpty()) {
+            return false;
+        }
+        return JobBlockPairingHelper.findNearbyChest(world, craftingTable.get(), recipient.jobPos())
+                .map(chest -> chest.equals(recipient.chestPos()))
+                .orElse(false);
     }
 
     public record RecipientRecord(VillagerEntity recipient, BlockPos jobPos, BlockPos chestPos, double sourceSquaredDistance) {
