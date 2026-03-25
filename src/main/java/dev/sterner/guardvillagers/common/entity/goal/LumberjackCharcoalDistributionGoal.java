@@ -43,8 +43,8 @@ import java.util.Optional;
  * chest so the furnace has continuous fuel to keep producing more. Only charcoal
  * beyond that reserve threshold is distributed.</p>
  *
- * <p>Distribution is round-robin across discovered recipients, one item at a time,
- * walking source→target on each transfer cycle.</p>
+ * <p>Distribution is round-robin across discovered recipients, moving adaptive-sized
+ * batches based on recipient urgency, while still preserving source reserves.</p>
  */
 public class LumberjackCharcoalDistributionGoal extends Goal {
 
@@ -54,7 +54,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     static final int CHARCOAL_RESERVE = 16;
 
     /** How often to poll the chest when idle (ticks). */
-    private static final int POLL_INTERVAL_TICKS = 100;
+    private static final int POLL_INTERVAL_TICKS = 40;
 
     /** Movement speed. */
     private static final double MOVE_SPEED = 0.6D;
@@ -69,6 +69,10 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     private static final int PATH_RETRY_TICKS = 20;
     /** If coal/charcoal fuel is below this count, top-up is allowed (when work exists). */
     private static final int LOW_FUEL_THRESHOLD = 8;
+    /** Baseline transfer size for normal top-ups. */
+    private static final int BASELINE_BATCH = 4;
+    /** Larger transfer used for urgent, empty-fuel recipients with pending work. */
+    private static final int URGENT_BATCH = 12;
 
     // -----------------------------------------------------------------------
 
@@ -83,6 +87,8 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     private ItemStack carriedCharcoal = ItemStack.EMPTY;
     /** Target recipient chest for the current transfer. */
     private BlockPos targetChestPos = null;
+    /** Current transfer size plan selected during recipient discovery. */
+    private int targetTransferCount = BASELINE_BATCH;
     /** Round-robin cursor per recipient list. */
     private final Map<VillagerProfession, Integer> recipientCursor = new HashMap<>();
 
@@ -117,16 +123,17 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         }
 
         // Find a recipient (prioritize active fuel demand; fallback to chest-space recipients)
-        BlockPos recipient = findRecipient(world);
+        RecipientEntry recipient = findRecipient(world);
         if (recipient == null) {
             LOGGER.debug("LumberjackCharcoal {}: surplus={} but no recipients found within {} blocks",
                     guard.getUuidAsString(), surplus, SCAN_RADIUS);
             return false;
         }
 
-        this.targetChestPos = recipient;
+        this.targetChestPos = recipient.chestPos();
+        this.targetTransferCount = recipient.urgentFuelNeed() ? URGENT_BATCH : BASELINE_BATCH;
         LOGGER.info("LumberjackCharcoal {}: charcoal={} surplus={} → distributing to chest at {}",
-                guard.getUuidAsString(), charcoalInChest, surplus, recipient.toShortString());
+                guard.getUuidAsString(), charcoalInChest, surplus, recipient.chestPos().toShortString());
         return true;
     }
 
@@ -154,6 +161,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         }
         carriedCharcoal = ItemStack.EMPTY;
         targetChestPos = null;
+        targetTransferCount = BASELINE_BATCH;
         stage = Stage.DONE;
     }
 
@@ -200,8 +208,8 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     // -----------------------------------------------------------------------
 
     /**
-     * Extracts exactly 1 charcoal from the source chest (capped by surplus above reserve).
-     * Returns false if nothing could be extracted.
+     * Extracts a batch of charcoal from the source chest, capped by source surplus
+     * above {@link #CHARCOAL_RESERVE} and by current transfer urgency.
      */
     private boolean extractCharcoal(ServerWorld world, BlockPos chestPos) {
         Inventory chest = getChestInventory(world, chestPos);
@@ -211,17 +219,21 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         int surplus = charcoalInChest - CHARCOAL_RESERVE;
         if (surplus <= 0) return false;
 
-        // Extract exactly 1 — the target doesn't need a flood
+        int toExtract = Math.min(Math.max(1, targetTransferCount), surplus);
+        int extracted = 0;
         for (int slot = 0; slot < chest.size(); slot++) {
+            if (extracted >= toExtract) break;
             ItemStack stack = chest.getStack(slot);
             if (stack.isEmpty() || !stack.isOf(Items.CHARCOAL)) continue;
-            stack.decrement(1);
+            int take = Math.min(stack.getCount(), toExtract - extracted);
+            stack.decrement(take);
             if (stack.isEmpty()) chest.setStack(slot, ItemStack.EMPTY);
-            chest.markDirty();
-            carriedCharcoal = new ItemStack(Items.CHARCOAL, 1);
-            return true;
+            extracted += take;
         }
-        return false;
+        if (extracted <= 0) return false;
+        chest.markDirty();
+        carriedCharcoal = new ItemStack(Items.CHARCOAL, extracted);
+        return true;
     }
 
     private void depositCarried(ServerWorld world) {
@@ -239,7 +251,10 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         if (!remaining.isEmpty()) {
             // Target is full — put it back
             returnCarriedToSource(world);
+            return;
         }
+        // Successful delivery: allow immediate reevaluation for rapid follow-up runs.
+        nextPollTick = world.getTime();
     }
 
     private void returnCarriedToSource(ServerWorld world) {
@@ -272,7 +287,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
      * Recipients: butcher (smoker), armorer (blast furnace), toolsmith (smithing table),
      * weaponsmith (grindstone).
      */
-    private BlockPos findRecipient(ServerWorld world) {
+    private RecipientEntry findRecipient(ServerWorld world) {
         // Build a combined ranked list across all recipient professions
         List<RecipientEntry> all = new ArrayList<>();
         all.addAll(findRecipientsByProfession(world, VillagerProfession.BUTCHER, Blocks.SMOKER));
@@ -285,8 +300,9 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
         if (all.isEmpty()) return null;
 
-        // Sort deterministically (demand first, then chest pos) so the cursor is stable
-        all.sort(Comparator.comparing(RecipientEntry::fuelNeeded).reversed()
+        // Sort deterministically (urgent demand first, then demand, then chest pos) so the cursor is stable
+        all.sort(Comparator.comparing(RecipientEntry::urgentFuelNeed).reversed()
+                .thenComparing(Comparator.comparing(RecipientEntry::fuelNeeded).reversed())
                 .thenComparingInt(e -> e.chestPos().getX())
                 .thenComparingInt(e -> e.chestPos().getZ())
                 .thenComparingInt(e -> e.chestPos().getY()));
@@ -295,7 +311,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         int index = Math.floorMod(cursor, all.size());
         recipientCursor.put(VillagerProfession.NONE, index + 1);
 
-        return all.get(index).chestPos();
+        return all.get(index);
     }
 
     private List<RecipientEntry> findRecipientsByProfession(ServerWorld world,
@@ -324,16 +340,19 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
             if (inv == null) continue;
 
             boolean fuelNeeded = false;
+            boolean urgentFuelNeed = false;
             BlockEntity jobBlockEntity = world.getBlockEntity(jobPos);
             if (profession == VillagerProfession.BUTCHER) {
                 if (!(jobBlockEntity instanceof SmokerBlockEntity smoker)) continue;
                 fuelNeeded = isFuelNeeded(world, smoker, inv);
+                urgentFuelNeed = isUrgentFuelNeed(world, smoker.getStack(1), smoker.getStack(0), inv, true);
             } else if (profession == VillagerProfession.ARMORER) {
                 if (!(jobBlockEntity instanceof BlastFurnaceBlockEntity blastFurnace)) continue;
                 fuelNeeded = isFuelNeeded(world, blastFurnace, inv);
+                urgentFuelNeed = isUrgentFuelNeed(world, blastFurnace.getStack(1), blastFurnace.getStack(0), inv, false);
             }
 
-            result.add(new RecipientEntry(inv, chestPos.get().toImmutable(), fuelNeeded));
+            result.add(new RecipientEntry(inv, chestPos.get().toImmutable(), fuelNeeded, urgentFuelNeed));
         }
         return result;
     }
@@ -354,6 +373,18 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
         boolean hasWork = !inputStack.isEmpty() || hasProcessableInputInChest;
         return hasWork;
+    }
+
+    private boolean isUrgentFuelNeed(ServerWorld world,
+                                     ItemStack fuelStack,
+                                     ItemStack inputStack,
+                                     Inventory chestInventory,
+                                     boolean smokerType) {
+        if (!fuelStack.isEmpty()) return false;
+        boolean hasProcessableInputInChest = smokerType
+                ? hasSmokableInputInChest(world, chestInventory)
+                : hasBlastableInputInChest(world, chestInventory);
+        return !inputStack.isEmpty() || hasProcessableInputInChest;
     }
 
     private boolean hasSmokableInputInChest(ServerWorld world, Inventory chestInventory) {
@@ -466,7 +497,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     // Records / enums
     // -----------------------------------------------------------------------
 
-    private record RecipientEntry(Inventory inventory, BlockPos chestPos, boolean fuelNeeded) {}
+    private record RecipientEntry(Inventory inventory, BlockPos chestPos, boolean fuelNeeded, boolean urgentFuelNeed) {}
 
     private enum Stage {
         IDLE,
