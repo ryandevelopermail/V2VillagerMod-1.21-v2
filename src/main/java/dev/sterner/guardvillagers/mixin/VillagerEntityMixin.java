@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandMemoryHolder;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.villager.behavior.VillagerFenceGateEscapeHelper;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.server.world.ServerWorld;
@@ -69,6 +70,14 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private final Map<BlockPos, Long> guardvillagers$nextReservedVisualResetTickByPos = new HashMap<>();
     @Unique
     private long guardvillagers$nextReservedVisualResetTickForVillager = Long.MIN_VALUE;
+
+    @Unique
+    @Nullable
+    private BlockPos guardvillagers$emergencyEscapeGatePos;
+    @Unique
+    private boolean guardvillagers$emergencyEscapeOpenedGate;
+    @Unique
+    private long guardvillagers$emergencyEscapeLastAttemptTick = Long.MIN_VALUE;
 
     // -------------------------------------------------------------------------
     // Village membership — home bell tag (Cluster 1B)
@@ -422,6 +431,24 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
                     GUARDVILLAGERS_RESERVED_POI_FALLBACK_COOLDOWN_SKIPS.get(),
                     GUARDVILLAGERS_RESERVED_POI_FALLBACK_SAME_POS_SKIPS.get());
         }
+    }
+
+    @Inject(method = "mobTick", at = @At("TAIL"))
+    private void guardvillagers$handleEmergencyFenceGateEscape(CallbackInfo ci) {
+        VillagerEntity villager = (VillagerEntity) (Object) this;
+        if (villager.getWorld().isClient || !(villager.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+
+        VillagerFenceGateEscapeHelper.EscapeState state = VillagerFenceGateEscapeHelper.tick(
+                serverWorld,
+                villager,
+                guardvillagers$emergencyEscapeGatePos,
+                guardvillagers$emergencyEscapeOpenedGate,
+                guardvillagers$emergencyEscapeLastAttemptTick);
+        guardvillagers$emergencyEscapeGatePos = state.activeGate();
+        guardvillagers$emergencyEscapeOpenedGate = state.openedByEmergency();
+        guardvillagers$emergencyEscapeLastAttemptTick = state.lastAttemptTick();
     }
 
 }
