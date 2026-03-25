@@ -17,6 +17,7 @@ import net.minecraft.item.AxeItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.TagKey;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.Box;
@@ -173,16 +174,9 @@ public final class LumberjackChestTriggerController {
         // Only demand these if the lumberjack has a crafting table (base pairing is complete).
         if (guard.getPairedCraftingTablePos() != null) {
             Inventory chestInv = resolveChestInventory(world, guard);
-            if (chestInv != null) {
-                int fences = countItems(chestInv, Items.OAK_FENCE);
-                int gates = countItems(chestInv, Items.OAK_FENCE_GATE);
-                // Target: enough for a 6×6 pen (20 fence segments + 1 gate)
-                if (fences < 20) {
-                    return UpgradeDemand.v3Fence();
-                }
-                if (gates < 1) {
-                    return UpgradeDemand.v3FenceGate();
-                }
+            UpgradeDemand penDemand = resolveV3PenDemand(chestInv);
+            if (penDemand != null) {
+                return penDemand;
             }
         }
 
@@ -1366,6 +1360,10 @@ public final class LumberjackChestTriggerController {
         return countMatching(context, stack -> stack.isOf(item));
     }
 
+    private static int countByTag(TriggerContext context, TagKey<Item> tag) {
+        return countMatching(context, stack -> stack.isIn(tag));
+    }
+
     private static int countMatching(TriggerContext context, Predicate<ItemStack> predicate) {
         return countMatching(context.chestInventory(), predicate) + countMatching(context.guard().getGatheredStackBuffer(), predicate);
     }
@@ -1373,6 +1371,30 @@ public final class LumberjackChestTriggerController {
     /** Simple item count helper used by resolveNextUpgradeDemand. */
     private static int countItems(Inventory inventory, Item item) {
         return countMatching(inventory, stack -> stack.isOf(item));
+    }
+
+    private static int countByTag(Inventory inventory, TagKey<Item> tag) {
+        return countMatching(inventory, stack -> stack.isIn(tag));
+    }
+
+    private static int countByTag(List<ItemStack> stacks, TagKey<Item> tag) {
+        return countMatching(stacks, stack -> stack.isIn(tag));
+    }
+
+    static UpgradeDemand resolveV3PenDemand(Inventory inventory) {
+        if (inventory == null) {
+            return null;
+        }
+        int fences = countByTag(inventory, ItemTags.FENCES);
+        int gates = countByTag(inventory, ItemTags.FENCE_GATES);
+        // Target: enough for a 6×6 pen (20 fence segments + 1 gate)
+        if (fences < 20) {
+            return UpgradeDemand.v3Fence();
+        }
+        if (gates < 1) {
+            return UpgradeDemand.v3FenceGate();
+        }
+        return null;
     }
 
     private static int countMatching(Inventory inventory, Predicate<ItemStack> predicate) {

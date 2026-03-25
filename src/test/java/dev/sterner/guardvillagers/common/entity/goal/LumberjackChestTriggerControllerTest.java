@@ -1,8 +1,13 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import net.minecraft.inventory.SimpleInventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LumberjackChestTriggerControllerTest {
@@ -83,6 +88,57 @@ class LumberjackChestTriggerControllerTest {
         );
 
         assertFalse(blocked);
+    }
+
+    @Test
+    void resolveV3PenDemand_mixedFenceTypesMeetingThreshold_doesNotRequestRedundantFenceCrafting() {
+        SimpleInventory chestInventory = new SimpleInventory(3);
+        chestInventory.setStack(0, new ItemStack(Items.OAK_FENCE, 10));
+        chestInventory.setStack(1, new ItemStack(Items.SPRUCE_FENCE, 10));
+        chestInventory.setStack(2, new ItemStack(Items.OAK_FENCE_GATE, 1));
+
+        LumberjackChestTriggerController.UpgradeDemand demand =
+                LumberjackChestTriggerController.resolveV3PenDemand(chestInventory);
+
+        assertNull(demand);
+    }
+
+    @Test
+    void resolveV3PenDemand_mixedFenceGateTypesMeetingThreshold_doesNotRequestRedundantGateCrafting() {
+        SimpleInventory chestInventory = new SimpleInventory(4);
+        chestInventory.setStack(0, new ItemStack(Items.OAK_FENCE, 20));
+        chestInventory.setStack(1, new ItemStack(Items.SPRUCE_FENCE_GATE, 1));
+        chestInventory.setStack(2, new ItemStack(Items.BIRCH_FENCE_GATE, 1));
+
+        LumberjackChestTriggerController.UpgradeDemand demand =
+                LumberjackChestTriggerController.resolveV3PenDemand(chestInventory);
+
+        assertNull(demand);
+    }
+
+    @Test
+    void resolveV3PenDemand_belowFenceThresholdAcrossMixedTypes_requestsFenceDemand() {
+        SimpleInventory chestInventory = new SimpleInventory(3);
+        chestInventory.setStack(0, new ItemStack(Items.OAK_FENCE, 8));
+        chestInventory.setStack(1, new ItemStack(Items.SPRUCE_FENCE, 11));
+        chestInventory.setStack(2, new ItemStack(Items.OAK_FENCE_GATE, 1));
+
+        LumberjackChestTriggerController.UpgradeDemand demand =
+                LumberjackChestTriggerController.resolveV3PenDemand(chestInventory);
+
+        assertEquals(LumberjackChestTriggerController.UpgradeDemand.v3Fence(), demand);
+    }
+
+    @Test
+    void resolveV3PenDemand_missingGateDespiteFenceThreshold_requestsFenceGateDemand() {
+        SimpleInventory chestInventory = new SimpleInventory(2);
+        chestInventory.setStack(0, new ItemStack(Items.OAK_FENCE, 12));
+        chestInventory.setStack(1, new ItemStack(Items.SPRUCE_FENCE, 8));
+
+        LumberjackChestTriggerController.UpgradeDemand demand =
+                LumberjackChestTriggerController.resolveV3PenDemand(chestInventory);
+
+        assertEquals(LumberjackChestTriggerController.UpgradeDemand.v3FenceGate(), demand);
     }
 
 }
