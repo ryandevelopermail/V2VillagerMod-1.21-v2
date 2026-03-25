@@ -6,13 +6,18 @@ import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.entity.BlastFurnaceBlockEntity;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.BarrelBlockEntity;
+import net.minecraft.block.entity.SmokerBlockEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.recipe.RecipeType;
+import net.minecraft.recipe.input.SingleStackRecipeInput;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -62,6 +67,8 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
     /** Path retry interval (ticks). */
     private static final int PATH_RETRY_TICKS = 20;
+    /** If coal/charcoal fuel is below this count, top-up is allowed (when work exists). */
+    private static final int LOW_FUEL_THRESHOLD = 8;
 
     // -----------------------------------------------------------------------
 
@@ -109,7 +116,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
             return false;
         }
 
-        // Find a recipient that actually needs charcoal
+        // Find a recipient (prioritize active fuel demand; fallback to chest-space recipients)
         BlockPos recipient = findRecipient(world);
         if (recipient == null) {
             LOGGER.debug("LumberjackCharcoal {}: surplus={} but no recipients found within {} blocks",
@@ -260,7 +267,8 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     // -----------------------------------------------------------------------
 
     /**
-     * Finds the next recipient chest (round-robin) that has space for charcoal.
+     * Finds the next recipient chest (round-robin) with space for charcoal.
+     * Demand-true recipients are ranked ahead of recipients that merely have chest space.
      * Recipients: butcher (smoker), armorer (blast furnace), toolsmith (smithing table),
      * weaponsmith (grindstone).
      */
@@ -277,8 +285,9 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
         if (all.isEmpty()) return null;
 
-        // Sort deterministically (by chest pos) so the cursor is stable
-        all.sort(Comparator.comparingInt((RecipientEntry e) -> e.chestPos().getX())
+        // Sort deterministically (demand first, then chest pos) so the cursor is stable
+        all.sort(Comparator.comparing(RecipientEntry::fuelNeeded).reversed()
+                .thenComparingInt(e -> e.chestPos().getX())
                 .thenComparingInt(e -> e.chestPos().getZ())
                 .thenComparingInt(e -> e.chestPos().getY()));
 
@@ -314,9 +323,61 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
             Inventory inv = getChestInventory(world, chestPos.get());
             if (inv == null) continue;
 
-            result.add(new RecipientEntry(inv, chestPos.get().toImmutable()));
+            boolean fuelNeeded = false;
+            BlockEntity jobBlockEntity = world.getBlockEntity(jobPos);
+            if (profession == VillagerProfession.BUTCHER) {
+                if (!(jobBlockEntity instanceof SmokerBlockEntity smoker)) continue;
+                fuelNeeded = isFuelNeeded(world, smoker, inv);
+            } else if (profession == VillagerProfession.ARMORER) {
+                if (!(jobBlockEntity instanceof BlastFurnaceBlockEntity blastFurnace)) continue;
+                fuelNeeded = isFuelNeeded(world, blastFurnace, inv);
+            }
+
+            result.add(new RecipientEntry(inv, chestPos.get().toImmutable(), fuelNeeded));
         }
         return result;
+    }
+
+    private boolean isFuelNeeded(ServerWorld world, SmokerBlockEntity smoker, Inventory chestInventory) {
+        return isFuelNeeded(smoker.getStack(1), smoker.getStack(0), hasSmokableInputInChest(world, chestInventory));
+    }
+
+    private boolean isFuelNeeded(ServerWorld world, BlastFurnaceBlockEntity blastFurnace, Inventory chestInventory) {
+        return isFuelNeeded(blastFurnace.getStack(1), blastFurnace.getStack(0), hasBlastableInputInChest(world, chestInventory));
+    }
+
+    private boolean isFuelNeeded(ItemStack fuelStack, ItemStack inputStack, boolean hasProcessableInputInChest) {
+        boolean fuelLowOrEmpty = fuelStack.isEmpty()
+                || ((fuelStack.isOf(Items.CHARCOAL) || fuelStack.isOf(Items.COAL))
+                && fuelStack.getCount() < LOW_FUEL_THRESHOLD);
+        if (!fuelLowOrEmpty) return false;
+
+        boolean hasWork = !inputStack.isEmpty() || hasProcessableInputInChest;
+        return hasWork;
+    }
+
+    private boolean hasSmokableInputInChest(ServerWorld world, Inventory chestInventory) {
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (stack.isEmpty()) continue;
+            SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
+            if (world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasBlastableInputInChest(ServerWorld world, Inventory chestInventory) {
+        for (int slot = 0; slot < chestInventory.size(); slot++) {
+            ItemStack stack = chestInventory.getStack(slot);
+            if (stack.isEmpty()) continue;
+            SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
+            if (world.getRecipeManager().getFirstMatch(RecipeType.BLASTING, input, world).isPresent()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean hasSpaceForCharcoal(Inventory inv) {
@@ -405,7 +466,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     // Records / enums
     // -----------------------------------------------------------------------
 
-    private record RecipientEntry(Inventory inventory, BlockPos chestPos) {}
+    private record RecipientEntry(Inventory inventory, BlockPos chestPos, boolean fuelNeeded) {}
 
     private enum Stage {
         IDLE,
