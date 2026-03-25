@@ -7,14 +7,64 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.IntBinaryOperator;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ShepherdFencePlacerGoalTest {
+
+    @Test
+    void buildVolumeClearance_rejectsCandidateUnderTreeCanopy() {
+        BlockPos origin = new BlockPos(0, 64, 0);
+        Set<BlockPos> leaves = new HashSet<>();
+        leaves.add(new BlockPos(3, 67, 3));
+
+        boolean clear = ShepherdFencePlacerGoal.isBuildVolumeClearForTest(
+                origin, 65, 67, pos -> true, leaves::contains);
+
+        assertFalse(clear);
+    }
+
+    @Test
+    void buildVolumeClearance_rejectsCandidateIntersectingTrunk() {
+        BlockPos origin = new BlockPos(0, 64, 0);
+        Set<BlockPos> logs = new HashSet<>();
+        logs.add(new BlockPos(0, 65, 0));
+
+        boolean clear = ShepherdFencePlacerGoal.isBuildVolumeClearForTest(
+                origin, 65, 67, pos -> true, logs::contains);
+
+        assertFalse(clear);
+    }
+
+    @Test
+    void buildVolumeClearance_acceptsFullyClearFlatArea() {
+        BlockPos origin = new BlockPos(0, 64, 0);
+
+        boolean clear = ShepherdFencePlacerGoal.isBuildVolumeClearForTest(
+                origin, 65, 67, pos -> true, pos -> false);
+
+        assertTrue(clear);
+    }
+
+    @Test
+    void placementGuard_detectsLateObstructionAndWouldTriggerReplan() {
+        BlockPos target = new BlockPos(10, 65, 10);
+        Set<BlockPos> blocked = new HashSet<>();
+        Predicate<BlockPos> replaceableAt = pos -> !blocked.contains(pos);
+        Predicate<BlockPos> noTrees = pos -> false;
+        Predicate<BlockPos> solidFloor = pos -> true;
+
+        assertTrue(ShepherdFencePlacerGoal.isPlacementCellClearForTest(target, replaceableAt, noTrees, solidFloor));
+
+        blocked.add(target);
+        assertFalse(ShepherdFencePlacerGoal.isPlacementCellClearForTest(target, replaceableAt, noTrees, solidFloor));
+    }
 
     @Test
     void computePerimeterFencePositions_slopedTerrain_placesFenceTopOneAboveLocalGround() {
