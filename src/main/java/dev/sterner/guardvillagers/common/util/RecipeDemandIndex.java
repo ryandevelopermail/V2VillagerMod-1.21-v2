@@ -64,22 +64,7 @@ public final class RecipeDemandIndex {
             aggregate.put(material, new HashMap<>());
         }
 
-        // fixed-goal enum requirements
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, FARMER_PLANK_COMPONENT_CAP, 1.15D, false, true);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, FARMER_STICK_COMPONENT_CAP, 1.15D, false, true);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
-        // Shepherd needs planks for bed crafting (3 per bed)
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.SHEPHERD, 1, 32, 1.0D, false, false);
-        add(aggregate,
-                DemandMaterial.LOGS,
-                VillagerProfession.BUTCHER,
-                1,
-                resolveFixedCap(DemandMaterial.LOGS, VillagerProfession.BUTCHER, 32),
-                1.0D,
-                false,
-                false);
-        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 1.4D, false, true);
-        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 1.4D, false, true);
+        addFixedDemandRoutes(aggregate);
 
         // dynamic-goal recipe scans (RecipeManager-backed goals)
         Set<VillagerProfession> detectedToolMaterialDemandProfessions = new HashSet<>();
@@ -99,6 +84,37 @@ public final class RecipeDemandIndex {
         RouteIndex routeIndex = new RouteIndex(toImmutable(aggregate));
         validateToolMaterialDemandCoverage(routeIndex, detectedToolMaterialDemandProfessions);
         return routeIndex;
+    }
+
+    static RouteIndex buildFixedRouteIndexForTests() {
+        EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate = new EnumMap<>(DemandMaterial.class);
+        for (DemandMaterial material : DemandMaterial.values()) {
+            aggregate.put(material, new HashMap<>());
+        }
+        addFixedDemandRoutes(aggregate);
+        return new RouteIndex(toImmutable(aggregate));
+    }
+
+    private static void addFixedDemandRoutes(EnumMap<DemandMaterial, Map<VillagerProfession, MutableDemand>> aggregate) {
+        // fixed-goal enum requirements
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.FARMER, 1, FARMER_PLANK_COMPONENT_CAP, 1.15D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.FARMER, 2, FARMER_STICK_COMPONENT_CAP, 1.15D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.SHEPHERD, 1, 24, 1.0D, false, false);
+        // Shepherd needs planks for bed crafting (3 per bed)
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.SHEPHERD, 1, 32, 1.0D, false, false);
+        // Shepherd fence pen construction stock routes
+        add(aggregate, DemandMaterial.FENCES, VillagerProfession.SHEPHERD, 1, 48, 1.0D, false, false);
+        add(aggregate, DemandMaterial.FENCE_GATES, VillagerProfession.SHEPHERD, 1, 12, 1.0D, false, false);
+        add(aggregate,
+                DemandMaterial.LOGS,
+                VillagerProfession.BUTCHER,
+                1,
+                resolveFixedCap(DemandMaterial.LOGS, VillagerProfession.BUTCHER, 32),
+                1.0D,
+                false,
+                false);
+        add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 1.4D, false, true);
+        add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 1.4D, false, true);
     }
 
     private static void scanDynamic(ServerWorld world,
@@ -281,6 +297,8 @@ public final class RecipeDemandIndex {
         CHARCOAL("charcoal", new ItemStack(Items.CHARCOAL), stack -> stack.isOf(Items.CHARCOAL)),
         STICK("stick", new ItemStack(Items.STICK), stack -> stack.isOf(Items.STICK)),
         PLANKS("planks", new ItemStack(Items.OAK_PLANKS), stack -> stack.isIn(ItemTags.PLANKS)),
+        FENCES("fences", new ItemStack(Items.OAK_FENCE), stack -> stack.isIn(ItemTags.FENCES)),
+        FENCE_GATES("fence_gates", new ItemStack(Items.OAK_FENCE_GATE), stack -> stack.isIn(ItemTags.FENCE_GATES)),
         LOGS("logs", new ItemStack(Items.OAK_LOG), stack -> stack.isIn(ItemTags.LOGS));
 
         private final String id;
