@@ -482,7 +482,7 @@ public final class JobBlockPairingHelper {
         return false;
     }
 
-    private static Optional<BlockPos> findNearbyCraftingTable(ServerWorld world, BlockPos center) {
+    public static Optional<BlockPos> findNearbyCraftingTable(ServerWorld world, BlockPos center) {
         int range = (int) Math.ceil(JOB_BLOCK_PAIRING_RANGE);
         for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
             if (center.isWithinDistance(checkPos, JOB_BLOCK_PAIRING_RANGE) && isCraftingTable(world.getBlockState(checkPos))) {
