@@ -154,6 +154,24 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(bufferedDrops.get(0).isOf(Items.OAK_LOG));
     }
 
+    @Test
+    void getEffectiveTreeSearchRadiusForAttempts_expandsAfterRepeatedNoTreeSessions() {
+        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
+        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(1));
+        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
+        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(3));
+        assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+    }
+
+    @Test
+    void isCandidateInScanMode_localModeUsesProvidedDynamicRadius() {
+        BlockPos center = new BlockPos(0, 64, 0);
+        BlockPos withinExpandedOnly = new BlockPos(0, 64, 25);
+
+        assertFalse(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, withinExpandedOnly, null, 20));
+        assertTrue(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, withinExpandedOnly, null, 32));
+    }
+
     private List<BlockPos> adjacent(BlockPos pos) {
         return List.of(
                 pos.up(),
