@@ -2314,10 +2314,13 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenTarget resolveNearestGatherPen(ServerWorld world) {
-        // Use VillagePenRegistry first; fall back to banner scan if empty.
+        // Use VillagePenRegistry first; fall back to job-site geometry scan when bell cache is empty.
         BlockPos villagerPos = villager.getBlockPos();
         List<VillagePenRegistry.PenEntry> registryPens =
-                VillagePenRegistry.get(world.getServer()).getNearestBellPens(world, villagerPos, PEN_SCAN_RANGE * 2);
+                VillagePenRegistry.get(world.getServer()).getNearestBellPensWithJobSiteFallback(
+                        world,
+                        villagerPos,
+                        PEN_SCAN_RANGE * 2);
 
         if (!registryPens.isEmpty()) {
             VillagePenRegistry.PenEntry nearest = registryPens.get(0);
