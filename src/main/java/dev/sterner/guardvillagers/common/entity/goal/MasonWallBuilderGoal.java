@@ -100,6 +100,8 @@ public class MasonWallBuilderGoal extends Goal {
     private WallRect cachedWallRect = null;
     /** Anchor position that produced {@link #cachedWallRect}. Null = no cache. */
     private BlockPos cachedWallRectAnchor = null;
+    /** POI footprint signature that produced {@link #cachedWallRect}. Null = no cache. */
+    private PoiFootprintSignature cachedPoiFootprintSignature = null;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -182,27 +184,35 @@ public class MasonWallBuilderGoal extends Goal {
      * @param anchorPos the QM chest position — used as the geographic village center
      */
     private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos anchorPos) {
-        // 1. Compute (or reuse cached) wall rectangle.
-        // computeWallRect does a full POI stream scan + per-perimeter heightmap lookups — expensive.
-        // Cache it per anchor so we only recompute when the village anchor changes.
-        WallRect rect;
-        if (cachedWallRect != null && anchorPos.equals(cachedWallRectAnchor)) {
-            rect = cachedWallRect;
-        } else {
-            Optional<WallRect> rectOpt = computeWallRect(world, anchorPos);
-            if (rectOpt.isEmpty()) {
-                LOGGER.debug("MasonWallBuilder {}: no village bounds found near anchor {}",
-                        guard.getUuidAsString(), anchorPos.toShortString());
-                cachedWallRect = null;
-                cachedWallRectAnchor = null;
-                return false;
-            }
-            rect = rectOpt.get();
-            cachedWallRect = rect;
-            cachedWallRectAnchor = anchorPos.toImmutable();
+        // 1. Compute current POI footprint signature (job sites + beds) near the anchor.
+        // Recompute the wall rectangle whenever this signature changes, even if the anchor is unchanged.
+        Optional<PoiFootprintSignature> signatureOpt = computePoiFootprintSignature(world, anchorPos);
+        if (signatureOpt.isEmpty()) {
+            LOGGER.debug("MasonWallBuilder {}: no village bounds found near anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
+            cachedWallRect = null;
+            cachedWallRectAnchor = null;
+            cachedPoiFootprintSignature = null;
+            return false;
         }
 
-        // 2. Compute all wall segment positions for the rectangle
+        PoiFootprintSignature currentSignature = signatureOpt.get();
+
+        // 2. Compute (or reuse cached) wall rectangle.
+        WallRect rect;
+        boolean cacheValid = cachedWallRect != null
+                && anchorPos.equals(cachedWallRectAnchor)
+                && currentSignature.equals(cachedPoiFootprintSignature);
+        if (cacheValid) {
+            rect = cachedWallRect;
+        } else {
+            rect = computeWallRect(anchorPos, currentSignature);
+            cachedWallRect = rect;
+            cachedWallRectAnchor = anchorPos.toImmutable();
+            cachedPoiFootprintSignature = currentSignature;
+        }
+
+        // 3. Compute all wall segment positions for the rectangle
         List<BlockPos> allSegments = computeWallSegments(world, rect);
         if (allSegments.isEmpty()) {
             return false;
@@ -232,10 +242,10 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
-        // 3. Find all peer masons near the anchor
+        // 4. Find all peer masons near the anchor
         List<MasonGuardEntity> peers = getPeerMasons(world, anchorPos);
 
-        // 4. Count cobblestone across all peers (including self)
+        // 5. Count cobblestone across all peers (including self)
         int myStone = countCobblestoneInChest(world, guard.getPairedChestPos());
         int totalStone = myStone;
         for (MasonGuardEntity peer : peers) {
@@ -253,7 +263,7 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.info("MasonWallBuilder {}: stone threshold met (available={}, required={})",
                 guard.getUuidAsString(), totalStone, requiredStone);
 
-        // 5. Elect builder — the mason (including self) with the most stone
+        // 6. Elect builder — the mason (including self) with the most stone
         MasonGuardEntity electedBuilder = guard;
         int electedStone = myStone;
         for (MasonGuardEntity peer : peers) {
@@ -278,7 +288,7 @@ public class MasonWallBuilderGoal extends Goal {
         // This mason is the elected builder
         isElectedBuilder = true;
 
-        // 6. Build transfer list from peers
+        // 7. Build transfer list from peers
         pendingTransfers = new ArrayList<>();
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
@@ -289,11 +299,11 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
 
-        // 7. Store segments on guard for NBT persistence
+        // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
         guard.setWallSegments(pendingSegments);
 
-        // 8. Store gate reservation positions (1 per face) on the guard
+        // 9. Store gate reservation positions (1 per face) on the guard
         guard.setWallGatePositions(gatePositions);
 
         LOGGER.info("MasonWallBuilder {}: elected builder; {} segments to place, {} transfers pending",
@@ -350,6 +360,7 @@ public class MasonWallBuilderGoal extends Goal {
             // Invalidate cached rect so next cycle recomputes with updated village bounds
             cachedWallRect = null;
             cachedWallRectAnchor = null;
+            cachedPoiFootprintSignature = null;
             return;
         }
 
@@ -369,6 +380,7 @@ public class MasonWallBuilderGoal extends Goal {
             guard.clearWallSegments();
             cachedWallRect = null;
             cachedWallRectAnchor = null;
+            cachedPoiFootprintSignature = null;
             return;
         }
 
@@ -411,12 +423,14 @@ public class MasonWallBuilderGoal extends Goal {
      * Scans job-site POI blocks and beds within BELL_EFFECT_RANGE of the QM chest anchor,
      * computes their bounding box, expands by WALL_EXPAND, and returns a rectangle.
      */
-    private Optional<WallRect> computeWallRect(ServerWorld world, BlockPos anchorPos) {
+    private Optional<PoiFootprintSignature> computePoiFootprintSignature(ServerWorld world, BlockPos anchorPos) {
         int range = VillageGuardStandManager.BELL_EFFECT_RANGE;
         Box searchBox = new Box(anchorPos).expand(range);
 
         int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        int count = 0;
+        int hash = 1;
         boolean found = false;
 
         // Scan all POI blocks (job sites AND beds — beds are registered as HOME POI in vanilla)
@@ -435,21 +449,30 @@ public class MasonWallBuilderGoal extends Goal {
             if (pos.getX() > maxX) maxX = pos.getX();
             if (pos.getZ() < minZ) minZ = pos.getZ();
             if (pos.getZ() > maxZ) maxZ = pos.getZ();
+            count++;
+            int posHash = 31 * (31 * pos.getX() + pos.getY()) + pos.getZ();
+            hash = 31 * hash + posHash;
             found = true;
         }
 
-        if (!found) return Optional.empty();
+        if (!found) {
+            return Optional.empty();
+        }
 
+        return Optional.of(new PoiFootprintSignature(minX, minZ, maxX, maxZ, count, hash));
+    }
+
+    private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
         // Expand by WALL_EXPAND and snap to a rectangle
         int wallY = anchorPos.getY(); // wall is at anchor Y level
 
-        return Optional.of(new WallRect(
-                minX - WALL_EXPAND,
-                minZ - WALL_EXPAND,
-                maxX + WALL_EXPAND,
-                maxZ + WALL_EXPAND,
+        return new WallRect(
+                signature.minX() - WALL_EXPAND,
+                signature.minZ() - WALL_EXPAND,
+                signature.maxX() + WALL_EXPAND,
+                signature.maxZ() + WALL_EXPAND,
                 wallY
-        ));
+        );
     }
 
     /**
@@ -733,6 +756,8 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private record WallRect(int minX, int minZ, int maxX, int maxZ, int y) {}
+
+    private record PoiFootprintSignature(int minX, int minZ, int maxX, int maxZ, int poiCount, int poiHash) {}
 
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
 }
