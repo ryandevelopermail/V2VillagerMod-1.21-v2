@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Emergency-only villager escape behavior for fenced pens.
@@ -22,11 +23,11 @@ public final class VillagerFenceGateEscapeHelper {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerFenceGateEscapeHelper.class);
     private static final String LOG_PREFIX = "[VillagerEmergencyGateEscape]";
 
-    private static final int SCAN_RADIUS = 6;
+    static final int SCAN_RADIUS = 6;
     private static final int PEN_FENCE_RANGE = 8;
     private static final int GATE_INTERIOR_MAX_DISTANCE = 8;
     private static final double NAVIGATION_SPEED = 0.85D;
-    private static final double CROSS_DISTANCE_SQ = 2.25D;
+    static final double CROSS_DISTANCE_SQ = 2.25D;
 
     private VillagerFenceGateEscapeHelper() {
     }
@@ -49,16 +50,13 @@ public final class VillagerFenceGateEscapeHelper {
         }
 
         int cadence = getCadenceTicks(villager.getUuid());
-        if (now - lastAttemptTick < cadence) {
-            return new EscapeState(null, false, lastAttemptTick);
+        BlockPos villagerPos = villager.getBlockPos();
+        boolean insidePen = isInsideFencePen(world, villagerPos);
+        if (!shouldActivateEscape(now, lastAttemptTick, cadence, insidePen, false)) {
+            return new EscapeState(null, false, insidePen ? lastAttemptTick : now);
         }
 
         lastAttemptTick = now;
-        BlockPos villagerPos = villager.getBlockPos();
-        if (!isInsideFencePen(world, villagerPos)) {
-            return new EscapeState(null, false, lastAttemptTick);
-        }
-
         EscapeCandidate candidate = findEscapeCandidate(world, villagerPos);
         if (candidate == null) {
             LOGGER.debug("{} abort-no-gate villager={} pos={}", LOG_PREFIX, villager.getUuidAsString(), villagerPos.toShortString());
@@ -67,17 +65,15 @@ public final class VillagerFenceGateEscapeHelper {
 
         BlockPos gatePos = candidate.gatePos();
         BlockState gateState = world.getBlockState(gatePos);
+        EscapeActivationAction action = createActivationAction(gateState.getBlock() instanceof FenceGateBlock && !gateState.get(FenceGateBlock.OPEN),
+                candidate.outsideTarget());
         boolean openedNow = false;
-        if (gateState.getBlock() instanceof FenceGateBlock && !gateState.get(FenceGateBlock.OPEN)) {
+        if (action.shouldOpenGate()) {
             world.setBlockState(gatePos, gateState.with(FenceGateBlock.OPEN, true), 2);
             openedNow = true;
         }
 
-        villager.getNavigation().startMovingTo(
-                candidate.outsideTarget().getX() + 0.5D,
-                candidate.outsideTarget().getY(),
-                candidate.outsideTarget().getZ() + 0.5D,
-                NAVIGATION_SPEED);
+        requestOutsideNavigation(villager, action.outsideTarget());
 
         LOGGER.debug("{} open villager={} gate={} outside={} openedNow={} cadence={}",
                 LOG_PREFIX,
@@ -98,7 +94,7 @@ public final class VillagerFenceGateEscapeHelper {
                                                   long now) {
         BlockState gateState = world.getBlockState(activeGate);
         if (!(gateState.getBlock() instanceof FenceGateBlock) || !gateState.contains(FenceGateBlock.FACING)) {
-            if (openedByEmergency) {
+            if (shouldCloseGateAfterEscape(openedByEmergency, true)) {
                 tryCloseGate(world, activeGate, gateState, villager, "abort-missing-gate");
             }
             LOGGER.debug("{} abort-missing-gate villager={} gate={}", LOG_PREFIX, villager.getUuidAsString(), activeGate.toShortString());
@@ -107,7 +103,7 @@ public final class VillagerFenceGateEscapeHelper {
 
         EscapeGateSides sides = resolveGateSides(world, activeGate, gateState);
         if (sides == null || sides.outsideTarget() == null) {
-            if (openedByEmergency) {
+            if (shouldCloseGateAfterEscape(openedByEmergency, true)) {
                 tryCloseGate(world, activeGate, gateState, villager, "abort-no-outside");
             }
             LOGGER.debug("{} abort-no-outside villager={} gate={}", LOG_PREFIX, villager.getUuidAsString(), activeGate.toShortString());
@@ -117,11 +113,7 @@ public final class VillagerFenceGateEscapeHelper {
         BlockPos villagerPos = villager.getBlockPos();
         boolean stillInside = isInsideFencePen(world, villagerPos);
 
-        villager.getNavigation().startMovingTo(
-                sides.outsideTarget().getX() + 0.5D,
-                sides.outsideTarget().getY(),
-                sides.outsideTarget().getZ() + 0.5D,
-                NAVIGATION_SPEED);
+        requestOutsideNavigation(villager, sides.outsideTarget());
 
         if (!stillInside && villagerPos.getSquaredDistance(sides.outsideTarget()) <= CROSS_DISTANCE_SQ) {
             LOGGER.debug("{} cross villager={} gate={} pos={} outside={}",
@@ -131,7 +123,7 @@ public final class VillagerFenceGateEscapeHelper {
                     villagerPos.toShortString(),
                     sides.outsideTarget().toShortString());
 
-            if (openedByEmergency) {
+            if (shouldCloseGateAfterEscape(openedByEmergency, true)) {
                 BlockState currentState = world.getBlockState(activeGate);
                 tryCloseGate(world, activeGate, currentState, villager, "close");
             }
@@ -140,7 +132,7 @@ public final class VillagerFenceGateEscapeHelper {
 
         if (!stillInside && now - lastAttemptTick > 100L) {
             LOGGER.debug("{} abort-timeout villager={} gate={} pos={}", LOG_PREFIX, villager.getUuidAsString(), activeGate.toShortString(), villagerPos.toShortString());
-            if (openedByEmergency) {
+            if (shouldCloseGateAfterEscape(openedByEmergency, true)) {
                 BlockState currentState = world.getBlockState(activeGate);
                 tryCloseGate(world, activeGate, currentState, villager, "abort-timeout-close");
             }
@@ -156,7 +148,7 @@ public final class VillagerFenceGateEscapeHelper {
         BlockPos min = villagerPos.add(-SCAN_RADIUS, 0, -SCAN_RADIUS);
         BlockPos max = villagerPos.add(SCAN_RADIUS, 0, SCAN_RADIUS);
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            if (!villagerPos.isWithinDistance(cursor, SCAN_RADIUS)) {
+            if (!isWithinScanRadius(villagerPos, cursor, SCAN_RADIUS)) {
                 continue;
             }
             BlockState state = world.getBlockState(cursor);
@@ -200,19 +192,11 @@ public final class VillagerFenceGateEscapeHelper {
             return null;
         }
 
-        BlockPos outside;
-        if (interior.getSquaredDistance(front) <= interior.getSquaredDistance(back)) {
-            outside = back;
-        } else {
-            outside = front;
-        }
-
-        if (isInsideFencePen(world, outside) || !canStandAt(world, outside)) {
-            BlockPos alternate = outside.equals(front) ? back : front;
-            if (isInsideFencePen(world, alternate) || !canStandAt(world, alternate)) {
-                return null;
-            }
-            outside = alternate;
+        BlockPos outside = resolveOutsideTarget(interior, front, back,
+                pos -> isInsideFencePen(world, pos),
+                pos -> canStandAt(world, pos));
+        if (outside == null) {
+            return null;
         }
 
         return new EscapeGateSides(interior.toImmutable(), outside.toImmutable());
@@ -294,6 +278,51 @@ public final class VillagerFenceGateEscapeHelper {
         return false;
     }
 
+    static boolean shouldActivateEscape(long now,
+                                        long lastAttemptTick,
+                                        int cadenceTicks,
+                                        boolean insidePen,
+                                        boolean gateWorkflowActive) {
+        return insidePen && !gateWorkflowActive && (now - lastAttemptTick >= cadenceTicks);
+    }
+
+    static boolean isWithinScanRadius(BlockPos villagerPos, BlockPos candidate, int radius) {
+        return villagerPos.isWithinDistance(candidate, radius);
+    }
+
+    @Nullable
+    static BlockPos resolveOutsideTarget(BlockPos interior,
+                                         BlockPos front,
+                                         BlockPos back,
+                                         Predicate<BlockPos> insidePen,
+                                         Predicate<BlockPos> canStandAt) {
+        BlockPos outside = interior.getSquaredDistance(front) <= interior.getSquaredDistance(back) ? back : front;
+        if (insidePen.test(outside) || !canStandAt.test(outside)) {
+            BlockPos alternate = outside.equals(front) ? back : front;
+            if (insidePen.test(alternate) || !canStandAt.test(alternate)) {
+                return null;
+            }
+            outside = alternate;
+        }
+        return outside.toImmutable();
+    }
+
+    static EscapeActivationAction createActivationAction(boolean gateClosed, BlockPos outsideTarget) {
+        return new EscapeActivationAction(gateClosed, outsideTarget.toImmutable());
+    }
+
+    static boolean shouldCloseGateAfterEscape(boolean openedByEmergency, boolean gateStillExists) {
+        return openedByEmergency && gateStillExists;
+    }
+
+    static void requestOutsideNavigation(VillagerEntity villager, BlockPos outsideTarget) {
+        villager.getNavigation().startMovingTo(
+                outsideTarget.getX() + 0.5D,
+                outsideTarget.getY(),
+                outsideTarget.getZ() + 0.5D,
+                NAVIGATION_SPEED);
+    }
+
     private static int getCadenceTicks(UUID uuid) {
         return 10 + (int) (Math.floorMod(uuid.getLeastSignificantBits(), 11));
     }
@@ -310,6 +339,9 @@ public final class VillagerFenceGateEscapeHelper {
     }
 
     public record EscapeState(@Nullable BlockPos activeGate, boolean openedByEmergency, long lastAttemptTick) {
+    }
+
+    record EscapeActivationAction(boolean shouldOpenGate, BlockPos outsideTarget) {
     }
 
     private record EscapeCandidate(BlockPos gatePos, BlockPos outsideTarget) {
