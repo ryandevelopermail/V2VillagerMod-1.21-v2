@@ -41,8 +41,9 @@ import java.util.stream.Stream;
  *       → compute axis-aligned bounding rectangle → expand 10 blocks outward.</li>
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
- *   <li>The elected builder must have enough cobblestone for ALL 1-high perimeter segments
- *       (excluding gap positions) before placing any block.</li>
+ *   <li>The elected builder must have enough cobblestone for ALL planned perimeter placements
+ *       (excluding gap positions) before placing any block. This is a one-thick perimeter in
+ *       X/Z that may include vertical fill columns where terrain dips below anchor level.</li>
  *   <li>Gap rules: skip DIRT_PATH positions; always leave at least 1 forced gap so the wall
  *       is never fully closed; reserve one position per face (4 total) for lumberjack fence
  *       gates (stored in entity NBT, not placed here).</li>
@@ -59,7 +60,8 @@ public class MasonWallBuilderGoal extends Goal {
     // Blocks to expand the village bounding box outward to form the wall rectangle
     private static final int WALL_EXPAND = 10;
     // Minimum stone needed before the elected builder starts placing
-    private static final int STONE_PER_SEGMENT = 1; // 1-high wall = 1 block per pos
+    // (required total is per planned block placement, including anti-gap vertical fill columns).
+    private static final int STONE_PER_SEGMENT = 1;
     /**
      * Maximum allowed height difference between a perimeter position's surface Y
      * and the bell Y before that position is considered too steep to wall.
@@ -192,6 +194,8 @@ public class MasonWallBuilderGoal extends Goal {
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
         if (poiMode != lastLoggedPoiMode) {
             LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
+            LOGGER.info("MasonWallBuilder {}: wall profile=one-thick perimeter with anti-gap vertical fill (maxDepth={})",
+                    guard.getUuidAsString(), MAX_FILL_DEPTH);
             lastLoggedPoiMode = poiMode;
         }
 
@@ -497,14 +501,14 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Returns all wall segment positions around the rectangle perimeter with terrain adaptation:
+     * Returns all planned wall block placements around the rectangle perimeter with terrain adaptation:
      * <ul>
      *   <li>Skip DIRT_PATH positions (natural gaps / roads)</li>
      *   <li>Skip positions where {@code |surfaceY - bellY| > STEEP_SKIP_THRESHOLD} (too steep)</li>
      *   <li>Skip positions where the dip depth exceeds {@code MAX_FILL_DEPTH} (ravine guard)</li>
      *   <li>For positions above ground level: place wall block on top of the surface
      *       (wall sits on hill rather than being buried inside it)</li>
-     *   <li>For positions below ground level: emit a column of blocks from surfaceY+1
+     *   <li>For positions below anchor level: emit a column of blocks from surfaceY+1
      *       down to bellY, filling the dip so the wall has no gap underneath</li>
      *   <li>Force at least 1 gap so the wall is never fully enclosed</li>
      *   <li>Gate positions (1 per face) are included in the list but tagged separately</li>
@@ -537,7 +541,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Resolves the wall block(s) for one perimeter (x, z) position, adapting to terrain:
+     * Resolves planned wall block placement(s) for one perimeter (x, z) position, adapting to terrain:
      *
      * <ol>
      *   <li>Sample surface Y via {@code MOTION_BLOCKING_NO_LEAVES} heightmap
@@ -551,7 +555,7 @@ public class MasonWallBuilderGoal extends Goal {
      *       block at {@code surfaceY + 1} so it sits visibly on top of the ground.</li>
      *   <li>If {@code delta < 0}: the surface dips below bell level. Emit a column of
      *       blocks from {@code surfaceY + 1} up to {@code bellY} (inclusive) to fill the
-     *       gap underneath the wall line.</li>
+     *       gap underneath the one-thick wall line.</li>
      *   <li>In all cases, skip DIRT_PATH and already-cobblestone positions.</li>
      * </ol>
      */
