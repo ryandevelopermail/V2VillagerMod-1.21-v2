@@ -73,6 +73,10 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     private static final int BASELINE_BATCH = 4;
     /** Larger transfer used for urgent, empty-fuel recipients with pending work. */
     private static final int URGENT_BATCH = 12;
+    /** Charcoal reserve target kept in butcher recipient chests. */
+    private static final int BUTCHER_CHARCOAL_RESERVE_TARGET = 16;
+    /** Charcoal reserve target kept in armorer recipient chests. */
+    private static final int ARMORER_CHARCOAL_RESERVE_TARGET = 16;
 
     // -----------------------------------------------------------------------
 
@@ -131,7 +135,9 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
         }
 
         this.targetChestPos = recipient.chestPos();
-        this.targetTransferCount = recipient.urgentFuelNeed() ? URGENT_BATCH : BASELINE_BATCH;
+        this.targetTransferCount = recipient.urgentFuelNeed()
+                ? URGENT_BATCH
+                : Math.max(BASELINE_BATCH, Math.min(URGENT_BATCH, recipient.storageShortfall()));
         LOGGER.info("LumberjackCharcoal {}: charcoal={} surplus={} → distributing to chest at {}",
                 guard.getUuidAsString(), charcoalInChest, surplus, recipient.chestPos().toShortString());
         return true;
@@ -300,12 +306,7 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
 
         if (all.isEmpty()) return null;
 
-        // Sort deterministically (urgent demand first, then demand, then chest pos) so the cursor is stable
-        all.sort(Comparator.comparing(RecipientEntry::urgentFuelNeed).reversed()
-                .thenComparing(Comparator.comparing(RecipientEntry::fuelNeeded).reversed())
-                .thenComparingInt(e -> e.chestPos().getX())
-                .thenComparingInt(e -> e.chestPos().getZ())
-                .thenComparingInt(e -> e.chestPos().getY()));
+        sortRecipientsForSelection(all);
 
         int cursor = recipientCursor.getOrDefault(VillagerProfession.NONE, 0);
         int index = Math.floorMod(cursor, all.size());
@@ -339,6 +340,9 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
             Inventory inv = getChestInventory(world, chestPos.get());
             if (inv == null) continue;
 
+            int recipientCharcoalCount = countCharcoal(inv);
+            int storageShortfall = computeStorageShortfall(profession, recipientCharcoalCount);
+            boolean storageNeeded = storageShortfall > 0;
             boolean fuelNeeded = false;
             boolean urgentFuelNeed = false;
             BlockEntity jobBlockEntity = world.getBlockEntity(jobPos);
@@ -352,9 +356,29 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
                 urgentFuelNeed = isUrgentFuelNeed(world, blastFurnace.getStack(1), blastFurnace.getStack(0), inv, false);
             }
 
-            result.add(new RecipientEntry(inv, chestPos.get().toImmutable(), fuelNeeded, urgentFuelNeed));
+            result.add(new RecipientEntry(inv, chestPos.get().toImmutable(), fuelNeeded, urgentFuelNeed, storageNeeded, storageShortfall));
         }
         return result;
+    }
+
+    static void sortRecipientsForSelection(List<RecipientEntry> recipients) {
+        recipients.sort(Comparator.comparing(RecipientEntry::urgentFuelNeed).reversed()
+                .thenComparing(Comparator.comparingInt(RecipientEntry::storageShortfall).reversed())
+                .thenComparing(Comparator.comparing(RecipientEntry::fuelNeeded).reversed())
+                .thenComparingInt(e -> e.chestPos().getX())
+                .thenComparingInt(e -> e.chestPos().getZ())
+                .thenComparingInt(e -> e.chestPos().getY()));
+    }
+
+    static int computeStorageShortfall(VillagerProfession profession, int recipientCharcoalCount) {
+        int reserveTarget = charcoalReserveTargetFor(profession);
+        return Math.max(0, reserveTarget - recipientCharcoalCount);
+    }
+
+    private static int charcoalReserveTargetFor(VillagerProfession profession) {
+        if (profession == VillagerProfession.BUTCHER) return BUTCHER_CHARCOAL_RESERVE_TARGET;
+        if (profession == VillagerProfession.ARMORER) return ARMORER_CHARCOAL_RESERVE_TARGET;
+        return 0;
     }
 
     private boolean isFuelNeeded(ServerWorld world, SmokerBlockEntity smoker, Inventory chestInventory) {
@@ -497,7 +521,12 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     // Records / enums
     // -----------------------------------------------------------------------
 
-    private record RecipientEntry(Inventory inventory, BlockPos chestPos, boolean fuelNeeded, boolean urgentFuelNeed) {}
+    static record RecipientEntry(Inventory inventory,
+                                 BlockPos chestPos,
+                                 boolean fuelNeeded,
+                                 boolean urgentFuelNeed,
+                                 boolean storageNeeded,
+                                 int storageShortfall) {}
 
     private enum Stage {
         IDLE,
