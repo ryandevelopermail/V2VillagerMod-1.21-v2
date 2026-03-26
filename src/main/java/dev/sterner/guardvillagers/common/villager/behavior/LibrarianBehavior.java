@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
+import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -75,22 +76,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         }
         updateChestListener(world, villager, chestPos);
 
-        // Cluster 3 — Quartermaster promotion: trigger if a double-chest exists near the job site.
-        // We scan for any adjacent chest in the world rather than relying solely on the order that
-        // onChestPaired is called — this handles simultaneous placement and world-load rehydration.
-        if (!QUARTERMASTER_GOALS.containsKey(villager)) {
-            BlockPos adjacentChest = findAdjacentChestInWorld(world, chestPos);
-            if (adjacentChest != null) {
-                QuartermasterGoal qmGoal = new QuartermasterGoal(villager, jobPos, chestPos);
-                QUARTERMASTER_GOALS.put(villager, qmGoal);
-                villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
-                LOGGER.info("Librarian {} promoted to Quartermaster (double-chest detected: {} + {})",
-                        villager.getUuidAsString(), chestPos.toShortString(), adjacentChest.toShortString());
-            } else {
-                LOGGER.info("Librarian {} chest paired at {} — no adjacent chest found yet, Quartermaster pending",
-                        villager.getUuidAsString(), chestPos.toShortString());
-            }
-        }
+        tryPromoteQuartermaster(world, villager, jobPos, chestPos, "chest_paired");
         PAIRED_CHEST_POS.put(villager, chestPos);
     }
 
@@ -132,6 +118,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         updateChestListener(world, villager, chestPos);
+        tryPromoteQuartermaster(world, villager, jobPos, chestPos, "pairing_refresh");
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
@@ -183,18 +170,24 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
     }
 
-    /**
-     * Scans the 6 face-adjacent positions of {@code chestPos} for another chest block.
-     * Returns the position of the first adjacent chest found, or {@code null} if none.
-     * Used for Quartermaster double-chest detection — works regardless of placement order.
-     */
-    private static BlockPos findAdjacentChestInWorld(ServerWorld world, BlockPos chestPos) {
-        for (net.minecraft.util.math.Direction dir : net.minecraft.util.math.Direction.values()) {
-            BlockPos candidate = chestPos.offset(dir);
-            if (world.getBlockState(candidate).getBlock() instanceof ChestBlock) {
-                return candidate.toImmutable();
-            }
+    private void tryPromoteQuartermaster(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String reason) {
+        if (QUARTERMASTER_GOALS.containsKey(villager)) {
+            return;
         }
-        return null;
+        QuartermasterPrerequisiteHelper.Result prerequisites =
+                QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
+        if (!prerequisites.valid()) {
+            return;
+        }
+
+        QuartermasterGoal qmGoal = new QuartermasterGoal(villager, jobPos, chestPos);
+        QUARTERMASTER_GOALS.put(villager, qmGoal);
+        villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
+        LOGGER.info("Librarian {} promoted to Quartermaster (reason={}, chest={} second_chest={} job_site={})",
+                villager.getUuidAsString(),
+                reason,
+                chestPos.toShortString(),
+                prerequisites.secondChestPos().toShortString(),
+                jobPos.toShortString());
     }
 }
