@@ -91,4 +91,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int farmerWheatSeedReserveCap = 64;
     @Entry(min=0)
     public static int farmerWheatSeedBootstrapFloor = 0;
+    @Entry(min=0)
+    public static int lumberjackVillageMin = 1;
+    @Entry(min=0)
+    public static int lumberjackVillageMinLargeVillage = 2;
+    @Entry(min=1)
+    public static int lumberjackVillageMinLargeVillagePopulation = 12;
 }

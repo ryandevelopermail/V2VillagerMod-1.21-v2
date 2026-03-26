@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -126,7 +127,7 @@ public final class VillageLumberjackSpawnManager {
                 .filter(VillageLumberjackSpawnManager::isProfessional)
                 .count();
 
-        int desired = desiredLumberjackCount(professionals, totalVillagers);
+        int desired = desiredLumberjackCount(professionals, totalVillagers, totalVillagers > 0);
         List<LumberjackGuardEntity> activeLumberjacks = world.getEntitiesByClass(
                 LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
         int existing = activeLumberjacks.size();
@@ -419,10 +420,24 @@ public final class VillageLumberjackSpawnManager {
     // Population helpers
     // -------------------------------------------------------------------------
 
-    static int desiredLumberjackCount(int professionals, int totalVillagers) {
+    static int desiredLumberjackCount(int professionals, int totalVillagers, boolean hasEligibleVillageResident) {
         int fromProfessionals = professionals > 0 ? (professionals + RATIO_PROFESSIONALS - 1) / RATIO_PROFESSIONALS : 0;
         int fromTotal = totalVillagers > 0 ? (totalVillagers + RATIO_TOTAL - 1) / RATIO_TOTAL : 0;
-        return Math.max(fromProfessionals, fromTotal);
+        int ratioDesired = Math.max(fromProfessionals, fromTotal);
+
+        if (!hasEligibleVillageResident) {
+            return ratioDesired;
+        }
+
+        return Math.max(ratioDesired, configuredVillageMinimum(totalVillagers));
+    }
+
+    private static int configuredVillageMinimum(int totalVillagers) {
+        int floor = Math.max(0, GuardVillagersConfig.lumberjackVillageMin);
+        if (totalVillagers >= GuardVillagersConfig.lumberjackVillageMinLargeVillagePopulation) {
+            floor = Math.max(floor, GuardVillagersConfig.lumberjackVillageMinLargeVillage);
+        }
+        return floor;
     }
 
     private static boolean isEligibleVillager(VillagerEntity villager) {
