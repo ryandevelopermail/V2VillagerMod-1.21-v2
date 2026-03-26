@@ -83,6 +83,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int INITIAL_SCAN_ACCEPTED_ROOT_TARGET = SESSION_TARGET_MAX;
     private static final int INITIAL_SCAN_LOCAL_ROOT_TARGET = 1;
     private static final int MAX_REGION_BLOCK_VISITS_PER_PASS = 12000;
+    private static final int NO_TREE_ESCALATION_HIGH_WATER_MARK = 5;
+    private static final int NO_TREE_ESCALATION_REPEAT_INTERVAL = 3;
+    private static final int NO_TREE_ESCALATION_RETRY_DELAY_TICKS = 20 * 60 * 12;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -332,9 +335,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startSession(ServerWorld world, List<BlockPos> targets) {
         if (targets.isEmpty()) {
-            this.guard.setConsecutiveNoTreeSessions(this.guard.getConsecutiveNoTreeSessions() + 1);
-            LOGGER.info("Lumberjack Guard {} could not find eligible trees near paired base; rescheduling countdown",
-                    this.guard.getUuidAsString());
+            int noTreeFailures = this.guard.getConsecutiveNoTreeSessions() + 1;
+            this.guard.setConsecutiveNoTreeSessions(noTreeFailures);
+            boolean escalated = maybeRunNoTreeEscalation(world, noTreeFailures);
+
+            LOGGER.info("Lumberjack Guard {} could not find eligible trees near paired base (failures={}); rescheduling countdown",
+                    this.guard.getUuidAsString(),
+                    noTreeFailures);
+            if (escalated) {
+                startChopCountdown(world, NO_TREE_ESCALATION_RETRY_DELAY_TICKS,
+                        "no eligible tree targets (no-tree-escalation delayed retry)");
+                return;
+            }
             startChopCountdown(world, "no eligible tree targets");
             return;
         }
@@ -668,11 +680,36 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startChopCountdown(ServerWorld world, String reason) {
         long totalTicks = MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
+        startChopCountdown(world, totalTicks, reason);
+    }
+
+    private void startChopCountdown(ServerWorld world, long totalTicks, String reason) {
         this.guard.startChopCountdown(world.getTime(), totalTicks);
         LOGGER.info("Lumberjack Guard {} chop countdown started ({} ticks) {}",
                 this.guard.getUuidAsString(),
                 totalTicks,
                 reason);
+    }
+
+    private boolean maybeRunNoTreeEscalation(ServerWorld world, int noTreeFailures) {
+        if (!shouldRunNoTreeEscalation(noTreeFailures)) {
+            return false;
+        }
+
+        boolean midpointUpgradeApplied = runMidpointUpgradeNeedPass(world, this.guard);
+        this.guard.requestTriggerEvaluation();
+        LOGGER.warn("Lumberjack Guard {} no-tree-escalation failures={} highWaterMark={} midpointUpgradeApplied={} triggerEvaluationRequested={}",
+                this.guard.getUuidAsString(),
+                noTreeFailures,
+                NO_TREE_ESCALATION_HIGH_WATER_MARK,
+                midpointUpgradeApplied,
+                this.guard.isTriggerEvaluationRequested());
+        return true;
+    }
+
+    static boolean shouldRunNoTreeEscalation(int noTreeFailures) {
+        return noTreeFailures >= NO_TREE_ESCALATION_HIGH_WATER_MARK
+                && (noTreeFailures - NO_TREE_ESCALATION_HIGH_WATER_MARK) % NO_TREE_ESCALATION_REPEAT_INTERVAL == 0;
     }
 
     private void logCountdownProgress(ServerWorld world) {

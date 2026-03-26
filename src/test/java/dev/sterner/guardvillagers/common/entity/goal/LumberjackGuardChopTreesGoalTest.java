@@ -172,6 +172,15 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, withinExpandedOnly, null, 32));
     }
 
+    @Test
+    void shouldRunNoTreeEscalation_onlyAtHighWaterAndBoundedRepeats() {
+        assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(4));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(5));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(6));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(7));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(8));
+    }
+
     private List<BlockPos> adjacent(BlockPos pos) {
         return List.of(
                 pos.up(),
