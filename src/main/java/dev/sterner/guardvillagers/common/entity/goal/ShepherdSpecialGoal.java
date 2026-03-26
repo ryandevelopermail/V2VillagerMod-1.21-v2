@@ -878,30 +878,58 @@ public class ShepherdSpecialGoal extends Goal {
         Inventory inventory = getChestInventory(world).orElse(null);
         boolean hasBannerAvailable = hasBannerInInventoryOrHand()
                 || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
-
-        if (hasBannerAvailable) {
-            return TaskType.BANNER;
-        }
+        boolean hasBannerPlacementTarget = hasBannerAvailable && findNearestPenTarget(world) != null;
 
         if (inventory == null) {
-            if (hasShearsInInventoryOrHand()) {
-                return TaskType.SHEARS;
-            }
-            if (hasWheatInInventoryOrOffhand() && resolveNearestGatherPen(world) != null) {
-                return TaskType.WHEAT_GATHER;
-            }
-            return null;
+            TaskType selectedTask = selectTaskTypeByAvailability(
+                    hasBannerAvailable,
+                    hasBannerPlacementTarget,
+                    hasShearsInInventoryOrHand(),
+                    hasWheatInInventoryOrOffhand(),
+                    resolveNearestGatherPen(world) != null);
+            logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
+            return selectedTask;
         }
 
-        if (hasShearsInChestOrInventory(inventory)) {
+        boolean hasWheatAvailable = hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT))
+                || hasWheatInInventoryOrOffhand();
+        TaskType selectedTask = selectTaskTypeByAvailability(
+                hasBannerAvailable,
+                hasBannerPlacementTarget,
+                hasShearsInChestOrInventory(inventory),
+                hasWheatAvailable,
+                resolveNearestGatherPen(world) != null);
+        logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
+        return selectedTask;
+    }
+
+    private void logBannerFallbackSelection(boolean hasBannerAvailable, boolean hasBannerPlacementTarget, TaskType selectedTask) {
+        if (hasBannerAvailable && !hasBannerPlacementTarget && selectedTask != TaskType.BANNER) {
+            LOGGER.info("Shepherd {} found banner item but no valid pen target; selected fallback task {}",
+                    villager.getUuidAsString(), selectedTask);
+        }
+    }
+
+    static TaskType selectTaskTypeByAvailability(boolean hasBannerAvailable,
+                                                 boolean hasBannerPlacementTarget,
+                                                 boolean hasShearsAvailable,
+                                                 boolean hasWheatAvailable,
+                                                 boolean hasGatherPenTarget) {
+        if (hasBannerAvailable && hasBannerPlacementTarget) {
+            return TaskType.BANNER;
+        }
+        return selectNonBannerTaskType(hasShearsAvailable, hasWheatAvailable, hasGatherPenTarget);
+    }
+
+    static TaskType selectNonBannerTaskType(boolean hasShearsAvailable,
+                                            boolean hasWheatAvailable,
+                                            boolean hasGatherPenTarget) {
+        if (hasShearsAvailable) {
             return TaskType.SHEARS;
         }
-
-        if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
-                && resolveNearestGatherPen(world) != null) {
+        if (hasWheatAvailable && hasGatherPenTarget) {
             return TaskType.WHEAT_GATHER;
         }
-
         return null;
     }
 
