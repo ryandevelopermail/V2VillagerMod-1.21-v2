@@ -1585,6 +1585,10 @@ public class ShepherdSpecialGoal extends Goal {
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
+        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            penGatePos = cachedNearestPenGatePos;
+            return cachedNearestPenTarget;
+        }
 
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
