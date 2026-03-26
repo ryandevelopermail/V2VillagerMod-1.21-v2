@@ -37,6 +37,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
     private static final int SEARCH_RADIUS = 3;
     private static final long PATH_REEVALUATION_INTERVAL_TICKS = 20L;
     private static final long SERVICE_REEVALUATION_INTERVAL_TICKS = 20L;
+    private static final int CHARCOAL_SELF_FUEL_CAP = 12;
     private static final Set<VillagerProfession> CHECKED_JOB_PROFESSIONS = Set.of(
             VillagerProfession.NONE,
             VillagerProfession.ARMORER,
@@ -235,39 +236,27 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             remainingLogs += input.getCount();
         }
 
-        int fuelSpace;
-        if (fuel.isEmpty()) {
-            fuelSpace = output.getMaxCount();
-        } else if (fuel.isOf(Items.CHARCOAL)) {
-            fuelSpace = fuel.getMaxCount() - fuel.getCount();
-        } else {
-            fuelSpace = 0;
+        int desiredSelfFuel = desiredSelfFuelFromCharcoal(fuel, remainingLogs);
+        if (desiredSelfFuel > 0) {
+            int moved = Math.min(output.getCount(), desiredSelfFuel);
+            if (moved > 0) {
+                if (fuel.isEmpty()) {
+                    furnace.setStack(1, new ItemStack(Items.CHARCOAL, moved));
+                    fuel = furnace.getStack(1);
+                } else {
+                    fuel.increment(moved);
+                    furnace.setStack(1, fuel);
+                }
+
+                output.decrement(moved);
+                if (output.isEmpty()) {
+                    furnace.setStack(2, ItemStack.EMPTY);
+                    return;
+                }
+            }
         }
 
-        if (remainingLogs > 0 && fuelSpace > 0) {
-            int moved = Math.min(output.getCount(), fuelSpace);
-            if (moved <= 0) {
-                return;
-            }
-
-            if (fuel.isEmpty()) {
-                furnace.setStack(1, new ItemStack(Items.CHARCOAL, moved));
-            } else {
-                fuel.increment(moved);
-                furnace.setStack(1, fuel);
-            }
-
-            output.decrement(moved);
-            if (output.isEmpty()) {
-                furnace.setStack(2, ItemStack.EMPTY);
-            } else {
-                furnace.setStack(2, output);
-            }
-            return;
-        }
-
-        boolean pendingBurnCycle = !furnace.getStack(0).isEmpty() || !furnace.getStack(1).isEmpty();
-        if (remainingLogs <= 0 && !pendingBurnCycle) {
+        if (!output.isEmpty()) {
             returnLogs(chestInventory, output.copy());
             furnace.setStack(2, ItemStack.EMPTY);
         }
@@ -515,15 +504,25 @@ public class LumberjackFurnaceModifierGoal extends Goal {
 
         int logsInStorage = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
         int logsInInput = input.isIn(ItemTags.LOGS) ? input.getCount() : 0;
-        int totalLogs = logsInStorage + logsInInput;
+        return evaluateServiceStateCore(logsInStorage, logsInInput, input, fuel, output, hasReturnSpace(chestInventory, output));
+    }
 
+
+    static ServiceState evaluateServiceStateCore(int logsInStorage,
+                                                 int logsInInput,
+                                                 ItemStack input,
+                                                 ItemStack fuel,
+                                                 ItemStack output,
+                                                 boolean hasOutputReturnSpace) {
+        int totalLogs = logsInStorage + logsInInput;
         int inputSpace = input.isEmpty() ? 64 : (input.isIn(ItemTags.LOGS) ? input.getMaxCount() - input.getCount() : 0);
-        int fuelSpaceForCharcoal = fuel.isEmpty() ? 64 : (fuel.isOf(Items.CHARCOAL) ? fuel.getMaxCount() - fuel.getCount() : 0);
-        boolean fuelLow = fuel.isEmpty() || (fuel.isOf(Items.CHARCOAL) && fuel.getCount() < 3) || (fuel.isIn(ItemTags.LOGS) && fuel.getCount() < 3);
+        boolean fuelLow = fuel.isEmpty()
+                || (fuel.isOf(Items.CHARCOAL) && fuel.getCount() < CHARCOAL_SELF_FUEL_CAP)
+                || (fuel.isIn(ItemTags.LOGS) && fuel.getCount() < 3);
 
         boolean outputIsCharcoal = output.isOf(Items.CHARCOAL) && !output.isEmpty();
-        boolean canRouteOutput = !outputIsCharcoal || fuelSpaceForCharcoal > 0 || hasReturnSpace(chestInventory, output);
-        if (outputIsCharcoal && !canRouteOutput) {
+        boolean canSelfRefuelFromOutput = outputIsCharcoal && totalLogs > 0 && desiredSelfFuelFromCharcoal(fuel, totalLogs) > 0;
+        if (outputIsCharcoal && !canSelfRefuelFromOutput && !hasOutputReturnSpace) {
             return ServiceState.stop("no_output_space");
         }
 
@@ -540,6 +539,19 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             return ServiceState.stop("no_logs");
         }
         return ServiceState.stop("fuel_saturated");
+    }
+
+    static int desiredSelfFuelFromCharcoal(ItemStack fuel, int totalLogs) {
+        if (totalLogs <= 0) {
+            return 0;
+        }
+        if (fuel.isEmpty()) {
+            return CHARCOAL_SELF_FUEL_CAP;
+        }
+        if (!fuel.isOf(Items.CHARCOAL)) {
+            return 0;
+        }
+        return Math.max(0, CHARCOAL_SELF_FUEL_CAP - fuel.getCount());
     }
 
     private boolean hasReturnSpace(Inventory chestInventory, ItemStack stack) {
@@ -692,7 +704,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
     }
 
-    private record ServiceState(boolean actionable, String reason) {
+    static record ServiceState(boolean actionable, String reason) {
         private static ServiceState actionable(String reason) {
             return new ServiceState(true, reason);
         }
