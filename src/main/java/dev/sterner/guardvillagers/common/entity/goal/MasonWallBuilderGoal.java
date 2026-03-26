@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -16,6 +17,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.Heightmap;
+import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
@@ -34,7 +36,8 @@ import java.util.stream.Stream;
  *
  * <p>Behaviour summary:
  * <ol>
- *   <li>Scan all job-site POI blocks + beds within BELL_EFFECT_RANGE of the nearest QM chest
+ *   <li>Scan configured POI set (job sites only, jobs+beds, or all POIs) within
+ *       BELL_EFFECT_RANGE of the nearest QM chest
  *       → compute axis-aligned bounding rectangle → expand 10 blocks outward.</li>
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
@@ -102,6 +105,8 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos cachedWallRectAnchor = null;
     /** POI footprint signature that produced {@link #cachedWallRect}. Null = no cache. */
     private PoiFootprintSignature cachedPoiFootprintSignature = null;
+    /** Last mode logged for wall footprint scans; avoids repeating the same info line every cycle. */
+    private GuardVillagersConfig.MasonWallPoiMode lastLoggedPoiMode = null;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -184,7 +189,13 @@ public class MasonWallBuilderGoal extends Goal {
      * @param anchorPos the QM chest position — used as the geographic village center
      */
     private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos anchorPos) {
-        // 1. Compute current POI footprint signature (job sites + beds) near the anchor.
+        GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
+        if (poiMode != lastLoggedPoiMode) {
+            LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
+            lastLoggedPoiMode = poiMode;
+        }
+
+        // 1. Compute current POI footprint signature near the anchor using configured POI mode.
         // Recompute the wall rectangle whenever this signature changes, even if the anchor is unchanged.
         Optional<PoiFootprintSignature> signatureOpt = computePoiFootprintSignature(world, anchorPos);
         if (signatureOpt.isEmpty()) {
@@ -420,7 +431,7 @@ public class MasonWallBuilderGoal extends Goal {
     // -------------------------------------------------------------------------
 
     /**
-     * Scans job-site POI blocks and beds within BELL_EFFECT_RANGE of the QM chest anchor,
+     * Scans the configured POI subset within BELL_EFFECT_RANGE of the QM chest anchor,
      * computes their bounding box, expands by WALL_EXPAND, and returns a rectangle.
      */
     private Optional<PoiFootprintSignature> computePoiFootprintSignature(ServerWorld world, BlockPos anchorPos) {
@@ -433,11 +444,16 @@ public class MasonWallBuilderGoal extends Goal {
         int hash = 1;
         boolean found = false;
 
-        // Scan all POI blocks (job sites AND beds — beds are registered as HOME POI in vanilla)
-        // via the POI storage. This is O(POI count), not O(volume).
+        GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
+
+        // Scan configured POI set via the POI storage. This is O(POI count), not O(volume).
         PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         Stream<BlockPos> poiStream = poiStorage.getInSquare(
-                type -> true,
+                type -> switch (poiMode) {
+                    case JOB_SITES_ONLY -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE);
+                    case JOBS_AND_BEDS -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME);
+                    case ALL_POIS -> true;
+                },
                 anchorPos,
                 range,
                 PointOfInterestStorage.OccupationStatus.ANY
@@ -473,6 +489,11 @@ public class MasonWallBuilderGoal extends Goal {
                 signature.maxZ() + WALL_EXPAND,
                 wallY
         );
+    }
+
+    private GuardVillagersConfig.MasonWallPoiMode resolveWallPoiMode() {
+        GuardVillagersConfig.MasonWallPoiMode configured = GuardVillagersConfig.masonWallPoiMode;
+        return configured != null ? configured : GuardVillagersConfig.MasonWallPoiMode.JOBS_AND_BEDS;
     }
 
     /**

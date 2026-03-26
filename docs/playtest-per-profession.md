@@ -89,9 +89,14 @@ Use `/time set 6000` to skip to midday and prevent guards from sleeping.
 ### B-3 · Wall Building
 **Preconditions:** Mason has cobblestone in chest (≥ perimeter segment count).
 **Steps:**
-1. Ensure the village has several POI blocks (beds, job sites) spread out.
-2. The mason computes an AABB around all POI blocks, expands it 10 blocks, and starts placing cobblestone at surface Y.
-3. Watch for mason walking the perimeter and placing blocks.
+1. Set `masonWallPoiMode` in config and note expected footprint behavior:
+   - `JOB_SITES_ONLY`: only workstation/job-site POIs define bounds (beds ignored).
+   - `JOBS_AND_BEDS` (default): workstation/job-site POIs + bed HOME POIs define bounds.
+   - `ALL_POIS`: all POI types define bounds (backward-compat mode).
+2. Ensure the village has POIs that match the chosen mode spread out enough to make a perimeter.
+3. The mason computes an AABB around those selected POIs, expands it 10 blocks, and starts placing cobblestone at surface Y.
+4. Watch for mason walking the perimeter and placing blocks.
+5. Check logs for `MasonWallBuilder ... wall POI scan mode=<MODE>` to confirm the active mode.
 
 **Pass:** A 1-high cobblestone wall forms around the village outline. Steep terrain (>3 block height delta) is skipped. At least 1 gap is always left open.
 
