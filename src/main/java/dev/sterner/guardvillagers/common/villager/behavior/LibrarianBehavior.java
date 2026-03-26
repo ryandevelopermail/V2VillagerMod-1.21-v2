@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -36,16 +37,19 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!villager.isAlive()) {
+            demoteQuartermaster(world, villager, "villager_not_alive");
             clearChestListener(villager);
             return;
         }
 
         if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.LIBRARIAN, world.getBlockState(jobPos))) {
+            demoteQuartermaster(world, villager, "invalid_job_site");
             clearChestListener(villager);
             return;
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            demoteQuartermaster(world, villager, "invalid_pair_distance");
             clearChestListener(villager);
             return;
         }
@@ -76,23 +80,26 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         }
         updateChestListener(world, villager, chestPos);
 
-        tryPromoteQuartermaster(world, villager, jobPos, chestPos, "chest_paired");
+        syncQuartermasterState(world, villager, jobPos, chestPos, "chest_paired");
         PAIRED_CHEST_POS.put(villager, chestPos);
     }
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         if (!villager.isAlive()) {
+            demoteQuartermaster(world, villager, "villager_not_alive");
             clearChestListener(villager);
             return;
         }
 
         if (!ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.LIBRARIAN, world.getBlockState(jobPos))) {
+            demoteQuartermaster(world, villager, "invalid_job_site");
             clearChestListener(villager);
             return;
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
+            demoteQuartermaster(world, villager, "invalid_pair_distance");
             clearChestListener(villager);
             return;
         }
@@ -118,7 +125,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         updateChestListener(world, villager, chestPos);
-        tryPromoteQuartermaster(world, villager, jobPos, chestPos, "pairing_refresh");
+        syncQuartermasterState(world, villager, jobPos, chestPos, "pairing_refresh");
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
@@ -132,6 +139,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             CHEST_LISTENERS.remove(villager);
         }
         if (!(inventory instanceof SimpleInventory simpleInventory)) {
+            demoteQuartermaster(world, villager, "missing_or_invalid_chest");
             return;
         }
         InventoryChangedListener listener = sender -> {
@@ -170,16 +178,17 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private record ChestListener(SimpleInventory inventory, InventoryChangedListener listener) {
     }
 
-    private void tryPromoteQuartermaster(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String reason) {
-        if (QUARTERMASTER_GOALS.containsKey(villager)) {
-            return;
-        }
+    private void syncQuartermasterState(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String reason) {
         QuartermasterPrerequisiteHelper.Result prerequisites =
                 QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
         if (!prerequisites.valid()) {
+            demoteQuartermaster(world, villager, "missing_or_invalid_chest");
             return;
         }
 
+        if (QUARTERMASTER_GOALS.containsKey(villager)) {
+            return;
+        }
         QuartermasterGoal qmGoal = new QuartermasterGoal(villager, jobPos, chestPos);
         QUARTERMASTER_GOALS.put(villager, qmGoal);
         villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
@@ -189,5 +198,21 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
                 chestPos.toShortString(),
                 prerequisites.secondChestPos().toShortString(),
                 jobPos.toShortString());
+    }
+
+    private void demoteQuartermaster(ServerWorld world, VillagerEntity villager, String reason) {
+        QuartermasterGoal qmGoal = QUARTERMASTER_GOALS.remove(villager);
+        if (qmGoal == null) {
+            return;
+        }
+        villager.goalSelector.remove(qmGoal);
+        BlockPos pairedChestPos = PAIRED_CHEST_POS.get(villager);
+        if (pairedChestPos != null && world.getServer() != null) {
+            VillageAnchorState.get(world.getServer()).unregister(world, pairedChestPos);
+        }
+        PAIRED_CHEST_POS.remove(villager);
+        LOGGER.info("Librarian {} removed from Quartermaster role (reason={})",
+                villager.getUuidAsString(),
+                reason);
     }
 }

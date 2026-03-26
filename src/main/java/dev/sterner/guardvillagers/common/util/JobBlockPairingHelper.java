@@ -306,6 +306,7 @@ public final class JobBlockPairingHelper {
     }
 
     public static void refreshWorldPairings(ServerWorld world) {
+        VillageAnchorState.get(world.getServer()).pruneInvalidAnchors(world);
         Box worldBounds = getWorldBounds(world);
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
             refreshVillagerPairings(world, villager);
