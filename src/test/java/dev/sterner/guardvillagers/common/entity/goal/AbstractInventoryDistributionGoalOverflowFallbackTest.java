@@ -60,6 +60,35 @@ class AbstractInventoryDistributionGoalOverflowFallbackTest {
     }
 
     @Test
+    void overflowCandidateWithoutDirectRoutesAvailable_convergesToQmChest() {
+        ServerWorld world = mock(ServerWorld.class);
+        MinecraftServer server = mock(MinecraftServer.class);
+        VillageAnchorState anchorState = mock(VillageAnchorState.class);
+        VillagerEntity villager = mock(VillagerEntity.class);
+        BlockPos sourceChest = new BlockPos(3, 64, 3);
+        BlockPos qmChest = new BlockPos(9, 64, 9);
+        SimpleInventory sourceInventory = new SimpleInventory(new ItemStack(Items.BREAD, 16));
+
+        when(world.getServer()).thenReturn(server);
+        when(anchorState.getNearestQmChest(world, sourceChest, 300)).thenReturn(Optional.of(qmChest));
+
+        OverflowFallbackTestGoal goal = new OverflowFallbackTestGoal(villager, sourceChest);
+        goal.registerChest(qmChest, new SimpleInventory(27));
+
+        try (MockedStatic<VillageAnchorState> anchorStateStatic = Mockito.mockStatic(VillageAnchorState.class)) {
+            anchorStateStatic.when(() -> VillageAnchorState.get(server)).thenReturn(anchorState);
+
+            boolean selected = goal.trySelectOverflow(world, sourceInventory, stack -> !stack.isEmpty());
+
+            assertTrue(selected);
+            assertTrue(goal.isPendingOverflowTransfer());
+            assertEquals(qmChest, goal.getPendingTargetPos());
+            assertNull(goal.getPendingTargetId());
+            assertEquals(15, sourceInventory.getStack(0).getCount());
+        }
+    }
+
+    @Test
     void overflowCandidateWithoutQmAvailable_noOpWithoutItemLoss() {
         ServerWorld world = mock(ServerWorld.class);
         MinecraftServer server = mock(MinecraftServer.class);
@@ -110,6 +139,37 @@ class AbstractInventoryDistributionGoalOverflowFallbackTest {
         }
     }
 
+    @Test
+    void overflowTransferWithFullDestination_preservesPendingItemWithoutLoss() {
+        ServerWorld world = mock(ServerWorld.class);
+        MinecraftServer server = mock(MinecraftServer.class);
+        VillageAnchorState anchorState = mock(VillageAnchorState.class);
+        VillagerEntity villager = mock(VillagerEntity.class);
+        BlockPos sourceChest = new BlockPos(5, 64, 5);
+        BlockPos qmChest = new BlockPos(7, 64, 7);
+        SimpleInventory sourceInventory = new SimpleInventory(new ItemStack(Items.WHEAT, 1));
+        SimpleInventory fullDestination = new SimpleInventory(new ItemStack(Items.WHEAT, 64));
+
+        when(world.getServer()).thenReturn(server);
+        when(anchorState.getNearestQmChest(world, sourceChest, 300)).thenReturn(Optional.of(qmChest));
+
+        OverflowFallbackTestGoal goal = new OverflowFallbackTestGoal(villager, sourceChest);
+        goal.registerChest(qmChest, fullDestination);
+
+        try (MockedStatic<VillageAnchorState> anchorStateStatic = Mockito.mockStatic(VillageAnchorState.class)) {
+            anchorStateStatic.when(() -> VillageAnchorState.get(server)).thenReturn(anchorState);
+
+            assertTrue(goal.trySelectOverflow(world, sourceInventory, stack -> !stack.isEmpty()));
+            assertEquals(0, sourceInventory.getStack(0).getCount());
+
+            boolean transferred = goal.tryExecuteOverflowTransfer(world);
+
+            assertFalse(transferred);
+            assertEquals(1, goal.getPendingItem().getCount());
+            assertEquals(64, fullDestination.getStack(0).getCount());
+        }
+    }
+
     private static final class OverflowFallbackTestGoal extends AbstractInventoryDistributionGoal {
         private final java.util.Map<BlockPos, Inventory> chestInventories = new java.util.HashMap<>();
 
@@ -139,6 +199,10 @@ class AbstractInventoryDistributionGoalOverflowFallbackTest {
 
         ItemStack getPendingItem() {
             return pendingItem;
+        }
+
+        boolean tryExecuteOverflowTransfer(ServerWorld world) {
+            return executeOverflowTransfer(world);
         }
 
         @Override
