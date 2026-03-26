@@ -54,6 +54,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
     private static final int TREE_SEARCH_RADIUS = 20;
+    private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
+    private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
     private static final int TREE_CROWN_RADIUS = 4;
@@ -790,16 +792,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         BlockPos center = chest == null
                 ? table
                 : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+        int effectiveTreeSearchRadius = getEffectiveTreeSearchRadius(guard);
 
         Set<BlockPos> excluded = new HashSet<>(guard.getSelectedTreeTargets());
-        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+        BlockPos min = center.add(-effectiveTreeSearchRadius, -TREE_SEARCH_HEIGHT, -effectiveTreeSearchRadius);
+        BlockPos max = center.add(effectiveTreeSearchRadius, TREE_SEARCH_HEIGHT, effectiveTreeSearchRadius);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             BlockPos pos = cursor.toImmutable();
-            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
+            if (!center.isWithinDistance(pos, effectiveTreeSearchRadius)) {
                 continue;
             }
             if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
@@ -822,6 +825,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         return nearest;
+    }
+
+    private int getEffectiveTreeSearchRadius() {
+        return getEffectiveTreeSearchRadius(this.guard);
+    }
+
+    static int getEffectiveTreeSearchRadius(LumberjackGuardEntity guard) {
+        int attempts = guard.getConsecutiveNoTreeSessions();
+        return getEffectiveTreeSearchRadiusForAttempts(attempts);
+    }
+
+    static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
+        if (attempts >= 4) {
+            return TREE_SEARCH_MAX_EXPANDED_RADIUS;
+        }
+        if (attempts >= 2) {
+            return TREE_SEARCH_EXPANDED_RADIUS;
+        }
+        return TREE_SEARCH_RADIUS;
     }
 
     private static BlockPos normalizeRootStatic(ServerWorld world, BlockPos pos) {
@@ -952,13 +974,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();
         BlockPos center = getPairedBaseCenter(table, chest);
+        int effectiveTreeSearchRadius = getEffectiveTreeSearchRadius();
 
         MappedBoundsSearchContext mappedContext = resolveMappedBoundsSearchContext(world, center);
         boolean hasMappedBounds = mappedContext != null;
-        Set<BlockPos> nearbyBells = collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
+        Set<BlockPos> nearbyBells = collectBellsNear(world, center, effectiveTreeSearchRadius + BELL_EXCLUSION_RADIUS);
 
         List<ScanBounds> regions = new ArrayList<>();
-        regions.add(ScanBounds.fromLocalRadius(center));
+        regions.add(ScanBounds.fromLocalRadius(center, effectiveTreeSearchRadius));
         if (hasMappedBounds) {
             for (VillageMappedBoundsState.MappedBounds bounds : mappedContext.bounds()) {
                 regions.add(ScanBounds.fromMapped(center, bounds));
@@ -973,6 +996,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 uniqueBoundsCount,
                 center.toShortString());
         return new TreeTargetScanSession(center,
+                effectiveTreeSearchRadius,
                 hasMappedBounds,
                 mappedContext == null ? 0 : mappedContext.cartographerCount(),
                 regions,
@@ -1152,10 +1176,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
+        return isCandidateInScanMode(center, candidate, mappedBounds, TREE_SEARCH_RADIUS);
+    }
+
+    static boolean isCandidateInScanMode(BlockPos center,
+                                         BlockPos candidate,
+                                         @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
+                                         int localSearchRadius) {
         if (mappedBounds != null) {
             return mappedBounds.contains(candidate);
         }
-        return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
+        return center.isWithinDistance(candidate, localSearchRadius);
     }
 
     static boolean shouldEarlyCompleteScanPass(boolean hasMappedBounds, int passIndex, int acceptedRoots, int acceptedLocalRoots) {
@@ -1177,8 +1208,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                               @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
                               boolean usesLocalBellExclusion) {
         static ScanBounds fromLocalRadius(BlockPos center) {
-            BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-            BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+            return fromLocalRadius(center, TREE_SEARCH_RADIUS);
+        }
+
+        static ScanBounds fromLocalRadius(BlockPos center, int radius) {
+            BlockPos min = center.add(-radius, -TREE_SEARCH_HEIGHT, -radius);
+            BlockPos max = center.add(radius, TREE_SEARCH_HEIGHT, radius);
             long width = (long) (max.getX() - min.getX() + 1);
             long height = (long) (max.getY() - min.getY() + 1);
             long depth = (long) (max.getZ() - min.getZ() + 1);
@@ -1233,6 +1268,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private static final List<Integer> SECONDARY_LAYER_OFFSETS = List.of(4, -3, 5, -4, 6, -5, 7, -6, 8, -7, 9, -8, 10, -9, -10);
 
         private final BlockPos center;
+        private final int localSearchRadius;
         private final boolean hasMappedBounds;
         private final int cartographerCount;
         private final List<ScanBounds> regions;
@@ -1253,11 +1289,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private boolean complete;
 
         private TreeTargetScanSession(BlockPos center,
+                                      int localSearchRadius,
                                       boolean hasMappedBounds,
                                       int cartographerCount,
                                       List<ScanBounds> regions,
                                       @Nullable Set<BlockPos> nearbyBells) {
             this.center = center;
+            this.localSearchRadius = localSearchRadius;
             this.hasMappedBounds = hasMappedBounds;
             this.cartographerCount = cartographerCount;
             this.regions = regions;
@@ -1294,7 +1332,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
                 if (region.mappedBounds() != null && !isWithinAnyMappedBounds(pos, this.regions, this.center)) {
                     this.metrics.skipped("out_of_bounds");
-                } else if (!isCandidateInScanMode(this.center, pos, region.mappedBounds())) {
+                } else if (!isCandidateInScanMode(this.center, pos, region.mappedBounds(), this.localSearchRadius)) {
                     this.metrics.skipped("out_of_bounds");
                 } else if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
                     this.metrics.skipped("non_log");
