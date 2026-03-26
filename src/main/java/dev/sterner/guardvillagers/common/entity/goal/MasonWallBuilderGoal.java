@@ -217,6 +217,21 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
+        // Determine gate reservations before computing required stone so gate exclusions
+        // are reflected in the build threshold.
+        List<BlockPos> gatePositions = pickGatePositions(rect, unbuilt);
+        Set<BlockPos> gateSet = new HashSet<>(gatePositions);
+
+        int requiredStone = unbuilt.stream()
+                .filter(pos -> !gateSet.contains(pos))
+                .mapToInt(pos -> STONE_PER_SEGMENT)
+                .sum();
+        if (requiredStone < 1) {
+            LOGGER.debug("MasonWallBuilder {}: no non-gate wall segments remain (available={}, required={})",
+                    guard.getUuidAsString(), 0, requiredStone);
+            return false;
+        }
+
         // 3. Find all peer masons near the anchor
         List<MasonGuardEntity> peers = getPeerMasons(world, anchorPos);
 
@@ -230,14 +245,13 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
 
-        // Build with whatever stone we have — don't require full wall upfront.
-        // If we have zero stone, wait for the distribution goal to supply more.
-        if (totalStone < 1) {
-            LOGGER.debug("MasonWallBuilder {}: no stone available yet (0/{} needed total)", guard.getUuidAsString(), unbuilt.size());
+        if (totalStone < requiredStone) {
+            LOGGER.info("MasonWallBuilder {}: insufficient stone (available={}, required={})",
+                    guard.getUuidAsString(), totalStone, requiredStone);
             return false;
         }
-        LOGGER.info("MasonWallBuilder {}: {} stone available, {} segments to build ({} unbuilt)",
-                guard.getUuidAsString(), totalStone, unbuilt.size(), unbuilt.size());
+        LOGGER.info("MasonWallBuilder {}: stone threshold met (available={}, required={})",
+                guard.getUuidAsString(), totalStone, requiredStone);
 
         // 5. Elect builder — the mason (including self) with the most stone
         MasonGuardEntity electedBuilder = guard;
@@ -280,7 +294,6 @@ public class MasonWallBuilderGoal extends Goal {
         guard.setWallSegments(pendingSegments);
 
         // 8. Store gate reservation positions (1 per face) on the guard
-        List<BlockPos> gatePositions = pickGatePositions(rect, unbuilt);
         guard.setWallGatePositions(gatePositions);
 
         LOGGER.info("MasonWallBuilder {}: elected builder; {} segments to place, {} transfers pending",
