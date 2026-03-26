@@ -149,6 +149,13 @@ public class QuartermasterGoal extends Goal {
         VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
     }
 
+    private void ensureAnchorUnregistered(ServerWorld world) {
+        if (anchorRegistered) {
+            unregisterAnchor(world);
+            anchorRegistered = false;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Goal lifecycle
     // -------------------------------------------------------------------------
@@ -156,7 +163,10 @@ public class QuartermasterGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
-        if (!villager.isAlive()) return false;
+        if (!villager.isAlive() || villager.isRemoved()) {
+            ensureAnchorUnregistered(world);
+            return false;
+        }
         if (!validateAndSyncPrerequisites(world)) return false;
         if (!anchorRegistered) {
             registerAnchor(world);
@@ -170,7 +180,7 @@ public class QuartermasterGoal extends Goal {
 
     @Override
     public boolean shouldContinue() {
-        return stage != Stage.IDLE && stage != Stage.DONE && villager.isAlive();
+        return stage != Stage.IDLE && stage != Stage.DONE && villager.isAlive() && !villager.isRemoved();
     }
 
     @Override
@@ -180,6 +190,9 @@ public class QuartermasterGoal extends Goal {
 
     @Override
     public void stop() {
+        if (villager.getWorld() instanceof ServerWorld world && (!villager.isAlive() || villager.isRemoved())) {
+            ensureAnchorUnregistered(world);
+        }
         villager.getNavigation().stop();
         stage = Stage.IDLE;
         sourcePos = null;
@@ -191,6 +204,12 @@ public class QuartermasterGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
+            return;
+        }
+        if (!villager.isAlive() || villager.isRemoved()) {
+            ensureAnchorUnregistered(world);
+            stage = Stage.DONE;
+            villager.getNavigation().stop();
             return;
         }
         if (!validateAndSyncPrerequisites(world)) {
@@ -240,10 +259,7 @@ public class QuartermasterGoal extends Goal {
             return true;
         }
 
-        if (anchorRegistered) {
-            unregisterAnchor(world);
-            anchorRegistered = false;
-        }
+        ensureAnchorUnregistered(world);
         if (!demoted) {
             Optional<BlockPos> secondChest = findDoubleChestOtherHalf(world, chestPos);
             String secondChestText = secondChest.map(BlockPos::toShortString).orElse("none");
