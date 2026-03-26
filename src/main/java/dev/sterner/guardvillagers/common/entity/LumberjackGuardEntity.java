@@ -62,6 +62,7 @@ public class LumberjackGuardEntity extends GuardEntity {
     private boolean triggerEvaluationRequested;
     private long nextVillageExpansionScanTick;
     private boolean bootstrapComplete;
+    private int consecutiveNoTreeSessions;
 
     public LumberjackGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -222,6 +223,14 @@ public class LumberjackGuardEntity extends GuardEntity {
         this.bootstrapComplete = bootstrapComplete;
     }
 
+    public int getConsecutiveNoTreeSessions() {
+        return this.consecutiveNoTreeSessions;
+    }
+
+    public void setConsecutiveNoTreeSessions(int consecutiveNoTreeSessions) {
+        this.consecutiveNoTreeSessions = Math.max(consecutiveNoTreeSessions, 0);
+    }
+
     @Override
     protected void initEquipment(Random random, LocalDifficulty localDifficulty) {
         super.initEquipment(random, localDifficulty);
@@ -330,6 +339,9 @@ public class LumberjackGuardEntity extends GuardEntity {
                 ? nbt.getLong("LumberjackNextVillageExpansionScanTick")
                 : 0L;
         this.bootstrapComplete = nbt.getBoolean("LumberjackBootstrapComplete");
+        this.consecutiveNoTreeSessions = nbt.contains("LumberjackConsecutiveNoTreeSessions")
+                ? Math.max(nbt.getInt("LumberjackConsecutiveNoTreeSessions"), 0)
+                : 0;
 
         this.selectedTreeTargets.clear();
         NbtList targetList = nbt.getList("LumberjackSelectedTreeTargets", 10);
@@ -383,6 +395,7 @@ public class LumberjackGuardEntity extends GuardEntity {
         nbt.putBoolean("LumberjackTriggerEvaluationRequested", this.triggerEvaluationRequested);
         nbt.putLong("LumberjackNextVillageExpansionScanTick", this.nextVillageExpansionScanTick);
         nbt.putBoolean("LumberjackBootstrapComplete", this.bootstrapComplete);
+        nbt.putInt("LumberjackConsecutiveNoTreeSessions", this.consecutiveNoTreeSessions);
 
         NbtList targetList = new NbtList();
         for (BlockPos pos : this.selectedTreeTargets) {

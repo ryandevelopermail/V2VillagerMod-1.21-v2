@@ -330,11 +330,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startSession(ServerWorld world, List<BlockPos> targets) {
         if (targets.isEmpty()) {
+            this.guard.setConsecutiveNoTreeSessions(this.guard.getConsecutiveNoTreeSessions() + 1);
             LOGGER.info("Lumberjack Guard {} could not find eligible trees near paired base; rescheduling countdown",
                     this.guard.getUuidAsString());
             startChopCountdown(world, "no eligible tree targets");
             return;
         }
+        this.guard.setConsecutiveNoTreeSessions(0);
 
         int sessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
         int selectedCount = Math.min(sessionCap, targets.size());
