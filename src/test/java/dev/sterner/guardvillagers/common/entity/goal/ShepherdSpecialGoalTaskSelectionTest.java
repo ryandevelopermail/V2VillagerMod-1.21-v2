@@ -14,12 +14,15 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -78,9 +81,81 @@ class ShepherdSpecialGoalTaskSelectionTest {
         }
     }
 
+    @Test
+    void findNearestPenTarget_withFreshSpatialCache_reusesCachedTargetAndGateWithoutRescan() throws Exception {
+        ServerWorld world = mock(ServerWorld.class);
+        VillagerEntity villager = mock(VillagerEntity.class);
+        BlockPos jobPos = new BlockPos(20, 64, 20);
+        BlockPos chestPos = new BlockPos(4, 64, 4);
+        BlockPos cachedGate = new BlockPos(9, 64, 9);
+
+        when(world.getTime()).thenReturn(1000L);
+        when(villager.getWorld()).thenReturn(world);
+
+        ShepherdSpecialGoal goal = new ShepherdSpecialGoal(villager, jobPos, chestPos);
+        setField(goal, "nearestPenCacheTick", 980L);
+        setField(goal, "cachedNearestPenTarget", cachedGate);
+        setField(goal, "cachedNearestPenGatePos", cachedGate);
+        setField(goal, "penGatePos", null);
+
+        BlockPos result = invokeFindNearestPenTarget(goal, world);
+
+        assertEquals(cachedGate, result);
+        assertEquals(cachedGate, getField(goal, "penGatePos"));
+        Mockito.verify(world, never()).getBottomY();
+        Mockito.verify(world, never()).getTopY();
+        Mockito.verify(world, never()).getBlockState(any(BlockPos.class));
+    }
+
+    @Test
+    void invalidateSpatialSearchCache_clearsNearestPenCacheFieldsUsedByTaskPolling() throws Exception {
+        ServerWorld world = mock(ServerWorld.class);
+        VillagerEntity villager = mock(VillagerEntity.class);
+        BlockPos jobPos = new BlockPos(20, 64, 20);
+        BlockPos chestPos = new BlockPos(4, 64, 4);
+        BlockPos cachedGate = new BlockPos(9, 64, 9);
+
+        when(villager.getWorld()).thenReturn(world);
+
+        ShepherdSpecialGoal goal = new ShepherdSpecialGoal(villager, jobPos, chestPos);
+        setField(goal, "nearestPenCacheTick", 980L);
+        setField(goal, "cachedNearestPenTarget", cachedGate);
+        setField(goal, "cachedNearestPenGatePos", cachedGate);
+
+        invokeInvalidateSpatialSearchCache(goal);
+
+        assertEquals(Long.MIN_VALUE, getField(goal, "nearestPenCacheTick"));
+        assertNull(getField(goal, "cachedNearestPenTarget"));
+        assertNull(getField(goal, "cachedNearestPenGatePos"));
+    }
+
     private static ShepherdSpecialGoal.TaskType getTaskType(ShepherdSpecialGoal goal) throws Exception {
         Field taskTypeField = ShepherdSpecialGoal.class.getDeclaredField("taskType");
         taskTypeField.setAccessible(true);
         return (ShepherdSpecialGoal.TaskType) taskTypeField.get(goal);
+    }
+
+    private static BlockPos invokeFindNearestPenTarget(ShepherdSpecialGoal goal, ServerWorld world) throws Exception {
+        Method method = ShepherdSpecialGoal.class.getDeclaredMethod("findNearestPenTarget", ServerWorld.class);
+        method.setAccessible(true);
+        return (BlockPos) method.invoke(goal, world);
+    }
+
+    private static void invokeInvalidateSpatialSearchCache(ShepherdSpecialGoal goal) throws Exception {
+        Method method = ShepherdSpecialGoal.class.getDeclaredMethod("invalidateSpatialSearchCache");
+        method.setAccessible(true);
+        method.invoke(goal);
+    }
+
+    private static void setField(ShepherdSpecialGoal goal, String fieldName, Object value) throws Exception {
+        Field field = ShepherdSpecialGoal.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(goal, value);
+    }
+
+    private static Object getField(ShepherdSpecialGoal goal, String fieldName) throws Exception {
+        Field field = ShepherdSpecialGoal.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return field.get(goal);
     }
 }
