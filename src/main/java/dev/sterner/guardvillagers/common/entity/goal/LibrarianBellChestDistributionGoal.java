@@ -1,6 +1,5 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -119,19 +118,7 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
     }
 
     private Optional<BlockPos> resolveBellChestTarget(ServerWorld world) {
-        // Use the nearest QM chest as the distribution target (the village bank).
-        // Skip if the nearest QM chest is our own chest (no self-distribution).
-        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
-        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, jobPos, 300);
-        if (nearestQm.isEmpty()) {
-            return Optional.empty();
-        }
-        BlockPos target = nearestQm.get();
-        // Don't distribute back into our own chest
-        if (target.equals(chestPos)) {
-            return Optional.empty();
-        }
-        return Optional.of(target);
+        return resolveOverflowFallbackQmChest(world);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {

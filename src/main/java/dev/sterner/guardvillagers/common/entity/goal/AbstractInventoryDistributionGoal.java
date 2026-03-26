@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
@@ -29,6 +30,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final double MOVE_SPEED = 0.6D;
     protected static final double DEFAULT_OVERFLOW_FULLNESS_TRIGGER = 0.825D;
     protected static final double DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE = 24.0D;
+    protected static final int DEFAULT_OVERFLOW_QM_SEARCH_RADIUS = 300;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -386,7 +388,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (!isOverflowModeActive(world, sourceInventory)) {
             return false;
         }
-        if (getOverflowRecipients(world).isEmpty()) {
+        if (getOverflowRecipients(world).isEmpty() && resolveOverflowFallbackQmChest(world).isEmpty()) {
             return false;
         }
 
@@ -404,7 +406,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         }
 
         List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
-        if (recipients.isEmpty()) {
+        Optional<BlockPos> fallbackQmChest = recipients.isEmpty() ? resolveOverflowFallbackQmChest(world) : Optional.empty();
+        if (recipients.isEmpty() && fallbackQmChest.isEmpty()) {
             return false;
         }
 
@@ -414,14 +417,19 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                 continue;
             }
 
-            DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
             ItemStack extracted = stack.split(1);
             sourceInventory.setStack(slot, stack);
             sourceInventory.markDirty();
 
             pendingItem = extracted;
-            pendingTargetId = recipient.recipient().getUuid();
-            pendingTargetPos = recipient.chestPos();
+            if (!recipients.isEmpty()) {
+                DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
+                pendingTargetId = recipient.recipient().getUuid();
+                pendingTargetPos = recipient.chestPos();
+            } else {
+                pendingTargetId = null;
+                pendingTargetPos = fallbackQmChest.get();
+            }
             pendingOverflowTransfer = true;
             return true;
         }
@@ -435,7 +443,13 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
         List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
         if (recipients.isEmpty()) {
-            return false;
+            Optional<BlockPos> fallbackQmChest = resolveOverflowFallbackQmChest(world);
+            if (fallbackQmChest.isEmpty()) {
+                return false;
+            }
+            pendingTargetId = null;
+            pendingTargetPos = fallbackQmChest.get();
+            return true;
         }
 
         if (pendingTargetId != null) {
@@ -451,6 +465,28 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         return true;
+    }
+
+    protected int getOverflowQmSearchRadius() {
+        return DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
+    }
+
+    protected Optional<BlockPos> resolveOverflowFallbackQmChest(ServerWorld world) {
+        BlockPos origin = getDistributionCenter();
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, origin, getOverflowQmSearchRadius());
+        if (nearestQm.isEmpty()) {
+            return Optional.empty();
+        }
+
+        BlockPos target = nearestQm.get();
+        if (target.equals(chestPos)) {
+            return Optional.empty();
+        }
+        if (getChestInventoryAt(world, target).isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(target.toImmutable());
     }
 
     protected boolean executeOverflowTransfer(ServerWorld world) {
