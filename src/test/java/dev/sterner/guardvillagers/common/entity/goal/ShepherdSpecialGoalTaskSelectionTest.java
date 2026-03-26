@@ -42,6 +42,49 @@ class ShepherdSpecialGoalTaskSelectionTest {
     }
 
     @Test
+    void selectTaskTypeByAvailability_equivalentAvailabilityStates_preservePriorityOrdering() {
+        ShepherdSpecialGoal.TaskType noBannerState = ShepherdSpecialGoal.selectTaskTypeByAvailability(
+                false,
+                false,
+                true,
+                true,
+                true
+        );
+        ShepherdSpecialGoal.TaskType bannerWithoutTargetState = ShepherdSpecialGoal.selectTaskTypeByAvailability(
+                true,
+                false,
+                true,
+                true,
+                true
+        );
+        ShepherdSpecialGoal.TaskType equivalentNonBannerSelection = ShepherdSpecialGoal.selectNonBannerTaskType(
+                true,
+                true,
+                true
+        );
+        assertEquals(ShepherdSpecialGoal.TaskType.SHEARS, noBannerState);
+        assertEquals(noBannerState, bannerWithoutTargetState);
+        assertEquals(noBannerState, equivalentNonBannerSelection);
+
+        ShepherdSpecialGoal.TaskType bannerWithoutOtherSupply = ShepherdSpecialGoal.selectTaskTypeByAvailability(
+                true,
+                true,
+                false,
+                false,
+                false
+        );
+        ShepherdSpecialGoal.TaskType bannerWithOtherSupply = ShepherdSpecialGoal.selectTaskTypeByAvailability(
+                true,
+                true,
+                true,
+                true,
+                true
+        );
+        assertEquals(ShepherdSpecialGoal.TaskType.BANNER, bannerWithoutOtherSupply);
+        assertEquals(bannerWithoutOtherSupply, bannerWithOtherSupply);
+    }
+
+    @Test
     void canStart_withoutBellPenCache_usesJobSiteFallbackGatherPenForWheatTask() throws Exception {
         ServerWorld world = mock(ServerWorld.class);
         MinecraftServer server = mock(MinecraftServer.class);
