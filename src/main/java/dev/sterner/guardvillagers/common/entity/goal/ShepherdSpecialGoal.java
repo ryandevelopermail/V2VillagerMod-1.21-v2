@@ -220,7 +220,7 @@ public class ShepherdSpecialGoal extends Goal {
         boolean hasShearsInChest = shearsInChestCount > 0;
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest) {
-            lastShearsInChestCount = countShearsInChest(world);
+            lastShearsInChestCount = shearsInChestCount;
         } else if (!hasShearsInChest) {
             lastShearsInChestCount = 0;
         }
@@ -876,29 +876,38 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
-        boolean hasBannerAvailable = hasBannerInInventoryOrHand()
-                || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
-        boolean hasBannerPlacementTarget = hasBannerAvailable && findNearestPenTarget(world) != null;
+        boolean hasBannerInInventoryOrHand = hasBannerInInventoryOrHand();
+        boolean hasShearsInInventoryOrHand = hasShearsInInventoryOrHand();
+        boolean hasWheatInInventoryOrOffhand = hasWheatInInventoryOrOffhand();
+        boolean nearestBannerPenExists = findNearestPenTarget(world) != null;
+        boolean nearestGatherPenExists = resolveNearestGatherPen(world) != null;
+
+        boolean hasBannerInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
+        boolean hasShearsInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS));
+        boolean hasWheatInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT));
+
+        boolean hasBannerAvailable = hasBannerInInventoryOrHand || hasBannerInChest;
+        boolean hasBannerPlacementTarget = hasBannerAvailable && nearestBannerPenExists;
+        boolean hasShearsAvailable = hasShearsInInventoryOrHand || hasShearsInChest;
+        boolean hasWheatAvailable = hasWheatInInventoryOrOffhand || hasWheatInChest;
 
         if (inventory == null) {
             TaskType selectedTask = selectTaskTypeByAvailability(
                     hasBannerAvailable,
                     hasBannerPlacementTarget,
-                    hasShearsInInventoryOrHand(),
-                    hasWheatInInventoryOrOffhand(),
-                    resolveNearestGatherPen(world) != null);
+                    hasShearsAvailable,
+                    hasWheatAvailable,
+                    nearestGatherPenExists);
             logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
             return selectedTask;
         }
 
-        boolean hasWheatAvailable = hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT))
-                || hasWheatInInventoryOrOffhand();
         TaskType selectedTask = selectTaskTypeByAvailability(
                 hasBannerAvailable,
                 hasBannerPlacementTarget,
-                hasShearsInChestOrInventory(inventory),
+                hasShearsAvailable,
                 hasWheatAvailable,
-                resolveNearestGatherPen(world) != null);
+                nearestGatherPenExists);
         logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
         return selectedTask;
     }
@@ -951,11 +960,6 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         return false;
-    }
-
-    private boolean hasShearsInChestOrInventory(Inventory chestInventory) {
-        return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))
-                || hasShearsInInventoryOrHand();
     }
 
     private boolean hasShearsInInventoryOrHand() {
