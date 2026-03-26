@@ -7,6 +7,12 @@ import java.util.List;
 
 public class GuardVillagersConfig extends MidnightConfig {
 
+    public enum MasonWallPoiMode {
+        JOB_SITES_ONLY,
+        JOBS_AND_BEDS,
+        ALL_POIS
+    }
+
     @Entry
     public static int reputationRequirementToBeAttacked = -100;
     @Entry
@@ -79,6 +85,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int bellChestBedSearchRadius = 6;
     @Entry(min=1)
     public static int masonTableDailyCraftLimit = 4;
+    @Entry
+    public static MasonWallPoiMode masonWallPoiMode = MasonWallPoiMode.JOBS_AND_BEDS;
     @Entry(min=1)
     public static int farmerWheatSeedReserveCap = 64;
     @Entry(min=0)
