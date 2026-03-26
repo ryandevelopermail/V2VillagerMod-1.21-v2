@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.behavior.WeaponsmithBehavior;
@@ -117,6 +118,8 @@ public class QuartermasterGoal extends Goal {
 
     private long nextCheckTick = 0L;
     private Stage stage = Stage.IDLE;
+    private boolean anchorRegistered = false;
+    private boolean demoted = false;
 
     // Current active transfer
     private BlockPos sourcePos = null;
@@ -153,8 +156,11 @@ public class QuartermasterGoal extends Goal {
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive()) return false;
-        // Ensure QM chest is registered as village anchor on every active check
-        registerAnchor(world);
+        if (!validateAndSyncPrerequisites(world)) return false;
+        if (!anchorRegistered) {
+            registerAnchor(world);
+            anchorRegistered = true;
+        }
         if (world.getTime() < nextCheckTick) return false;
 
         nextCheckTick = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -184,6 +190,11 @@ public class QuartermasterGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
+            return;
+        }
+        if (!validateAndSyncPrerequisites(world)) {
+            stage = Stage.DONE;
+            villager.getNavigation().stop();
             return;
         }
 
@@ -218,6 +229,31 @@ public class QuartermasterGoal extends Goal {
             case DONE -> stage = Stage.IDLE;
             default -> {}
         }
+    }
+
+    private boolean validateAndSyncPrerequisites(ServerWorld world) {
+        QuartermasterPrerequisiteHelper.Result result =
+                QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
+        if (result.valid()) {
+            demoted = false;
+            return true;
+        }
+
+        if (anchorRegistered) {
+            unregisterAnchor(world);
+            anchorRegistered = false;
+        }
+        if (!demoted) {
+            Optional<BlockPos> secondChest = findDoubleChestOtherHalf(world, chestPos);
+            String secondChestText = secondChest.map(BlockPos::toShortString).orElse("none");
+            LOGGER.info("Librarian {} demoted from Quartermaster (chest={} second_chest={} job_site={})",
+                    villager.getUuidAsString(),
+                    chestPos.toShortString(),
+                    secondChestText,
+                    jobPos.toShortString());
+            demoted = true;
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------
