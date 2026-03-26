@@ -15,6 +15,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -724,7 +725,7 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     /**
-     * Returns true if any living Librarian-profession villager with an active
+     * Returns true if any living Librarian-profession villager with an installed
      * QuartermasterGoal exists within {@code range} blocks of {@code anchor}.
      */
     public static boolean isAnyActive(ServerWorld world, BlockPos anchor, double range) {
@@ -734,8 +735,27 @@ public class QuartermasterGoal extends Goal {
                 box,
                 v -> v.isAlive()
                         && v.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.LIBRARIAN);
-        // We treat any alive librarian near the anchor as potential QM — lightweight check.
-        return !librarians.isEmpty();
+
+        for (net.minecraft.entity.passive.VillagerEntity librarian : librarians) {
+            for (PrioritizedGoal prioritizedGoal : librarian.goalSelector.getGoals()) {
+                if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+                    LOGGER.debug(
+                            "Quartermaster presence check: true (anchor={} range={} librarian={} running={})",
+                            anchor.toShortString(),
+                            range,
+                            librarian.getUuidAsString(),
+                            prioritizedGoal.isRunning());
+                    return true;
+                }
+            }
+        }
+
+        LOGGER.debug(
+                "Quartermaster presence check: false (anchor={} range={} librarians_scanned={})",
+                anchor.toShortString(),
+                range,
+                librarians.size());
+        return false;
     }
 
     private void moveTo(BlockPos target) {
