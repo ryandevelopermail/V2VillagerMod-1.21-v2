@@ -2474,7 +2474,7 @@ public class ShepherdSpecialGoal extends Goal {
         DONE
     }
 
-    private enum TaskType {
+    enum TaskType {
         SHEARS,
         BANNER,
         WHEAT_GATHER
