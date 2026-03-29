@@ -139,7 +139,12 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             CHEST_LISTENERS.remove(villager);
         }
         if (!(inventory instanceof SimpleInventory simpleInventory)) {
-            demoteQuartermaster(world, villager, "missing_or_invalid_chest");
+            // ChestBlock#getInventory can return non-SimpleInventory wrappers (e.g. double-chest
+            // combined inventory). Those inventories do not expose listener hooks, but they are
+            // still valid chest inventories for QM operation. Do not demote; just run without
+            // event wakeups and rely on normal periodic polling.
+            LOGGER.debug("Librarian {} chest at {} does not support inventory listeners; using polling fallback.",
+                    villager.getUuidAsString(), chestPos.toShortString());
             return;
         }
         InventoryChangedListener listener = sender -> {
