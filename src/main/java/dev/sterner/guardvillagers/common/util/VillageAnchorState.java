@@ -113,6 +113,7 @@ public class VillageAnchorState extends PersistentState {
         Set<BlockPos> set = anchorsByWorld.computeIfAbsent(world.getRegistryKey(), k -> new HashSet<>());
         if (set.add(qmChestPos.toImmutable())) {
             markDirty();
+            VillagePenRegistry.invalidateFallbackCache(world.getServer());
             LOGGER.info("[VillageAnchorState] registered QM chest at {} (world: {})",
                     qmChestPos.toShortString(), world.getRegistryKey().getValue());
         }
@@ -128,6 +129,7 @@ public class VillageAnchorState extends PersistentState {
                 anchorsByWorld.remove(world.getRegistryKey());
             }
             markDirty();
+            VillagePenRegistry.invalidateFallbackCache(world.getServer());
             LOGGER.info("[VillageAnchorState] unregistered QM chest at {} (world: {})",
                     qmChestPos.toShortString(), world.getRegistryKey().getValue());
         }
@@ -149,6 +151,7 @@ public class VillageAnchorState extends PersistentState {
                 anchorsByWorld.remove(world.getRegistryKey());
             }
             markDirty();
+            VillagePenRegistry.invalidateFallbackCache(world.getServer());
             LOGGER.info("[VillageAnchorState] pruned stale QM anchors (world: {})", world.getRegistryKey().getValue());
         }
     }

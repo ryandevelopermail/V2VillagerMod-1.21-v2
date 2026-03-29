@@ -117,7 +117,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
 
         // If a pen already exists near this shepherd's job site, don't craft more materials
         VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
-        boolean penExists = registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent();
+        boolean penExists = registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, 96).isPresent();
         if (penExists) {
             LOGGER.debug("ShepherdFence {}: pen found within {} blocks of job site — skipping fence crafting",
                     villager.getUuidAsString(), PEN_SCAN_RADIUS);

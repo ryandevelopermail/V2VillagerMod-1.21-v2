@@ -23,6 +23,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +63,14 @@ public class VillagePenRegistry extends PersistentState {
     private static final int PEN_FENCE_RANGE = 64;
     /** Max gate candidates checked per bell per scan. */
     private static final int MAX_GATE_CANDIDATES = 64;
+    /** Fallback cache key region size in blocks. */
+    private static final int JOB_SITE_CACHE_REGION_SIZE = 64;
+    /** Fallback cache TTL in ticks (short-lived by design to avoid stale geometry). */
+    private static int JOB_SITE_FALLBACK_CACHE_TTL_TICKS = 400;
+    /** Hard block-iteration budget for fallback scans per invocation. */
+    private static final int JOB_SITE_SCAN_MAX_BLOCKS_PER_CALL = 2_048;
+    /** Hard gate-processing budget for fallback scans per invocation. */
+    private static final int JOB_SITE_SCAN_MAX_GATES_PER_CALL = 8;
     /**
      * Max horizontal blocks to BFS from gate into pen interior.
      * Raised to 16 so pens up to ~32×32 are reliably detected.
@@ -86,6 +95,8 @@ public class VillagePenRegistry extends PersistentState {
 
     /** Tick of last rescan. Persisted so we don't rescan on first tick after restart. */
     private long lastRescanTick = Long.MIN_VALUE;
+    /** Short-lived cache for job-site fallback scans keyed by (dimension, region cell). */
+    private final Map<FallbackCacheKey, FallbackCacheEntry> fallbackScanCache = new HashMap<>();
 
     // -------------------------------------------------------------------------
     // Static accessors
@@ -93,6 +104,22 @@ public class VillagePenRegistry extends PersistentState {
 
     public static VillagePenRegistry get(MinecraftServer server) {
         return server.getOverworld().getPersistentStateManager().getOrCreate(getType(), STATE_ID);
+    }
+
+    /**
+     * Called when anchor registration changes. Clears fallback scan cache to avoid stale
+     * geometry-driven routing around moved or removed anchors.
+     */
+    public static void invalidateFallbackCache(MinecraftServer server) {
+        VillagePenRegistry registry = get(server);
+        if (!registry.fallbackScanCache.isEmpty()) {
+            registry.fallbackScanCache.clear();
+            registry.markDirty();
+        }
+    }
+
+    public static void setJobSiteFallbackCacheTtlTicks(int ttlTicks) {
+        JOB_SITE_FALLBACK_CACHE_TTL_TICKS = Math.max(1, ttlTicks);
     }
 
     private static Type<VillagePenRegistry> getType() {
@@ -216,6 +243,8 @@ public class VillagePenRegistry extends PersistentState {
             totalPens += pens.size();
         }
 
+        // Rescan completion means world geometry may have changed significantly.
+        fallbackScanCache.clear();
         markDirty();
         LOGGER.info("[VillagePenRegistry] rescan complete: {} anchor(s), {} pen(s) detected", anchors.size(), totalPens);
     }
@@ -273,7 +302,7 @@ public class VillagePenRegistry extends PersistentState {
      * villager's job-site position). Pass 0 to disable the fallback.
      */
     public Optional<PenEntry> getNearestPen(ServerWorld world, BlockPos anchor, int radius) {
-        return getNearestPen(world, anchor, radius, 300);
+        return getNearestPen(world, anchor, radius, 160);
     }
 
     /**
@@ -287,8 +316,8 @@ public class VillagePenRegistry extends PersistentState {
     public Optional<PenEntry> getNearestPen(ServerWorld world, BlockPos anchor, int radius, int jobSiteFallbackRadius) {
         List<PenEntry> pens = getNearestBellPens(world, anchor, radius);
         if (pens.isEmpty() && jobSiteFallbackRadius > 0) {
-            // No bell-registered pens — fall back to a live scan around the job-site position
-            pens = scanPensNearJobSite(world, anchor, jobSiteFallbackRadius);
+            // No bell-registered pens — fall back to a budgeted short-TTL cache around job-site.
+            pens = getJobSiteFallbackPens(world, anchor, jobSiteFallbackRadius);
         }
         if (pens.isEmpty()) {
             return Optional.empty();
@@ -311,9 +340,13 @@ public class VillagePenRegistry extends PersistentState {
      * call for shepherd-specific pen detection (needs a list, not just the nearest).
      */
     public List<PenEntry> getNearestBellPensWithJobSiteFallback(ServerWorld world, BlockPos anchor, int radius) {
+        return getNearestBellPensWithJobSiteFallback(world, anchor, radius, 160);
+    }
+
+    public List<PenEntry> getNearestBellPensWithJobSiteFallback(ServerWorld world, BlockPos anchor, int radius, int jobSiteFallbackRadius) {
         List<PenEntry> pens = getNearestBellPens(world, anchor, radius);
-        if (pens.isEmpty()) {
-            pens = scanPensNearJobSite(world, anchor, 300);
+        if (pens.isEmpty() && jobSiteFallbackRadius > 0) {
+            pens = getJobSiteFallbackPens(world, anchor, jobSiteFallbackRadius);
         }
         return pens;
     }
@@ -321,11 +354,71 @@ public class VillagePenRegistry extends PersistentState {
     /**
      * Performs a live geometry scan for fence-gate-enclosed pens within {@code radius} blocks
      * of {@code jobSitePos}. Used as a fallback when no bell is registered nearby.
-     * Results are NOT cached — this is intentionally a one-shot scan for rare/fallback use.
+     * Results are cached with short TTL and scanned with per-call budgets to avoid
+     * large single-tick geometry spikes.
      */
-    private List<PenEntry> scanPensNearJobSite(ServerWorld world, BlockPos jobSitePos, int radius) {
-        LOGGER.debug("[VillagePenRegistry] job-site fallback scan around {} r={}", jobSitePos.toShortString(), radius);
-        return scanPensNearBell(world, jobSitePos, radius);
+    private List<PenEntry> getJobSiteFallbackPens(ServerWorld world, BlockPos jobSitePos, int radius) {
+        FallbackCacheKey key = FallbackCacheKey.of(world, jobSitePos);
+        FallbackCacheEntry entry = fallbackScanCache.get(key);
+        long now = world.getTime();
+        boolean fresh = entry != null
+                && (now - entry.scanTick) <= JOB_SITE_FALLBACK_CACHE_TTL_TICKS
+                && entry.scanRadius == radius
+                && entry.continuation == null;
+        if (fresh) {
+            return entry.pens;
+        }
+
+        if (entry == null || entry.scanRadius != radius || (now - entry.scanTick) > JOB_SITE_FALLBACK_CACHE_TTL_TICKS) {
+            entry = new FallbackCacheEntry(radius);
+            fallbackScanCache.put(key, entry);
+        }
+        runFallbackScanStep(world, jobSitePos, entry, now);
+        return entry.pens;
+    }
+
+    private void runFallbackScanStep(ServerWorld world, BlockPos jobSitePos, FallbackCacheEntry entry, long now) {
+        if (entry.continuation == null) {
+            entry.continuation = ScanContinuation.start(world, jobSitePos, entry.scanRadius);
+            entry.pens = new ArrayList<>();
+            LOGGER.debug("[VillagePenRegistry] job-site fallback scan start around {} r={}",
+                    jobSitePos.toShortString(), entry.scanRadius);
+        }
+
+        ScanContinuation continuation = entry.continuation;
+        List<BlockPos> gateCandidates = new ArrayList<>();
+        int blocksProcessed = 0;
+        while (blocksProcessed < JOB_SITE_SCAN_MAX_BLOCKS_PER_CALL && continuation.hasNext()) {
+            BlockPos cursor = continuation.next();
+            blocksProcessed++;
+            if (!jobSitePos.isWithinDistance(cursor, entry.scanRadius)) {
+                continue;
+            }
+            if (world.getBlockState(cursor).getBlock() instanceof FenceGateBlock) {
+                gateCandidates.add(cursor.toImmutable());
+                if (gateCandidates.size() >= JOB_SITE_SCAN_MAX_GATES_PER_CALL) {
+                    break;
+                }
+            }
+        }
+
+        int gatesProcessed = 0;
+        for (BlockPos gatePos : gateCandidates) {
+            if (gatesProcessed >= JOB_SITE_SCAN_MAX_GATES_PER_CALL) {
+                break;
+            }
+            gatesProcessed++;
+            addPenFromGate(world, gatePos, entry.pens);
+        }
+
+        if (!continuation.hasNext()) {
+            entry.scanTick = now;
+            entry.continuation = null;
+            entry.pens = Collections.unmodifiableList(new ArrayList<>(entry.pens));
+            markDirty();
+            LOGGER.debug("[VillagePenRegistry] job-site fallback scan complete around {} r={} pens={}",
+                    jobSitePos.toShortString(), entry.scanRadius, entry.pens.size());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -359,31 +452,34 @@ public class VillagePenRegistry extends PersistentState {
 
         List<PenEntry> pens = new ArrayList<>();
         for (BlockPos gatePos : gateCandidates) {
-            BlockState state = world.getBlockState(gatePos);
-            if (!(state.getBlock() instanceof FenceGateBlock)) {
-                continue;
-            }
-            BlockPos interior = resolveInterior(world, gatePos, state);
-            if (interior == null) {
-                continue;
-            }
-            if (!isInsideFencePen(world, interior)) {
-                continue;
-            }
-            BlockPos center = getPenCenter(world, interior);
-            if (center == null) {
-                continue;
-            }
-            // Dedup by center proximity
-            boolean duplicate = pens.stream().anyMatch(existing ->
-                    existing.gate().equals(gatePos)
-                    || existing.center().getSquaredDistance(center) <= 9.0D);
-            if (duplicate) {
-                continue;
-            }
-            pens.add(new PenEntry(gatePos.toImmutable(), center.toImmutable(), gatePos.toImmutable()));
+            addPenFromGate(world, gatePos, pens);
         }
         return pens;
+    }
+
+    private void addPenFromGate(ServerWorld world, BlockPos gatePos, List<PenEntry> pens) {
+        BlockState state = world.getBlockState(gatePos);
+        if (!(state.getBlock() instanceof FenceGateBlock)) {
+            return;
+        }
+        BlockPos interior = resolveInterior(world, gatePos, state);
+        if (interior == null) {
+            return;
+        }
+        if (!isInsideFencePen(world, interior)) {
+            return;
+        }
+        BlockPos center = getPenCenter(world, interior);
+        if (center == null) {
+            return;
+        }
+        boolean duplicate = pens.stream().anyMatch(existing ->
+                existing.gate().equals(gatePos)
+                        || existing.center().getSquaredDistance(center) <= 9.0D);
+        if (duplicate) {
+            return;
+        }
+        pens.add(new PenEntry(gatePos.toImmutable(), center.toImmutable(), gatePos.toImmutable()));
     }
 
     private BlockPos resolveInterior(ServerWorld world, BlockPos gatePos, BlockState state) {
@@ -494,5 +590,69 @@ public class VillagePenRegistry extends PersistentState {
         VillagePenRegistry registry = get(world.getServer());
         BlockPos detected = registry.getPenCenter(world, pos);
         return detected != null && detected.getSquaredDistance(expectedCenter) <= 9.0D;
+    }
+
+    private record FallbackCacheKey(RegistryKey<net.minecraft.world.World> dimension, int regionX, int regionZ) {
+        private static FallbackCacheKey of(ServerWorld world, BlockPos pos) {
+            return new FallbackCacheKey(
+                    world.getRegistryKey(),
+                    Math.floorDiv(pos.getX(), JOB_SITE_CACHE_REGION_SIZE),
+                    Math.floorDiv(pos.getZ(), JOB_SITE_CACHE_REGION_SIZE));
+        }
+    }
+
+    private static final class FallbackCacheEntry {
+        private final int scanRadius;
+        private long scanTick = Long.MIN_VALUE;
+        private List<PenEntry> pens = List.of();
+        private ScanContinuation continuation;
+
+        private FallbackCacheEntry(int scanRadius) {
+            this.scanRadius = scanRadius;
+        }
+    }
+
+    private static final class ScanContinuation {
+        private final int minX;
+        private final int minY;
+        private final int minZ;
+        private final int width;
+        private final int height;
+        private final int depth;
+        private final int total;
+        private int index;
+
+        private ScanContinuation(int minX, int minY, int minZ, int width, int height, int depth) {
+            this.minX = minX;
+            this.minY = minY;
+            this.minZ = minZ;
+            this.width = width;
+            this.height = height;
+            this.depth = depth;
+            this.total = width * height * depth;
+        }
+
+        private static ScanContinuation start(ServerWorld world, BlockPos center, int radius) {
+            int y = center.getY();
+            int minY = Math.max(world.getBottomY(), y - 16);
+            int maxY = Math.min(world.getTopY(), y + 16);
+            int width = radius * 2 + 1;
+            int height = maxY - minY + 1;
+            int depth = radius * 2 + 1;
+            return new ScanContinuation(center.getX() - radius, minY, center.getZ() - radius, width, height, depth);
+        }
+
+        private boolean hasNext() {
+            return index < total;
+        }
+
+        private BlockPos next() {
+            int current = index++;
+            int localX = current % width;
+            int yz = current / width;
+            int localY = yz % height;
+            int localZ = yz / height;
+            return new BlockPos(minX + localX, minY + localY, minZ + localZ);
+        }
     }
 }
