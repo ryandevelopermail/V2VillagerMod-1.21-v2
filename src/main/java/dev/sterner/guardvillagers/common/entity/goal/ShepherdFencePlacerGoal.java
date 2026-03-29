@@ -140,7 +140,7 @@ public class ShepherdFencePlacerGoal extends Goal {
 
         // Don't act if a pen already exists near the job site
         VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
-        if (registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent()) {
+        if (registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, 96).isPresent()) {
             LOGGER.debug("ShepherdFencePlacer {}: pen already exists near job site {}, skipping",
                     villager.getUuidAsString(), jobPos.toShortString());
             return false;

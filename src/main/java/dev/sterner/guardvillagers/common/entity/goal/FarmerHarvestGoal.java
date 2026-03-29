@@ -1189,7 +1189,7 @@ public class FarmerHarvestGoal extends Goal {
     private boolean prepareFeeding(ServerWorld world) {
         // Use VillagePenRegistry (geometry-based) instead of banner tracker.
         VillagePenRegistry.PenEntry pen = VillagePenRegistry.get(world.getServer())
-                .getNearestPen(world, jobPos, 300)
+                .getNearestPen(world, jobPos, 220, 120)
                 .orElse(null);
         if (pen == null) {
             return false;

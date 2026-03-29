@@ -2129,7 +2129,7 @@ public class ShepherdSpecialGoal extends Goal {
         // Registry-based: use nearest pen center as gather anchor.
         BlockPos villagerPos = villager.getBlockPos();
         return VillagePenRegistry.get(world.getServer())
-                .getNearestPen(world, villagerPos, PEN_SCAN_RANGE * 2)
+                .getNearestPen(world, villagerPos, PEN_SCAN_RANGE * 2, 128)
                 .map(VillagePenRegistry.PenEntry::center)
                 .orElseGet(() -> findNearestGroundBanner(world));
     }
@@ -2328,7 +2328,8 @@ public class ShepherdSpecialGoal extends Goal {
                 VillagePenRegistry.get(world.getServer()).getNearestBellPensWithJobSiteFallback(
                         world,
                         villagerPos,
-                        PEN_SCAN_RANGE * 2);
+                        PEN_SCAN_RANGE * 2,
+                        128);
 
         if (!registryPens.isEmpty()) {
             VillagePenRegistry.PenEntry nearest = registryPens.get(0);

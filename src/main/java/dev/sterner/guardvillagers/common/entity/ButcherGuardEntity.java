@@ -343,7 +343,7 @@ public class ButcherGuardEntity extends GuardEntity {
         }
         // Use VillagePenRegistry (geometry-based) to navigate toward the nearest pen gate.
         VillagePenRegistry.get(serverWorld.getServer())
-                .getNearestPen(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE)
+                .getNearestPen(serverWorld, this.getBlockPos(), HUNT_BANNER_SEARCH_RANGE, 120)
                 .ifPresentOrElse(
                         pen -> this.getNavigation().startMovingTo(
                                 pen.gate().getX() + 0.5D, pen.gate().getY(), pen.gate().getZ() + 0.5D, 0.6D),
