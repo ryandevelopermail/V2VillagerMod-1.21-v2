@@ -252,8 +252,10 @@ public class GuardVillagers implements ModInitializer {
             }
         });
 
-        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) ->
-                VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z));
+        ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z);
+            JobBlockPairingHelper.onChunkLoaded(world, chunk);
+        });
 
         ServerWorldEvents.LOAD.register((server, world) -> {
             JobBlockPairingHelper.refreshWorldPairings(world);
@@ -265,6 +267,7 @@ public class GuardVillagers implements ModInitializer {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
+            JobBlockPairingHelper.onWorldUnload(world);
         });
 
         ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
@@ -298,6 +301,7 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
                 }
+                JobBlockPairingHelper.runBackgroundCatchUp(world);
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });

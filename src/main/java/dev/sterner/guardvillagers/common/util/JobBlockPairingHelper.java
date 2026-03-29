@@ -23,6 +23,7 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
@@ -33,15 +34,21 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.villager.FarmerBannerTracker;
+import net.minecraft.world.World;
 import net.minecraft.world.event.GameEvent;
-import net.minecraft.world.border.WorldBorder;
 import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkPos;
 import net.minecraft.world.chunk.ChunkStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -55,6 +62,11 @@ public final class JobBlockPairingHelper {
     private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
+    private static final double BOOTSTRAP_PLAYER_PROXIMITY_RADIUS = 256.0D;
+    private static final int CHUNK_HYDRATION_RING = 1;
+    private static final long BACKGROUND_CATCHUP_INTERVAL_TICKS = 40L;
+    private static final int BACKGROUND_CATCHUP_ENTITY_BUDGET = 64;
+    private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
         registerPairingBlock(Blocks.CHEST);
@@ -307,25 +319,162 @@ public final class JobBlockPairingHelper {
 
     public static void refreshWorldPairings(ServerWorld world) {
         VillageAnchorState.get(world.getServer()).pruneInvalidAnchors(world);
-        Box worldBounds = getWorldBounds(world);
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, worldBounds, Entity::isAlive)) {
+        Box scanBox = buildPlayerProximityBox(world, BOOTSTRAP_PLAYER_PROXIMITY_RADIUS);
+        if (scanBox != null) {
+            refreshEntitiesInBox(world, scanBox);
+            enqueueChunksForBox(world, scanBox);
+        }
+    }
+
+    public static void onChunkLoaded(ServerWorld world, Chunk chunk) {
+        enqueueChunkRing(stateFor(world), chunk.getPos().x, chunk.getPos().z, CHUNK_HYDRATION_RING);
+        hydrateChunkRing(world, chunk.getPos().x, chunk.getPos().z, CHUNK_HYDRATION_RING, Integer.MAX_VALUE);
+    }
+
+    public static void runBackgroundCatchUp(ServerWorld world) {
+        HydrationState state = stateFor(world);
+        long time = world.getTime();
+        if (time - state.lastCatchUpTick < BACKGROUND_CATCHUP_INTERVAL_TICKS) {
+            return;
+        }
+        state.lastCatchUpTick = time;
+        hydrateQueuedChunksWithBudget(world, state, BACKGROUND_CATCHUP_ENTITY_BUDGET);
+    }
+
+    public static void onWorldUnload(ServerWorld world) {
+        HYDRATION_STATE.remove(world.getRegistryKey());
+    }
+
+    @Nullable
+    private static Box buildPlayerProximityBox(ServerWorld world, double radius) {
+        var players = world.getPlayers();
+        if (players.isEmpty()) {
+            return null;
+        }
+
+        double minX = Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        double maxZ = -Double.MAX_VALUE;
+        for (var player : players) {
+            minX = Math.min(minX, player.getX());
+            minY = Math.min(minY, player.getY());
+            minZ = Math.min(minZ, player.getZ());
+            maxX = Math.max(maxX, player.getX());
+            maxY = Math.max(maxY, player.getY());
+            maxZ = Math.max(maxZ, player.getZ());
+        }
+        return new Box(minX - radius, minY - radius, minZ - radius, maxX + radius, maxY + radius, maxZ + radius);
+    }
+
+    private static void refreshEntitiesInBox(ServerWorld world, Box box) {
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, box, JobBlockPairingHelper::isEmployedVillager)) {
             refreshVillagerPairings(world, villager);
         }
-        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, worldBounds, Entity::isAlive)) {
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, box, Entity::isAlive)) {
             refreshButcherGuardPairings(world, guard);
         }
     }
 
-    public static Box getWorldBounds(ServerWorld world) {
-        WorldBorder border = world.getWorldBorder();
-        double halfSize = border.getSize() / 2.0D;
-        double minX = border.getCenterX() - halfSize;
-        double maxX = border.getCenterX() + halfSize;
-        double minZ = border.getCenterZ() - halfSize;
-        double maxZ = border.getCenterZ() + halfSize;
-        int minY = world.getBottomY();
-        int maxY = world.getTopY();
-        return new Box(minX, minY, minZ, maxX, maxY, maxZ);
+    private static void enqueueChunksForBox(ServerWorld world, Box box) {
+        int minChunkX = MathHelper.floor(box.minX) >> 4;
+        int maxChunkX = MathHelper.floor(box.maxX) >> 4;
+        int minChunkZ = MathHelper.floor(box.minZ) >> 4;
+        int maxChunkZ = MathHelper.floor(box.maxZ) >> 4;
+        HydrationState state = stateFor(world);
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                enqueueChunk(state, chunkX, chunkZ);
+            }
+        }
+    }
+
+    private static void hydrateQueuedChunksWithBudget(ServerWorld world, HydrationState state, int entityBudget) {
+        int remaining = entityBudget;
+        while (remaining > 0 && !state.pendingChunks.isEmpty()) {
+            long packed = state.pendingChunks.removeFirst();
+            state.enqueuedChunks.remove(packed);
+            int chunkX = ChunkPos.getPackedX(packed);
+            int chunkZ = ChunkPos.getPackedZ(packed);
+            remaining -= hydrateChunk(world, chunkX, chunkZ, remaining);
+        }
+    }
+
+    private static void hydrateChunkRing(ServerWorld world, int centerChunkX, int centerChunkZ, int ringRadius, int entityBudget) {
+        HydrationState state = stateFor(world);
+        int remaining = entityBudget;
+        for (int dx = -ringRadius; dx <= ringRadius; dx++) {
+            for (int dz = -ringRadius; dz <= ringRadius; dz++) {
+                int chunkX = centerChunkX + dx;
+                int chunkZ = centerChunkZ + dz;
+                int refreshed = hydrateChunk(world, chunkX, chunkZ, remaining);
+                remaining -= refreshed;
+                if (remaining <= 0) {
+                    enqueueChunk(state, chunkX, chunkZ);
+                    return;
+                }
+            }
+        }
+    }
+
+    private static int hydrateChunk(ServerWorld world, int chunkX, int chunkZ, int remainingBudget) {
+        if (remainingBudget <= 0) {
+            return 0;
+        }
+
+        Chunk chunk = world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (chunk == null) {
+            return 0;
+        }
+
+        BlockPos startPos = chunk.getPos().getStartPos();
+        Box chunkBox = new Box(startPos.getX(), world.getBottomY(), startPos.getZ(), startPos.getX() + 16.0D, world.getTopY(), startPos.getZ() + 16.0D);
+        int refreshed = 0;
+
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, chunkBox, JobBlockPairingHelper::isEmployedVillager)) {
+            if (refreshed >= remainingBudget) {
+                return refreshed;
+            }
+            refreshVillagerPairings(world, villager);
+            refreshed++;
+        }
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, chunkBox, Entity::isAlive)) {
+            if (refreshed >= remainingBudget) {
+                return refreshed;
+            }
+            refreshButcherGuardPairings(world, guard);
+            refreshed++;
+        }
+
+        return refreshed;
+    }
+
+    private static HydrationState stateFor(ServerWorld world) {
+        return HYDRATION_STATE.computeIfAbsent(world.getRegistryKey(), key -> new HydrationState());
+    }
+
+    private static void enqueueChunk(HydrationState state, int chunkX, int chunkZ) {
+        long packed = ChunkPos.toLong(chunkX, chunkZ);
+        if (state.enqueuedChunks.add(packed)) {
+            state.pendingChunks.addLast(packed);
+        }
+    }
+
+    private static void enqueueChunkRing(HydrationState state, int centerChunkX, int centerChunkZ, int ringRadius) {
+        for (int dx = -ringRadius; dx <= ringRadius; dx++) {
+            for (int dz = -ringRadius; dz <= ringRadius; dz++) {
+                enqueueChunk(state, centerChunkX + dx, centerChunkZ + dz);
+            }
+        }
+    }
+
+    private static final class HydrationState {
+        private final Deque<Long> pendingChunks = new ArrayDeque<>();
+        private final Set<Long> enqueuedChunks = new HashSet<>();
+        private long lastCatchUpTick = Long.MIN_VALUE;
     }
 
     private static boolean pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {
