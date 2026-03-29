@@ -1,7 +1,12 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import org.junit.jupiter.api.Test;
+import net.minecraft.inventory.SimpleInventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -48,5 +53,24 @@ class LumberjackGuardCraftingGoalTest {
 
         assertFalse(acted);
         assertFalse(placementAttempted.get());
+    }
+
+    @Test
+    void craftSingleUpgradeDemandOutputIfPossible_fenceDemandCraftsThreeFencesPerOperation() {
+        List<ItemStack> buffer = new ArrayList<>();
+        SimpleInventory chestInventory = new SimpleInventory(2);
+        chestInventory.setStack(0, new ItemStack(Items.OAK_PLANKS, 4));
+        chestInventory.setStack(1, new ItemStack(Items.STICK, 2));
+
+        boolean crafted = LumberjackGuardCraftingGoal.craftSingleUpgradeDemandOutputIfPossible(
+                buffer,
+                chestInventory,
+                LumberjackChestTriggerController.UpgradeDemand.v3Fence()
+        );
+
+        assertTrue(crafted);
+        assertEquals(1, buffer.size());
+        assertTrue(buffer.getFirst().isOf(Items.OAK_FENCE));
+        assertEquals(3, buffer.getFirst().getCount());
     }
 }

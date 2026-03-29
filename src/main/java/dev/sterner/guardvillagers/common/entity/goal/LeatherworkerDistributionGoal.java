@@ -14,6 +14,8 @@ import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashSet;
 import java.util.List;
@@ -22,6 +24,7 @@ import java.util.Set;
 import java.util.UUID;
 
 public class LeatherworkerDistributionGoal extends AbstractInventoryDistributionGoal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerDistributionGoal.class);
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
 
     /**
@@ -184,22 +187,69 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             return List.of();
         }
 
-        // Item frames go to cartographers (for map display walls) first; librarians are a fallback.
+        // Item frames go to v2 cartographers (for map display walls) first; librarians are an explicit fallback.
         // All other leatherworker items route to librarians only.
-        java.util.stream.Stream<DistributionRecipientHelper.RecipientRecord> candidates;
+        List<DistributionRecipientHelper.RecipientRecord> candidates;
         if (stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME)) {
-            candidates = java.util.stream.Stream.concat(
-                    DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream(),
-                    DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream()
+            List<DistributionRecipientHelper.RecipientRecord> allCartographers =
+                    DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+            List<DistributionRecipientHelper.RecipientRecord> v2Cartographers =
+                    DistributionRecipientHelper.findEligibleV2CartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+            List<DistributionRecipientHelper.RecipientRecord> librarians =
+                    DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+            candidates = resolveItemFrameRecipients(
+                    stack,
+                    allCartographers,
+                    v2Cartographers,
+                    librarians,
+                    LOGGER,
+                    villager.getUuidAsString()
             );
         } else {
-            candidates = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).stream();
+            candidates = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
 
-        return candidates
-                .filter(recipient -> !excludedRecipients.contains(recipient.recipient().getUuid()))
+        return candidates.stream()
+                .filter(recipient -> !excludedRecipients.contains(recipientId(recipient)))
                 .filter(recipient -> canRecipientAccept(world, recipient.chestPos(), stack))
                 .toList();
+    }
+
+    static List<DistributionRecipientHelper.RecipientRecord> resolveItemFrameRecipients(
+            ItemStack stack,
+            List<DistributionRecipientHelper.RecipientRecord> allCartographers,
+            List<DistributionRecipientHelper.RecipientRecord> v2Cartographers,
+            List<DistributionRecipientHelper.RecipientRecord> librarians,
+            Logger logger,
+            String leatherworkerId
+    ) {
+        if (!(stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME))) {
+            return librarians;
+        }
+
+        Set<UUID> v2CartographerIds = v2Cartographers.stream()
+                .map(LeatherworkerDistributionGoal::recipientId)
+                .collect(java.util.stream.Collectors.toSet());
+        for (DistributionRecipientHelper.RecipientRecord recipient : allCartographers) {
+            if (!v2CartographerIds.contains(recipientId(recipient))) {
+                logger.debug("Leatherworker {} rejected non-v2 cartographer recipient={} jobPos={} chestPos={} for stack={}",
+                        leatherworkerId,
+                        recipientId(recipient),
+                        recipient.jobPos().toShortString(),
+                        recipient.chestPos().toShortString(),
+                        stack.getItem().toString());
+            }
+        }
+
+        return java.util.stream.Stream.concat(v2Cartographers.stream(), librarians.stream())
+                .toList();
+    }
+
+    private static UUID recipientId(DistributionRecipientHelper.RecipientRecord recipient) {
+        if (recipient.recipient() != null) {
+            return recipient.recipient().getUuid();
+        }
+        return UUID.nameUUIDFromBytes((recipient.jobPos().toShortString() + "|" + recipient.chestPos().toShortString()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private boolean canRecipientAccept(ServerWorld world, BlockPos chestPosition, ItemStack stack) {

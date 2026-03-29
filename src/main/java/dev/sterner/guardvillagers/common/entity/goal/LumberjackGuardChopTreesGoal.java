@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,6 +54,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
     private static final int TREE_SEARCH_RADIUS = 20;
+    private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
+    private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
     private static final int MAX_LOGS_PER_TREE = 256;
     private static final int TREE_CROWN_RADIUS = 4;
@@ -76,6 +79,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TARGET_STUCK_FALLBACK_TICKS = 20 * 30;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
+    private static final int TREE_SCAN_BLOCK_BUDGET_PER_TICK = 8000;
+    private static final int INITIAL_SCAN_ACCEPTED_ROOT_TARGET = SESSION_TARGET_MAX;
+    private static final int INITIAL_SCAN_LOCAL_ROOT_TARGET = 1;
+    private static final int MAX_REGION_BLOCK_VISITS_PER_PASS = 12000;
+    private static final int NO_TREE_ESCALATION_HIGH_WATER_MARK = 5;
+    private static final int NO_TREE_ESCALATION_REPEAT_INTERVAL = 3;
+    private static final int NO_TREE_ESCALATION_RETRY_DELAY_TICKS = 20 * 60 * 12;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -86,6 +96,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int stalledTicks;
     private int stallRecoveryAttempts;
     private boolean bootstrapRetryTreeScheduled;
+    private @Nullable TreeTargetScanSession pendingTreeTargetScan;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -285,6 +296,11 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void updateChopCountdown(ServerWorld world) {
+        if (this.pendingTreeTargetScan != null) {
+            continueOrStartTreeTargetScan(world);
+            return;
+        }
+
         if (!this.guard.isChopCountdownActive()) {
             startChopCountdown(world, "initial schedule");
         }
@@ -295,18 +311,46 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         if (this.guard.isChopCountdownActive() && world.getTime() >= this.guard.getNextChopTick()) {
             this.guard.clearChopCountdown();
-            startSession(world);
+            continueOrStartTreeTargetScan(world);
         }
     }
 
-    private void startSession(ServerWorld world) {
-        List<BlockPos> targets = findTreeTargets(world);
+    private void continueOrStartTreeTargetScan(ServerWorld world) {
+        if (this.pendingTreeTargetScan == null) {
+            this.pendingTreeTargetScan = createTreeTargetScanSession(world);
+        }
+
+        this.pendingTreeTargetScan.scanNextBudget(world, TREE_SCAN_BLOCK_BUDGET_PER_TICK,
+                (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+
+        if (!this.pendingTreeTargetScan.complete()) {
+            return;
+        }
+
+        List<BlockPos> targets = this.pendingTreeTargetScan.sortedRoots();
+        this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString());
+        this.pendingTreeTargetScan = null;
+        startSession(world, targets);
+    }
+
+    private void startSession(ServerWorld world, List<BlockPos> targets) {
         if (targets.isEmpty()) {
-            LOGGER.info("Lumberjack Guard {} could not find eligible trees near paired base; rescheduling countdown",
-                    this.guard.getUuidAsString());
+            int noTreeFailures = this.guard.getConsecutiveNoTreeSessions() + 1;
+            this.guard.setConsecutiveNoTreeSessions(noTreeFailures);
+            boolean escalated = maybeRunNoTreeEscalation(world, noTreeFailures);
+
+            LOGGER.info("Lumberjack Guard {} could not find eligible trees near paired base (failures={}); rescheduling countdown",
+                    this.guard.getUuidAsString(),
+                    noTreeFailures);
+            if (escalated) {
+                startChopCountdown(world, NO_TREE_ESCALATION_RETRY_DELAY_TICKS,
+                        "no eligible tree targets (no-tree-escalation delayed retry)");
+                return;
+            }
             startChopCountdown(world, "no eligible tree targets");
             return;
         }
+        this.guard.setConsecutiveNoTreeSessions(0);
 
         int sessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
         int selectedCount = Math.min(sessionCap, targets.size());
@@ -319,6 +363,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.rootTeardownRetryAttempts.clear();
         this.rootFocusTicks.clear();
         this.bootstrapRetryTreeScheduled = false;
+        this.pendingTreeTargetScan = null;
         this.guard.setActiveSession(true);
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_TREE);
 
@@ -362,6 +407,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.rootTeardownRetryAttempts.clear();
         this.rootFocusTicks.clear();
         this.bootstrapRetryTreeScheduled = false;
+        this.pendingTreeTargetScan = null;
         startChopCountdown((ServerWorld) this.guard.getWorld(), reason);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
@@ -634,11 +680,36 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startChopCountdown(ServerWorld world, String reason) {
         long totalTicks = MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
+        startChopCountdown(world, totalTicks, reason);
+    }
+
+    private void startChopCountdown(ServerWorld world, long totalTicks, String reason) {
         this.guard.startChopCountdown(world.getTime(), totalTicks);
         LOGGER.info("Lumberjack Guard {} chop countdown started ({} ticks) {}",
                 this.guard.getUuidAsString(),
                 totalTicks,
                 reason);
+    }
+
+    private boolean maybeRunNoTreeEscalation(ServerWorld world, int noTreeFailures) {
+        if (!shouldRunNoTreeEscalation(noTreeFailures)) {
+            return false;
+        }
+
+        boolean midpointUpgradeApplied = runMidpointUpgradeNeedPass(world, this.guard);
+        this.guard.requestTriggerEvaluation();
+        LOGGER.warn("Lumberjack Guard {} no-tree-escalation failures={} highWaterMark={} midpointUpgradeApplied={} triggerEvaluationRequested={}",
+                this.guard.getUuidAsString(),
+                noTreeFailures,
+                NO_TREE_ESCALATION_HIGH_WATER_MARK,
+                midpointUpgradeApplied,
+                this.guard.isTriggerEvaluationRequested());
+        return true;
+    }
+
+    static boolean shouldRunNoTreeEscalation(int noTreeFailures) {
+        return noTreeFailures >= NO_TREE_ESCALATION_HIGH_WATER_MARK
+                && (noTreeFailures - NO_TREE_ESCALATION_HIGH_WATER_MARK) % NO_TREE_ESCALATION_REPEAT_INTERVAL == 0;
     }
 
     private void logCountdownProgress(ServerWorld world) {
@@ -758,16 +829,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         BlockPos center = chest == null
                 ? table
                 : new BlockPos((table.getX() + chest.getX()) / 2, Math.min(table.getY(), chest.getY()), (table.getZ() + chest.getZ()) / 2);
+        int effectiveTreeSearchRadius = getEffectiveTreeSearchRadius(guard);
 
         Set<BlockPos> excluded = new HashSet<>(guard.getSelectedTreeTargets());
-        BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-        BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+        BlockPos min = center.add(-effectiveTreeSearchRadius, -TREE_SEARCH_HEIGHT, -effectiveTreeSearchRadius);
+        BlockPos max = center.add(effectiveTreeSearchRadius, TREE_SEARCH_HEIGHT, effectiveTreeSearchRadius);
         BlockPos nearest = null;
         double nearestDistance = Double.MAX_VALUE;
 
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             BlockPos pos = cursor.toImmutable();
-            if (!center.isWithinDistance(pos, TREE_SEARCH_RADIUS)) {
+            if (!center.isWithinDistance(pos, effectiveTreeSearchRadius)) {
                 continue;
             }
             if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
@@ -790,6 +862,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         return nearest;
+    }
+
+    private int getEffectiveTreeSearchRadius() {
+        return getEffectiveTreeSearchRadius(this.guard);
+    }
+
+    static int getEffectiveTreeSearchRadius(LumberjackGuardEntity guard) {
+        int attempts = guard.getConsecutiveNoTreeSessions();
+        return getEffectiveTreeSearchRadiusForAttempts(attempts);
+    }
+
+    static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
+        if (attempts >= 4) {
+            return TREE_SEARCH_MAX_EXPANDED_RADIUS;
+        }
+        if (attempts >= 2) {
+            return TREE_SEARCH_EXPANDED_RADIUS;
+        }
+        return TREE_SEARCH_RADIUS;
     }
 
     private static BlockPos normalizeRootStatic(ServerWorld world, BlockPos pos) {
@@ -907,34 +998,46 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private List<BlockPos> findTreeTargets(ServerWorld world) {
+        TreeTargetScanSession session = createTreeTargetScanSession(world);
+        while (!session.complete()) {
+            session.scanNextBudget(world, Integer.MAX_VALUE / 4,
+                    (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+        }
+        session.logMetrics(this.guard.getUuidAsString());
+        return session.sortedRoots();
+    }
+
+    private TreeTargetScanSession createTreeTargetScanSession(ServerWorld world) {
         BlockPos table = this.guard.getPairedCraftingTablePos();
         BlockPos chest = this.guard.getPairedChestPos();
         BlockPos center = getPairedBaseCenter(table, chest);
+        int effectiveTreeSearchRadius = getEffectiveTreeSearchRadius();
 
         MappedBoundsSearchContext mappedContext = resolveMappedBoundsSearchContext(world, center);
-        boolean mappedMode = mappedContext != null;
-        LOGGER.debug("Lumberjack Guard {} mapped-bounds mode active={} (center={})",
+        boolean hasMappedBounds = mappedContext != null;
+        Set<BlockPos> nearbyBells = collectBellsNear(world, center, effectiveTreeSearchRadius + BELL_EXCLUSION_RADIUS);
+
+        List<ScanBounds> regions = new ArrayList<>();
+        regions.add(ScanBounds.fromLocalRadius(center, effectiveTreeSearchRadius));
+        if (hasMappedBounds) {
+            for (VillageMappedBoundsState.MappedBounds bounds : mappedContext.bounds()) {
+                regions.add(ScanBounds.fromMapped(center, bounds));
+            }
+        }
+
+        int uniqueBoundsCount = mappedContext == null ? 0 : mappedContext.bounds().size();
+        String scanMode = hasMappedBounds ? "local+mapped" : "local-only";
+        LOGGER.debug("Lumberjack Guard {} scan-mode={} uniqueBounds={} center={}",
                 this.guard.getUuidAsString(),
-                mappedMode,
+                scanMode,
+                uniqueBoundsCount,
                 center.toShortString());
-
-        Set<BlockPos> nearbyBells = mappedMode
-                ? Set.of()
-                : collectBellsNear(world, center, TREE_SEARCH_RADIUS + BELL_EXCLUSION_RADIUS);
-
-        ScanBounds scanBounds = ScanBounds.fromLocalRadius(center);
-        Set<BlockPos> uniqueRoots = mappedMode
-                ? collectQualifiedRootsInMappedBounds(world, center, mappedContext)
-                : collectQualifiedRootsInBounds(world, scanBounds, center, nearbyBells);
-
-        List<BlockPos> sorted = new ArrayList<>(uniqueRoots);
-        sorted.sort(Comparator.comparingDouble(center::getSquaredDistance));
-        LOGGER.debug("Lumberjack Guard {} tree target scan complete mode={} candidates={} accepted={}",
-                this.guard.getUuidAsString(),
-                mappedMode ? "mapped-bounds" : "local-radius",
-                scanBounds.candidateCount(),
-                sorted.size());
-        return sorted;
+        return new TreeTargetScanSession(center,
+                effectiveTreeSearchRadius,
+                hasMappedBounds,
+                mappedContext == null ? 0 : mappedContext.cartographerCount(),
+                regions,
+                nearbyBells);
     }
 
     private Set<BlockPos> collectQualifiedRootsInMappedBounds(ServerWorld world,
@@ -1037,17 +1140,70 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             allBounds.addAll(chestBounds);
         }
 
-        if (allBounds.isEmpty()) {
-            LOGGER.debug("Lumberjack Guard {} nearby cartographers found but no populated maps in paired chests",
+        List<VillageMappedBoundsState.MappedBounds> uniqueValidBounds = uniqueValidMappedBounds(allBounds);
+        if (!isMappedModeEnabled(uniqueValidBounds)) {
+            LOGGER.debug("Lumberjack Guard {} mapped-bounds fallback: zero valid populated map bounds remain",
                     this.guard.getUuidAsString());
             return null;
         }
 
-        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} populated map bounds",
+        List<VillageMappedBoundsState.MappedBounds> mergedBounds = mergeOverlappingMappedBounds(uniqueValidBounds);
+        LOGGER.debug("Lumberjack Guard {} mapped-bounds enabled from {} cartographer(s) with {} valid unique populated map bounds (merged={})",
                 this.guard.getUuidAsString(),
                 nearbyCartographers.size(),
-                allBounds.size());
-        return new MappedBoundsSearchContext(allBounds, nearbyCartographers.size());
+                uniqueValidBounds.size(),
+                mergedBounds.size());
+        return new MappedBoundsSearchContext(mergedBounds, nearbyCartographers.size());
+    }
+
+    static boolean isMappedModeEnabled(List<VillageMappedBoundsState.MappedBounds> bounds) {
+        return !uniqueValidMappedBounds(bounds).isEmpty();
+    }
+
+    static List<VillageMappedBoundsState.MappedBounds> uniqueValidMappedBounds(List<VillageMappedBoundsState.MappedBounds> bounds) {
+        if (bounds.isEmpty()) {
+            return List.of();
+        }
+
+        List<VillageMappedBoundsState.MappedBounds> uniqueValid = new ArrayList<>();
+        Set<VillageMappedBoundsState.MappedBounds> seen = new HashSet<>();
+        for (VillageMappedBoundsState.MappedBounds candidate : bounds) {
+            if (candidate.minX() > candidate.maxX() || candidate.minZ() > candidate.maxZ()) {
+                continue;
+            }
+            if (seen.add(candidate)) {
+                uniqueValid.add(candidate);
+            }
+        }
+        return uniqueValid;
+    }
+
+    static List<VillageMappedBoundsState.MappedBounds> mergeOverlappingMappedBounds(List<VillageMappedBoundsState.MappedBounds> bounds) {
+        List<VillageMappedBoundsState.MappedBounds> merged = new ArrayList<>();
+        for (VillageMappedBoundsState.MappedBounds candidate : bounds) {
+            VillageMappedBoundsState.MappedBounds running = candidate;
+            boolean didMerge;
+            do {
+                didMerge = false;
+                for (int i = 0; i < merged.size(); i++) {
+                    VillageMappedBoundsState.MappedBounds existing = merged.get(i);
+                    if (existing.minX() > running.maxX() || existing.maxX() < running.minX()
+                            || existing.minZ() > running.maxZ() || existing.maxZ() < running.minZ()) {
+                        continue;
+                    }
+                    merged.remove(i);
+                    running = new VillageMappedBoundsState.MappedBounds(
+                            Math.min(existing.minX(), running.minX()),
+                            Math.max(existing.maxX(), running.maxX()),
+                            Math.min(existing.minZ(), running.minZ()),
+                            Math.max(existing.maxZ(), running.maxZ()));
+                    didMerge = true;
+                    break;
+                }
+            } while (didMerge);
+            merged.add(running);
+        }
+        return merged;
     }
 
     private static BlockPos getPairedBaseCenter(BlockPos table, @Nullable BlockPos chest) {
@@ -1057,24 +1213,48 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
+        return isCandidateInScanMode(center, candidate, mappedBounds, TREE_SEARCH_RADIUS);
+    }
+
+    static boolean isCandidateInScanMode(BlockPos center,
+                                         BlockPos candidate,
+                                         @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
+                                         int localSearchRadius) {
         if (mappedBounds != null) {
             return mappedBounds.contains(candidate);
         }
-        return center.isWithinDistance(candidate, TREE_SEARCH_RADIUS);
+        return center.isWithinDistance(candidate, localSearchRadius);
+    }
+
+    static boolean shouldEarlyCompleteScanPass(boolean hasMappedBounds, int passIndex, int acceptedRoots, int acceptedLocalRoots) {
+        if (acceptedRoots >= INITIAL_SCAN_ACCEPTED_ROOT_TARGET) {
+            return true;
+        }
+        return passIndex == 0
+                && hasMappedBounds
+                && acceptedLocalRoots >= INITIAL_SCAN_LOCAL_ROOT_TARGET;
     }
 
     private record MappedBoundsSearchContext(List<VillageMappedBoundsState.MappedBounds> bounds,
                                              int cartographerCount) {
     }
 
-    private record ScanBounds(BlockPos min, BlockPos max, long candidateCount) {
+    private record ScanBounds(BlockPos min,
+                              BlockPos max,
+                              long candidateCount,
+                              @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
+                              boolean usesLocalBellExclusion) {
         static ScanBounds fromLocalRadius(BlockPos center) {
-            BlockPos min = center.add(-TREE_SEARCH_RADIUS, -TREE_SEARCH_HEIGHT, -TREE_SEARCH_RADIUS);
-            BlockPos max = center.add(TREE_SEARCH_RADIUS, TREE_SEARCH_HEIGHT, TREE_SEARCH_RADIUS);
+            return fromLocalRadius(center, TREE_SEARCH_RADIUS);
+        }
+
+        static ScanBounds fromLocalRadius(BlockPos center, int radius) {
+            BlockPos min = center.add(-radius, -TREE_SEARCH_HEIGHT, -radius);
+            BlockPos max = center.add(radius, TREE_SEARCH_HEIGHT, radius);
             long width = (long) (max.getX() - min.getX() + 1);
             long height = (long) (max.getY() - min.getY() + 1);
             long depth = (long) (max.getZ() - min.getZ() + 1);
-            return new ScanBounds(min, max, width * height * depth);
+            return new ScanBounds(min, max, width * height * depth, null, true);
         }
 
         static ScanBounds fromMapped(BlockPos center, VillageMappedBoundsState.MappedBounds bounds) {
@@ -1083,7 +1263,256 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             long width = (long) (max.getX() - min.getX() + 1);
             long height = (long) (max.getY() - min.getY() + 1);
             long depth = (long) (max.getZ() - min.getZ() + 1);
-            return new ScanBounds(min, max, width * height * depth);
+            return new ScanBounds(min, max, width * height * depth, bounds, false);
+        }
+    }
+
+    @FunctionalInterface
+    private interface RootCollector {
+        boolean tryAdd(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots);
+    }
+
+    private static final class ScanMetrics {
+        private final long startNanos = System.nanoTime();
+        private long visitedBlocks;
+        private long candidateLogs;
+        private int acceptedRoots;
+        private final Map<String, Integer> skippedReasons = new LinkedHashMap<>();
+
+        void visited() {
+            this.visitedBlocks++;
+        }
+
+        void candidate() {
+            this.candidateLogs++;
+        }
+
+        void accepted() {
+            this.acceptedRoots++;
+        }
+
+        void skipped(String reason) {
+            this.skippedReasons.merge(reason, 1, Integer::sum);
+        }
+
+        long elapsedMs() {
+            return (System.nanoTime() - this.startNanos) / 1_000_000L;
+        }
+    }
+
+    private static final class TreeTargetScanSession {
+        private static final List<Integer> INITIAL_LAYER_OFFSETS = List.of(0, 1, -1, 2, -2, 3);
+        private static final List<Integer> SECONDARY_LAYER_OFFSETS = List.of(4, -3, 5, -4, 6, -5, 7, -6, 8, -7, 9, -8, 10, -9, -10);
+
+        private final BlockPos center;
+        private final int localSearchRadius;
+        private final boolean hasMappedBounds;
+        private final int cartographerCount;
+        private final List<ScanBounds> regions;
+        private final @Nullable Set<BlockPos> nearbyBells;
+        private final Set<BlockPos> uniqueRoots = new HashSet<>();
+        private final ScanMetrics metrics = new ScanMetrics();
+        private final int[] regionLayerIndices;
+        private final int[] regionX;
+        private final int[] regionZ;
+        private final boolean[] regionCursorInitialized;
+        private final int[] regionVisitsThisPass;
+        private int regionIndex;
+        private int layerIndex;
+        private int x;
+        private int z;
+        private int passIndex;
+        private int localAcceptedRoots;
+        private boolean complete;
+
+        private TreeTargetScanSession(BlockPos center,
+                                      int localSearchRadius,
+                                      boolean hasMappedBounds,
+                                      int cartographerCount,
+                                      List<ScanBounds> regions,
+                                      @Nullable Set<BlockPos> nearbyBells) {
+            this.center = center;
+            this.localSearchRadius = localSearchRadius;
+            this.hasMappedBounds = hasMappedBounds;
+            this.cartographerCount = cartographerCount;
+            this.regions = regions;
+            this.nearbyBells = nearbyBells;
+            this.regionLayerIndices = new int[regions.size()];
+            this.regionX = new int[regions.size()];
+            this.regionZ = new int[regions.size()];
+            this.regionCursorInitialized = new boolean[regions.size()];
+            this.regionVisitsThisPass = new int[regions.size()];
+        }
+
+        void scanNextBudget(ServerWorld world, int budget, RootCollector collector) {
+            int remaining = Math.max(1, budget);
+            while (remaining > 0 && !this.complete) {
+                if (this.regionIndex >= this.regions.size()) {
+                    advancePassIfNeeded();
+                    continue;
+                }
+                ScanBounds region = this.regions.get(this.regionIndex);
+                if (this.x == 0 && this.z == 0 && this.layerIndex == 0) {
+                    initializeOrRestoreRegionCursor(region);
+                }
+
+                int y = this.center.getY() + activeLayers().get(this.layerIndex);
+                if (y < region.min().getY() || y > region.max().getY()) {
+                    advanceLayer(region);
+                    continue;
+                }
+
+                BlockPos pos = new BlockPos(this.x, y, this.z);
+                remaining--;
+                this.metrics.visited();
+                this.regionVisitsThisPass[this.regionIndex]++;
+
+                if (region.mappedBounds() != null && !isWithinAnyMappedBounds(pos, this.regions, this.center)) {
+                    this.metrics.skipped("out_of_bounds");
+                } else if (!isCandidateInScanMode(this.center, pos, region.mappedBounds(), this.localSearchRadius)) {
+                    this.metrics.skipped("out_of_bounds");
+                } else if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                    this.metrics.skipped("non_log");
+                } else {
+                    this.metrics.candidate();
+                    Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
+                    if (collector.tryAdd(world, pos, bellExclusion, this.uniqueRoots)) {
+                        this.metrics.accepted();
+                        if (region.usesLocalBellExclusion()) {
+                            this.localAcceptedRoots++;
+                        }
+                        if (shouldEarlyCompleteCurrentPass()) {
+                            this.complete = true;
+                            saveRegionCursor();
+                            break;
+                        }
+                    } else {
+                        this.metrics.skipped("rejected_root");
+                    }
+                }
+
+                this.x++;
+                if (this.x > region.max().getX()) {
+                    this.x = region.min().getX();
+                    this.z++;
+                    if (this.z > region.max().getZ()) {
+                        this.z = region.min().getZ();
+                        advanceLayer(region);
+                    }
+                }
+
+                if (!this.complete
+                        && this.regionIndex < this.regions.size()
+                        && this.regionVisitsThisPass[this.regionIndex] >= MAX_REGION_BLOCK_VISITS_PER_PASS) {
+                    this.metrics.skipped("region_visit_cap");
+                    advanceRegionWithCheckpoint();
+                }
+            }
+        }
+
+        private static boolean isWithinAnyMappedBounds(BlockPos pos, List<ScanBounds> regions, BlockPos center) {
+            for (ScanBounds region : regions) {
+                if (region.mappedBounds() == null) {
+                    continue;
+                }
+                if (isCandidateInScanMode(center, pos, region.mappedBounds())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private List<Integer> activeLayers() {
+            return this.passIndex == 0 ? INITIAL_LAYER_OFFSETS : SECONDARY_LAYER_OFFSETS;
+        }
+
+        private void advanceLayer(ScanBounds region) {
+            this.layerIndex++;
+            if (this.layerIndex >= activeLayers().size()) {
+                this.layerIndex = 0;
+                advanceRegionWithCheckpoint();
+            }
+        }
+
+        private void advancePassIfNeeded() {
+            if (shouldEarlyCompleteCurrentPass()) {
+                this.complete = true;
+                return;
+            }
+            if (this.passIndex == 0 && this.uniqueRoots.size() < INITIAL_SCAN_ACCEPTED_ROOT_TARGET) {
+                this.passIndex = 1;
+                this.regionIndex = 0;
+                this.layerIndex = 0;
+                this.x = 0;
+                this.z = 0;
+                for (int i = 0; i < this.regionVisitsThisPass.length; i++) {
+                    this.regionVisitsThisPass[i] = 0;
+                }
+                return;
+            }
+            this.complete = true;
+        }
+
+        private boolean shouldEarlyCompleteCurrentPass() {
+            return shouldEarlyCompleteScanPass(
+                    this.hasMappedBounds,
+                    this.passIndex,
+                    this.uniqueRoots.size(),
+                    this.localAcceptedRoots);
+        }
+
+        private void advanceRegionWithCheckpoint() {
+            saveRegionCursor();
+            this.regionIndex++;
+            this.layerIndex = 0;
+            this.x = 0;
+            this.z = 0;
+        }
+
+        private void initializeOrRestoreRegionCursor(ScanBounds region) {
+            if (!this.regionCursorInitialized[this.regionIndex]) {
+                this.layerIndex = this.regionLayerIndices[this.regionIndex];
+                this.x = region.min().getX();
+                this.z = region.min().getZ();
+                this.regionCursorInitialized[this.regionIndex] = true;
+                return;
+            }
+            this.layerIndex = this.regionLayerIndices[this.regionIndex];
+            this.x = this.regionX[this.regionIndex];
+            this.z = this.regionZ[this.regionIndex];
+        }
+
+        private void saveRegionCursor() {
+            if (this.regionIndex < 0 || this.regionIndex >= this.regions.size()) {
+                return;
+            }
+            this.regionLayerIndices[this.regionIndex] = this.layerIndex;
+            this.regionX[this.regionIndex] = this.x;
+            this.regionZ[this.regionIndex] = this.z;
+            this.regionCursorInitialized[this.regionIndex] = true;
+        }
+
+        boolean complete() {
+            return this.complete;
+        }
+
+        List<BlockPos> sortedRoots() {
+            List<BlockPos> sorted = new ArrayList<>(this.uniqueRoots);
+            sorted.sort(Comparator.comparingDouble(this.center::getSquaredDistance));
+            return sorted;
+        }
+
+        void logMetrics(String guardId) {
+            LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} skipped={}",
+                    guardId,
+                    this.hasMappedBounds ? "local+mapped" : "local-only",
+                    this.cartographerCount,
+                    this.regions.size(),
+                    this.metrics.elapsedMs(),
+                    this.metrics.visitedBlocks,
+                    this.metrics.candidateLogs,
+                    this.metrics.acceptedRoots,
+                    this.metrics.skippedReasons);
         }
     }
 

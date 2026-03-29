@@ -380,6 +380,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         int plannedTransferAmount;
         if (materialType == LumberjackDemandPlanner.MaterialType.PLANKS
                 || materialType == LumberjackDemandPlanner.MaterialType.STICK
+                || materialType == LumberjackDemandPlanner.MaterialType.FENCES
+                || materialType == LumberjackDemandPlanner.MaterialType.FENCE_GATES
                 || materialType == LumberjackDemandPlanner.MaterialType.LOGS) {
             int maxDeficitBound = Math.max(1, Math.min(recipient.deficit(), 8));
             plannedTransferAmount = Math.min(sourceStack.getCount(), maxDeficitBound);

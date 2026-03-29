@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.LeatherworkerCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
@@ -36,6 +37,7 @@ public class LeatherworkerCraftingGoal extends Goal {
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
     private static final int CRAFT_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CRAFT_INTERVAL_MAX_TICKS = 20 * 60 * 10;
+    private static final double CARTOGRAPHER_DEMAND_SCAN_RANGE = 24.0D;
     private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerCraftingGoal.class);
 
     private final VillagerEntity villager;
@@ -196,7 +198,13 @@ public class LeatherworkerCraftingGoal extends Goal {
             return;
         }
 
-        LeatherRecipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
+        boolean framePriority = hasNearbyCartographerFrameDemand(world);
+        int recipeIndex = selectRecipeIndex(
+                craftable.stream().map(LeatherRecipe::output).toList(),
+                framePriority,
+                villager.getRandom()
+        );
+        LeatherRecipe recipe = craftable.get(recipeIndex);
         if (!canInsertOutput(inventory, recipe.output)) {
             return;
         }
@@ -205,8 +213,45 @@ public class LeatherworkerCraftingGoal extends Goal {
             inventory.markDirty();
             craftedToday++;
             recordLastCrafted(recipe.output);
-            CraftingCheckLogger.report(world, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
+            if (framePriority && recipe.output.isOf(Items.ITEM_FRAME)) {
+                CraftingCheckLogger.report(world, "Leatherworker", "frame-priority", formatCraftedResult(lastCheckCount, recipe.output));
+            } else {
+                CraftingCheckLogger.report(world, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
+            }
         }
+    }
+
+    static int selectRecipeIndex(List<ItemStack> craftableOutputs, boolean framePriority, net.minecraft.util.math.random.Random random) {
+        if (craftableOutputs.isEmpty()) {
+            throw new IllegalArgumentException("craftableOutputs must not be empty");
+        }
+        Optional<Integer> prioritizedIndex = selectRecipe(craftableOutputs, framePriority);
+        return prioritizedIndex.orElseGet(() -> random.nextInt(craftableOutputs.size()));
+    }
+
+    private static Optional<Integer> selectRecipe(List<ItemStack> craftableOutputs, boolean framePriority) {
+        if (!framePriority) {
+            return Optional.empty();
+        }
+        for (int i = 0; i < craftableOutputs.size(); i++) {
+            if (craftableOutputs.get(i).isOf(Items.ITEM_FRAME)) {
+                return Optional.of(i);
+            }
+        }
+        return Optional.empty();
+    }
+
+    private boolean hasNearbyCartographerFrameDemand(ServerWorld world) {
+        for (DistributionRecipientHelper.RecipientRecord recipient : DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, CARTOGRAPHER_DEMAND_SCAN_RANGE)) {
+            Optional<Inventory> inventory = getChestInventory(world, recipient.chestPos());
+            if (inventory.isEmpty()) {
+                continue;
+            }
+            if (countItem(inventory.get(), Items.ITEM_FRAME) < CartographerMapWallGoal.FRAMES_NEEDED) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void startCraftCountdown(String reason) {
@@ -370,12 +415,27 @@ public class LeatherworkerCraftingGoal extends Goal {
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
-        BlockState state = world.getBlockState(chestPos);
+        return getChestInventory(world, chestPos);
+    }
+
+    private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos targetChestPos) {
+        BlockState state = world.getBlockState(targetChestPos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
             return Optional.empty();
         }
-        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
+        Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, targetChestPos, false);
         return Optional.ofNullable(inventory);
+    }
+
+    private int countItem(Inventory inventory, net.minecraft.item.Item item) {
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
     }
 
     private void moveTo(BlockPos target) {

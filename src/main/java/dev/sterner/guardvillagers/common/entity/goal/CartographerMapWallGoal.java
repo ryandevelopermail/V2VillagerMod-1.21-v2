@@ -43,7 +43,7 @@ public class CartographerMapWallGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerMapWallGoal.class);
 
     private static final int MAPS_NEEDED = 8;
-    private static final int FRAMES_NEEDED = 4;
+    public static final int FRAMES_NEEDED = 4;
     private static final int FRAMES_TO_PLACE = 4;
     private static final int SCAN_RADIUS = 20;
     private static final int SCAN_INTERVAL_TICKS = 1200;

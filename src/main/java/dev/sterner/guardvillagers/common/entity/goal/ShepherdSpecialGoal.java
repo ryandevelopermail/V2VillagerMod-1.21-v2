@@ -220,7 +220,7 @@ public class ShepherdSpecialGoal extends Goal {
         boolean hasShearsInChest = shearsInChestCount > 0;
 
         if (nextTask == TaskType.SHEARS && hasShearsInChest) {
-            lastShearsInChestCount = countShearsInChest(world);
+            lastShearsInChestCount = shearsInChestCount;
         } else if (!hasShearsInChest) {
             lastShearsInChestCount = 0;
         }
@@ -876,32 +876,69 @@ public class ShepherdSpecialGoal extends Goal {
 
     private TaskType findTaskType(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
-        boolean hasBannerAvailable = hasBannerInInventoryOrHand()
-                || (inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS)));
+        boolean hasBannerInInventoryOrHand = hasBannerInInventoryOrHand();
+        boolean hasShearsInInventoryOrHand = hasShearsInInventoryOrHand();
+        boolean hasWheatInInventoryOrOffhand = hasWheatInInventoryOrOffhand();
+        boolean nearestBannerPenExists = findNearestPenTarget(world) != null;
+        boolean nearestGatherPenExists = resolveNearestGatherPen(world) != null;
 
-        if (hasBannerAvailable) {
-            return TaskType.BANNER;
-        }
+        boolean hasBannerInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
+        boolean hasShearsInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS));
+        boolean hasWheatInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT));
+
+        boolean hasBannerAvailable = hasBannerInInventoryOrHand || hasBannerInChest;
+        boolean hasBannerPlacementTarget = hasBannerAvailable && nearestBannerPenExists;
+        boolean hasShearsAvailable = hasShearsInInventoryOrHand || hasShearsInChest;
+        boolean hasWheatAvailable = hasWheatInInventoryOrOffhand || hasWheatInChest;
 
         if (inventory == null) {
-            if (hasShearsInInventoryOrHand()) {
-                return TaskType.SHEARS;
-            }
-            if (hasWheatInInventoryOrOffhand() && resolveNearestGatherPen(world) != null) {
-                return TaskType.WHEAT_GATHER;
-            }
-            return null;
+            TaskType selectedTask = selectTaskTypeByAvailability(
+                    hasBannerAvailable,
+                    hasBannerPlacementTarget,
+                    hasShearsAvailable,
+                    hasWheatAvailable,
+                    nearestGatherPenExists);
+            logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
+            return selectedTask;
         }
 
-        if (hasShearsInChestOrInventory(inventory)) {
+        TaskType selectedTask = selectTaskTypeByAvailability(
+                hasBannerAvailable,
+                hasBannerPlacementTarget,
+                hasShearsAvailable,
+                hasWheatAvailable,
+                nearestGatherPenExists);
+        logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
+        return selectedTask;
+    }
+
+    private void logBannerFallbackSelection(boolean hasBannerAvailable, boolean hasBannerPlacementTarget, TaskType selectedTask) {
+        if (hasBannerAvailable && !hasBannerPlacementTarget && selectedTask != TaskType.BANNER) {
+            LOGGER.info("Shepherd {} found banner item but no valid pen target; selected fallback task {}",
+                    villager.getUuidAsString(), selectedTask);
+        }
+    }
+
+    static TaskType selectTaskTypeByAvailability(boolean hasBannerAvailable,
+                                                 boolean hasBannerPlacementTarget,
+                                                 boolean hasShearsAvailable,
+                                                 boolean hasWheatAvailable,
+                                                 boolean hasGatherPenTarget) {
+        if (hasBannerAvailable && hasBannerPlacementTarget) {
+            return TaskType.BANNER;
+        }
+        return selectNonBannerTaskType(hasShearsAvailable, hasWheatAvailable, hasGatherPenTarget);
+    }
+
+    static TaskType selectNonBannerTaskType(boolean hasShearsAvailable,
+                                            boolean hasWheatAvailable,
+                                            boolean hasGatherPenTarget) {
+        if (hasShearsAvailable) {
             return TaskType.SHEARS;
         }
-
-        if ((hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT)) || hasWheatInInventoryOrOffhand())
-                && resolveNearestGatherPen(world) != null) {
+        if (hasWheatAvailable && hasGatherPenTarget) {
             return TaskType.WHEAT_GATHER;
         }
-
         return null;
     }
 
@@ -923,11 +960,6 @@ public class ShepherdSpecialGoal extends Goal {
             }
         }
         return false;
-    }
-
-    private boolean hasShearsInChestOrInventory(Inventory chestInventory) {
-        return hasMatchingItem(chestInventory, stack -> stack.isOf(Items.SHEARS))
-                || hasShearsInInventoryOrHand();
     }
 
     private boolean hasShearsInInventoryOrHand() {
@@ -1557,6 +1589,10 @@ public class ShepherdSpecialGoal extends Goal {
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
+        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+            penGatePos = cachedNearestPenGatePos;
+            return cachedNearestPenTarget;
+        }
 
         BlockPos villagerPos = villager.getBlockPos();
         int minY = getLocalMinY(world, villagerPos);
@@ -2286,10 +2322,13 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenTarget resolveNearestGatherPen(ServerWorld world) {
-        // Use VillagePenRegistry first; fall back to banner scan if empty.
+        // Use VillagePenRegistry first; fall back to job-site geometry scan when bell cache is empty.
         BlockPos villagerPos = villager.getBlockPos();
         List<VillagePenRegistry.PenEntry> registryPens =
-                VillagePenRegistry.get(world.getServer()).getNearestBellPens(world, villagerPos, PEN_SCAN_RANGE * 2);
+                VillagePenRegistry.get(world.getServer()).getNearestBellPensWithJobSiteFallback(
+                        world,
+                        villagerPos,
+                        PEN_SCAN_RANGE * 2);
 
         if (!registryPens.isEmpty()) {
             VillagePenRegistry.PenEntry nearest = registryPens.get(0);
@@ -2435,7 +2474,7 @@ public class ShepherdSpecialGoal extends Goal {
         DONE
     }
 
-    private enum TaskType {
+    enum TaskType {
         SHEARS,
         BANNER,
         WHEAT_GATHER

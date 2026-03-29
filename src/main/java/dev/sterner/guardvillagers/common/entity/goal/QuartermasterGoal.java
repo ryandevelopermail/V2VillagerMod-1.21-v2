@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.behavior.WeaponsmithBehavior;
@@ -14,6 +15,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -117,6 +119,8 @@ public class QuartermasterGoal extends Goal {
 
     private long nextCheckTick = 0L;
     private Stage stage = Stage.IDLE;
+    private boolean anchorRegistered = false;
+    private boolean demoted = false;
 
     // Current active transfer
     private BlockPos sourcePos = null;
@@ -145,6 +149,13 @@ public class QuartermasterGoal extends Goal {
         VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
     }
 
+    private void ensureAnchorUnregistered(ServerWorld world) {
+        if (anchorRegistered) {
+            unregisterAnchor(world);
+            anchorRegistered = false;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Goal lifecycle
     // -------------------------------------------------------------------------
@@ -152,9 +163,15 @@ public class QuartermasterGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
-        if (!villager.isAlive()) return false;
-        // Ensure QM chest is registered as village anchor on every active check
-        registerAnchor(world);
+        if (!villager.isAlive() || villager.isRemoved()) {
+            ensureAnchorUnregistered(world);
+            return false;
+        }
+        if (!validateAndSyncPrerequisites(world)) return false;
+        if (!anchorRegistered) {
+            registerAnchor(world);
+            anchorRegistered = true;
+        }
         if (world.getTime() < nextCheckTick) return false;
 
         nextCheckTick = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -163,7 +180,7 @@ public class QuartermasterGoal extends Goal {
 
     @Override
     public boolean shouldContinue() {
-        return stage != Stage.IDLE && stage != Stage.DONE && villager.isAlive();
+        return stage != Stage.IDLE && stage != Stage.DONE && villager.isAlive() && !villager.isRemoved();
     }
 
     @Override
@@ -173,6 +190,9 @@ public class QuartermasterGoal extends Goal {
 
     @Override
     public void stop() {
+        if (villager.getWorld() instanceof ServerWorld world && (!villager.isAlive() || villager.isRemoved())) {
+            ensureAnchorUnregistered(world);
+        }
         villager.getNavigation().stop();
         stage = Stage.IDLE;
         sourcePos = null;
@@ -184,6 +204,17 @@ public class QuartermasterGoal extends Goal {
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             stage = Stage.DONE;
+            return;
+        }
+        if (!villager.isAlive() || villager.isRemoved()) {
+            ensureAnchorUnregistered(world);
+            stage = Stage.DONE;
+            villager.getNavigation().stop();
+            return;
+        }
+        if (!validateAndSyncPrerequisites(world)) {
+            stage = Stage.DONE;
+            villager.getNavigation().stop();
             return;
         }
 
@@ -218,6 +249,28 @@ public class QuartermasterGoal extends Goal {
             case DONE -> stage = Stage.IDLE;
             default -> {}
         }
+    }
+
+    private boolean validateAndSyncPrerequisites(ServerWorld world) {
+        QuartermasterPrerequisiteHelper.Result result =
+                QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
+        if (result.valid()) {
+            demoted = false;
+            return true;
+        }
+
+        ensureAnchorUnregistered(world);
+        if (!demoted) {
+            Optional<BlockPos> secondChest = findDoubleChestOtherHalf(world, chestPos);
+            String secondChestText = secondChest.map(BlockPos::toShortString).orElse("none");
+            LOGGER.info("Librarian {} demoted from Quartermaster (chest={} second_chest={} job_site={})",
+                    villager.getUuidAsString(),
+                    chestPos.toShortString(),
+                    secondChestText,
+                    jobPos.toShortString());
+            demoted = true;
+        }
+        return false;
     }
 
     // -------------------------------------------------------------------------
@@ -688,7 +741,7 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     /**
-     * Returns true if any living Librarian-profession villager with an active
+     * Returns true if any living Librarian-profession villager with an installed
      * QuartermasterGoal exists within {@code range} blocks of {@code anchor}.
      */
     public static boolean isAnyActive(ServerWorld world, BlockPos anchor, double range) {
@@ -698,8 +751,27 @@ public class QuartermasterGoal extends Goal {
                 box,
                 v -> v.isAlive()
                         && v.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.LIBRARIAN);
-        // We treat any alive librarian near the anchor as potential QM — lightweight check.
-        return !librarians.isEmpty();
+
+        for (net.minecraft.entity.passive.VillagerEntity librarian : librarians) {
+            for (PrioritizedGoal prioritizedGoal : librarian.goalSelector.getGoals()) {
+                if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+                    LOGGER.debug(
+                            "Quartermaster presence check: true (anchor={} range={} librarian={} running={})",
+                            anchor.toShortString(),
+                            range,
+                            librarian.getUuidAsString(),
+                            prioritizedGoal.isRunning());
+                    return true;
+                }
+            }
+        }
+
+        LOGGER.debug(
+                "Quartermaster presence check: false (anchor={} range={} librarians_scanned={})",
+                anchor.toShortString(),
+                range,
+                librarians.size());
+        return false;
     }
 
     private void moveTo(BlockPos target) {

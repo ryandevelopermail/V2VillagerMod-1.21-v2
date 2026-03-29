@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import net.minecraft.block.ChestBlock;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtHelper;
@@ -123,9 +124,32 @@ public class VillageAnchorState extends PersistentState {
     public void unregister(ServerWorld world, BlockPos qmChestPos) {
         Set<BlockPos> set = anchorsByWorld.get(world.getRegistryKey());
         if (set != null && set.remove(qmChestPos.toImmutable())) {
+            if (set.isEmpty()) {
+                anchorsByWorld.remove(world.getRegistryKey());
+            }
             markDirty();
             LOGGER.info("[VillageAnchorState] unregistered QM chest at {} (world: {})",
                     qmChestPos.toShortString(), world.getRegistryKey().getValue());
+        }
+    }
+
+    /**
+     * Removes stale anchors in the provided world.
+     *
+     * <p>An anchor is stale when its position no longer contains a chest block.
+     * This method is safe to call frequently and is idempotent.
+     */
+    public void pruneInvalidAnchors(ServerWorld world) {
+        Set<BlockPos> set = anchorsByWorld.get(world.getRegistryKey());
+        if (set == null || set.isEmpty()) return;
+
+        boolean changed = set.removeIf(pos -> !isValidAnchorBlock(world, pos));
+        if (changed) {
+            if (set.isEmpty()) {
+                anchorsByWorld.remove(world.getRegistryKey());
+            }
+            markDirty();
+            LOGGER.info("[VillageAnchorState] pruned stale QM anchors (world: {})", world.getRegistryKey().getValue());
         }
     }
 
@@ -141,6 +165,7 @@ public class VillageAnchorState extends PersistentState {
      * gracefully rather than throwing.
      */
     public Optional<BlockPos> getNearestQmChest(ServerWorld world, BlockPos origin, int radius) {
+        pruneInvalidAnchors(world);
         Set<BlockPos> set = anchorsByWorld.get(world.getRegistryKey());
         if (set == null || set.isEmpty()) return Optional.empty();
 
@@ -165,7 +190,12 @@ public class VillageAnchorState extends PersistentState {
      * Returns all registered QM chest positions in the given world (unmodifiable).
      */
     public Set<BlockPos> getAllQmChests(ServerWorld world) {
+        pruneInvalidAnchors(world);
         Set<BlockPos> set = anchorsByWorld.get(world.getRegistryKey());
         return set == null ? Collections.emptySet() : Collections.unmodifiableSet(set);
+    }
+
+    private boolean isValidAnchorBlock(ServerWorld world, BlockPos pos) {
+        return world.getBlockState(pos).getBlock() instanceof ChestBlock;
     }
 }

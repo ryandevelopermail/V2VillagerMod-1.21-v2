@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -23,8 +24,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 
 /**
  * Periodically ensures enough lumberjacks exist relative to village population.
@@ -124,16 +127,22 @@ public final class VillageLumberjackSpawnManager {
                 .filter(VillageLumberjackSpawnManager::isProfessional)
                 .count();
 
-        int desired = desiredLumberjackCount(professionals, totalVillagers);
-        int existing = world.getEntitiesByClass(
-                LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive).size();
+        int desired = desiredLumberjackCount(professionals, totalVillagers, totalVillagers > 0);
+        List<LumberjackGuardEntity> activeLumberjacks = world.getEntitiesByClass(
+                LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
+        int existing = activeLumberjacks.size();
 
-        if (existing >= desired) {
+        int pendingUnclaimedTables = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
+        int effectiveExisting = existing + pendingUnclaimedTables;
+
+        if (effectiveExisting >= desired) {
+            LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
+                    bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
             return;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} existing={} — placing table",
-                bellPos.toShortString(), professionals, totalVillagers, desired, existing);
+        LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — placing table",
+                bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
 
         // Attempt one table + conversion per scan cycle (pace ourselves).
         tryPlaceTableAndConvert(world, bellPos);
@@ -350,6 +359,52 @@ public final class VillageLumberjackSpawnManager {
         return tables;
     }
 
+    /**
+     * Counts nearby crafting tables that are present but not already accounted for by active
+     * lumberjacks. These represent pending supply that can convert unemployed villagers later.
+     */
+    private static int countPendingUnclaimedCraftingTablesNearBell(ServerWorld world, BlockPos bellPos, List<LumberjackGuardEntity> activeLumberjacks) {
+        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
+        List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
+        if (nearbyTables.isEmpty()) {
+            return 0;
+        }
+
+        Set<BlockPos> pairedToLivingLumberjacks = new HashSet<>();
+        for (LumberjackGuardEntity lumberjack : activeLumberjacks) {
+            BlockPos pairedPos = lumberjack.getPairedCraftingTablePos();
+            if (pairedPos != null) {
+                pairedToLivingLumberjacks.add(pairedPos.toImmutable());
+            }
+        }
+
+        int pending = 0;
+        for (BlockPos tablePos : nearbyTables) {
+            if (!isPendingLumberjackConversionTable(world, tablePos, pairedToLivingLumberjacks)) {
+                continue;
+            }
+            pending++;
+        }
+
+        LOGGER.info("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
+                bellPos.toShortString(), nearbyTables.size(), pending);
+        return pending;
+    }
+
+    /**
+     * Returns true when this table is eligible as pending supply:
+     * block exists, not reserved for converted workers, and not already paired to a living lumberjack.
+     */
+    private static boolean isPendingLumberjackConversionTable(ServerWorld world, BlockPos tablePos, Set<BlockPos> pairedToLivingLumberjacks) {
+        if (!world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)) {
+            return false;
+        }
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+            return false;
+        }
+        return !pairedToLivingLumberjacks.contains(tablePos);
+    }
+
     private static VillagerEntity findNearestUnemployed(ServerWorld world, BlockPos tablePos) {
         Box scanBox = new Box(tablePos).expand(UNEMPLOYED_SCAN_RANGE);
         List<VillagerEntity> candidates = world.getEntitiesByClass(
@@ -365,10 +420,24 @@ public final class VillageLumberjackSpawnManager {
     // Population helpers
     // -------------------------------------------------------------------------
 
-    static int desiredLumberjackCount(int professionals, int totalVillagers) {
+    static int desiredLumberjackCount(int professionals, int totalVillagers, boolean hasEligibleVillageResident) {
         int fromProfessionals = professionals > 0 ? (professionals + RATIO_PROFESSIONALS - 1) / RATIO_PROFESSIONALS : 0;
         int fromTotal = totalVillagers > 0 ? (totalVillagers + RATIO_TOTAL - 1) / RATIO_TOTAL : 0;
-        return Math.max(fromProfessionals, fromTotal);
+        int ratioDesired = Math.max(fromProfessionals, fromTotal);
+
+        if (!hasEligibleVillageResident) {
+            return ratioDesired;
+        }
+
+        return Math.max(ratioDesired, configuredVillageMinimum(totalVillagers));
+    }
+
+    private static int configuredVillageMinimum(int totalVillagers) {
+        int floor = Math.max(0, GuardVillagersConfig.lumberjackVillageMin);
+        if (totalVillagers >= GuardVillagersConfig.lumberjackVillageMinLargeVillagePopulation) {
+            floor = Math.max(floor, GuardVillagersConfig.lumberjackVillageMinLargeVillage);
+        }
+        return floor;
     }
 
     private static boolean isEligibleVillager(VillagerEntity villager) {

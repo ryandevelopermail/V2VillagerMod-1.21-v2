@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.mixin;
 
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdBehavior;
+import dev.sterner.guardvillagers.common.villager.behavior.ButcherBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.ArmorerBehavior;
 import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
@@ -38,6 +39,7 @@ public class ChestBlockEntityMixin {
     private void guardvillagers$notifyChestMutation() {
         if ((Object) this instanceof ChestBlockEntity chest && chest.getWorld() instanceof ServerWorld serverWorld) {
             ShepherdBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
+            ButcherBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
             MasonBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
             ArmorerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
             CartographerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());

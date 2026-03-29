@@ -4,6 +4,9 @@ import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.util.math.BlockPos;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,5 +30,46 @@ class LumberjackGuardChopTreesMappedBoundsModeTest {
 
         assertTrue(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, nearCandidate, null));
         assertFalse(LumberjackGuardChopTreesGoal.isCandidateInScanMode(center, farCandidate, null));
+    }
+
+
+    @Test
+    void mappedBoundsMode_remainsEnabledUntilLastValidBoundIsRemovedAcrossScanCycles() {
+        VillageMappedBoundsState.MappedBounds a = new VillageMappedBoundsState.MappedBounds(-64, 64, -64, 64);
+        VillageMappedBoundsState.MappedBounds b = new VillageMappedBoundsState.MappedBounds(256, 384, 256, 384);
+
+        assertTrue(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of(a, b, a)));
+        assertTrue(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of(b)));
+        assertFalse(LumberjackGuardChopTreesGoal.isMappedModeEnabled(List.of()));
+    }
+
+    @Test
+    void mergeOverlappingMappedBounds_combinesOverlapsIntoMinimalScanRegion() {
+        List<VillageMappedBoundsState.MappedBounds> merged = LumberjackGuardChopTreesGoal.mergeOverlappingMappedBounds(List.of(
+                new VillageMappedBoundsState.MappedBounds(-64, 64, -64, 64),
+                new VillageMappedBoundsState.MappedBounds(60, 180, -64, 64),
+                new VillageMappedBoundsState.MappedBounds(300, 360, 300, 360)
+        ));
+
+        assertEquals(2, merged.size());
+        assertTrue(merged.stream().anyMatch(bounds -> bounds.contains(new BlockPos(140, 64, 0))));
+    }
+
+    @Test
+    void mapsPresent_withLocalActionableRoots_canCompleteInitialPassImmediately() {
+        assertTrue(LumberjackGuardChopTreesGoal.shouldEarlyCompleteScanPass(
+                true,
+                0,
+                1,
+                1));
+    }
+
+    @Test
+    void mapsPresent_withoutLocalRoots_keepsMappedExpansionPathActive() {
+        assertFalse(LumberjackGuardChopTreesGoal.shouldEarlyCompleteScanPass(
+                true,
+                0,
+                0,
+                0));
     }
 }

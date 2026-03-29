@@ -15,6 +15,7 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundCategory;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.IntBinaryOperator;
 
 /**
  * Shepherd places a 7×7 fence pen (27 fences + 1 gate) near their job block when:
@@ -65,8 +67,10 @@ public class ShepherdFencePlacerGoal extends Goal {
 
     /** How far from the job block to search for a valid pen site. */
     private static final int SITE_SEARCH_RADIUS = 32;
-    /** Flat-ground tolerance: all floor Y must be within ±2 of the base Y. */
-    private static final int FLAT_Y_TOLERANCE = 2;
+    /** Strict flat-ground tolerance. 0 means all sampled columns must share identical surface Y. */
+    private static final int FLAT_Y_DELTA = 0;
+    /** Required vertical clearance above floor for pen walkability/buildability checks. */
+    private static final int REQUIRED_CLEARANCE_BLOCKS = 3;
 
     /**
      * Pen scan radius — matches ShepherdFenceCraftingGoal.PEN_SCAN_RADIUS (64).
@@ -259,6 +263,13 @@ public class ShepherdFencePlacerGoal extends Goal {
             stage = Stage.MOVE_TO_FENCE;
             return;
         }
+        // Re-validate immediately before placement that this spot and headroom remain clear.
+        if (!isPlacementCellClear(world, target)) {
+            LOGGER.debug("ShepherdFencePlacer {}: fence spot {} became obstructed; aborting plan and replanning",
+                    villager.getUuidAsString(), target.toShortString());
+            abortCurrentPlanForReplan();
+            return;
+        }
 
         // Consume one fence from chest
         Optional<Inventory> invOpt = getChestInventory(world);
@@ -300,6 +311,13 @@ public class ShepherdFencePlacerGoal extends Goal {
                 || world.getBlockState(pendingGatePos).getBlock() instanceof FenceGateBlock) {
             stage = Stage.DONE;
             triggerRescan(world);
+            return;
+        }
+        if (!isPlacementCellClear(world, pendingGatePos)
+                || !isGateApproachClear(world, pendingGatePos, pendingGateFacing)) {
+            LOGGER.debug("ShepherdFencePlacer {}: gate/approach at {} became obstructed; aborting plan and replanning",
+                    villager.getUuidAsString(), pendingGatePos.toShortString());
+            abortCurrentPlanForReplan();
             return;
         }
 
@@ -354,20 +372,20 @@ public class ShepherdFencePlacerGoal extends Goal {
      * Uses BlockPos.Mutable to avoid GC pressure.
      */
     private PenPlan findPenSite(ServerWorld world) {
-        BlockPos.Mutable mutable = new BlockPos.Mutable();
-
         for (int dx = -SITE_SEARCH_RADIUS; dx <= SITE_SEARCH_RADIUS - PEN_SIZE; dx++) {
             for (int dz = -SITE_SEARCH_RADIUS; dz <= SITE_SEARCH_RADIUS - PEN_SIZE; dz++) {
                 int baseX = jobPos.getX() + dx;
                 int baseZ = jobPos.getZ() + dz;
 
-                // Sample surface Y at the northwest corner of the candidate area
-                mutable.set(baseX, jobPos.getY(), baseZ);
-                int surfaceY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+                int[] surfaceYMap = sampleSurfaceYMap(world, baseX, baseZ);
+                if (!isPerimeterFlat(surfaceYMap, FLAT_Y_DELTA)) continue;
 
-                BlockPos origin = new BlockPos(baseX, surfaceY, baseZ);
-                if (isSiteValid(world, origin)) {
-                    return buildPenPlan(origin);
+                Integer flatY = getSharedFlatY(surfaceYMap, FLAT_Y_DELTA);
+                if (flatY == null) continue;
+
+                BlockPos origin = new BlockPos(baseX, flatY, baseZ);
+                if (isSiteValid(world, origin, surfaceYMap, flatY)) {
+                    return buildPenPlan(world, origin);
                 }
             }
         }
@@ -377,27 +395,26 @@ public class ShepherdFencePlacerGoal extends Goal {
     /**
      * Validates a 7×7 site with northwest corner at {@code origin}:
      * <ul>
-     *   <li>All floor Y within ±FLAT_Y_TOLERANCE of origin.getY()</li>
+     *   <li>Surface Y is sampled for all 49 columns and must be strictly flat (delta ≤ {@link #FLAT_Y_DELTA})</li>
      *   <li>No DIRT_PATH blocks anywhere in the 7×7 footprint</li>
      *   <li>No job-site POI inside the 5×5 interior</li>
      *   <li>Solid floor + replaceable space at pen level for all 49 positions</li>
      * </ul>
      */
     private boolean isSiteValid(ServerWorld world, BlockPos origin) {
-        int baseY = origin.getY();
+        int[] surfaceYMap = sampleSurfaceYMap(world, origin.getX(), origin.getZ());
+        Integer flatY = getSharedFlatY(surfaceYMap, FLAT_Y_DELTA);
+        return flatY != null && isSiteValid(world, new BlockPos(origin.getX(), flatY, origin.getZ()), surfaceYMap, flatY);
+    }
+
+    private boolean isSiteValid(ServerWorld world, BlockPos origin, int[] surfaceYMap, int flatY) {
         BlockPos.Mutable mutable = new BlockPos.Mutable();
 
         for (int dx = 0; dx < PEN_SIZE; dx++) {
             for (int dz = 0; dz < PEN_SIZE; dz++) {
                 int x = origin.getX() + dx;
                 int z = origin.getZ() + dz;
-
-                // Sample actual surface at this column
-                mutable.set(x, baseY, z);
-                int surfY = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
-
-                // Flatness check
-                if (Math.abs(surfY - baseY) > FLAT_Y_TOLERANCE) return false;
+                int surfY = surfaceYMap[indexFor(dx, dz)];
 
                 // Use the actual surface Y for block checks
                 mutable.set(x, surfY, z);
@@ -411,11 +428,15 @@ public class ShepherdFencePlacerGoal extends Goal {
                 // full cube occlusion and rejects common terrain like bottom slabs).
                 if (!floor.isSideSolidFullSquare(world, mutable.toImmutable(), net.minecraft.util.math.Direction.UP)) return false;
 
-                // Space at pen level must be replaceable
-                mutable.set(x, surfY + 1, z);
-                if (!world.getBlockState(mutable).isReplaceable()) return false;
-
             }
+        }
+
+        int minY = flatY + 1;
+        int maxY = flatY + REQUIRED_CLEARANCE_BLOCKS;
+        if (!isBuildVolumeClear(world, origin, minY, maxY)) return false;
+        if (!isPenFloorAndPerimeterTreeFree(world, origin, flatY)) return false;
+        if (!isGateApproachClear(world, computeGatePosition(origin.getX(), origin.getZ(), (x, z) -> flatY), Direction.NORTH)) {
+            return false;
         }
 
         // Reject the site if any job-site or structural block we care about is inside the 5×5
@@ -447,47 +468,229 @@ public class ShepherdFencePlacerGoal extends Goal {
         return true;
     }
 
+    private boolean isBuildVolumeClear(ServerWorld world, BlockPos origin, int minY, int maxY) {
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            for (int dz = 0; dz < PEN_SIZE; dz++) {
+                int x = origin.getX() + dx;
+                int z = origin.getZ() + dz;
+                for (int y = minY; y <= maxY; y++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    BlockState state = world.getBlockState(pos);
+                    if (isHardObstacle(state) || !state.isReplaceable()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean isPenFloorAndPerimeterTreeFree(ServerWorld world, BlockPos origin, int floorY) {
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            for (int dz = 0; dz < PEN_SIZE; dz++) {
+                boolean isPerimeter = dx == 0 || dz == 0 || dx == PEN_SIZE - 1 || dz == PEN_SIZE - 1;
+                if (!isPerimeter) continue;
+                mutable.set(origin.getX() + dx, floorY, origin.getZ() + dz);
+                if (isTreeBlock(world.getBlockState(mutable))) return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isGateApproachClear(ServerWorld world, BlockPos gatePos, Direction gateFacing) {
+        BlockPos inside = gatePos.offset(gateFacing.getOpposite());
+        BlockPos outside = gatePos.offset(gateFacing);
+        return isPathCellClear(world, inside) && isPathCellClear(world, outside);
+    }
+
+    private boolean isPathCellClear(ServerWorld world, BlockPos floorPos) {
+        BlockState floor = world.getBlockState(floorPos.down());
+        if (!floor.isSideSolidFullSquare(world, floorPos.down(), Direction.UP) || isTreeBlock(floor)) return false;
+        for (int i = 0; i < REQUIRED_CLEARANCE_BLOCKS; i++) {
+            BlockPos scan = floorPos.up(i);
+            BlockState state = world.getBlockState(scan);
+            if (isHardObstacle(state) || !state.isReplaceable()) return false;
+        }
+        return true;
+    }
+
+    private boolean isPlacementCellClear(ServerWorld world, BlockPos target) {
+        BlockState floor = world.getBlockState(target.down());
+        if (!floor.isSideSolidFullSquare(world, target.down(), Direction.UP) || isTreeBlock(floor)) return false;
+        for (int i = 0; i < REQUIRED_CLEARANCE_BLOCKS; i++) {
+            BlockPos scan = target.up(i);
+            BlockState state = world.getBlockState(scan);
+            if (isHardObstacle(state) || !state.isReplaceable()) return false;
+        }
+        return true;
+    }
+
+    private boolean isHardObstacle(BlockState state) {
+        return isTreeBlock(state);
+    }
+
+    private boolean isTreeBlock(BlockState state) {
+        return state.isIn(BlockTags.LOGS) || state.isIn(BlockTags.LEAVES);
+    }
+
+    private void abortCurrentPlanForReplan() {
+        villager.getNavigation().stop();
+        currentNavTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
+        pendingFences = new ArrayList<>();
+        pendingGatePos = null;
+        currentIndex = 0;
+        nextCheckTime = 0L;
+        stage = Stage.DONE;
+    }
+
+    private int[] sampleSurfaceYMap(ServerWorld world, int baseX, int baseZ) {
+        int[] surfaceYMap = new int[PEN_SIZE * PEN_SIZE];
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            for (int dz = 0; dz < PEN_SIZE; dz++) {
+                int x = baseX + dx;
+                int z = baseZ + dz;
+                mutable.set(x, jobPos.getY(), z);
+                surfaceYMap[indexFor(dx, dz)] = world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+            }
+        }
+        return surfaceYMap;
+    }
+
+    static boolean isPerimeterFlat(int[] surfaceYMap, int allowedDelta) {
+        int referenceY = surfaceYMap[indexFor(0, 0)];
+        for (int i = 0; i < PEN_SIZE; i++) {
+            if (Math.abs(surfaceYMap[indexFor(i, 0)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(i, PEN_SIZE - 1)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(0, i)] - referenceY) > allowedDelta) return false;
+            if (Math.abs(surfaceYMap[indexFor(PEN_SIZE - 1, i)] - referenceY) > allowedDelta) return false;
+        }
+        return true;
+    }
+
+    static Integer getSharedFlatY(int[] surfaceYMap, int allowedDelta) {
+        int referenceY = surfaceYMap[0];
+        for (int y : surfaceYMap) {
+            if (Math.abs(y - referenceY) > allowedDelta) {
+                return null;
+            }
+        }
+        return referenceY;
+    }
+
+    private static int indexFor(int dx, int dz) {
+        return dx * PEN_SIZE + dz;
+    }
+
+    /**
+     * Test helper for validating scan order behavior independent of world/block rules.
+     */
+    static BlockPos findFirstFlatCandidateForTest(int jobX, int jobZ, int searchRadius, IntBinaryOperator surfaceYAt, int allowedDelta) {
+        for (int dx = -searchRadius; dx <= searchRadius - PEN_SIZE; dx++) {
+            for (int dz = -searchRadius; dz <= searchRadius - PEN_SIZE; dz++) {
+                int baseX = jobX + dx;
+                int baseZ = jobZ + dz;
+                int[] surfaceYMap = new int[PEN_SIZE * PEN_SIZE];
+                for (int localX = 0; localX < PEN_SIZE; localX++) {
+                    for (int localZ = 0; localZ < PEN_SIZE; localZ++) {
+                        surfaceYMap[indexFor(localX, localZ)] = surfaceYAt.applyAsInt(baseX + localX, baseZ + localZ);
+                    }
+                }
+                if (!isPerimeterFlat(surfaceYMap, allowedDelta)) continue;
+                Integer sharedY = getSharedFlatY(surfaceYMap, allowedDelta);
+                if (sharedY != null) return new BlockPos(baseX, sharedY, baseZ);
+            }
+        }
+        return null;
+    }
+
     /**
      * Builds the fence position list and gate position for a valid 7×7 site.
      * The pen exterior is the outer ring of the 7×7. Gate is at south face center (dx=3).
      * Gate faces SOUTH (inward opening direction is north).
      */
-    private PenPlan buildPenPlan(BlockPos origin) {
-        // Determine the actual Y for the pen level (surface + 1)
-        // Use a consistent Y by reading the surface at the origin corner
-        // We'll place fences at the surfaceY+1 level, adapting per column
+    private PenPlan buildPenPlan(ServerWorld world, BlockPos origin) {
         int baseX = origin.getX();
         int baseZ = origin.getZ();
-        int penY = origin.getY() + 1; // fences sit on top of the ground
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        IntBinaryOperator surfaceYAt = (x, z) -> {
+            mutable.set(x, origin.getY(), z);
+            return world.getTopPosition(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, mutable).getY() - 1;
+        };
 
-        List<BlockPos> fences = new ArrayList<>();
-
-        // North face (dz=0): all 7 columns
-        for (int dx = 0; dx < PEN_SIZE; dx++) {
-            fences.add(new BlockPos(baseX + dx, penY, baseZ));
-        }
-        // South face (dz=PEN_SIZE-1): all 7 columns
-        for (int dx = 0; dx < PEN_SIZE; dx++) {
-            fences.add(new BlockPos(baseX + dx, penY, baseZ + PEN_SIZE - 1));
-        }
-        // West face (dx=0): interior Z only (skip corners already covered)
-        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
-            fences.add(new BlockPos(baseX, penY, baseZ + dz));
-        }
-        // East face (dx=PEN_SIZE-1): interior Z only
-        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
-            fences.add(new BlockPos(baseX + PEN_SIZE - 1, penY, baseZ + dz));
-        }
-
-        // Gate at south face center: dx = PEN_SIZE/2 = 3
-        int gateDx = PEN_SIZE / 2; // = 3 for PEN_SIZE=7
-        BlockPos gatePos = new BlockPos(baseX + gateDx, penY, baseZ + PEN_SIZE - 1);
-        fences.remove(gatePos); // Remove the gate slot from fence list
+        List<BlockPos> fences = computePerimeterFencePositions(baseX, baseZ, surfaceYAt);
+        BlockPos gatePos = computeGatePosition(baseX, baseZ, surfaceYAt);
 
         // Gate faces NORTH — opens inward toward pen interior
         Direction gateFacing = Direction.NORTH;
 
-        return new PenPlan(origin, new ArrayList<>(fences), gatePos, gateFacing);
+        return new PenPlan(origin, fences, gatePos, gateFacing);
+    }
+
+    static List<BlockPos> computePerimeterFencePositions(int baseX, int baseZ, IntBinaryOperator surfaceYAt) {
+        List<BlockPos> fences = new ArrayList<>();
+
+        // North face (dz=0): all 7 columns
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            int x = baseX + dx;
+            int z = baseZ;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // South face (dz=PEN_SIZE-1): all 7 columns
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            int x = baseX + dx;
+            int z = baseZ + PEN_SIZE - 1;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // West face (dx=0): interior Z only (skip corners already covered)
+        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
+            int x = baseX;
+            int z = baseZ + dz;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+        // East face (dx=PEN_SIZE-1): interior Z only
+        for (int dz = 1; dz < PEN_SIZE - 1; dz++) {
+            int x = baseX + PEN_SIZE - 1;
+            int z = baseZ + dz;
+            fences.add(new BlockPos(x, surfaceYAt.applyAsInt(x, z) + 1, z));
+        }
+
+        fences.remove(computeGatePosition(baseX, baseZ, surfaceYAt));
+        return fences;
+    }
+
+    static BlockPos computeGatePosition(int baseX, int baseZ, IntBinaryOperator surfaceYAt) {
+        int gateX = baseX + PEN_SIZE / 2;
+        int gateZ = baseZ + PEN_SIZE - 1;
+        return new BlockPos(gateX, surfaceYAt.applyAsInt(gateX, gateZ) + 1, gateZ);
+    }
+
+    static boolean isBuildVolumeClearForTest(BlockPos origin, int minY, int maxY,
+                                             java.util.function.Predicate<BlockPos> replaceableAt,
+                                             java.util.function.Predicate<BlockPos> treeBlockAt) {
+        for (int dx = 0; dx < PEN_SIZE; dx++) {
+            for (int dz = 0; dz < PEN_SIZE; dz++) {
+                int x = origin.getX() + dx;
+                int z = origin.getZ() + dz;
+                for (int y = minY; y <= maxY; y++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    if (!replaceableAt.test(pos) || treeBlockAt.test(pos)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    static boolean isPlacementCellClearForTest(BlockPos target,
+                                               java.util.function.Predicate<BlockPos> replaceableAt,
+                                               java.util.function.Predicate<BlockPos> treeBlockAt,
+                                               java.util.function.Predicate<BlockPos> solidFloorAt) {
+        if (!solidFloorAt.test(target.down()) || treeBlockAt.test(target.down())) return false;
+        for (int i = 0; i < REQUIRED_CLEARANCE_BLOCKS; i++) {
+            BlockPos scan = target.up(i);
+            if (!replaceableAt.test(scan) || treeBlockAt.test(scan)) return false;
+        }
+        return true;
     }
 
     // -------------------------------------------------------------------------

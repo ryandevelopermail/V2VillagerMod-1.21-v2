@@ -203,9 +203,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
-        if (demand != null && countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem()) <= 0) {
-            if (craftIfPossible(chestInventory, demand.planksCost(), demand.stickCost(), demand.outputItem())) {
-                stashCraftedOutput(chestInventory, demand.outputItem());
+        int outputOnHand = demand == null ? 0 : countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem());
+        if (demand != null && outputOnHand < demand.outputCount()) {
+            if (craftIfPossible(chestInventory, demand.planksCost(), demand.stickCost(), demand.outputItem(), demand.outputCount())) {
+                stashCraftedOutput(chestInventory, demand.outputItem(), demand.outputCount());
                 LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
                 return true;
             }
@@ -328,21 +329,33 @@ public class LumberjackGuardCraftingGoal extends Goal {
     public static boolean craftSingleUpgradeDemandOutputIfPossible(LumberjackGuardEntity guard,
                                                                     Inventory chestInventory,
                                                                     LumberjackChestTriggerController.UpgradeDemand demand) {
+        return craftSingleUpgradeDemandOutputIfPossible(guard.getGatheredStackBuffer(), chestInventory, demand);
+    }
+
+    static boolean craftSingleUpgradeDemandOutputIfPossible(List<ItemStack> gatheredStackBuffer,
+                                                            Inventory chestInventory,
+                                                            LumberjackChestTriggerController.UpgradeDemand demand) {
         if (demand == null) {
             return false;
         }
 
         int planks = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
-                + countMatchingStatic(guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+                + countMatchingStatic(gatheredStackBuffer, stack -> stack.isIn(ItemTags.PLANKS));
+        int sticks = countByItemStatic(chestInventory, Items.STICK) + countByItemStatic(gatheredStackBuffer, Items.STICK);
+        if (sticks < demand.stickCost()) {
+            return false;
+        }
         if (planks < demand.planksCost()) {
             return false;
         }
 
-        if (!consumeMatchingStatic(chestInventory, guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), demand.planksCost())) {
+        boolean consumedPlanks = consumeMatchingStatic(chestInventory, gatheredStackBuffer, stack -> stack.isIn(ItemTags.PLANKS), demand.planksCost());
+        boolean consumedSticks = demand.stickCost() == 0 || consumeByItemStatic(chestInventory, gatheredStackBuffer, Items.STICK, demand.stickCost());
+        if (!consumedPlanks || !consumedSticks) {
             return false;
         }
 
-        addToBufferStatic(guard, new ItemStack(demand.outputItem(), 1));
+        addToBufferStatic(gatheredStackBuffer, new ItemStack(demand.outputItem(), demand.outputCount()));
         return true;
     }
 
@@ -407,12 +420,12 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
     }
 
-    private void stashCraftedOutput(Inventory chestInventory, Item item) {
+    private void stashCraftedOutput(Inventory chestInventory, Item item, int expectedCount) {
         if (!isBasePairingReadyForDemand()) {
             return;
         }
 
-        ItemStack craftedStack = takeOneByItem(this.guard.getGatheredStackBuffer(), item);
+        ItemStack craftedStack = takeUpToByItem(this.guard.getGatheredStackBuffer(), item, expectedCount);
         if (craftedStack.isEmpty()) {
             return;
         }
@@ -430,6 +443,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private boolean craftIfPossible(Inventory chestInventory, int planksCost, int stickCost, Item output) {
+        return craftIfPossible(chestInventory, planksCost, stickCost, output, 1);
+    }
+
+    private boolean craftIfPossible(Inventory chestInventory, int planksCost, int stickCost, Item output, int outputCount) {
         int planks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int sticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
@@ -440,7 +457,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
         boolean consumedPlanks = consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS), planksCost);
         boolean consumedSticks = stickCost == 0 || consumeByItem(chestInventory, this.guard.getGatheredStackBuffer(), Items.STICK, stickCost);
         if (consumedPlanks && consumedSticks) {
-            addToBuffer(new ItemStack(output, 1));
+            addToBuffer(new ItemStack(output, outputCount));
             return true;
         }
 
@@ -481,6 +498,27 @@ public class LumberjackGuardCraftingGoal extends Goal {
             return split;
         }
 
+        return ItemStack.EMPTY;
+    }
+
+    private ItemStack takeUpToByItem(List<ItemStack> stacks, Item item, int amount) {
+        if (amount <= 0) {
+            return ItemStack.EMPTY;
+        }
+        for (int i = 0; i < stacks.size(); i++) {
+            ItemStack stack = stacks.get(i);
+            if (stack.isEmpty() || !stack.isOf(item)) {
+                continue;
+            }
+
+            int splitAmount = Math.min(amount, stack.getCount());
+            ItemStack split = stack.split(splitAmount);
+            if (stack.isEmpty()) {
+                stacks.set(i, ItemStack.EMPTY);
+            }
+            stacks.removeIf(ItemStack::isEmpty);
+            return split;
+        }
         return ItemStack.EMPTY;
     }
 
@@ -529,7 +567,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private static void addToBufferStatic(LumberjackGuardEntity guard, ItemStack incoming) {
-        List<ItemStack> buffer = guard.getGatheredStackBuffer();
+        addToBufferStatic(guard.getGatheredStackBuffer(), incoming);
+    }
+
+    private static void addToBufferStatic(List<ItemStack> buffer, ItemStack incoming) {
         for (ItemStack existing : buffer) {
             if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
                 int move = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
@@ -582,6 +623,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
         int remaining = consumeFromInventoryStatic(inventory, predicate, amount);
         remaining = consumeFromBufferStatic(buffer, predicate, remaining);
         return remaining <= 0;
+    }
+
+    private static boolean consumeByItemStatic(Inventory inventory, List<ItemStack> buffer, Item item, int amount) {
+        return consumeMatchingStatic(inventory, buffer, stack -> stack.isOf(item), amount);
     }
 
     private static int consumeFromInventoryStatic(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, int amount) {

@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.village.VillagerProfession;
 
 import org.junit.jupiter.api.Test;
@@ -73,6 +75,23 @@ class LumberjackGuardDepositLogsGoalTest {
         );
 
         assertEquals(-1, candidateIndex);
+    }
+
+    @Test
+    void collectCandidates_materialDetectionRecognizesFenceAndGateStacksForShepherdRouting() {
+        assertEquals(LumberjackDemandPlanner.MaterialType.FENCES, LumberjackDemandPlanner.MaterialType.fromStack(new ItemStack(Items.OAK_FENCE)));
+        assertEquals(LumberjackDemandPlanner.MaterialType.FENCE_GATES, LumberjackDemandPlanner.MaterialType.fromStack(new ItemStack(Items.OAK_FENCE_GATE)));
+    }
+
+    @Test
+    void clampTransferForRecipient_keepsFenceTransfersForShepherdUnchanged() {
+        int transfer = LumberjackGuardDepositLogsGoal.clampTransferForRecipient(
+                LumberjackDemandPlanner.MaterialType.FENCES,
+                VillagerProfession.SHEPHERD,
+                4
+        );
+
+        assertEquals(4, transfer);
     }
 
 }

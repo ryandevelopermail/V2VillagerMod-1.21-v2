@@ -108,6 +108,20 @@ public final class UniversalDistributionRouter {
                         RoutingMode.ALWAYS
                 ),
                 new DistributionRouteRule(
+                        "fences-to-shepherd-v2",
+                        stack -> stack.isIn(ItemTags.FENCES),
+                        List.of(RecipientTarget.strictlyPaired(VillagerProfession.SHEPHERD, Blocks.LOOM)),
+                        86,
+                        RoutingMode.ALWAYS
+                ),
+                new DistributionRouteRule(
+                        "fence-gates-to-shepherd-v2",
+                        stack -> stack.isIn(ItemTags.FENCE_GATES),
+                        List.of(RecipientTarget.strictlyPaired(VillagerProfession.SHEPHERD, Blocks.LOOM)),
+                        86,
+                        RoutingMode.ALWAYS
+                ),
+                new DistributionRouteRule(
                         "sticks-to-stick-consuming-professions",
                         stack -> stack.isOf(Items.STICK),
                         List.of(
@@ -158,6 +172,7 @@ public final class UniversalDistributionRouter {
                     target.profession(),
                     target.expectedJobBlock(),
                     recipient -> isStrictlyPaired(world, recipient, target.expectedJobBlock())
+                            && isEligibleV2ShepherdRecipient(world, target, recipient)
                             && supportsCapabilities(world, recipient, target.requiredCapabilities())));
         }
 
@@ -180,6 +195,29 @@ public final class UniversalDistributionRouter {
         }
 
         return JobBlockPairingHelper.findNearbyChest(world, recipient.jobPos())
+                .map(pos -> pos.equals(recipient.chestPos()))
+                .orElse(false);
+    }
+
+    static boolean isEligibleV2ShepherdRecipient(ServerWorld world,
+                                                 RecipientTarget target,
+                                                 DistributionRecipientHelper.RecipientRecord recipient) {
+        if (!requiresV2ShepherdPairing(target)) {
+            return true;
+        }
+        return hasNearbyPairedCraftingTableForJobSite(world, recipient);
+    }
+
+    static boolean requiresV2ShepherdPairing(RecipientTarget target) {
+        return target.profession() == VillagerProfession.SHEPHERD && target.expectedJobBlock() == Blocks.LOOM;
+    }
+
+    private static boolean hasNearbyPairedCraftingTableForJobSite(ServerWorld world, DistributionRecipientHelper.RecipientRecord recipient) {
+        Optional<BlockPos> craftingTable = JobBlockPairingHelper.findNearbyCraftingTable(world, recipient.jobPos());
+        if (craftingTable.isEmpty()) {
+            return false;
+        }
+        return JobBlockPairingHelper.findNearbyChest(world, craftingTable.get(), recipient.jobPos())
                 .map(pos -> pos.equals(recipient.chestPos()))
                 .orElse(false);
     }

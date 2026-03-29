@@ -190,6 +190,8 @@ public final class LumberjackDemandPlanner {
         CHARCOAL("charcoal", 16, RecipeDemandIndex.DemandMaterial.CHARCOAL),
         STICK("stick", 24, RecipeDemandIndex.DemandMaterial.STICK),
         PLANKS("planks", 32, RecipeDemandIndex.DemandMaterial.PLANKS),
+        FENCES("fences", 48, RecipeDemandIndex.DemandMaterial.FENCES),
+        FENCE_GATES("fence_gates", 12, RecipeDemandIndex.DemandMaterial.FENCE_GATES),
         LOGS("logs", 32, RecipeDemandIndex.DemandMaterial.LOGS);
 
         private final String label;

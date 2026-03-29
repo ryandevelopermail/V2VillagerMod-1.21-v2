@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.villager;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -223,8 +224,21 @@ public final class LumberjackPopulationBalancingService {
                     ? (professionals + RATIO_PROFESSIONALS - 1) / RATIO_PROFESSIONALS : 0;
             int desiredFromTotal = v2Villagers > 0
                     ? (v2Villagers + RATIO_TOTAL - 1) / RATIO_TOTAL : 0;
-            int desired = Math.max(desiredFromProfessionals, desiredFromTotal);
+            int ratioDesired = Math.max(desiredFromProfessionals, desiredFromTotal);
+
+            int desired = ratioDesired;
+            if (v2Villagers > 0) {
+                desired = Math.max(ratioDesired, configuredVillageMinimum(v2Villagers));
+            }
             return activeLumberjackGuards < desired;
+        }
+
+        private int configuredVillageMinimum(int totalVillagers) {
+            int floor = Math.max(0, GuardVillagersConfig.lumberjackVillageMin);
+            if (totalVillagers >= GuardVillagersConfig.lumberjackVillageMinLargeVillagePopulation) {
+                floor = Math.max(floor, GuardVillagersConfig.lumberjackVillageMinLargeVillage);
+            }
+            return floor;
         }
     }
 }

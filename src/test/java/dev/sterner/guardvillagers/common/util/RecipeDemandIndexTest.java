@@ -150,4 +150,17 @@ class RecipeDemandIndexTest {
         assertFalse(RecipeDemandIndex.validateToolMaterialDemandCoverage(index, Set.of(VillagerProfession.FARMER, VillagerProfession.MASON)));
     }
 
+    @Test
+    void fixedDemandRoutes_includeShepherdFenceAndFenceGateDemand() {
+        RecipeDemandIndex.RouteIndex routeIndex = RecipeDemandIndex.buildFixedRouteIndexForTests();
+
+        boolean hasFenceRoute = routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.FENCES).stream()
+                .anyMatch(route -> route.profession() == VillagerProfession.SHEPHERD);
+        boolean hasFenceGateRoute = routeIndex.routesFor(RecipeDemandIndex.DemandMaterial.FENCE_GATES).stream()
+                .anyMatch(route -> route.profession() == VillagerProfession.SHEPHERD);
+
+        assertTrue(hasFenceRoute);
+        assertTrue(hasFenceGateRoute);
+    }
+
 }
