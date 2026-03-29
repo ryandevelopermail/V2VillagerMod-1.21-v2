@@ -268,6 +268,7 @@ public class GuardVillagers implements ModInitializer {
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
             JobBlockPairingHelper.onWorldUnload(world);
+            ProfessionDefinitions.onWorldUnload(world);
         });
 
         ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
