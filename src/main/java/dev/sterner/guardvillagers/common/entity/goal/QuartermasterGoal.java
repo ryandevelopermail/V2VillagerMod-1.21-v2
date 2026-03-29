@@ -1,7 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
@@ -18,6 +20,7 @@ import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
@@ -60,7 +63,7 @@ public class QuartermasterGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(QuartermasterGoal.class);
 
-    private static final int CHECK_INTERVAL_TICKS = 300;
+    private static final int CHECK_INTERVAL_TICKS = 100;
     private static final double SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
     private static final double REACH_SQ = 3.0D * 3.0D;
@@ -78,6 +81,28 @@ public class QuartermasterGoal extends Goal {
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
+    /** Rods are unique tools; cap delivery so we don't strip the whole bank. */
+    private static final int HAUL_AMOUNT_RODS = 2;
+    /** Minimum coal+charcoal in butcher chest before we top it up. */
+    private static final int BUTCHER_FUEL_THRESHOLD = 8;
+    /** Minimum fishing rods in fisherman chest before we top it up. */
+    private static final int FISHERMAN_ROD_THRESHOLD = 1;
+    /** Minimum wheat seeds in farmer chest before we top it up. */
+    private static final int FARMER_SEED_THRESHOLD = 32;
+    /** Minimum planks in shepherd chest before we top it up (for bed crafting). */
+    private static final int SHEPHERD_PLANK_THRESHOLD = 16;
+    /** Minimum sticks in fletcher chest before we top it up. */
+    private static final int FLETCHER_STICK_THRESHOLD = 16;
+    /** Minimum iron ingots in toolsmith chest before we top it up. */
+    private static final int TOOLSMITH_IRON_THRESHOLD = 16;
+    /** Minimum iron ingots in armorer chest before we top it up. */
+    private static final int ARMORER_IRON_THRESHOLD = 16;
+    /** Minimum nether wart in cleric chest before we top it up. */
+    private static final int CLERIC_WART_THRESHOLD = 8;
+    /** Minimum paper in cartographer chest before we top it up. */
+    private static final int CARTOGRAPHER_PAPER_THRESHOLD = 16;
+    /** Minimum leather in leatherworker chest before we top it up. */
+    private static final int LEATHERWORKER_LEATHER_THRESHOLD = 8;
 
     /**
      * Item whitelist for Priority-3 surplus haul.
@@ -118,6 +143,7 @@ public class QuartermasterGoal extends Goal {
     private final BlockPos chestPos;  // librarian's paired chest (double-chest second half)
 
     private long nextCheckTick = 0L;
+    private boolean immediateCheckPending = false;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
     private boolean demoted = false;
@@ -140,6 +166,15 @@ public class QuartermasterGoal extends Goal {
      */
     public void registerAnchor(ServerWorld world) {
         VillageAnchorState.get(world.getServer()).register(world, chestPos);
+    }
+
+    /**
+     * Schedules an immediate transfer-planning check on the next goal tick, bypassing
+     * the normal {@link #CHECK_INTERVAL_TICKS} cooldown. Call when the QM's chest
+     * inventory changes so shortages are addressed without waiting up to 5 seconds.
+     */
+    public void requestImmediateCheck() {
+        immediateCheckPending = true;
     }
 
     /**
@@ -172,8 +207,8 @@ public class QuartermasterGoal extends Goal {
             registerAnchor(world);
             anchorRegistered = true;
         }
-        if (world.getTime() < nextCheckTick) return false;
-
+        if (!immediateCheckPending && world.getTime() < nextCheckTick) return false;
+        immediateCheckPending = false;
         nextCheckTick = world.getTime() + CHECK_INTERVAL_TICKS;
         return tryPlanTransfer(world);
     }
@@ -293,6 +328,32 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
+        // Priority 1b: butcher guard needs coal/charcoal to fuel the smoker.
+        Optional<BlockPos> butcherNeedingFuel = findButcherNeedingFuel(world);
+        if (butcherNeedingFuel.isPresent()) {
+            ItemStack fuel = findBestFuelItem(world, chestPos);
+            if (!fuel.isEmpty()) {
+                sourcePos = chestPos;
+                destPos = butcherNeedingFuel.get();
+                transferStack = fuel.copyWithCount(Math.min(HAUL_AMOUNT, fuel.getCount()));
+                LOGGER.debug("QM {}: hauling {} to butcher at {}", villager.getUuidAsString(), fuel.getItem(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 1c: fisherman guard has no fishing rod.
+        Optional<BlockPos> fishermanNeedingRod = findFishermanNeedingRod(world);
+        if (fishermanNeedingRod.isPresent()) {
+            int rodsAvailable = countItem(world, chestPos, Items.FISHING_ROD);
+            if (rodsAvailable > 0) {
+                sourcePos = chestPos;
+                destPos = fishermanNeedingRod.get();
+                transferStack = new ItemStack(Items.FISHING_ROD, Math.min(HAUL_AMOUNT_RODS, rodsAvailable));
+                LOGGER.debug("QM {}: hauling fishing rod to fisherman at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
         // Priority 2a: lumberjack crafting (low on planks) → top up from bell chest.
         // Use any plank type (tag-based), pick the most abundant stack in the bell chest
         // so we don't artificially lock onto oak when e.g. birch is available.
@@ -348,6 +409,119 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
+        // Priority 2d: farmer needs wheat seeds for the planting cycle.
+        Optional<BlockPos> farmerNeedingSeeds = findProfessionChestNeedingItem(
+                world, VillagerProfession.FARMER, Items.WHEAT_SEEDS, FARMER_SEED_THRESHOLD);
+        if (farmerNeedingSeeds.isPresent()) {
+            int available = countItem(world, chestPos, Items.WHEAT_SEEDS);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = farmerNeedingSeeds.get();
+                transferStack = new ItemStack(Items.WHEAT_SEEDS, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling wheat seeds to farmer at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2e: shepherd needs planks for bed crafting.
+        // Use tag-based total for the threshold check, then tag-based delivery from bell chest.
+        Optional<BlockPos> shepherdNeedingPlanks = findProfessionChestNeedingTagItem(
+                world, VillagerProfession.SHEPHERD, ItemTags.PLANKS, SHEPHERD_PLANK_THRESHOLD);
+        if (shepherdNeedingPlanks.isPresent() && bellChestPos != null) {
+            ItemStack bestPlanks = findBestTagItem(world, bellChestPos, ItemTags.PLANKS);
+            if (!bestPlanks.isEmpty()) {
+                sourcePos = bellChestPos;
+                destPos = shepherdNeedingPlanks.get();
+                transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
+                LOGGER.debug("QM {}: hauling {} planks to shepherd at {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2f: fletcher needs sticks for arrow crafting.
+        Optional<BlockPos> fletcherNeedingSticks = findProfessionChestNeedingItem(
+                world, VillagerProfession.FLETCHER, Items.STICK, FLETCHER_STICK_THRESHOLD);
+        if (fletcherNeedingSticks.isPresent()) {
+            int available = countItem(world, chestPos, Items.STICK);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = fletcherNeedingSticks.get();
+                transferStack = new ItemStack(Items.STICK, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling sticks to fletcher at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2g: toolsmith needs iron ingots for tool crafting.
+        Optional<BlockPos> toolsmithNeedingIron = findProfessionChestNeedingItem(
+                world, VillagerProfession.TOOLSMITH, Items.IRON_INGOT, TOOLSMITH_IRON_THRESHOLD);
+        if (toolsmithNeedingIron.isPresent()) {
+            int available = countItem(world, chestPos, Items.IRON_INGOT);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = toolsmithNeedingIron.get();
+                transferStack = new ItemStack(Items.IRON_INGOT, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling iron ingots to toolsmith at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2h: armorer needs iron ingots for armor crafting.
+        Optional<BlockPos> armorerNeedingIron = findProfessionChestNeedingItem(
+                world, VillagerProfession.ARMORER, Items.IRON_INGOT, ARMORER_IRON_THRESHOLD);
+        if (armorerNeedingIron.isPresent()) {
+            int available = countItem(world, chestPos, Items.IRON_INGOT);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = armorerNeedingIron.get();
+                transferStack = new ItemStack(Items.IRON_INGOT, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling iron ingots to armorer at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2i: cleric needs nether wart for brewing.
+        Optional<BlockPos> clericNeedingWart = findProfessionChestNeedingItem(
+                world, VillagerProfession.CLERIC, Items.NETHER_WART, CLERIC_WART_THRESHOLD);
+        if (clericNeedingWart.isPresent()) {
+            int available = countItem(world, chestPos, Items.NETHER_WART);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = clericNeedingWart.get();
+                transferStack = new ItemStack(Items.NETHER_WART, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling nether wart to cleric at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2j: cartographer needs paper for map crafting.
+        Optional<BlockPos> cartographerNeedingPaper = findProfessionChestNeedingItem(
+                world, VillagerProfession.CARTOGRAPHER, Items.PAPER, CARTOGRAPHER_PAPER_THRESHOLD);
+        if (cartographerNeedingPaper.isPresent()) {
+            int available = countItem(world, chestPos, Items.PAPER);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = cartographerNeedingPaper.get();
+                transferStack = new ItemStack(Items.PAPER, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling paper to cartographer at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
+        // Priority 2k: leatherworker needs leather for armor crafting.
+        Optional<BlockPos> leatherworkerNeedingLeather = findProfessionChestNeedingItem(
+                world, VillagerProfession.LEATHERWORKER, Items.LEATHER, LEATHERWORKER_LEATHER_THRESHOLD);
+        if (leatherworkerNeedingLeather.isPresent()) {
+            int available = countItem(world, chestPos, Items.LEATHER);
+            if (available > 0) {
+                sourcePos = chestPos;
+                destPos = leatherworkerNeedingLeather.get();
+                transferStack = new ItemStack(Items.LEATHER, Math.min(HAUL_AMOUNT, available));
+                LOGGER.debug("QM {}: hauling leather to leatherworker at {}", villager.getUuidAsString(), destPos.toShortString());
+                return true;
+            }
+        }
+
         // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest.
         // IMPORTANT: only haul whitelisted bulk materials (logs, planks, wool, cobble, wheat, coal, etc.)
         // to avoid draining specialist profession chests of their unique trade goods (arrows, potions,
@@ -395,6 +569,104 @@ public class QuartermasterGoal extends Goal {
                         && lj.getPairedChestPos() != null
                         && countTagItems(world, lj.getPairedChestPos(), ItemTags.PLANKS) < LUMBERJACK_PLANK_THRESHOLD
         ).stream().findFirst();
+    }
+
+    /**
+     * Finds the paired chest of the first Butcher guard within scan range that has fewer than
+     * {@link #BUTCHER_FUEL_THRESHOLD} total coal+charcoal. The butcher's smoker needs fuel to
+     * cook meat; without it, the production pipeline stalls.
+     */
+    private Optional<BlockPos> findButcherNeedingFuel(ServerWorld world) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        return world.getEntitiesByClass(ButcherGuardEntity.class, box,
+                bg -> bg.isAlive()
+                        && bg.getPairedChestPos() != null
+                        && countItem(world, bg.getPairedChestPos(), Items.COAL)
+                           + countItem(world, bg.getPairedChestPos(), Items.CHARCOAL) < BUTCHER_FUEL_THRESHOLD
+        ).stream().findFirst().map(ButcherGuardEntity::getPairedChestPos);
+    }
+
+    /**
+     * Finds the paired chest of the first Fisherman guard within scan range that has fewer than
+     * {@link #FISHERMAN_ROD_THRESHOLD} fishing rods. Without a rod the fisherman cannot fish.
+     */
+    private Optional<BlockPos> findFishermanNeedingRod(ServerWorld world) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        return world.getEntitiesByClass(FishermanGuardEntity.class, box,
+                fg -> fg.isAlive()
+                        && fg.getPairedChestPos() != null
+                        && countItem(world, fg.getPairedChestPos(), Items.FISHING_ROD) < FISHERMAN_ROD_THRESHOLD
+        ).stream().findFirst().map(FishermanGuardEntity::getPairedChestPos);
+    }
+
+    /**
+     * Generic scout for v2-behavior villagers (those that remain {@link VillagerEntity} instances
+     * with a {@link net.minecraft.entity.ai.brain.MemoryModuleType#JOB_SITE} brain memory).
+     * Finds the paired chest of the first villager of {@code profession} within scan range that
+     * has fewer than {@code threshold} of {@code item}.
+     *
+     * <p>Uses the same JOB_SITE + {@link JobBlockPairingHelper#findNearbyChest} pattern as
+     * {@link #findSurplusChest} for reliable chest discovery regardless of villager position.
+     */
+    private Optional<BlockPos> findProfessionChestNeedingItem(
+            ServerWorld world, VillagerProfession profession,
+            Item item, int threshold) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        for (VillagerEntity v : world.getEntitiesByClass(
+                VillagerEntity.class, box,
+                v -> v.isAlive() && v.getVillagerData().getProfession() == profession)) {
+            BlockPos vJobSite = v.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .filter(gp -> gp.dimension() == world.getRegistryKey())
+                    .map(GlobalPos::pos)
+                    .orElse(null);
+            if (vJobSite == null) continue;
+            Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, vJobSite);
+            if (pairedChest.isEmpty()) continue;
+            BlockPos immutable = pairedChest.get().toImmutable();
+            if (countItem(world, immutable, item) < threshold) {
+                return Optional.of(immutable);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Tag-based variant of {@link #findProfessionChestNeedingItem}: finds the paired chest of the
+     * first villager of {@code profession} within scan range that has fewer than {@code threshold}
+     * total items matching {@code tag}.
+     */
+    private Optional<BlockPos> findProfessionChestNeedingTagItem(
+            ServerWorld world, VillagerProfession profession,
+            net.minecraft.registry.tag.TagKey<Item> tag, int threshold) {
+        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        for (VillagerEntity v : world.getEntitiesByClass(
+                VillagerEntity.class, box,
+                v -> v.isAlive() && v.getVillagerData().getProfession() == profession)) {
+            BlockPos vJobSite = v.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .filter(gp -> gp.dimension() == world.getRegistryKey())
+                    .map(GlobalPos::pos)
+                    .orElse(null);
+            if (vJobSite == null) continue;
+            Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, vJobSite);
+            if (pairedChest.isEmpty()) continue;
+            BlockPos immutable = pairedChest.get().toImmutable();
+            if (countTagItems(world, immutable, tag) < threshold) {
+                return Optional.of(immutable);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Finds the most abundant fuel item (coal preferred over charcoal) in the chest at {@code pos}.
+     * Returns {@link ItemStack#EMPTY} if neither is present.
+     */
+    private ItemStack findBestFuelItem(ServerWorld world, BlockPos pos) {
+        int coalCount = countItem(world, pos, Items.COAL);
+        if (coalCount > 0) return new ItemStack(Items.COAL, coalCount);
+        int charcoalCount = countItem(world, pos, Items.CHARCOAL);
+        if (charcoalCount > 0) return new ItemStack(Items.CHARCOAL, charcoalCount);
+        return ItemStack.EMPTY;
     }
 
     /**
@@ -495,6 +767,20 @@ public class QuartermasterGoal extends Goal {
             if (lj.getPairedChestPos() != null) {
                 protectedChests.add(lj.getPairedChestPos());
                 findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
+            }
+        }
+        // Protect fisherman and butcher guard chests — their contents (fish, meat, rods) are
+        // specialist goods that should never be drained into the QM bank by the surplus haul.
+        for (FishermanGuardEntity fg : world.getEntitiesByClass(FishermanGuardEntity.class, box, FishermanGuardEntity::isAlive)) {
+            if (fg.getPairedChestPos() != null) {
+                protectedChests.add(fg.getPairedChestPos());
+                findDoubleChestOtherHalf(world, fg.getPairedChestPos()).ifPresent(protectedChests::add);
+            }
+        }
+        for (ButcherGuardEntity bg : world.getEntitiesByClass(ButcherGuardEntity.class, box, ButcherGuardEntity::isAlive)) {
+            if (bg.getPairedChestPos() != null) {
+                protectedChests.add(bg.getPairedChestPos());
+                findDoubleChestOtherHalf(world, bg.getPairedChestPos()).ifPresent(protectedChests::add);
             }
         }
         // Protect shepherd chests — they contain beds + wool + planks needed for bed economy.
