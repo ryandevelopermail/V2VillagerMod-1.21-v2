@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -504,40 +505,76 @@ public class MasonWallBuilderGoal extends Goal {
      * Returns all planned wall block placements around the rectangle perimeter with terrain adaptation:
      * <ul>
      *   <li>Skip DIRT_PATH positions (natural gaps / roads)</li>
+     *   <li>Skip positions where the surface is already solid (solid blocks already fill the gap)</li>
      *   <li>Skip positions where {@code |surfaceY - bellY| > STEEP_SKIP_THRESHOLD} (too steep)</li>
      *   <li>Skip positions where the dip depth exceeds {@code MAX_FILL_DEPTH} (ravine guard)</li>
      *   <li>For positions above ground level: place wall block on top of the surface
      *       (wall sits on hill rather than being buried inside it)</li>
      *   <li>For positions below anchor level: emit a column of blocks from surfaceY+1
-     *       down to bellY, filling the dip so the wall has no gap underneath</li>
-     *   <li>Force at least 1 gap so the wall is never fully enclosed</li>
+     *       up to bellY, filling the dip so the wall has no gap underneath</li>
+     *   <li>Force at least 1 gap so the wall is never fully enclosed. The gap is one full X,Z
+     *       column (all Y levels) removed, ensuring a real traversable opening rather than
+     *       just a missing fill block. Only triggered when no terrain-skip gaps already exist.</li>
      *   <li>Gate positions (1 per face) are included in the list but tagged separately</li>
      * </ul>
      */
     private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
-        List<BlockPos> segments = new ArrayList<>();
+        // Group segments by X,Z column (packed long key) in insertion order.
+        // This lets us compare covered columns vs. total perimeter columns — fill columns
+        // (multiple Y blocks per X,Z) do not inflate the count, and terrain-skip gaps
+        // (zero blocks for an X,Z) are correctly detected as natural gaps.
+        LinkedHashMap<Long, List<BlockPos>> columnMap = new LinkedHashMap<>();
         int bellY = rect.y();
 
         // North face (z = minZ), South face (z = maxZ)
         for (int x = rect.minX(); x <= rect.maxX(); x++) {
-            resolveWallColumn(world, x, rect.minZ(), bellY, segments);
-            resolveWallColumn(world, x, rect.maxZ(), bellY, segments);
+            collectWallColumn(world, x, rect.minZ(), bellY, columnMap);
+            collectWallColumn(world, x, rect.maxZ(), bellY, columnMap);
         }
         // West face (x = minX), East face (x = maxX) — corners already covered above
         for (int z = rect.minZ() + 1; z < rect.maxZ(); z++) {
-            resolveWallColumn(world, rect.minX(), z, bellY, segments);
-            resolveWallColumn(world, rect.maxX(), z, bellY, segments);
+            collectWallColumn(world, rect.minX(), z, bellY, columnMap);
+            collectWallColumn(world, rect.maxX(), z, bellY, columnMap);
         }
 
-        // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
-        if (!segments.isEmpty()) {
-            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ());
-            if (segments.size() >= perimeterTotal) {
-                segments.remove(segments.size() - 1);
-            }
+        // Total unique X,Z positions the perimeter trace visits
+        int totalPerimeterColumns = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ());
+        // Covered = positions that produced ≥1 segment (terrain skips produce 0 and are absent)
+        int coveredColumns = columnMap.size();
+
+        // If every perimeter column is covered (no terrain-skip gaps exist), force one
+        // traversable gap by removing the last column's entire block set from the map.
+        // Removing a full column guarantees a real 1-wide opening, not just a missing fill block.
+        if (!columnMap.isEmpty() && coveredColumns >= totalPerimeterColumns) {
+            Long lastKey = null;
+            for (Long key : columnMap.keySet()) lastKey = key;
+            columnMap.remove(lastKey);
+            LOGGER.debug("MasonWallBuilder {}: forced gap column removed (all {} perimeter columns were covered)",
+                    guard.getUuidAsString(), totalPerimeterColumns);
         }
 
+        // Flatten to an ordered list
+        List<BlockPos> segments = new ArrayList<>();
+        for (List<BlockPos> col : columnMap.values()) {
+            segments.addAll(col);
+        }
         return segments;
+    }
+
+    /**
+     * Resolves planned blocks for one perimeter (x, z) position and, if any are produced,
+     * stores them as a column entry in {@code columnMap} keyed by packed X,Z.
+     * Columns that are fully skipped (steep terrain, ravine, or all positions solid) add no entry,
+     * which is how the forced-gap logic detects natural terrain gaps.
+     */
+    private void collectWallColumn(ServerWorld world, int x, int z, int bellY,
+            LinkedHashMap<Long, List<BlockPos>> columnMap) {
+        List<BlockPos> columnBlocks = new ArrayList<>();
+        resolveWallColumn(world, x, z, bellY, columnBlocks);
+        if (!columnBlocks.isEmpty()) {
+            long key = ((long) x << 32) | (z & 0xFFFFFFFFL);
+            columnMap.put(key, columnBlocks);
+        }
     }
 
     /**
@@ -589,10 +626,14 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void addSegmentIfValid(ServerWorld world, BlockPos pos, List<BlockPos> segments) {
+        BlockState state = world.getBlockState(pos);
         // Skip road tiles — natural gaps should stay open
-        if (world.getBlockState(pos).isOf(Blocks.DIRT_PATH)) return;
+        if (state.isOf(Blocks.DIRT_PATH)) return;
         // Skip already-built positions
-        if (world.getBlockState(pos).isOf(Blocks.COBBLESTONE)) return;
+        if (state.isOf(Blocks.COBBLESTONE)) return;
+        // Skip positions that already have a solid block — the terrain itself fills the gap,
+        // so placing cobblestone there would waste stone and overwrite natural or player-placed blocks.
+        if (state.blocksMovement()) return;
         segments.add(pos.toImmutable());
     }
 
@@ -644,11 +685,17 @@ public class MasonWallBuilderGoal extends Goal {
             if (fixedIsZ) {
                 if (pos.getZ() != midZ) continue;
                 int dist = Math.abs(pos.getX() - midX);
-                if (dist < bestDist) { bestDist = dist; best = pos; }
+                // Prefer closer X; on a tie prefer the higher Y so gate is at the wall surface,
+                // not buried inside a fill column.
+                if (dist < bestDist || (dist == bestDist && pos.getY() > best.getY())) {
+                    bestDist = dist; best = pos;
+                }
             } else {
                 if (pos.getX() != midX) continue;
                 int dist = Math.abs(pos.getZ() - midZ);
-                if (dist < bestDist) { bestDist = dist; best = pos; }
+                if (dist < bestDist || (dist == bestDist && pos.getY() > best.getY())) {
+                    bestDist = dist; best = pos;
+                }
             }
         }
         return best;
