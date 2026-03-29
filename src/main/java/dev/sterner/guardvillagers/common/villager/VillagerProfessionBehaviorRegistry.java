@@ -42,7 +42,10 @@ public final class VillagerProfessionBehaviorRegistry {
     }
 
     public static void ensureUniversalJobBlockGoal(VillagerEntity villager, BlockPos jobPos) {
-        if (!ProfessionDefinitions.hasDefinition(villager.getVillagerData().getProfession())) {
+        // hasDefinition covers vanilla professions; BEHAVIORS.containsKey covers soft-dep compat professions
+        // (e.g. MoreVillagers) that are registered directly without going through ProfessionDefinitions.
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        if (!ProfessionDefinitions.hasDefinition(profession) && !BEHAVIORS.containsKey(profession)) {
             return;
         }
 

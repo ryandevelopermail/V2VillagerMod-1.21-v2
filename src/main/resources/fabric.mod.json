@@ -31,7 +31,7 @@
     "fabric-api": "*"
   },
   "suggests": {
-    "another-mod": "*"
+    "morevillagers": "*"
   },
   "custom": {
     "activeMods": [
