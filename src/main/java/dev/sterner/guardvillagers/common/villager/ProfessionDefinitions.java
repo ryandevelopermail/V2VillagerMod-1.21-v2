@@ -7,11 +7,17 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.World;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -20,6 +26,11 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public final class ProfessionDefinitions {
+    private static final int FALLBACK_CHUNK_RADIUS = 8;
+    private static final int FALLBACK_CHUNK_SCAN_BUDGET = 24;
+    private static final long FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS = 200L;
+    private static final long FALLBACK_CHUNK_COOLDOWN_TICKS = 400L;
+
     private static final List<SpecialModifier> GLOBAL_SPECIAL_MODIFIERS = List.of(
             new SpecialModifier(GuardVillagers.id("guard_stand_modifier"), GuardVillagers.GUARD_STAND_MODIFIER, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE),
             new SpecialModifier(GuardVillagers.id("guard_stand_anchor"), GuardVillagers.GUARD_STAND_ANCHOR, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
@@ -47,6 +58,7 @@ public final class ProfessionDefinitions {
 
     private static final Map<VillagerProfession, ProfessionDefinition> DEFINITIONS_BY_PROFESSION = DEFINITIONS.stream()
             .collect(Collectors.toUnmodifiableMap(ProfessionDefinition::profession, definition -> definition));
+    private static final Map<RegistryKey<World>, FallbackScanState> FALLBACK_SCAN_STATE = new HashMap<>();
 
     private static boolean registered;
 
@@ -115,17 +127,56 @@ public final class ProfessionDefinitions {
     }
 
     public static void markFallbackCandidates(ServerWorld world) {
-        int chunkRadius = 8;
+        long now = world.getTime();
+        FallbackScanState state = stateFor(world);
+        if (now - state.lastQueueRefreshTick >= FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS) {
+            refreshChunkQueueNearPlayers(world, state);
+            state.lastQueueRefreshTick = now;
+        }
+
+        int remainingBudget = FALLBACK_CHUNK_SCAN_BUDGET;
+        while (remainingBudget > 0 && !state.pendingChunks.isEmpty()) {
+            long packedChunkPos = state.pendingChunks.removeFirst();
+            state.enqueuedChunks.remove(packedChunkPos);
+            int chunkX = ChunkPos.getPackedX(packedChunkPos);
+            int chunkZ = ChunkPos.getPackedZ(packedChunkPos);
+            if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                continue;
+            }
+
+            long lastScanTick = state.lastScannedChunkTicks.getOrDefault(packedChunkPos, Long.MIN_VALUE);
+            if (now - lastScanTick < FALLBACK_CHUNK_COOLDOWN_TICKS) {
+                continue;
+            }
+            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunkX, chunkZ);
+            state.lastScannedChunkTicks.put(packedChunkPos, now);
+            remainingBudget--;
+        }
+    }
+
+    public static void onWorldUnload(ServerWorld world) {
+        FALLBACK_SCAN_STATE.remove(world.getRegistryKey());
+    }
+
+    private static FallbackScanState stateFor(ServerWorld world) {
+        return FALLBACK_SCAN_STATE.computeIfAbsent(world.getRegistryKey(), key -> new FallbackScanState());
+    }
+
+    private static void refreshChunkQueueNearPlayers(ServerWorld world, FallbackScanState state) {
         for (PlayerEntity player : world.getPlayers()) {
             ChunkPos center = player.getChunkPos();
-            for (int chunkX = center.x - chunkRadius; chunkX <= center.x + chunkRadius; chunkX++) {
-                for (int chunkZ = center.z - chunkRadius; chunkZ <= center.z + chunkRadius; chunkZ++) {
-                    if (!world.isChunkLoaded(chunkX, chunkZ)) {
-                        continue;
-                    }
-                    VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunkX, chunkZ);
+            for (int chunkX = center.x - FALLBACK_CHUNK_RADIUS; chunkX <= center.x + FALLBACK_CHUNK_RADIUS; chunkX++) {
+                for (int chunkZ = center.z - FALLBACK_CHUNK_RADIUS; chunkZ <= center.z + FALLBACK_CHUNK_RADIUS; chunkZ++) {
+                    enqueueChunk(state, chunkX, chunkZ);
                 }
             }
+        }
+    }
+
+    private static void enqueueChunk(FallbackScanState state, int chunkX, int chunkZ) {
+        long packedChunkPos = ChunkPos.toLong(chunkX, chunkZ);
+        if (state.enqueuedChunks.add(packedChunkPos)) {
+            state.pendingChunks.addLast(packedChunkPos);
         }
     }
 
@@ -142,5 +193,12 @@ public final class ProfessionDefinitions {
                 conversionHook,
                 List.of()
         );
+    }
+
+    private static final class FallbackScanState {
+        private final Deque<Long> pendingChunks = new ArrayDeque<>();
+        private final Set<Long> enqueuedChunks = new HashSet<>();
+        private final Map<Long, Long> lastScannedChunkTicks = new HashMap<>();
+        private long lastQueueRefreshTick = Long.MIN_VALUE;
     }
 }
