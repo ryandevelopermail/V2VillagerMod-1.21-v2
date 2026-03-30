@@ -15,6 +15,7 @@ import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationM
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.RecipeDemandIndex;
 import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
+import dev.sterner.guardvillagers.common.util.TickWorkGuard;
 import dev.sterner.guardvillagers.common.util.VillageLumberjackSpawnManager;
 import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
@@ -109,6 +110,8 @@ public class GuardVillagers implements ModInitializer {
     private static final int PAIRING_BOOTSTRAP_MAX_ENTITIES_PER_TICK = 96;
     private static final int PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS = 3;
     private static final int PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS = 16;
+    private static final int PAIRING_BOOTSTRAP_MAX_ITERATIONS_PER_TICK = 96;
+    private static final long PAIRING_BOOTSTRAP_MAX_ELAPSED_MS_PER_TICK = 4L;
     private static final long WORLD_LOAD_PHASE_WARN_THRESHOLD_MS = 250L;
     private static final long WORLD_LOAD_TOTAL_WARN_THRESHOLD_MS = 500L;
     private static final int CANDIDATE_CHUNK_SCAN_STARTUP_BUDGET = 1;
@@ -441,6 +444,9 @@ public class GuardVillagers implements ModInitializer {
         return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 
+    /**
+     * Must be bounded per tick; leaves unprocessed chunks queued for future ticks.
+     */
     private static void runPairingBootstrapStep(ServerWorld world) {
         PairingBootstrapState state = PENDING_PAIRING_BOOTSTRAP.get(world.getRegistryKey());
         if (state == null) {
@@ -462,13 +468,34 @@ public class GuardVillagers implements ModInitializer {
         }
 
         enqueuePlayerRings(state, world, PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS);
-        while (remainingChunkBudget > 0 && remainingEntityBudget > 0 && !state.pendingChunks.isEmpty()) {
+        int processedChunks = 0;
+        int refreshedEntities = 0;
+        TickWorkGuard guard = new TickWorkGuard(PAIRING_BOOTSTRAP_MAX_ITERATIONS_PER_TICK, PAIRING_BOOTSTRAP_MAX_ELAPSED_MS_PER_TICK);
+        while (remainingChunkBudget > 0
+                && remainingEntityBudget > 0
+                && !state.pendingChunks.isEmpty()
+                && guard.shouldContinue(processedChunks)) {
             long packedChunk = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packedChunk);
             int chunkX = ChunkPos.getPackedX(packedChunk);
             int chunkZ = ChunkPos.getPackedZ(packedChunk);
-            remainingEntityBudget -= hydratePairingsInChunk(world, chunkX, chunkZ, remainingEntityBudget);
+            int hydrated = hydratePairingsInChunk(world, chunkX, chunkZ, remainingEntityBudget);
+            remainingEntityBudget -= hydrated;
             remainingChunkBudget--;
+            processedChunks++;
+            refreshedEntities += hydrated;
+        }
+
+        boolean hasLeftover = !state.pendingChunks.isEmpty();
+        if (hasLeftover && (guard.hitTimeCap() || guard.hitIterationCap(processedChunks, true))) {
+            LOGGER.warn("pairing bootstrap queue guard tripped: world={} reason={} queueSize={} processedChunks={} refreshedEntities={} remainingChunkBudget={} remainingEntityBudget={}",
+                    world.getRegistryKey().getValue(),
+                    guard.hitTimeCap() ? "elapsed-time" : "iteration-cap",
+                    state.pendingChunks.size(),
+                    processedChunks,
+                    refreshedEntities,
+                    remainingChunkBudget,
+                    remainingEntityBudget);
         }
 
         if (state.currentRadiusChunks < PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS) {

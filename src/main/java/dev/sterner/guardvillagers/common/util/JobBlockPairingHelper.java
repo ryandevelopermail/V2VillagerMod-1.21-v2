@@ -72,6 +72,8 @@ public final class JobBlockPairingHelper {
     private static final int BOOTSTRAP_CHUNK_ENQUEUE_BUDGET = 384;
     private static final int MAX_BOOTSTRAP_CHUNK_SPAN_PER_AXIS = 96;
     private static final int ANCHOR_SEED_SAMPLE_COUNT = 8;
+    private static final int HYDRATION_MAX_ITERATIONS_PER_TICK = 128;
+    private static final long HYDRATION_MAX_ELAPSED_MS_PER_TICK = 4L;
     private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
@@ -461,12 +463,19 @@ public final class JobBlockPairingHelper {
         }
     }
 
+    /**
+     * Must be bounded per tick to avoid unbounded queue drain work in a single invocation.
+     */
     private static void hydrateQueuedChunksWithBudget(ServerWorld world, HydrationState state, int entityBudget, int chunkBudget) {
         int remainingEntityBudget = entityBudget;
         int remainingChunkBudget = chunkBudget;
         int processedChunks = 0;
         int refreshedEntities = 0;
-        while (remainingEntityBudget > 0 && remainingChunkBudget > 0 && !state.pendingChunks.isEmpty()) {
+        TickWorkGuard guard = new TickWorkGuard(HYDRATION_MAX_ITERATIONS_PER_TICK, HYDRATION_MAX_ELAPSED_MS_PER_TICK);
+        while (remainingEntityBudget > 0
+                && remainingChunkBudget > 0
+                && !state.pendingChunks.isEmpty()
+                && guard.shouldContinue(processedChunks)) {
             long packed = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packed);
             int chunkX = unpackChunkX(packed);
@@ -476,6 +485,18 @@ public final class JobBlockPairingHelper {
             remainingChunkBudget--;
             processedChunks++;
             refreshedEntities += hydrated;
+        }
+
+        boolean hasLeftover = !state.pendingChunks.isEmpty();
+        if (hasLeftover && (guard.hitTimeCap() || guard.hitIterationCap(processedChunks, true))) {
+            LOGGER.warn("background hydration queue guard tripped: world={} reason={} queueSize={} processedChunks={} refreshedEntities={} remainingEntityBudget={} remainingChunkBudget={}",
+                    world.getRegistryKey().getValue(),
+                    guard.hitTimeCap() ? "elapsed-time" : "iteration-cap",
+                    state.pendingChunks.size(),
+                    processedChunks,
+                    refreshedEntities,
+                    remainingEntityBudget,
+                    remainingChunkBudget);
         }
 
         if (processedChunks > 0 && refreshedEntities == 0) {
