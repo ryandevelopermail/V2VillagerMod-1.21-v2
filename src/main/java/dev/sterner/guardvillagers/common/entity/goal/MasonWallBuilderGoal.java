@@ -404,6 +404,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         BlockPos target = pendingSegments.get(currentSegmentIndex);
+        BlockPos navigationTarget = resolveSegmentNavigationTarget(world, target);
         if (!target.equals(activeMoveTarget)) {
             activeMoveTarget = target;
             activeMoveTargetTicks = 0;
@@ -417,10 +418,15 @@ public class MasonWallBuilderGoal extends Goal {
             lastMoveDistSq = Double.MAX_VALUE;
             stage = Stage.PLACE_BLOCK;
         } else {
-            boolean pathStarted = guard.getNavigation().startMovingTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, MOVE_SPEED);
+            boolean pathStarted = guard.getNavigation().startMovingTo(
+                    navigationTarget.getX() + 0.5,
+                    navigationTarget.getY() + 0.5,
+                    navigationTarget.getZ() + 0.5,
+                    MOVE_SPEED
+            );
             if (!pathStarted) {
-                LOGGER.info("MasonWallBuilder {}: skipping unreachable segment {} (path not found)",
-                        guard.getUuidAsString(), target.toShortString());
+                LOGGER.info("MasonWallBuilder {}: skipping unreachable segment {} (path not found, navTarget={})",
+                        guard.getUuidAsString(), target.toShortString(), navigationTarget.toShortString());
                 currentSegmentIndex++;
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
@@ -441,6 +447,20 @@ public class MasonWallBuilderGoal extends Goal {
                 lastMoveDistSq = Double.MAX_VALUE;
             }
         }
+    }
+
+    /**
+     * Wall segments are frequently air blocks one block above terrain. Pathfinding directly
+     * to those coordinates often fails because entities cannot stand in that space. Route
+     * navigation to a nearby standable position instead, while still placing on the original
+     * segment when the guard is within placement reach.
+     */
+    private BlockPos resolveSegmentNavigationTarget(ServerWorld world, BlockPos segmentPos) {
+        BlockPos below = segmentPos.down();
+        if (world.getBlockState(below).isSolidBlock(world, below)) {
+            return below;
+        }
+        return segmentPos;
     }
 
     private void tickPlaceBlock(ServerWorld world) {
