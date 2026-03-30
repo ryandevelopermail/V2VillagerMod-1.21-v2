@@ -55,6 +55,10 @@ public final class LumberjackPopulationBalancingService {
         LAST_REFRESH_TICK.remove(worldKey);
     }
 
+    public static int getSnapshotRegionCount(ServerWorld world) {
+        return LATEST_SNAPSHOTS.getOrDefault(world.getRegistryKey(), Map.of()).size();
+    }
+
     public static boolean shouldAllowCreationAttempts(ServerWorld world, BlockPos anchorPos, String trigger) {
         RegionSnapshot snapshot = getOrRefreshSnapshot(world, anchorPos, trigger);
         if (snapshot == null) {
