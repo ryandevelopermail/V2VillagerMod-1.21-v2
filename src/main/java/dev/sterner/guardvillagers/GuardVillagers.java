@@ -98,6 +98,7 @@ public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
     private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
+    private static final Map<RegistryKey<World>, ConversionScheduleState> CONVERSION_SCHEDULE_STATES = new HashMap<>();
     private static final Map<RegistryKey<World>, PairingBootstrapState> PENDING_PAIRING_BOOTSTRAP = new HashMap<>();
     private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
     private static final int PAIRING_BOOTSTRAP_MAX_CHUNKS_PER_TICK = 4;
@@ -109,6 +110,10 @@ public class GuardVillagers implements ModInitializer {
     private static final int CANDIDATE_CHUNK_SCAN_STARTUP_BUDGET = 1;
     private static final int CANDIDATE_CHUNK_SCAN_LIVE_BUDGET = 4;
     private static final int CANDIDATE_CHUNK_SCAN_BACKLOG_BUDGET = 8;
+    private static final long CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS = 200L;
+    private static final int CONVERSION_WARMUP_DOWNSAMPLE_FACTOR = 6;
+    private static final int CONVERSION_CATCH_UP_MAX_RUNS_PER_TICK = 2;
+    private static final int CONVERSION_PENDING_RUN_CAP = 32;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -290,6 +295,7 @@ public class GuardVillagers implements ModInitializer {
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
+            CONVERSION_SCHEDULE_STATES.remove(world.getRegistryKey());
             PENDING_PAIRING_BOOTSTRAP.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
@@ -521,6 +527,18 @@ public class GuardVillagers implements ModInitializer {
         return refreshed;
     }
 
+    private static final class ConversionScheduleState {
+        private int pendingRuns;
+        private long lastEnqueueTick = Long.MIN_VALUE;
+        private final long warmupStartTick;
+        private boolean warmupActive = true;
+        private boolean warmupStartLogged;
+
+        private ConversionScheduleState(long warmupStartTick) {
+            this.warmupStartTick = warmupStartTick;
+        }
+    }
+
     private static final class PairingBootstrapState {
         private final Deque<Long> pendingChunks = new ArrayDeque<>();
         private final Set<Long> enqueuedChunks = new HashSet<>();
@@ -531,19 +549,54 @@ public class GuardVillagers implements ModInitializer {
     private void runConversionHooksOnSchedule(ServerWorld world) {
         long worldTick = world.getTime();
         long executionInterval = Math.max(20, GuardVillagersConfig.villagerConversionExecutionIntervalTicks);
-        if (worldTick % executionInterval != 0L) {
-            return;
-        }
-
         RegistryKey<World> worldKey = world.getRegistryKey();
-        long lastRunTick = LAST_CONVERSION_EXECUTION_TICK.getOrDefault(worldKey, Long.MIN_VALUE);
-        if (worldTick - lastRunTick < executionInterval) {
+        ConversionScheduleState state = CONVERSION_SCHEDULE_STATES.computeIfAbsent(worldKey, ignored -> new ConversionScheduleState(worldTick));
+
+        if (worldTick % executionInterval == 0L && state.lastEnqueueTick != worldTick) {
+            state.lastEnqueueTick = worldTick;
+            state.pendingRuns = Math.min(CONVERSION_PENDING_RUN_CAP, state.pendingRuns + 1);
+        }
+
+        if (state.warmupActive) {
+            if (!state.warmupStartLogged) {
+                state.warmupStartLogged = true;
+                LOGGER.info("[conversion-schedule] world={} warmup-start tick={} downsampleFactor={} worldAgeThresholdTicks={}",
+                        worldKey.getValue(), worldTick, CONVERSION_WARMUP_DOWNSAMPLE_FACTOR, CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS);
+            }
+
+            boolean warmupReady = !world.getPlayers().isEmpty() || worldTick >= CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS;
+            if (!warmupReady) {
+                long downsampleInterval = executionInterval * CONVERSION_WARMUP_DOWNSAMPLE_FACTOR;
+                if (state.pendingRuns > 0 && worldTick % downsampleInterval == 0L) {
+                    runConversionHooks(world, worldKey, 1);
+                    state.pendingRuns--;
+                }
+                return;
+            }
+
+            state.warmupActive = false;
+            long warmupDuration = Math.max(0L, worldTick - state.warmupStartTick);
+            LOGGER.info("[conversion-schedule] world={} warmup-end tick={} durationTicks={} pendingBacklog={} playersOnline={} ageReady={}",
+                    worldKey.getValue(), worldTick, warmupDuration, state.pendingRuns, !world.getPlayers().isEmpty(),
+                    worldTick >= CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS);
+        }
+
+        int runsToExecute = Math.min(state.pendingRuns, CONVERSION_CATCH_UP_MAX_RUNS_PER_TICK);
+        if (runsToExecute <= 0) {
             return;
         }
 
-        LAST_CONVERSION_EXECUTION_TICK.put(worldKey, worldTick);
-        ProfessionDefinitions.runConversionHooks(world);
+        runConversionHooks(world, worldKey, runsToExecute);
+        state.pendingRuns -= runsToExecute;
     }
+
+    private static void runConversionHooks(ServerWorld world, RegistryKey<World> worldKey, int runCount) {
+        for (int i = 0; i < runCount; i++) {
+            ProfessionDefinitions.runConversionHooks(world);
+            LAST_CONVERSION_EXECUTION_TICK.put(worldKey, world.getTime());
+        }
+    }
+
 
     /** Scan radius (blocks) for per-schedule guard reconciliation — covers normal village spread. */
     private static final double RECONCILIATION_SCAN_RADIUS = 800.0D;
