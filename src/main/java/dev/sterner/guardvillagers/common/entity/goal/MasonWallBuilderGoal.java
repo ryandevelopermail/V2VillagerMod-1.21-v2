@@ -89,6 +89,9 @@ public class MasonWallBuilderGoal extends Goal {
     private List<BlockPos> pendingSegments = new ArrayList<>();
     private int currentSegmentIndex = 0;
     private int lastProgressLoggedSegmentCount = 0;
+    private BlockPos activeMoveTarget = null;
+    private int activeMoveTargetTicks = 0;
+    private double lastMoveDistSq = Double.MAX_VALUE;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -154,6 +157,9 @@ public class MasonWallBuilderGoal extends Goal {
         currentSegmentIndex = 0;
         currentTransferIndex = 0;
         lastProgressLoggedSegmentCount = 0;
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -398,12 +404,42 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         BlockPos target = pendingSegments.get(currentSegmentIndex);
+        if (!target.equals(activeMoveTarget)) {
+            activeMoveTarget = target;
+            activeMoveTargetTicks = 0;
+            lastMoveDistSq = Double.MAX_VALUE;
+        }
         double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
         if (distSq <= REACH_SQ) {
+            activeMoveTarget = null;
+            activeMoveTargetTicks = 0;
+            lastMoveDistSq = Double.MAX_VALUE;
             stage = Stage.PLACE_BLOCK;
         } else {
-            guard.getNavigation().startMovingTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, MOVE_SPEED);
+            boolean pathStarted = guard.getNavigation().startMovingTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, MOVE_SPEED);
+            if (!pathStarted) {
+                LOGGER.info("MasonWallBuilder {}: skipping unreachable segment {} (path not found)",
+                        guard.getUuidAsString(), target.toShortString());
+                currentSegmentIndex++;
+                activeMoveTarget = null;
+                activeMoveTargetTicks = 0;
+                lastMoveDistSq = Double.MAX_VALUE;
+                return;
+            }
+
+            activeMoveTargetTicks++;
+            if (distSq < lastMoveDistSq - 0.01D) {
+                lastMoveDistSq = distSq;
+                activeMoveTargetTicks = 0;
+            } else if (activeMoveTargetTicks > 200) {
+                LOGGER.info("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
+                        guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
+                currentSegmentIndex++;
+                activeMoveTarget = null;
+                activeMoveTargetTicks = 0;
+                lastMoveDistSq = Double.MAX_VALUE;
+            }
         }
     }
 
