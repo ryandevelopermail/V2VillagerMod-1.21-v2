@@ -39,7 +39,7 @@ public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Toolsmith {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
+        LOGGER.debug("Toolsmith {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
 
         ToolsmithDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new ToolsmithDistributionGoal(villager, jobPos, chestPos, null));

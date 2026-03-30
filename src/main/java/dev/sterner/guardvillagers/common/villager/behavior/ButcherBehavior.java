@@ -58,7 +58,7 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Butcher {} paired chest at {} for job site {}",
+        LOGGER.debug("Butcher {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

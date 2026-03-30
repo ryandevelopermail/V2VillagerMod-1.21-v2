@@ -48,7 +48,7 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Fletcher {} paired chest at {} for job site {}",
+        LOGGER.debug("Fletcher {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

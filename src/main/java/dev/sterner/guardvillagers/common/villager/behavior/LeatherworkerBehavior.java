@@ -45,7 +45,7 @@ public class LeatherworkerBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Leatherworker {} paired chest at {} for job site {}",
+        LOGGER.debug("Leatherworker {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

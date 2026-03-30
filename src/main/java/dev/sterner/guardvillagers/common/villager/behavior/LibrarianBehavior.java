@@ -54,7 +54,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Librarian {} paired chest at {} for job site {}",
+        LOGGER.debug("Librarian {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

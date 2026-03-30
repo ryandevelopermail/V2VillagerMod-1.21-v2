@@ -86,6 +86,8 @@ public final class VillageLumberjackSpawnManager {
     /** Ratio: one lumberjack per N total villagers (lower bound). */
     private static final int RATIO_TOTAL = 6;
 
+    private static final long STRUCTURED_LOG_INTERVAL_TICKS = 1200L;
+
     private VillageLumberjackSpawnManager() {
     }
 
@@ -136,8 +138,10 @@ public final class VillageLumberjackSpawnManager {
         int effectiveExisting = existing + pendingUnclaimedTables;
 
         if (effectiveExisting >= desired) {
-            LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
+            if (shouldLogBellEvent(world, bellPos, "skip_placement")) {
+            LOGGER.debug("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
                     bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
+        }
             return;
         }
 
@@ -159,8 +163,10 @@ public final class VillageLumberjackSpawnManager {
         // Find all chests near the bell and shuffle them for variety.
         List<BlockPos> chests = findChestsNearBell(world, bellPos);
         if (chests.isEmpty()) {
-            LOGGER.info("lumberjack-spawn bell={} — no chests found within {} blocks; cannot place table",
-                    bellPos.toShortString(), CHEST_SCAN_RANGE);
+            if (shouldLogBellEvent(world, bellPos, "no_chests")) {
+                LOGGER.debug("lumberjack-spawn bell={} — no chests found within {} blocks; cannot place table",
+                        bellPos.toShortString(), CHEST_SCAN_RANGE);
+            }
             // Fallback: try a free surface spot near the bell itself
             tryPlaceTableNearBellFallback(world, bellPos, existingTables);
             return;
@@ -178,8 +184,10 @@ public final class VillageLumberjackSpawnManager {
             return;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} — {} chest(s) found but none had a free adjacent floor slot",
-                bellPos.toShortString(), chests.size());
+        if (shouldLogBellEvent(world, bellPos, "no_adjacent_slot")) {
+            LOGGER.debug("lumberjack-spawn bell={} — {} chest(s) found but none had a free adjacent floor slot",
+                    bellPos.toShortString(), chests.size());
+        }
 
         // Fallback: open surface near bell
         tryPlaceTableNearBellFallback(world, bellPos, existingTables);
@@ -200,8 +208,10 @@ public final class VillageLumberjackSpawnManager {
         if (candidate != null) {
             forceConvert(world, candidate, tablePos);
         } else {
-            LOGGER.info("lumberjack-spawn no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
-                    UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
+            if (StructuredLogThrottle.shouldLog("lumberjack-spawn:" + tablePos.asLong() + ":no_unemployed", world.getTime(), STRUCTURED_LOG_INTERVAL_TICKS)) {
+                LOGGER.debug("lumberjack-spawn no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
+                        UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
+            }
             // Nudge the hook for the next tick just in case.
             if (!world.getPlayers().isEmpty()) {
                 UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
@@ -233,7 +243,9 @@ public final class VillageLumberjackSpawnManager {
                 }
             }
         }
-        LOGGER.info("lumberjack-spawn bell={} — fallback surface scan also found no placement slot", bellPos.toShortString());
+        if (shouldLogBellEvent(world, bellPos, "fallback_no_slot")) {
+            LOGGER.debug("lumberjack-spawn bell={} — fallback surface scan also found no placement slot", bellPos.toShortString());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -242,11 +254,15 @@ public final class VillageLumberjackSpawnManager {
 
     private static void forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "force-convert")) {
-            LOGGER.info("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
+            if (StructuredLogThrottle.shouldLog("lumberjack-spawn:" + tablePos.asLong() + ":balancer_blocked", world.getTime(), STRUCTURED_LOG_INTERVAL_TICKS)) {
+                LOGGER.debug("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
+            }
             return;
         }
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            LOGGER.info("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
+            if (StructuredLogThrottle.shouldLog("lumberjack-spawn:" + tablePos.asLong() + ":reserved_skip", world.getTime(), STRUCTURED_LOG_INTERVAL_TICKS)) {
+                LOGGER.debug("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
+            }
             return;
         }
 
@@ -273,6 +289,15 @@ public final class VillageLumberjackSpawnManager {
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
+    }
+
+
+    private static boolean shouldLogBellEvent(ServerWorld world, BlockPos bellPos, String eventType) {
+        return StructuredLogThrottle.shouldLog(
+                "lumberjack-spawn:" + bellPos.asLong() + ":" + eventType,
+                world.getTime(),
+                STRUCTURED_LOG_INTERVAL_TICKS
+        );
     }
 
     private static void clearAllEquipment(LumberjackGuardEntity guard) {
@@ -386,8 +411,10 @@ public final class VillageLumberjackSpawnManager {
             pending++;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
-                bellPos.toShortString(), nearbyTables.size(), pending);
+        if (shouldLogBellEvent(world, bellPos, "pending_tables")) {
+            LOGGER.debug("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
+                    bellPos.toShortString(), nearbyTables.size(), pending);
+        }
         return pending;
     }
 
