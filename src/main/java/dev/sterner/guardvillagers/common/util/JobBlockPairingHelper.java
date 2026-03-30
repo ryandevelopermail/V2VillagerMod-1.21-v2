@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import org.jetbrains.annotations.Nullable;
 
 public final class JobBlockPairingHelper {
@@ -74,6 +75,7 @@ public final class JobBlockPairingHelper {
     private static final int ANCHOR_SEED_SAMPLE_COUNT = 8;
     private static final int HYDRATION_MAX_ITERATIONS_PER_TICK = 128;
     private static final long HYDRATION_MAX_ELAPSED_MS_PER_TICK = 4L;
+    private static final long BANNER_PAIRING_COOLDOWN_TICKS = 20L;
     private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
@@ -288,6 +290,18 @@ public final class JobBlockPairingHelper {
     }
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
+        refreshVillagerPairings(world, villager, PairingRefreshMode.FULL_EVENT);
+    }
+
+    public static void refreshVillagerPairingsSilent(ServerWorld world, VillagerEntity villager) {
+        refreshVillagerPairings(world, villager, PairingRefreshMode.SILENT_HYDRATION);
+    }
+
+    public static void refreshVillagerPairingsWithExplicitBannerTrigger(ServerWorld world, VillagerEntity villager) {
+        refreshVillagerPairings(world, villager, PairingRefreshMode.FULL_EVENT_EXPLICIT_BANNER);
+    }
+
+    private static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager, PairingRefreshMode refreshMode) {
         if (!isEmployedVillager(villager)) {
             return;
         }
@@ -313,12 +327,17 @@ public final class JobBlockPairingHelper {
             craftingTablePos.ifPresent(pos -> VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
         }
 
+        if (refreshMode == PairingRefreshMode.SILENT_HYDRATION) {
+            return;
+        }
+
         VillagerProfession profession = villager.getVillagerData().getProfession();
-        if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
+        if ((profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD)
+                && shouldProcessBannerPairing(world, villager, refreshMode)) {
             Collection<BlockPos> bannerPositions = findBannersWithinRange(world, jobPos, 300);
             for (BlockPos bannerPos : bannerPositions) {
                 BlockState bannerState = world.getBlockState(bannerPos);
-                if (isBannerOnFence(world, bannerPos, bannerState)) {
+                if (isBannerOnFence(world, bannerPos, bannerState) && shouldProcessBannerPositionThisTick(world, bannerPos)) {
                     handleBannerPlacement(world, bannerPos, bannerState);
                 }
             }
@@ -433,7 +452,7 @@ public final class JobBlockPairingHelper {
 
     private static void refreshEntitiesInBox(ServerWorld world, Box box) {
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, box, JobBlockPairingHelper::isEmployedVillager)) {
-            refreshVillagerPairings(world, villager);
+            refreshVillagerPairingsSilent(world, villager);
         }
         for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, box, Entity::isAlive)) {
             refreshButcherGuardPairings(world, guard);
@@ -545,7 +564,7 @@ public final class JobBlockPairingHelper {
             if (refreshed >= remainingBudget) {
                 return refreshed;
             }
-            refreshVillagerPairings(world, villager);
+            refreshVillagerPairingsSilent(world, villager);
             refreshed++;
         }
 
@@ -562,6 +581,37 @@ public final class JobBlockPairingHelper {
 
     private static HydrationState stateFor(ServerWorld world) {
         return HYDRATION_STATE.computeIfAbsent(world.getRegistryKey(), key -> new HydrationState());
+    }
+
+    private static boolean shouldProcessBannerPairing(ServerWorld world, VillagerEntity villager, PairingRefreshMode refreshMode) {
+        if (refreshMode == PairingRefreshMode.FULL_EVENT_EXPLICIT_BANNER) {
+            return true;
+        }
+
+        HydrationState state = stateFor(world);
+        long time = world.getTime();
+        UUID villagerId = villager.getUuid();
+        Long lastTick = state.lastBannerPairingTickByVillager.get(villagerId);
+        if (lastTick != null && time - lastTick < BANNER_PAIRING_COOLDOWN_TICKS) {
+            return false;
+        }
+
+        state.lastBannerPairingTickByVillager.put(villagerId, time);
+        if (state.lastBannerPairingTickByVillager.size() > 4096) {
+            long pruneBefore = time - (BANNER_PAIRING_COOLDOWN_TICKS * 4L);
+            state.lastBannerPairingTickByVillager.entrySet().removeIf(entry -> entry.getValue() < pruneBefore);
+        }
+        return true;
+    }
+
+    private static boolean shouldProcessBannerPositionThisTick(ServerWorld world, BlockPos bannerPos) {
+        HydrationState state = stateFor(world);
+        long tick = world.getTime();
+        if (state.lastProcessedBannerTick != tick) {
+            state.lastProcessedBannerTick = tick;
+            state.processedBannerPositionsThisTick.clear();
+        }
+        return state.processedBannerPositionsThisTick.add(bannerPos.asLong());
     }
 
     private static void enqueueChunk(HydrationState state, int chunkX, int chunkZ) {
@@ -594,10 +644,19 @@ public final class JobBlockPairingHelper {
     private static final class HydrationState {
         private final Deque<Long> pendingChunks = new ArrayDeque<>();
         private final Set<Long> enqueuedChunks = new HashSet<>();
+        private final Map<UUID, Long> lastBannerPairingTickByVillager = new HashMap<>();
+        private final Set<Long> processedBannerPositionsThisTick = new HashSet<>();
+        private long lastProcessedBannerTick = Long.MIN_VALUE;
         private long lastCatchUpTick = Long.MIN_VALUE;
         private int anchorSeedCursor;
         @Nullable
         private ChunkBoxCursor bootstrapScanCursor;
+    }
+
+    private enum PairingRefreshMode {
+        SILENT_HYDRATION,
+        FULL_EVENT,
+        FULL_EVENT_EXPLICIT_BANNER
     }
 
     private static final class ChunkBoxCursor {

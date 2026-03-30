@@ -244,7 +244,7 @@ public class GuardVillagers implements ModInitializer {
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity) {
                 if (world instanceof ServerWorld serverWorld) {
-                    JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);
+                    JobBlockPairingHelper.refreshVillagerPairingsSilent(serverWorld, villagerEntity);
                     VillagerConversionCandidateIndex.markCandidate(serverWorld, villagerEntity);
                 }
                 if (villagerEntity.isNatural()) {
@@ -564,7 +564,7 @@ public class GuardVillagers implements ModInitializer {
             if (refreshed >= remainingEntityBudget) {
                 return refreshed;
             }
-            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+            JobBlockPairingHelper.refreshVillagerPairingsSilent(world, villager);
             refreshed++;
         }
 
