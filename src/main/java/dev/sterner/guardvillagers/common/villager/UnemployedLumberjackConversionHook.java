@@ -4,11 +4,13 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.ItemStack;
@@ -17,19 +19,28 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
-import net.minecraft.entity.ai.pathing.Path;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class UnemployedLumberjackConversionHook {
     private static final double CRAFTING_TABLE_SEARCH_RANGE = JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE;
     private static final double CONVERSION_CANDIDATE_SCAN_RANGE = 8.0D;
+    private static final long PAIRED_STATE_MEMO_BUCKET_TICKS = 20L;
+    private static final long PAIRED_STATE_MEMO_BUCKETS_TO_KEEP = 2L;
+    private static final int NEARBY_LUMBERJACK_SCAN_RANGE = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 1.0D);
     private static final Logger LOGGER = LoggerFactory.getLogger(UnemployedLumberjackConversionHook.class);
+    private static final Map<PairedStateMemoKey, Boolean> PAIRED_STATE_MEMO = new ConcurrentHashMap<>();
+    private static final AtomicLong DEBUG_TOTAL_CANDIDATES = new AtomicLong();
+    private static final AtomicLong DEBUG_TOTAL_PATH_CALLS = new AtomicLong();
+    private static final AtomicLong DEBUG_TOTAL_SUCCESSES = new AtomicLong();
 
     private UnemployedLumberjackConversionHook() {
     }
@@ -61,19 +72,24 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
-            Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager);
+            SelectionMetrics metrics = new SelectionMetrics();
+            Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager, metrics);
             if (craftingTablePos.isEmpty()) {
+                maybeLogMetrics(villager, metrics, false);
                 continue;
             }
 
             BlockPos tablePos = craftingTablePos.get();
             if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "crafting-table-candidate")) {
+                maybeLogMetrics(villager, metrics, false);
                 continue;
             }
             if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+                maybeLogMetrics(villager, metrics, false);
                 continue;
             }
 
+            maybeLogMetrics(villager, metrics, true);
             convert(world, villager, tablePos);
         }
     }
@@ -110,10 +126,13 @@ public final class UnemployedLumberjackConversionHook {
         return true;
     }
 
-    private static Optional<BlockPos> findReachableCraftingTable(ServerWorld world, VillagerEntity villager) {
+    private static Optional<BlockPos> findReachableCraftingTable(ServerWorld world, VillagerEntity villager, SelectionMetrics metrics) {
         BlockPos center = villager.getBlockPos();
         int range = (int) Math.ceil(CRAFTING_TABLE_SEARCH_RANGE);
+        BlockPos bestCandidate = null;
+        double bestDistanceSq = Double.MAX_VALUE;
 
+        // Phase 1: cheap block-state collection.
         for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -range, -range), center.add(range, range, range))) {
             if (!center.isWithinDistance(checkPos, CRAFTING_TABLE_SEARCH_RANGE)) {
                 continue;
@@ -124,15 +143,32 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
+            metrics.candidateCount++;
+
+            // Phase 2: quick reservation + paired-state checks.
+            if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, immutableCheckPos)) {
+                continue;
+            }
+
             if (isCraftingTableAlreadyPaired(world, immutableCheckPos)) {
                 continue;
             }
 
-            if (!isReachable(villager, immutableCheckPos)) {
-                continue;
+            double distanceSq = center.getSquaredDistance(immutableCheckPos);
+            if (distanceSq < bestDistanceSq) {
+                bestDistanceSq = distanceSq;
+                bestCandidate = immutableCheckPos;
             }
+        }
 
-            return Optional.of(immutableCheckPos);
+        if (bestCandidate == null) {
+            return Optional.empty();
+        }
+
+        // Phase 3: single best-candidate pathfinding attempt.
+        metrics.pathCalls++;
+        if (isReachable(villager, bestCandidate)) {
+            return Optional.of(bestCandidate);
         }
 
         return Optional.empty();
@@ -144,20 +180,49 @@ public final class UnemployedLumberjackConversionHook {
     }
 
     private static boolean isCraftingTableAlreadyPaired(ServerWorld world, BlockPos tablePos) {
-        // Lumberjacks roam widely so we need a broad box to find the one whose
-        // pairedCraftingTablePos points to this exact table. Keep it at BELL_EFFECT_RANGE.
-        // The reservation manager is the primary guard; this scan is a secondary safeguard
-        // for cases where the reservation wasn't persisted (e.g., server restart before persist).
-        Box lumberjackScanBox = new Box(tablePos).expand(VillageGuardStandManager.BELL_EFFECT_RANGE);
+        long bucket = world.getTime() / PAIRED_STATE_MEMO_BUCKET_TICKS;
+        cleanupPairedStateMemo(bucket);
+        PairedStateMemoKey key = new PairedStateMemoKey(world.getRegistryKey().getValue().toString(), tablePos.toImmutable(), bucket);
+        return PAIRED_STATE_MEMO.computeIfAbsent(key, ignored -> isCraftingTableAlreadyPairedUncached(world, tablePos));
+    }
 
-        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, lumberjackScanBox, LumberjackGuardEntity::isAlive)) {
-            if (tablePos.equals(lumberjack.getPairedCraftingTablePos())) {
+    private static boolean isCraftingTableAlreadyPairedUncached(ServerWorld world, BlockPos tablePos) {
+        // Prefer proximity/anchor-constrained scans before any broad search.
+        Box nearbyLumberjackScanBox = new Box(tablePos).expand(NEARBY_LUMBERJACK_SCAN_RANGE);
+        if (hasPairedLumberjackInBox(world, tablePos, nearbyLumberjackScanBox)) {
+            return true;
+        }
+
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> anchor = anchorState.getNearestQmChest(world, tablePos, VillageGuardStandManager.BELL_EFFECT_RANGE);
+        if (anchor.isPresent()) {
+            Box anchoredScanBox = new Box(anchor.get()).expand(VillageGuardStandManager.BELL_EFFECT_RANGE);
+            if (hasPairedLumberjackInBox(world, tablePos, anchoredScanBox)) {
                 return true;
             }
         }
 
-        // Any villager whose job site is paired to this table must be within JOB_BLOCK_PAIRING_RANGE
-        // of it (by definition of the pairing geometry). No need to scan further.
+        return hasPairedVillagerForTable(world, tablePos);
+    }
+
+    private static boolean hasPairedLumberjackInBox(ServerWorld world, BlockPos tablePos, Box scanBox) {
+        for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, scanBox, LumberjackGuardEntity::isAlive)) {
+            BlockPos pairedTablePos = lumberjack.getPairedCraftingTablePos();
+            if (pairedTablePos != null && tablePos.equals(pairedTablePos)) {
+                return true;
+            }
+            BlockPos pairedChestPos = lumberjack.getPairedChestPos();
+            if (pairedChestPos != null && !pairedChestPos.isWithinDistance(tablePos, VillageGuardStandManager.BELL_EFFECT_RANGE)) {
+                continue;
+            }
+            if (pairedTablePos != null && pairedTablePos.isWithinDistance(tablePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasPairedVillagerForTable(ServerWorld world, BlockPos tablePos) {
         Box villagerScanBox = new Box(tablePos).expand(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE + 1.0D);
 
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, villagerScanBox, UnemployedLumberjackConversionHook::isEmployedVillager)) {
@@ -174,8 +239,6 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
-            // Only treat this as an already-paired table when it satisfies the same pairing geometry:
-            // table must be near both the villager's job block and paired chest.
             if (!jobPos.isWithinDistance(tablePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)
                     || !chestPos.isWithinDistance(tablePos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
                 continue;
@@ -188,6 +251,30 @@ public final class UnemployedLumberjackConversionHook {
         }
 
         return false;
+    }
+
+    private static void cleanupPairedStateMemo(long currentBucket) {
+        long minBucket = currentBucket - PAIRED_STATE_MEMO_BUCKETS_TO_KEEP;
+        PAIRED_STATE_MEMO.keySet().removeIf(key -> key.timeBucket < minBucket);
+    }
+
+    private static void maybeLogMetrics(VillagerEntity villager, SelectionMetrics metrics, boolean success) {
+        if (!LOGGER.isDebugEnabled()) {
+            return;
+        }
+        long candidatesTotal = DEBUG_TOTAL_CANDIDATES.addAndGet(metrics.candidateCount);
+        long pathCallsTotal = DEBUG_TOTAL_PATH_CALLS.addAndGet(metrics.pathCalls);
+        long successesTotal = DEBUG_TOTAL_SUCCESSES.addAndGet(success ? 1L : 0L);
+        double totalSuccessRate = candidatesTotal == 0L ? 0.0D : (double) successesTotal / (double) candidatesTotal;
+        LOGGER.debug("Unemployed lumberjack conversion selection villager={} candidates={} pathCalls={} success={} totals[candidates={}, pathCalls={}, successes={}, successRate={}]",
+                villager.getUuidAsString(),
+                metrics.candidateCount,
+                metrics.pathCalls,
+                success,
+                candidatesTotal,
+                pathCallsTotal,
+                successesTotal,
+                String.format("%.2f%%", totalSuccessRate * 100.0D));
     }
 
     private static boolean isEmployedVillager(VillagerEntity villager) {
@@ -239,5 +326,13 @@ public final class UnemployedLumberjackConversionHook {
         guard.equipStack(EquipmentSlot.FEET, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.MAINHAND, ItemStack.EMPTY);
         guard.equipStack(EquipmentSlot.OFFHAND, ItemStack.EMPTY);
+    }
+
+    private record PairedStateMemoKey(String worldId, BlockPos tablePos, long timeBucket) {
+    }
+
+    private static final class SelectionMetrics {
+        private int candidateCount;
+        private int pathCalls;
     }
 }
