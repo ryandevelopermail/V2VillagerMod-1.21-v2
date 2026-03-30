@@ -275,7 +275,7 @@ public class GuardVillagers implements ModInitializer {
                 }
             }
             if (entity instanceof ButcherGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
-                JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity);
+                JobBlockPairingHelper.refreshButcherGuardPairings(serverWorld, guardEntity, false);
                 rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedSmokerPos(), VillagerProfession.BUTCHER, "paired smoker");
             }
             if (entity instanceof MasonGuardEntity guardEntity && world instanceof ServerWorld serverWorld) {
@@ -485,6 +485,9 @@ public class GuardVillagers implements ModInitializer {
             processedChunks++;
             refreshedEntities += hydrated;
         }
+        state.totalProcessedChunks += processedChunks;
+        state.totalRefreshedEntities += refreshedEntities;
+        state.ticksProcessed++;
 
         boolean hasLeftover = !state.pendingChunks.isEmpty();
         if (hasLeftover && (guard.hitTimeCap() || guard.hitIterationCap(processedChunks, true))) {
@@ -507,6 +510,11 @@ public class GuardVillagers implements ModInitializer {
         }
 
         if (state.currentRadiusChunks >= PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS && state.pendingChunks.isEmpty()) {
+            LOGGER.info("[pairing-bootstrap] world={} summary ticksProcessed={} processedChunks={} refreshedEntities={}",
+                    world.getRegistryKey().getValue(),
+                    state.ticksProcessed,
+                    state.totalProcessedChunks,
+                    state.totalRefreshedEntities);
             PENDING_PAIRING_BOOTSTRAP.remove(world.getRegistryKey());
         }
     }
@@ -572,7 +580,7 @@ public class GuardVillagers implements ModInitializer {
             if (refreshed >= remainingEntityBudget) {
                 return refreshed;
             }
-            JobBlockPairingHelper.refreshButcherGuardPairings(world, guard);
+            JobBlockPairingHelper.refreshButcherGuardPairings(world, guard, false);
             refreshed++;
         }
 
@@ -596,6 +604,9 @@ public class GuardVillagers implements ModInitializer {
         private final Set<Long> enqueuedChunks = new HashSet<>();
         private int currentRadiusChunks = 0;
         private boolean prunedAnchors;
+        private int totalProcessedChunks;
+        private int totalRefreshedEntities;
+        private int ticksProcessed;
     }
 
     private void runConversionHooksOnSchedule(ServerWorld world) {

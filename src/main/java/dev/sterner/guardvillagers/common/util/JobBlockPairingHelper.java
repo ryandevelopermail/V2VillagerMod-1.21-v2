@@ -76,6 +76,7 @@ public final class JobBlockPairingHelper {
     private static final int HYDRATION_MAX_ITERATIONS_PER_TICK = 128;
     private static final long HYDRATION_MAX_ELAPSED_MS_PER_TICK = 4L;
     private static final long BANNER_PAIRING_COOLDOWN_TICKS = 20L;
+    private static final long PAIRING_LOG_RATE_LIMIT_TICKS = 200L;
     private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
@@ -183,7 +184,7 @@ public final class JobBlockPairingHelper {
         }
 
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
-            playPairingAnimation(world, placedPos, villager, globalPos.pos());
+            playPairingAnimation(world, placedPos, villager, globalPos.pos(), true, PairingLogEventType.JOB_BLOCK_PLACEMENT);
             VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
         }
     }
@@ -218,7 +219,7 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        playPairingAnimation(world, placedPos, villager, jobPos);
+        playPairingAnimation(world, placedPos, villager, jobPos, true, PairingLogEventType.CRAFTING_TABLE_PLACEMENT);
         VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), placedPos);
     }
 
@@ -255,7 +256,7 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        playPairingAnimation(world, placedPos, villager, jobPos);
+        playPairingAnimation(world, placedPos, villager, jobPos, true, PairingLogEventType.SPECIAL_MODIFIER_PLACEMENT);
         VillagerProfessionBehaviorRegistry.notifySpecialModifierPaired(world, villager, jobPos, nearbyChest.get(), modifier, placedPos);
     }
 
@@ -281,7 +282,7 @@ public final class JobBlockPairingHelper {
 
         int guardPairedCount = 0;
         for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, new Box(bannerPos).expand(BUTCHER_BANNER_PAIR_RANGE), Entity::isAlive)) {
-            if (pairButcherGuardWithBanner(world, guard, bannerPos)) {
+            if (pairButcherGuardWithBanner(world, guard, bannerPos, true)) {
                 guardPairedCount++;
             }
         }
@@ -455,7 +456,7 @@ public final class JobBlockPairingHelper {
             refreshVillagerPairingsSilent(world, villager);
         }
         for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, box, Entity::isAlive)) {
-            refreshButcherGuardPairings(world, guard);
+            refreshButcherGuardPairings(world, guard, false);
         }
     }
 
@@ -572,7 +573,7 @@ public final class JobBlockPairingHelper {
             if (refreshed >= remainingBudget) {
                 return refreshed;
             }
-            refreshButcherGuardPairings(world, guard);
+            refreshButcherGuardPairings(world, guard, false);
             refreshed++;
         }
 
@@ -645,6 +646,7 @@ public final class JobBlockPairingHelper {
         private final Deque<Long> pendingChunks = new ArrayDeque<>();
         private final Set<Long> enqueuedChunks = new HashSet<>();
         private final Map<UUID, Long> lastBannerPairingTickByVillager = new HashMap<>();
+        private final Map<Long, Long> lastPairingLogTickByEntityEvent = new HashMap<>();
         private final Set<Long> processedBannerPositionsThisTick = new HashSet<>();
         private long lastProcessedBannerTick = Long.MIN_VALUE;
         private long lastCatchUpTick = Long.MIN_VALUE;
@@ -657,6 +659,22 @@ public final class JobBlockPairingHelper {
         SILENT_HYDRATION,
         FULL_EVENT,
         FULL_EVENT_EXPLICIT_BANNER
+    }
+
+    public enum PairingLogEventType {
+        GENERIC("generic"),
+        JOB_BLOCK_PLACEMENT("job_block_placement"),
+        CRAFTING_TABLE_PLACEMENT("crafting_table_placement"),
+        SPECIAL_MODIFIER_PLACEMENT("special_modifier_placement"),
+        FARMER_BANNER_PAIRING("farmer_banner_pairing"),
+        SHEPHERD_BANNER_PAIRING("shepherd_banner_pairing"),
+        BUTCHER_BANNER_PAIRING("butcher_banner_pairing");
+
+        private final String id;
+
+        PairingLogEventType(String id) {
+            this.id = id;
+        }
     }
 
     private static final class ChunkBoxCursor {
@@ -745,7 +763,7 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        playPairingAnimation(world, bannerPos, villager, jobPos);
+        playPairingAnimation(world, bannerPos, villager, jobPos, true, PairingLogEventType.FARMER_BANNER_PAIRING);
         FarmerBannerTracker.setBanner(villager, bannerPos);
         return true;
     }
@@ -782,23 +800,27 @@ public final class JobBlockPairingHelper {
             return false;
         }
 
-        playPairingAnimation(world, bannerPos, villager, jobPos);
+        playPairingAnimation(world, bannerPos, villager, jobPos, true, PairingLogEventType.SHEPHERD_BANNER_PAIRING);
         ShepherdBannerTracker.setBanner(villager, bannerPos);
         return true;
     }
 
-    private static boolean pairButcherGuardWithBanner(ServerWorld world, ButcherGuardEntity guard, BlockPos bannerPos) {
+    private static boolean pairButcherGuardWithBanner(ServerWorld world, ButcherGuardEntity guard, BlockPos bannerPos, boolean emitEffects) {
         if (guard.squaredDistanceTo(bannerPos.getX() + 0.5D, bannerPos.getY() + 0.5D, bannerPos.getZ() + 0.5D) > BUTCHER_BANNER_PAIR_RANGE * BUTCHER_BANNER_PAIR_RANGE) {
             return false;
         }
 
-        playPairingAnimation(world, bannerPos, guard, guard.getBlockPos());
+        playPairingAnimation(world, bannerPos, guard, guard.getBlockPos(), emitEffects, PairingLogEventType.BUTCHER_BANNER_PAIRING);
         ButcherBannerTracker.setBanner(guard, bannerPos);
         guard.setPairedBannerPos(bannerPos);
         return true;
     }
 
     public static void refreshButcherGuardPairings(ServerWorld world, ButcherGuardEntity guard) {
+        refreshButcherGuardPairings(world, guard, true);
+    }
+
+    public static void refreshButcherGuardPairings(ServerWorld world, ButcherGuardEntity guard, boolean emitEffects) {
         if (!guard.isAlive()) {
             return;
         }
@@ -816,7 +838,7 @@ public final class JobBlockPairingHelper {
         for (BlockPos bannerPos : bannerPositions) {
             BlockState bannerState = world.getBlockState(bannerPos);
             if (isBannerOnFence(world, bannerPos, bannerState)) {
-                pairButcherGuardWithBanner(world, guard, bannerPos);
+                pairButcherGuardWithBanner(world, guard, bannerPos, emitEffects);
                 break;
             }
         }
@@ -921,16 +943,37 @@ public final class JobBlockPairingHelper {
     }
 
     public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos) {
-        if (villager instanceof VillagerEntity villagerEntity) {
+        playPairingAnimation(world, blockPos, villager, jobPos, true, PairingLogEventType.GENERIC);
+    }
+
+    public static void playPairingAnimation(ServerWorld world, BlockPos blockPos, LivingEntity villager, BlockPos jobPos, boolean emitEffects) {
+        playPairingAnimation(world, blockPos, villager, jobPos, emitEffects, PairingLogEventType.GENERIC);
+    }
+
+    public static void playPairingAnimation(ServerWorld world,
+                                            BlockPos blockPos,
+                                            LivingEntity villager,
+                                            BlockPos jobPos,
+                                            boolean emitEffects,
+                                            PairingLogEventType eventType) {
+        if (villager instanceof VillagerEntity villagerEntity
+                && LOGGER.isDebugEnabled()
+                && shouldEmitPairingLog(world, villager, eventType)) {
             VillagerProfession profession = villagerEntity.getVillagerData().getProfession();
             Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
             Identifier blockId = Registries.BLOCK.getId(world.getBlockState(blockPos).getBlock());
-            LOGGER.info("{} paired with {} at [{}] - {} ID: {}",
+            LOGGER.debug("{} paired with {} at [{}] - {} entityId={} eventType={} emitEffects={}",
                     professionId,
                     blockId,
                     blockPos.toShortString(),
                     professionId,
-                    villager.getId());
+                    villager.getId(),
+                    eventType.id,
+                    emitEffects);
+        }
+
+        if (!emitEffects) {
+            return;
         }
 
         spawnHappyParticles(world, blockPos);
@@ -940,6 +983,24 @@ public final class JobBlockPairingHelper {
         world.playSound(null, blockPos, SoundEvents.ENTITY_VILLAGER_CELEBRATE, SoundCategory.BLOCKS, 0.75F, 1.0F);
         world.playSound(null, villager.getBlockPos(), SoundEvents.ENTITY_VILLAGER_YES, SoundCategory.NEUTRAL, 0.85F, 1.0F);
         world.emitGameEvent(villager, GameEvent.BLOCK_CHANGE, blockPos);
+    }
+
+    private static boolean shouldEmitPairingLog(ServerWorld world, LivingEntity entity, PairingLogEventType eventType) {
+        HydrationState state = stateFor(world);
+        long tick = world.getTime();
+        long entityKey = entity.getUuid().getMostSignificantBits() ^ entity.getUuid().getLeastSignificantBits();
+        long eventKey = entityKey * 31L + eventType.id.hashCode();
+        Long lastTick = state.lastPairingLogTickByEntityEvent.get(eventKey);
+        if (lastTick != null && tick - lastTick < PAIRING_LOG_RATE_LIMIT_TICKS) {
+            return false;
+        }
+
+        state.lastPairingLogTickByEntityEvent.put(eventKey, tick);
+        if (state.lastPairingLogTickByEntityEvent.size() > 8192) {
+            long pruneBefore = tick - (PAIRING_LOG_RATE_LIMIT_TICKS * 4L);
+            state.lastPairingLogTickByEntityEvent.entrySet().removeIf(entry -> entry.getValue() < pruneBefore);
+        }
+        return true;
     }
 
     private static boolean isEmployedVillager(VillagerEntity villager) {
