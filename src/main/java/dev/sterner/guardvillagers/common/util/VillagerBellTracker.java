@@ -64,6 +64,7 @@ public final class VillagerBellTracker {
     private static final String REPORT_BOOK_TITLE_PREFIX = "Bell Report ";
     private static final Map<UUID, ReportAssignment> REPORTING_VILLAGERS = new HashMap<>();
     private static final Map<GlobalPos, Long> LAST_BOOK_WRITE_TICK = new HashMap<>();
+    private static final long BELL_EVENT_LOG_INTERVAL_TICKS = 200L;
 
     private VillagerBellTracker() {
     }
@@ -113,17 +114,30 @@ public final class VillagerBellTracker {
         Optional<Inventory> chestInventory = findBellReportChestInventory(world, bellPos);
         if (chestInventory.isEmpty()) {
             logBellReportChestLookupFailure(world, bellPos);
-            LOGGER.info("Bell report book generation skipped at {}: no nearby chest found.", bellPos.toShortString());
+            if (shouldLogBellEvent(world, bellPos, "book_skip_no_chest")) {
+                LOGGER.debug("Bell report book generation skipped at {}: no nearby chest found.", bellPos.toShortString());
+            }
             return;
         }
 
         ItemStack reportBook = createBellReportBookItem(pages, bellPos);
         if (!tryInsertIntoInventory(chestInventory.get(), reportBook)) {
-            LOGGER.info("Bell report book generation skipped at {}: nearby chest had no free slot.", bellPos.toShortString());
+            if (shouldLogBellEvent(world, bellPos, "book_skip_no_slot")) {
+                LOGGER.debug("Bell report book generation skipped at {}: nearby chest had no free slot.", bellPos.toShortString());
+            }
             return;
         }
 
         LOGGER.info("Placed bell report book at {} with {} pages.", bellPos.toShortString(), pages.size());
+    }
+
+
+    private static boolean shouldLogBellEvent(ServerWorld world, BlockPos bellPos, String eventType) {
+        return StructuredLogThrottle.shouldLog(
+                "bell-report:" + bellPos.asLong() + ":" + eventType,
+                world.getTime(),
+                BELL_EVENT_LOG_INTERVAL_TICKS
+        );
     }
 
     private static ItemStack createBellReportBookItem(List<String> pages, BlockPos bellPos) {
@@ -153,12 +167,14 @@ public final class VillagerBellTracker {
 
         int fallbackRadius = Math.max(0, GuardVillagersConfig.bellReportChestFallbackRadius);
         if (candidateChestPositions.isEmpty() && fallbackRadius > REPORT_CHEST_PRIMARY_SEARCH_RADIUS) {
-            LOGGER.info(
-                    "Bell report chest lookup at {}: no chest found within primary radius {}; retrying with fallback radius {}.",
-                    bellPos.toShortString(),
-                    REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
-                    fallbackRadius
-            );
+            if (shouldLogBellEvent(world, bellPos, "lookup_fallback_retry")) {
+                LOGGER.debug(
+                        "Bell report chest lookup at {}: no chest found within primary radius {}; retrying with fallback radius {}.",
+                        bellPos.toShortString(),
+                        REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
+                        fallbackRadius
+                );
+            }
             candidateChestPositions.addAll(findNearestBellReportChestCandidates(world, bellPos, fallbackRadius));
         }
 
@@ -177,11 +193,13 @@ public final class VillagerBellTracker {
                 return Optional.of(inventory);
             }
 
-            LOGGER.info(
-                    "Bell report chest lookup at {}: chest-like block at {} has no accessible inventory (blocked or unavailable).",
-                    bellPos.toShortString(),
-                    chestPos.toShortString()
-            );
+            if (shouldLogBellEvent(world, bellPos, "lookup_blocked_inventory")) {
+                LOGGER.debug(
+                        "Bell report chest lookup at {}: chest-like block at {} has no accessible inventory (blocked or unavailable).",
+                        bellPos.toShortString(),
+                        chestPos.toShortString()
+                );
+            }
         }
 
         return Optional.empty();
@@ -208,15 +226,17 @@ public final class VillagerBellTracker {
         boolean bellChunkLoaded = world.isChunkLoaded(bellPos);
         String neighborChunkLoadStates = describeNeighborChunkLoadStates(world, bellPos);
 
-        LOGGER.info(
-                "Bell report chest lookup failed at {} in {}. primaryRadius={}, fallbackRadius={}, bellChunkLoaded={}, neighboringChunksLoaded={}",
-                bellPos.toShortString(),
-                dimension,
-                REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
-                fallbackRadius,
-                bellChunkLoaded,
-                neighborChunkLoadStates
-        );
+        if (shouldLogBellEvent(world, bellPos, "lookup_failed")) {
+            LOGGER.debug(
+                    "Bell report chest lookup failed at {} in {}. primaryRadius={}, fallbackRadius={}, bellChunkLoaded={}, neighboringChunksLoaded={}",
+                    bellPos.toShortString(),
+                    dimension,
+                    REPORT_CHEST_PRIMARY_SEARCH_RADIUS,
+                    fallbackRadius,
+                    bellChunkLoaded,
+                    neighborChunkLoadStates
+            );
+        }
     }
 
     private static String describeNeighborChunkLoadStates(ServerWorld world, BlockPos bellPos) {

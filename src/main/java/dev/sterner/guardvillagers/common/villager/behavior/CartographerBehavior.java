@@ -54,14 +54,14 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
         }
 
         if (!jobPos.isWithinDistance(chestPos, 3.0D)) {
-            LOGGER.info("Cartographer {} pairing rejected: chest {} is {} blocks from job site {} (need <=3)",
+            LOGGER.debug("Cartographer {} pairing rejected: chest {} is {} blocks from job site {} (need <=3)",
                     villager.getUuidAsString(), chestPos.toShortString(),
                     (int) Math.sqrt(jobPos.getSquaredDistance(chestPos)), jobPos.toShortString());
             clearChestListener(villager);
             return;
         }
 
-        LOGGER.info("Cartographer {} paired chest at {} for job site {}",
+        LOGGER.debug("Cartographer {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

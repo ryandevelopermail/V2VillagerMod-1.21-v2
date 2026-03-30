@@ -49,7 +49,7 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         PAIRED_CHESTS.put(villager, chestPos.toImmutable());
-        LOGGER.info("Armorer {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
+        LOGGER.debug("Armorer {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
 
         ArmorerBlastFurnaceGoal blastFurnaceGoal = upsertGoal(GOALS, villager, BLAST_FURNACE_GOAL_PRIORITY,
                 () -> new ArmorerBlastFurnaceGoal(villager, jobPos, chestPos));

@@ -59,7 +59,7 @@ public class ClericBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Cleric {} paired chest at {} for job site {}",
+        LOGGER.debug("Cleric {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());

@@ -39,7 +39,7 @@ public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Weaponsmith {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
+        LOGGER.debug("Weaponsmith {} paired chest at {} for job site {}", villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
         PAIRED_CHESTS.put(villager, chestPos.toImmutable());
 
         WeaponsmithDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,

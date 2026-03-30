@@ -70,7 +70,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Fisherman {} paired chest at {} for job site {}",
+        LOGGER.debug("Fisherman {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
@@ -118,7 +118,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             return;
         }
 
-        LOGGER.info("Fisherman {} paired chest at {} for job site {}",
+        LOGGER.debug("Fisherman {} paired chest at {} for job site {}",
                 villager.getUuidAsString(),
                 chestPos.toShortString(),
                 jobPos.toShortString());
