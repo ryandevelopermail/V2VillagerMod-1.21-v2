@@ -144,6 +144,12 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     @Override
+    public boolean canStop() {
+        // Keep the elected builder focused until the current build cycle finishes.
+        return !isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE;
+    }
+
+    @Override
     public void start() {
         currentSegmentIndex = 0;
         currentTransferIndex = 0;
@@ -156,14 +162,19 @@ public class MasonWallBuilderGoal extends Goal {
             stage = Stage.DONE;
         }
         if (isElectedBuilder) {
-            LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={})",
-                    guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size());
+            String firstTarget = pendingSegments.isEmpty() ? "none" : pendingSegments.get(0).toShortString();
+            LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={})",
+                    guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size(), firstTarget);
         }
     }
 
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        if (isElectedBuilder && currentSegmentIndex > 0 && currentSegmentIndex < pendingSegments.size()) {
+            LOGGER.info("MasonWallBuilder {}: build cycle paused/interrupted at {}/{}",
+                    guard.getUuidAsString(), currentSegmentIndex, pendingSegments.size());
+        }
         stage = Stage.IDLE;
         isElectedBuilder = false;
         pendingSegments.clear();
@@ -444,7 +455,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (!isElectedBuilder || pendingSegments.isEmpty()) return;
         int placed = currentSegmentIndex;
         int total = pendingSegments.size();
-        if (placed >= total || placed - lastProgressLoggedSegmentCount >= 100) {
+        if (placed >= total || placed <= 10 || placed - lastProgressLoggedSegmentCount >= 25) {
             lastProgressLoggedSegmentCount = placed;
             int percent = (int) Math.floor((placed * 100.0) / total);
             LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
