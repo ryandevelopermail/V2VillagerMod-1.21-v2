@@ -219,7 +219,9 @@ public class FletcherCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Fletcher", () -> formatCraftedResult(lastCheckCount, recipe.output));
+            final int craftedCheckCount = lastCheckCount;
+            final FletcherRecipe craftedRecipe = recipe;
+            CraftingCheckLogger.report(world, "Fletcher", () -> formatCraftedResult(craftedCheckCount, craftedRecipe.output));
         }
     }
 
