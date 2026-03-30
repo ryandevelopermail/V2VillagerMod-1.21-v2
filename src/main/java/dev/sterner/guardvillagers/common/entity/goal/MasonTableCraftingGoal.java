@@ -91,7 +91,7 @@ public class MasonTableCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Mason", immediateCheckPending ? "immediate request" : "natural interval", () -> formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -186,7 +186,7 @@ public class MasonTableCraftingGoal extends Goal {
             craftedToday++;
             craftedOutputsToday.add(recipe.output.copyWithCount(1));
             this.lastCraftedOutputItem = recipe.output.getItem();
-            CraftingCheckLogger.report(world, "Mason", "crafted final tool: " + formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Mason", () -> "crafted final tool: " + formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
@@ -525,7 +525,7 @@ public class MasonTableCraftingGoal extends Goal {
         }
 
         CraftingCheckLogger.report(world, "Mason",
-                "day " + lastCraftDay + " summary: crafted " + craftedToday + "/" + dailyCraftLimit + " -> [" + craftedSummary + "]");
+                () -> "day " + lastCraftDay + " summary: crafted " + craftedToday + "/" + dailyCraftLimit + " -> [" + craftedSummary + "]");
     }
 
     private String formatCheckResult(int craftableCount) {

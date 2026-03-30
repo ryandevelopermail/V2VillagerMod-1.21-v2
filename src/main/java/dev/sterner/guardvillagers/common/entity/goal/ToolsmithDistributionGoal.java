@@ -106,9 +106,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             pendingTargetPos = fisherman.chestPos();
             pendingUniversalRoute = false;
             pendingOverflowTransfer = false;
-            CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
+            CraftingCheckLogger.report(world, "Toolsmith", () -> "distribution " + demandSnapshot.compactSummary());
             CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());
-            CraftingCheckLogger.report(world, "Toolsmith", "crafted tool selected for transfer: fishing_rod"
+            CraftingCheckLogger.report(world, "Toolsmith", () -> "crafted tool selected for transfer: fishing_rod"
                     + " -> " + fisherman.recipientKind().name().toLowerCase(java.util.Locale.ROOT)
                     + " storage " + fisherman.chestPos().toShortString());
             return true;
@@ -125,9 +125,9 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         pendingUniversalRoute = false;
         pendingOverflowTransfer = false;
 
-        CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
+        CraftingCheckLogger.report(world, "Toolsmith", () -> "distribution " + demandSnapshot.compactSummary());
         CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());
-        CraftingCheckLogger.report(world, "Toolsmith", "crafted tool selected for transfer: "
+        CraftingCheckLogger.report(world, "Toolsmith", () -> "crafted tool selected for transfer: "
                 + selected.toolType().label()
                 + " -> " + recipient.record().recipient().getVillagerData().getProfession()
                 + " chest " + recipient.record().chestPos().toShortString());
@@ -209,7 +209,7 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             return;
         }
 
-        CraftingCheckLogger.report(world, "Toolsmith", message);
+        CraftingCheckLogger.report(world, "Toolsmith", () -> message);
         lastTargetRefreshLogMessage = message;
         lastTargetRefreshLogTick = tick;
     }
