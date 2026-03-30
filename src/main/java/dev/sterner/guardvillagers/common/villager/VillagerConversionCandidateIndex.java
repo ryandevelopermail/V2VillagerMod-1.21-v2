@@ -11,6 +11,8 @@ import java.util.*;
 
 public final class VillagerConversionCandidateIndex {
     private static final Map<WorldKey, Map<VillagerProfession, Map<Long, Set<UUID>>>> CANDIDATES = new HashMap<>();
+    private static final Map<WorldKey, Deque<Long>> PENDING_CHUNK_SCANS = new HashMap<>();
+    private static final Map<WorldKey, Set<Long>> PENDING_CHUNK_SCAN_SET = new HashMap<>();
 
     private VillagerConversionCandidateIndex() {
     }
@@ -48,6 +50,62 @@ public final class VillagerConversionCandidateIndex {
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, bounds, VillagerEntity::isAlive)) {
             markCandidate(world, villager);
         }
+    }
+
+    public static void enqueueChunkScan(ServerWorld world, int chunkX, int chunkZ) {
+        WorldKey worldKey = WorldKey.of(world);
+        long chunkKey = ChunkPos.toLong(chunkX, chunkZ);
+
+        Set<Long> pendingSet = PENDING_CHUNK_SCAN_SET.computeIfAbsent(worldKey, ignored -> new HashSet<>());
+        if (!pendingSet.add(chunkKey)) {
+            return;
+        }
+
+        PENDING_CHUNK_SCANS
+                .computeIfAbsent(worldKey, ignored -> new ArrayDeque<>())
+                .addLast(chunkKey);
+    }
+
+    public static int processQueuedChunkScans(ServerWorld world, int maxChunks) {
+        if (maxChunks <= 0) {
+            return 0;
+        }
+
+        WorldKey worldKey = WorldKey.of(world);
+        Deque<Long> queue = PENDING_CHUNK_SCANS.get(worldKey);
+        Set<Long> pendingSet = PENDING_CHUNK_SCAN_SET.get(worldKey);
+        if (queue == null || queue.isEmpty() || pendingSet == null || pendingSet.isEmpty()) {
+            return 0;
+        }
+
+        int processed = 0;
+        while (processed < maxChunks && !queue.isEmpty()) {
+            long chunkKey = queue.removeFirst();
+            pendingSet.remove(chunkKey);
+            markCandidatesInChunk(world, ChunkPos.getPackedX(chunkKey), ChunkPos.getPackedZ(chunkKey));
+            processed++;
+        }
+
+        if (queue.isEmpty()) {
+            PENDING_CHUNK_SCANS.remove(worldKey);
+        }
+        if (pendingSet.isEmpty()) {
+            PENDING_CHUNK_SCAN_SET.remove(worldKey);
+        }
+
+        return processed;
+    }
+
+    public static int getQueuedChunkScanCount(ServerWorld world) {
+        Deque<Long> queue = PENDING_CHUNK_SCANS.get(WorldKey.of(world));
+        return queue == null ? 0 : queue.size();
+    }
+
+    public static void clearWorld(ServerWorld world) {
+        WorldKey worldKey = WorldKey.of(world);
+        CANDIDATES.remove(worldKey);
+        PENDING_CHUNK_SCANS.remove(worldKey);
+        PENDING_CHUNK_SCAN_SET.remove(worldKey);
     }
 
     public static void markCandidatesNear(ServerWorld world, BlockPos center, double range) {
