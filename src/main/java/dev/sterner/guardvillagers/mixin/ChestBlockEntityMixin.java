@@ -12,7 +12,9 @@ import net.minecraft.block.entity.ChestBlockEntity;
 import net.minecraft.block.entity.LootableContainerBlockEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.math.BlockPos;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -20,6 +22,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(LootableContainerBlockEntity.class)
 public class ChestBlockEntityMixin {
+
+    @Unique
+    private long guardvillagers$lastChestMutationNotifyTick = Long.MIN_VALUE;
 
     @Inject(method = "setStack(ILnet/minecraft/item/ItemStack;)V", at = @At("TAIL"), require = 0)
     private void guardvillagers$onChestSetStack(int slot, ItemStack stack, CallbackInfo ci) {
@@ -36,16 +41,27 @@ public class ChestBlockEntityMixin {
         guardvillagers$notifyChestMutation();
     }
 
+    @Unique
     private void guardvillagers$notifyChestMutation() {
-        if ((Object) this instanceof ChestBlockEntity chest && chest.getWorld() instanceof ServerWorld serverWorld) {
-            ShepherdBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            ButcherBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            MasonBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            ArmorerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            CartographerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            FarmerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            FishermanBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
-            LumberjackChestTriggerBehavior.onChestInventoryMutated(serverWorld, chest.getPos());
+        if (!((Object) this instanceof ChestBlockEntity chest)) {
+            return;
         }
+        if (!(chest.getWorld() instanceof ServerWorld serverWorld)) {
+            return;
+        }
+        long currentTick = serverWorld.getTime();
+        if (currentTick == guardvillagers$lastChestMutationNotifyTick) {
+            return;
+        }
+        guardvillagers$lastChestMutationNotifyTick = currentTick;
+        BlockPos pos = chest.getPos();
+        ShepherdBehavior.onChestInventoryMutated(serverWorld, pos);
+        ButcherBehavior.onChestInventoryMutated(serverWorld, pos);
+        MasonBehavior.onChestInventoryMutated(serverWorld, pos);
+        ArmorerBehavior.onChestInventoryMutated(serverWorld, pos);
+        CartographerBehavior.onChestInventoryMutated(serverWorld, pos);
+        FarmerBehavior.onChestInventoryMutated(serverWorld, pos);
+        FishermanBehavior.onChestInventoryMutated(serverWorld, pos);
+        LumberjackChestTriggerBehavior.onChestInventoryMutated(serverWorld, pos);
     }
 }

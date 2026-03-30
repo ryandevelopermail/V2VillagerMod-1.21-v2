@@ -309,6 +309,12 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
             return;
         }
 
+        // Gate 1: per-villager cooldown — skip all expensive work until cooldown expires
+        long gameTime = serverWorld.getTime();
+        if (gameTime < guardvillagers$nextReservedCleanupTickForVillager) {
+            return;
+        }
+
         @Nullable BlockPos reservedPos = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                 .filter(globalPos -> globalPos.dimension() == serverWorld.getRegistryKey())
                 .map(GlobalPos::pos)
@@ -323,7 +329,12 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         }
 
         BlockPos immutableJobPos = reservedPos.toImmutable();
-        long gameTime = serverWorld.getTime();
+
+        // Gate 2: per-position cooldown — skip if this specific job site was recently processed
+        Long nextByPos = guardvillagers$nextReservedCleanupTickByPos.get(immutableJobPos);
+        if (nextByPos != null && gameTime < nextByPos) {
+            return;
+        }
 
         boolean repeatedPosition = immutableJobPos.equals(guardvillagers$lastReservedCleanupPos);
         if (repeatedPosition) {
