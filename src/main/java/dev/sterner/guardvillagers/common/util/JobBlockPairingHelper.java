@@ -396,8 +396,8 @@ public final class JobBlockPairingHelper {
         while (remaining > 0 && !state.pendingChunks.isEmpty()) {
             long packed = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packed);
-            int chunkX = ChunkPos.getPackedX(packed);
-            int chunkZ = ChunkPos.getPackedZ(packed);
+            int chunkX = unpackChunkX(packed);
+            int chunkZ = unpackChunkZ(packed);
             remaining -= hydrateChunk(world, chunkX, chunkZ, remaining);
         }
     }
@@ -457,10 +457,22 @@ public final class JobBlockPairingHelper {
     }
 
     private static void enqueueChunk(HydrationState state, int chunkX, int chunkZ) {
-        long packed = ChunkPos.toLong(chunkX, chunkZ);
+        long packed = packChunk(chunkX, chunkZ);
         if (state.enqueuedChunks.add(packed)) {
             state.pendingChunks.addLast(packed);
         }
+    }
+
+    private static long packChunk(int chunkX, int chunkZ) {
+        return ChunkPos.toLong(chunkX, chunkZ);
+    }
+
+    private static int unpackChunkX(long packed) {
+        return ChunkPos.getPackedX(packed);
+    }
+
+    private static int unpackChunkZ(long packed) {
+        return ChunkPos.getPackedZ(packed);
     }
 
     private static void enqueueChunkRing(HydrationState state, int centerChunkX, int centerChunkZ, int ringRadius) {
