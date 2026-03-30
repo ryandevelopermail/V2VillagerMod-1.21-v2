@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.TickWorkGuard;
 import dev.sterner.guardvillagers.common.villager.behavior.*;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -36,6 +37,8 @@ public final class ProfessionDefinitions {
     private static final long FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS = 200L;
     private static final long FALLBACK_CHUNK_COOLDOWN_TICKS = 400L;
     private static final long FALLBACK_SCAN_WARMUP_TICKS = 200L;
+    private static final int FALLBACK_MAX_ITERATIONS_PER_TICK = 128;
+    private static final long FALLBACK_MAX_ELAPSED_MS_PER_TICK = 4L;
 
     private static final List<SpecialModifier> GLOBAL_SPECIAL_MODIFIERS = List.of(
             new SpecialModifier(GuardVillagers.id("guard_stand_modifier"), GuardVillagers.GUARD_STAND_MODIFIER, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE),
@@ -132,6 +135,9 @@ public final class ProfessionDefinitions {
         }
     }
 
+    /**
+     * Must be bounded per tick to avoid draining the entire fallback queue in one invocation.
+     */
     public static void markFallbackCandidates(ServerWorld world) {
         long now = world.getTime();
         FallbackScanState state = stateFor(world);
@@ -151,8 +157,12 @@ public final class ProfessionDefinitions {
         int skippedUnloaded = 0;
         int skippedCooldown = 0;
         int scanned = 0;
+        TickWorkGuard guard = new TickWorkGuard(FALLBACK_MAX_ITERATIONS_PER_TICK, FALLBACK_MAX_ELAPSED_MS_PER_TICK);
 
-        while (remainingChunkIterations > 0 && remainingSuccessfulScans > 0 && !state.pendingChunks.isEmpty()) {
+        while (remainingChunkIterations > 0
+                && remainingSuccessfulScans > 0
+                && !state.pendingChunks.isEmpty()
+                && guard.shouldContinue(dequeuedChunks)) {
             long packedChunkPos = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packedChunkPos);
             remainingChunkIterations--;
@@ -175,6 +185,18 @@ public final class ProfessionDefinitions {
             state.lastScannedChunkTicks.put(packedChunkPos, now);
             remainingSuccessfulScans--;
             scanned++;
+        }
+
+        boolean hasLeftover = !state.pendingChunks.isEmpty();
+        if (hasLeftover && (guard.hitTimeCap() || guard.hitIterationCap(dequeuedChunks, true))) {
+            LOGGER.warn("fallback candidate queue guard tripped: world={} reason={} queueSize={} dequeued={} scanned={} skippedUnloaded={} skippedCooldown={}",
+                    world.getRegistryKey().getValue(),
+                    guard.hitTimeCap() ? "elapsed-time" : "iteration-cap",
+                    state.pendingChunks.size(),
+                    dequeuedChunks,
+                    scanned,
+                    skippedUnloaded,
+                    skippedCooldown);
         }
 
         if (LOGGER.isDebugEnabled() && dequeuedChunks > 0) {
