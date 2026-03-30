@@ -677,7 +677,7 @@ public class GuardVillagers implements ModInitializer {
                     world.getRegistryKey().getValue(), tick, stageName, durationMs, EARLY_TICK_STAGE_WARN_THRESHOLD_MS, queueBefore, queueAfter);
             return;
         }
-        LOGGER.info("[early-tick-timing] world={} tick={} stage={} durationMs={} queueBefore={} queueAfter={}",
+        LOGGER.debug("[early-tick-timing] world={} tick={} stage={} durationMs={} queueBefore={} queueAfter={}",
                 world.getRegistryKey().getValue(), tick, stageName, durationMs, queueBefore, queueAfter);
     }
 

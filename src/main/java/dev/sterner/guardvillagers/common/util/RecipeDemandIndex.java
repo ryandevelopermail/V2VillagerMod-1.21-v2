@@ -330,12 +330,12 @@ public final class RecipeDemandIndex {
         }
 
         public void dump(Logger logger) {
-            logger.info("[recipe-demand-index] computed recipient routes:");
+            logger.debug("[recipe-demand-index] computed recipient routes:");
             for (DemandMaterial material : DemandMaterial.values()) {
                 List<DistributionRouteEngine.ProfessionRoute> materialRoutes = routesFor(material);
-                logger.info("[recipe-demand-index] material={} routes={}", material.id(), materialRoutes.size());
+                logger.debug("[recipe-demand-index] material={} routes={}", material.id(), materialRoutes.size());
                 for (DistributionRouteEngine.ProfessionRoute route : materialRoutes) {
-                    logger.info("  -> {} cap={} weight={} requiresTable={} toolRecipePath={}",
+                    logger.debug("  -> {} cap={} weight={} requiresTable={} toolRecipePath={}",
                             route.profession(),
                             route.targetStockCap(),
                             route.demandWeight(),
