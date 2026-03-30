@@ -71,6 +71,10 @@ public class VillagePenRegistry extends PersistentState {
     private static final int JOB_SITE_SCAN_MAX_BLOCKS_PER_CALL = 2_048;
     /** Hard gate-processing budget for fallback scans per invocation. */
     private static final int JOB_SITE_SCAN_MAX_GATES_PER_CALL = 8;
+    /** Startup warmup window where only cached pen results are used. */
+    private static final long JOB_SITE_FALLBACK_WARMUP_TICKS = 200L;
+    /** Max deferred fallback scans progressed per tick after warmup. */
+    private static final int DEFERRED_SCAN_ENTRY_BUDGET_PER_TICK = 2;
     /**
      * Max horizontal blocks to BFS from gate into pen interior.
      * Raised to 16 so pens up to ~32×32 are reliably detected.
@@ -219,6 +223,7 @@ public class VillagePenRegistry extends PersistentState {
         }
         VillagePenRegistry registry = get(world.getServer());
         long now = world.getTime();
+        registry.progressDeferredFallbackScans(world, now);
         if (now - registry.lastRescanTick < RESCAN_INTERVAL_TICKS) {
             return;
         }
@@ -373,8 +378,40 @@ public class VillagePenRegistry extends PersistentState {
             entry = new FallbackCacheEntry(radius);
             fallbackScanCache.put(key, entry);
         }
+        entry.lastRequestedPos = jobSitePos.toImmutable();
+        if (now < JOB_SITE_FALLBACK_WARMUP_TICKS) {
+            entry.deferredDuringWarmup = true;
+            if (entry.continuation == null) {
+                entry.continuation = ScanContinuation.start(world, jobSitePos, entry.scanRadius);
+                entry.pens = new ArrayList<>();
+            }
+            // Warmup mode: avoid broad geometry scans. We keep the scan queued so it can
+            // resume as soon as warmup ends, while callers continue using registry/cached data.
+            return entry.pens;
+        }
         runFallbackScanStep(world, jobSitePos, entry, now);
         return entry.pens;
+    }
+
+    private void progressDeferredFallbackScans(ServerWorld world, long now) {
+        if (now < JOB_SITE_FALLBACK_WARMUP_TICKS || fallbackScanCache.isEmpty()) {
+            return;
+        }
+
+        int progressed = 0;
+        for (FallbackCacheEntry entry : fallbackScanCache.values()) {
+            if (progressed >= DEFERRED_SCAN_ENTRY_BUDGET_PER_TICK) {
+                break;
+            }
+            if (!entry.deferredDuringWarmup || entry.lastRequestedPos == null || entry.continuation == null) {
+                continue;
+            }
+            runFallbackScanStep(world, entry.lastRequestedPos, entry, now);
+            if (entry.continuation == null) {
+                entry.deferredDuringWarmup = false;
+            }
+            progressed++;
+        }
     }
 
     private void runFallbackScanStep(ServerWorld world, BlockPos jobSitePos, FallbackCacheEntry entry, long now) {
@@ -606,6 +643,8 @@ public class VillagePenRegistry extends PersistentState {
         private long scanTick = Long.MIN_VALUE;
         private List<PenEntry> pens = List.of();
         private ScanContinuation continuation;
+        private BlockPos lastRequestedPos;
+        private boolean deferredDuringWarmup;
 
         private FallbackCacheEntry(int scanRadius) {
             this.scanRadius = scanRadius;

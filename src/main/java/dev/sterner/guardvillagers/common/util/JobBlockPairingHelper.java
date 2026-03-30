@@ -66,6 +66,8 @@ public final class JobBlockPairingHelper {
     private static final int CHUNK_HYDRATION_RING = 1;
     private static final long BACKGROUND_CATCHUP_INTERVAL_TICKS = 40L;
     private static final int BACKGROUND_CATCHUP_ENTITY_BUDGET = 64;
+    private static final long WORLD_AGE_WARMUP_TICKS = 200L;
+    private static final int CHUNK_LOAD_IMMEDIATE_ENTITY_BUDGET = 24;
     private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
@@ -321,14 +323,19 @@ public final class JobBlockPairingHelper {
         VillageAnchorState.get(world.getServer()).pruneInvalidAnchors(world);
         Box scanBox = buildPlayerProximityBox(world, BOOTSTRAP_PLAYER_PROXIMITY_RADIUS);
         if (scanBox != null) {
-            refreshEntitiesInBox(world, scanBox);
             enqueueChunksForBox(world, scanBox);
+            if (world.getTime() >= WORLD_AGE_WARMUP_TICKS) {
+                refreshEntitiesInBox(world, scanBox);
+            }
         }
     }
 
     public static void onChunkLoaded(ServerWorld world, Chunk chunk) {
         enqueueChunkRing(stateFor(world), chunk.getPos().x, chunk.getPos().z, CHUNK_HYDRATION_RING);
-        hydrateChunkRing(world, chunk.getPos().x, chunk.getPos().z, CHUNK_HYDRATION_RING, Integer.MAX_VALUE);
+        if (world.getTime() < WORLD_AGE_WARMUP_TICKS) {
+            return;
+        }
+        hydrateChunkRing(world, chunk.getPos().x, chunk.getPos().z, CHUNK_HYDRATION_RING, CHUNK_LOAD_IMMEDIATE_ENTITY_BUDGET);
     }
 
     public static void runBackgroundCatchUp(ServerWorld world) {

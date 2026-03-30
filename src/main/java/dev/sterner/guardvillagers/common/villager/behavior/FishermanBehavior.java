@@ -23,15 +23,19 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -52,6 +56,11 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Map<BlockPos, Set<VillagerEntity>> BARREL_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
     private static final long STORAGE_SCAN_COOLDOWN_TICKS = 20L;
+    private static final long FALLBACK_SCAN_WARMUP_TICKS = 200L;
+    private static final int FALLBACK_ENTITY_SCAN_BUDGET_PER_MUTATION = 32;
+    private static final int DEFERRED_FALLBACK_BARREL_BUDGET_PER_TICK = 3;
+    private static final int DEFERRED_FALLBACK_ENTITY_BUDGET_PER_TICK = 48;
+    private static final Map<RegistryKey<World>, DeferredFallbackState> DEFERRED_FALLBACK_STATE = new HashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -297,9 +306,15 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             }
         }
 
+        if (world.getTime() < FALLBACK_SCAN_WARMUP_TICKS) {
+            queueDeferredFallback(world, barrelPos);
+            return;
+        }
+
         // Fallback scan: watcher map is empty or stale (fisherman just converted/died).
         Box scanBox = new Box(barrelPos).expand(24.0D);
-        Set<VillagerEntity> villagers = new java.util.LinkedHashSet<>(world.getEntitiesByClass(
+        Set<VillagerEntity> villagers = new java.util.LinkedHashSet<>();
+        for (VillagerEntity villager : world.getEntitiesByClass(
                 VillagerEntity.class,
                 scanBox,
                 villager -> villager.isAlive()
@@ -308,7 +323,12 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
                         .map(net.minecraft.util.math.GlobalPos::pos)
                         .filter(barrelPos::equals)
                         .isPresent()
-        ));
+        )) {
+            villagers.add(villager);
+            if (villagers.size() >= FALLBACK_ENTITY_SCAN_BUDGET_PER_MUTATION) {
+                break;
+            }
+        }
 
         if (villagers.isEmpty()) {
             return;
@@ -344,6 +364,64 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
         if (shouldRunConversionHooks) {
             ProfessionDefinitions.runConversionHooks(world);
+        }
+    }
+
+    public static void tickDeferredFallbackScans(ServerWorld world) {
+        if (world.getTime() < FALLBACK_SCAN_WARMUP_TICKS) {
+            return;
+        }
+        DeferredFallbackState state = DEFERRED_FALLBACK_STATE.get(world.getRegistryKey());
+        if (state == null || state.pendingBarrels.isEmpty()) {
+            return;
+        }
+
+        int remainingBarrels = DEFERRED_FALLBACK_BARREL_BUDGET_PER_TICK;
+        int remainingEntities = DEFERRED_FALLBACK_ENTITY_BUDGET_PER_TICK;
+        while (remainingBarrels > 0 && remainingEntities > 0 && !state.pendingBarrels.isEmpty()) {
+            BlockPos barrelPos = state.pendingBarrels.removeFirst();
+            state.enqueuedBarrels.remove(barrelPos);
+            int consumed = runFallbackScanWithBudget(world, barrelPos, remainingEntities);
+            remainingEntities -= consumed;
+            remainingBarrels--;
+        }
+    }
+
+    public static void onWorldUnload(ServerWorld world) {
+        DEFERRED_FALLBACK_STATE.remove(world.getRegistryKey());
+    }
+
+    private static int runFallbackScanWithBudget(ServerWorld world, BlockPos barrelPos, int entityBudget) {
+        Box scanBox = new Box(barrelPos).expand(24.0D);
+        Set<VillagerEntity> villagers = new LinkedHashSet<>();
+        int consumed = 0;
+        for (VillagerEntity villager : world.getEntitiesByClass(
+                VillagerEntity.class,
+                scanBox,
+                candidate -> candidate.isAlive()
+                        && candidate.getVillagerData().getProfession() == VillagerProfession.FISHERMAN
+                        && candidate.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(net.minecraft.util.math.GlobalPos::pos)
+                        .filter(barrelPos::equals)
+                        .isPresent()
+        )) {
+            villagers.add(villager);
+            consumed++;
+            if (consumed >= entityBudget) {
+                break;
+            }
+        }
+        if (!villagers.isEmpty()) {
+            handleStorageMutation(world, Set.copyOf(villagers));
+        }
+        return consumed;
+    }
+
+    private static void queueDeferredFallback(ServerWorld world, BlockPos barrelPos) {
+        DeferredFallbackState state = DEFERRED_FALLBACK_STATE.computeIfAbsent(world.getRegistryKey(), ignored -> new DeferredFallbackState());
+        BlockPos key = barrelPos.toImmutable();
+        if (state.enqueuedBarrels.add(key)) {
+            state.pendingBarrels.addLast(key);
         }
     }
 
@@ -421,5 +499,10 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             this.villager = villager;
             this.observedChestPositions = Set.copyOf(observedChestPositions);
         }
+    }
+
+    private static final class DeferredFallbackState {
+        private final Deque<BlockPos> pendingBarrels = new ArrayDeque<>();
+        private final Set<BlockPos> enqueuedBarrels = new HashSet<>();
     }
 }
