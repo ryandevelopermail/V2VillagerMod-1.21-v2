@@ -101,7 +101,7 @@ public class ToolsmithCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Toolsmith", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Toolsmith", immediateCheckPending ? "immediate request" : "natural interval", () -> formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -199,7 +199,7 @@ public class ToolsmithCraftingGoal extends Goal {
             craftedToday++;
             recordLastCrafted(recipe.output);
             requestImmediateDistributionForCraftedOutput(villager, recipe.output);
-            CraftingCheckLogger.report(world, "Toolsmith", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Toolsmith", () -> formatCraftedResult(lastCheckCount, recipe.output));
             if (recipe.output.isOf(Items.FISHING_ROD)) {
                 CraftingCheckLogger.report(world, "Toolsmith", "crafted fishing rod due to fisherman recipient demand");
             }
@@ -224,7 +224,7 @@ public class ToolsmithCraftingGoal extends Goal {
     private List<ToolRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<ToolRecipe> recipes = new ArrayList<>();
         ToolsmithDemandPlanner.DemandSnapshot demandSnapshot = ToolsmithDemandPlanner.buildSnapshot(world, villager, inventory);
-        CraftingCheckLogger.report(world, "Toolsmith", "crafting " + demandSnapshot.compactSummary());
+        CraftingCheckLogger.report(world, "Toolsmith", () -> "crafting " + demandSnapshot.compactSummary());
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
@@ -247,7 +247,7 @@ public class ToolsmithCraftingGoal extends Goal {
                 boolean practicalRodNeed = hasPracticalFishingRodNeed(toolDemand, deficit, demandSnapshot.rankedFishermanEntries().size());
                 if (!practicalRodNeed) {
                     if (toolDemand != null) {
-                        CraftingCheckLogger.report(world, "Toolsmith", "skipped fishing rod craft: no practical recipient need (aggregate "
+                        CraftingCheckLogger.report(world, "Toolsmith", () -> "skipped fishing rod craft: no practical recipient need (aggregate "
                                 + toolDemand.sourceStock() + "/" + toolDemand.recipientCount() + ")");
                     }
                     continue;

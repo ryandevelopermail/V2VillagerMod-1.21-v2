@@ -189,7 +189,7 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
     }
 
     protected void logCheck(ServerWorld world, boolean immediate, int craftableCount) {
-        CraftingCheckLogger.report(world, getGoalName(), immediate ? "immediate request" : "natural interval", formatCheckResult(craftableCount));
+        CraftingCheckLogger.report(world, getGoalName(), immediate ? "immediate request" : "natural interval", () -> formatCheckResult(craftableCount));
     }
 
     protected void onDailyReset(ServerWorld world) {
@@ -379,7 +379,7 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
             inventory.markDirty();
             craftedToday++;
             onCraftSucceeded(world, recipe);
-            CraftingCheckLogger.report(world, getGoalName(), formatCraftedResult(lastCheckCount, getRecipeOutput(recipe)));
+            CraftingCheckLogger.report(world, getGoalName(), () -> formatCraftedResult(lastCheckCount, getRecipeOutput(recipe)));
         }
     }
 

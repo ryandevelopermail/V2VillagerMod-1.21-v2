@@ -93,7 +93,7 @@ public class LibrarianCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Librarian", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Librarian", immediateCheckPending ? "immediate request" : "natural interval", () -> formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -179,7 +179,7 @@ public class LibrarianCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Librarian", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Librarian", () -> formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 

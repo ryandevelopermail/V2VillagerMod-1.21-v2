@@ -97,7 +97,7 @@ public class ArmorerCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Armorer", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Armorer", immediateCheckPending ? "immediate request" : "natural interval", () -> formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -275,7 +275,7 @@ public class ArmorerCraftingGoal extends Goal {
             inventory.markDirty();
             craftedToday++;
             remainingSlots.remove(0);
-            CraftingCheckLogger.report(world, "Armorer", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Armorer", () -> formatCraftedResult(lastCheckCount, recipe.output));
 
             if (!pendingStandItem.isEmpty()) {
                 return;

@@ -98,7 +98,7 @@ public class MasonCraftingGoal extends AbstractCraftingGoal<MasonCraftingGoal.Ma
     protected void logCheck(ServerWorld world, boolean immediate, int craftableCount) {
         CraftingCheckTrigger trigger = immediate ? pendingTrigger : CraftingCheckTrigger.SCHEDULED;
         int intervalTicks = immediate ? 0 : CHECK_INTERVAL_TICKS;
-        CraftingCheckLogger.report(world, getGoalName(), trigger.name(), intervalTicks, formatCheckResult(craftableCount));
+        CraftingCheckLogger.report(world, getGoalName(), trigger.name(), intervalTicks, () -> formatCheckResult(craftableCount));
     }
 
     @Override

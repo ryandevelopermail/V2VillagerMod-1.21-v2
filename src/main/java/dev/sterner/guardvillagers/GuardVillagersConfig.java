@@ -97,4 +97,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackVillageMinLargeVillage = 2;
     @Entry(min=1)
     public static int lumberjackVillageMinLargeVillagePopulation = 12;
+    @Entry
+    public static boolean enableCraftingDiagnostics = false;
+    @Entry(min=200, max=1200)
+    public static int craftingDiagnosticsIntervalTicks = 600;
 }

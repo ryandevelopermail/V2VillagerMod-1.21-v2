@@ -125,7 +125,7 @@ public class FishermanCraftingGoal extends Goal {
         }
 
         lastCheckCount = countCraftableRecipes(world);
-        CraftingCheckLogger.report(world, "Fisherman", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
+        CraftingCheckLogger.report(world, "Fisherman", immediateCheckPending ? "immediate request" : "natural interval", () -> formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
         return lastCheckCount > 0;
@@ -222,7 +222,7 @@ public class FishermanCraftingGoal extends Goal {
             insertStack(inventory, recipe.output.copy());
             inventory.markDirty();
             craftedToday++;
-            CraftingCheckLogger.report(world, "Fisherman", formatCraftedResult(lastCheckCount, recipe.output));
+            CraftingCheckLogger.report(world, "Fisherman", () -> formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
