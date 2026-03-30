@@ -106,6 +106,9 @@ public class GuardVillagers implements ModInitializer {
     private static final int PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS = 16;
     private static final long WORLD_LOAD_PHASE_WARN_THRESHOLD_MS = 250L;
     private static final long WORLD_LOAD_TOTAL_WARN_THRESHOLD_MS = 500L;
+    private static final int CANDIDATE_CHUNK_SCAN_STARTUP_BUDGET = 1;
+    private static final int CANDIDATE_CHUNK_SCAN_LIVE_BUDGET = 4;
+    private static final int CANDIDATE_CHUNK_SCAN_BACKLOG_BUDGET = 8;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -269,7 +272,7 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
-            VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z);
+            VillagerConversionCandidateIndex.enqueueChunkScan(world, chunk.getPos().x, chunk.getPos().z);
             JobBlockPairingHelper.onChunkLoaded(world, chunk);
         });
 
@@ -293,6 +296,7 @@ public class GuardVillagers implements ModInitializer {
             JobBlockPairingHelper.onWorldUnload(world);
             ProfessionDefinitions.onWorldUnload(world);
             FishermanBehavior.onWorldUnload(world);
+            VillagerConversionCandidateIndex.clearWorld(world);
         });
 
         ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
@@ -319,6 +323,7 @@ public class GuardVillagers implements ModInitializer {
                         && world.getTime() % Math.max(20, GuardVillagersConfig.villagerConversionCandidateMarkIntervalTicks) == 0L) {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
+                processQueuedCandidateChunkMarking(world);
                 LumberjackPopulationBalancingService.tick(world);
                 VillageLumberjackSpawnManager.tick(world);
                 VillagePenRegistry.tick(world);
@@ -332,6 +337,22 @@ public class GuardVillagers implements ModInitializer {
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });
+    }
+
+    private static void processQueuedCandidateChunkMarking(ServerWorld world) {
+        int queuedChunks = VillagerConversionCandidateIndex.getQueuedChunkScanCount(world);
+        if (queuedChunks <= 0) {
+            return;
+        }
+
+        boolean worldIsLive = !world.getPlayers().isEmpty();
+        int budget = worldIsLive
+                ? (queuedChunks > CANDIDATE_CHUNK_SCAN_LIVE_BUDGET
+                ? CANDIDATE_CHUNK_SCAN_BACKLOG_BUDGET
+                : CANDIDATE_CHUNK_SCAN_LIVE_BUDGET)
+                : CANDIDATE_CHUNK_SCAN_STARTUP_BUDGET;
+
+        VillagerConversionCandidateIndex.processQueuedChunkScans(world, budget);
     }
 
 
