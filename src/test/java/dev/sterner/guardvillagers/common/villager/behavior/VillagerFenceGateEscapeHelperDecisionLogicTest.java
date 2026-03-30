@@ -88,4 +88,25 @@ class VillagerFenceGateEscapeHelperDecisionLogicTest {
         assertTrue(VillagerFenceGateEscapeHelper.isWithinScanRadius(villagerPos, inRange, VillagerFenceGateEscapeHelper.SCAN_RADIUS));
         assertFalse(VillagerFenceGateEscapeHelper.isWithinScanRadius(villagerPos, outOfRange, VillagerFenceGateEscapeHelper.SCAN_RADIUS));
     }
+
+    @Test
+    void deferred_retry_tick_blocks_until_requested_delay_has_elapsed() {
+        int cadence = 15;
+        int deferTicks = 100;
+        long now = 500L;
+        long deferredLastAttemptTick = now - cadence + deferTicks;
+
+        assertFalse(VillagerFenceGateEscapeHelper.shouldActivateEscape(
+                now + deferTicks - 1,
+                deferredLastAttemptTick,
+                cadence,
+                true,
+                false));
+        assertTrue(VillagerFenceGateEscapeHelper.shouldActivateEscape(
+                now + deferTicks,
+                deferredLastAttemptTick,
+                cadence,
+                true,
+                false));
+    }
 }
