@@ -18,6 +18,7 @@ import dev.sterner.guardvillagers.common.util.TakeJobSiteInjectDiagnostics;
 import dev.sterner.guardvillagers.common.util.VillageLumberjackSpawnManager;
 import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker;
 import dev.sterner.guardvillagers.common.util.VillagerBellTracker.BellVillageReport;
 import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
@@ -70,26 +71,38 @@ import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.TypedActionResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.TypeFilter;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
+import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.world.spawner.SpecialSpawner;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Predicate;
 
 public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
     private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
+    private static final Map<RegistryKey<World>, PairingBootstrapState> PENDING_PAIRING_BOOTSTRAP = new HashMap<>();
     private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
+    private static final int PAIRING_BOOTSTRAP_MAX_CHUNKS_PER_TICK = 4;
+    private static final int PAIRING_BOOTSTRAP_MAX_ENTITIES_PER_TICK = 96;
+    private static final int PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS = 3;
+    private static final int PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS = 16;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -258,13 +271,14 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerWorldEvents.LOAD.register((server, world) -> {
-            JobBlockPairingHelper.refreshWorldPairings(world);
+            PENDING_PAIRING_BOOTSTRAP.put(world.getRegistryKey(), new PairingBootstrapState());
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
             reconcileConvertedWorkerReservations(world, "world-load");
             RecipeDemandIndex.forWorld(world);
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
+            PENDING_PAIRING_BOOTSTRAP.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
             JobBlockPairingHelper.onWorldUnload(world);
@@ -302,6 +316,7 @@ public class GuardVillagers implements ModInitializer {
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
                 }
+                runPairingBootstrapStep(world);
                 JobBlockPairingHelper.runBackgroundCatchUp(world);
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
@@ -324,6 +339,124 @@ public class GuardVillagers implements ModInitializer {
                 pairedPos.toShortString(),
                 world.getRegistryKey().getValue(),
                 source);
+    }
+
+    private static void runPairingBootstrapStep(ServerWorld world) {
+        PairingBootstrapState state = PENDING_PAIRING_BOOTSTRAP.get(world.getRegistryKey());
+        if (state == null) {
+            return;
+        }
+
+        if (!state.prunedAnchors) {
+            VillageAnchorState.get(world.getServer()).pruneInvalidAnchors(world);
+            state.prunedAnchors = true;
+            state.currentRadiusChunks = 0;
+            state.pendingChunks.clear();
+            state.enqueuedChunks.clear();
+        }
+
+        int remainingChunkBudget = PAIRING_BOOTSTRAP_MAX_CHUNKS_PER_TICK;
+        int remainingEntityBudget = PAIRING_BOOTSTRAP_MAX_ENTITIES_PER_TICK;
+        if (remainingChunkBudget <= 0 || remainingEntityBudget <= 0) {
+            return;
+        }
+
+        enqueuePlayerRings(state, world, PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS);
+        while (remainingChunkBudget > 0 && remainingEntityBudget > 0 && !state.pendingChunks.isEmpty()) {
+            long packedChunk = state.pendingChunks.removeFirst();
+            state.enqueuedChunks.remove(packedChunk);
+            int chunkX = ChunkPos.getPackedX(packedChunk);
+            int chunkZ = ChunkPos.getPackedZ(packedChunk);
+            remainingEntityBudget -= hydratePairingsInChunk(world, chunkX, chunkZ, remainingEntityBudget);
+            remainingChunkBudget--;
+        }
+
+        if (state.currentRadiusChunks < PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS) {
+            state.currentRadiusChunks++;
+        }
+
+        if (state.currentRadiusChunks > PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS) {
+            enqueuePlayerRings(state, world, state.currentRadiusChunks);
+        }
+
+        if (state.currentRadiusChunks >= PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS && state.pendingChunks.isEmpty()) {
+            PENDING_PAIRING_BOOTSTRAP.remove(world.getRegistryKey());
+        }
+    }
+
+    private static void enqueuePlayerRings(PairingBootstrapState state, ServerWorld world, int radiusChunks) {
+        if (world.getPlayers().isEmpty()) {
+            return;
+        }
+        for (PlayerEntity player : world.getPlayers()) {
+            int centerChunkX = MathHelper.floor(player.getX()) >> 4;
+            int centerChunkZ = MathHelper.floor(player.getZ()) >> 4;
+            enqueueChunkRing(state, centerChunkX, centerChunkZ, radiusChunks);
+        }
+    }
+
+    private static void enqueueChunkRing(PairingBootstrapState state, int centerChunkX, int centerChunkZ, int radiusChunks) {
+        if (radiusChunks == 0) {
+            enqueueChunk(state, centerChunkX, centerChunkZ);
+            return;
+        }
+        for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
+            enqueueChunk(state, centerChunkX + dx, centerChunkZ - radiusChunks);
+            enqueueChunk(state, centerChunkX + dx, centerChunkZ + radiusChunks);
+        }
+        for (int dz = -radiusChunks + 1; dz <= radiusChunks - 1; dz++) {
+            enqueueChunk(state, centerChunkX - radiusChunks, centerChunkZ + dz);
+            enqueueChunk(state, centerChunkX + radiusChunks, centerChunkZ + dz);
+        }
+    }
+
+    private static void enqueueChunk(PairingBootstrapState state, int chunkX, int chunkZ) {
+        long packedChunk = ChunkPos.toLong(chunkX, chunkZ);
+        if (state.enqueuedChunks.add(packedChunk)) {
+            state.pendingChunks.addLast(packedChunk);
+        }
+    }
+
+    private static int hydratePairingsInChunk(ServerWorld world, int chunkX, int chunkZ, int remainingEntityBudget) {
+        if (remainingEntityBudget <= 0) {
+            return 0;
+        }
+
+        Chunk chunk = world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+        if (chunk == null) {
+            return 0;
+        }
+
+        BlockPos startPos = chunk.getPos().getStartPos();
+        Box chunkBox = new Box(
+                startPos.getX(), world.getBottomY(), startPos.getZ(),
+                startPos.getX() + 16.0D, world.getTopY(), startPos.getZ() + 16.0D);
+        int refreshed = 0;
+
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, chunkBox, villager -> villager.isAlive() && villager.getVillagerData().getProfession() != VillagerProfession.NONE)) {
+            if (refreshed >= remainingEntityBudget) {
+                return refreshed;
+            }
+            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+            refreshed++;
+        }
+
+        for (ButcherGuardEntity guard : world.getEntitiesByClass(ButcherGuardEntity.class, chunkBox, Entity::isAlive)) {
+            if (refreshed >= remainingEntityBudget) {
+                return refreshed;
+            }
+            JobBlockPairingHelper.refreshButcherGuardPairings(world, guard);
+            refreshed++;
+        }
+
+        return refreshed;
+    }
+
+    private static final class PairingBootstrapState {
+        private final Deque<Long> pendingChunks = new ArrayDeque<>();
+        private final Set<Long> enqueuedChunks = new HashSet<>();
+        private int currentRadiusChunks = 0;
+        private boolean prunedAnchors;
     }
 
     private void runConversionHooksOnSchedule(ServerWorld world) {
