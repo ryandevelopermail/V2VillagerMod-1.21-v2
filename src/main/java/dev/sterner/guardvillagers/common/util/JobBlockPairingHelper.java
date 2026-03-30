@@ -65,6 +65,7 @@ public final class JobBlockPairingHelper {
     private static final double BOOTSTRAP_PLAYER_PROXIMITY_RADIUS = 256.0D;
     private static final int CHUNK_HYDRATION_RING = 1;
     private static final long BACKGROUND_CATCHUP_INTERVAL_TICKS = 40L;
+    private static final int BACKGROUND_CATCHUP_CHUNK_BUDGET = 8;
     private static final int BACKGROUND_CATCHUP_ENTITY_BUDGET = 64;
     private static final long WORLD_AGE_WARMUP_TICKS = 200L;
     private static final int CHUNK_LOAD_IMMEDIATE_ENTITY_BUDGET = 24;
@@ -356,7 +357,7 @@ public final class JobBlockPairingHelper {
             return;
         }
         state.lastCatchUpTick = time;
-        hydrateQueuedChunksWithBudget(world, state, BACKGROUND_CATCHUP_ENTITY_BUDGET);
+        hydrateQueuedChunksWithBudget(world, state, BACKGROUND_CATCHUP_ENTITY_BUDGET, BACKGROUND_CATCHUP_CHUNK_BUDGET);
     }
 
     public static void onWorldUnload(ServerWorld world) {
@@ -460,14 +461,31 @@ public final class JobBlockPairingHelper {
         }
     }
 
-    private static void hydrateQueuedChunksWithBudget(ServerWorld world, HydrationState state, int entityBudget) {
-        int remaining = entityBudget;
-        while (remaining > 0 && !state.pendingChunks.isEmpty()) {
+    private static void hydrateQueuedChunksWithBudget(ServerWorld world, HydrationState state, int entityBudget, int chunkBudget) {
+        int remainingEntityBudget = entityBudget;
+        int remainingChunkBudget = chunkBudget;
+        int processedChunks = 0;
+        int refreshedEntities = 0;
+        while (remainingEntityBudget > 0 && remainingChunkBudget > 0 && !state.pendingChunks.isEmpty()) {
             long packed = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packed);
             int chunkX = unpackChunkX(packed);
             int chunkZ = unpackChunkZ(packed);
-            remaining -= hydrateChunk(world, chunkX, chunkZ, remaining);
+            int hydrated = hydrateChunk(world, chunkX, chunkZ, remainingEntityBudget);
+            remainingEntityBudget -= hydrated;
+            remainingChunkBudget--;
+            processedChunks++;
+            refreshedEntities += hydrated;
+        }
+
+        if (processedChunks > 0 && refreshedEntities == 0) {
+            LOGGER.debug("background hydration made zero entity progress: world={} processedChunks={} refreshedEntities={} pendingChunks={} remainingEntityBudget={} remainingChunkBudget={}",
+                    world.getRegistryKey().getValue(),
+                    processedChunks,
+                    refreshedEntities,
+                    state.pendingChunks.size(),
+                    remainingEntityBudget,
+                    remainingChunkBudget);
         }
     }
 
