@@ -14,6 +14,9 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
@@ -26,8 +29,10 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public final class ProfessionDefinitions {
+    private static final Logger LOGGER = LoggerFactory.getLogger(ProfessionDefinitions.class);
     private static final int FALLBACK_CHUNK_RADIUS = 8;
     private static final int FALLBACK_CHUNK_SCAN_BUDGET = 24;
+    private static final int FALLBACK_CHUNK_ITERATION_BUDGET = 24;
     private static final long FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS = 200L;
     private static final long FALLBACK_CHUNK_COOLDOWN_TICKS = 400L;
     private static final long FALLBACK_SCAN_WARMUP_TICKS = 200L;
@@ -140,23 +145,45 @@ public final class ProfessionDefinitions {
             return;
         }
 
-        int remainingBudget = FALLBACK_CHUNK_SCAN_BUDGET;
-        while (remainingBudget > 0 && !state.pendingChunks.isEmpty()) {
+        int remainingChunkIterations = FALLBACK_CHUNK_ITERATION_BUDGET;
+        int remainingSuccessfulScans = FALLBACK_CHUNK_SCAN_BUDGET;
+        int dequeuedChunks = 0;
+        int skippedUnloaded = 0;
+        int skippedCooldown = 0;
+        int scanned = 0;
+
+        while (remainingChunkIterations > 0 && remainingSuccessfulScans > 0 && !state.pendingChunks.isEmpty()) {
             long packedChunkPos = state.pendingChunks.removeFirst();
             state.enqueuedChunks.remove(packedChunkPos);
+            remainingChunkIterations--;
+            dequeuedChunks++;
+
             int chunkX = ChunkPos.getPackedX(packedChunkPos);
             int chunkZ = ChunkPos.getPackedZ(packedChunkPos);
             if (!world.isChunkLoaded(chunkX, chunkZ)) {
+                skippedUnloaded++;
                 continue;
             }
 
             long lastScanTick = state.lastScannedChunkTicks.getOrDefault(packedChunkPos, Long.MIN_VALUE);
             if (now - lastScanTick < FALLBACK_CHUNK_COOLDOWN_TICKS) {
+                skippedCooldown++;
                 continue;
             }
+
             VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunkX, chunkZ);
             state.lastScannedChunkTicks.put(packedChunkPos, now);
-            remainingBudget--;
+            remainingSuccessfulScans--;
+            scanned++;
+        }
+
+        if (LOGGER.isDebugEnabled() && dequeuedChunks > 0) {
+            LOGGER.debug("Fallback candidate scan tick: dequeued={} skippedUnloaded={} skippedCooldown={} scanned={} remainingQueue={}", 
+                    dequeuedChunks,
+                    skippedUnloaded,
+                    skippedCooldown,
+                    scanned,
+                    state.pendingChunks.size());
         }
     }
 
