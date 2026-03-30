@@ -88,6 +88,7 @@ public class MasonWallBuilderGoal extends Goal {
     // The computed wall segments for this run (only on the elected builder)
     private List<BlockPos> pendingSegments = new ArrayList<>();
     private int currentSegmentIndex = 0;
+    private int lastProgressLoggedSegmentCount = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -146,12 +147,17 @@ public class MasonWallBuilderGoal extends Goal {
     public void start() {
         currentSegmentIndex = 0;
         currentTransferIndex = 0;
+        lastProgressLoggedSegmentCount = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
             stage = Stage.MOVE_TO_SEGMENT;
         } else {
             stage = Stage.DONE;
+        }
+        if (isElectedBuilder) {
+            LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={})",
+                    guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size());
         }
     }
 
@@ -376,6 +382,7 @@ public class MasonWallBuilderGoal extends Goal {
             cachedWallRect = null;
             cachedWallRectAnchor = null;
             cachedPoiFootprintSignature = null;
+            LOGGER.info("MasonWallBuilder {}: build cycle complete", guard.getUuidAsString());
             return;
         }
 
@@ -429,7 +436,20 @@ public class MasonWallBuilderGoal extends Goal {
                 guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
         currentSegmentIndex++;
+        maybeLogPlacementProgress();
         stage = Stage.MOVE_TO_SEGMENT;
+    }
+
+    private void maybeLogPlacementProgress() {
+        if (!isElectedBuilder || pendingSegments.isEmpty()) return;
+        int placed = currentSegmentIndex;
+        int total = pendingSegments.size();
+        if (placed >= total || placed - lastProgressLoggedSegmentCount >= 100) {
+            lastProgressLoggedSegmentCount = placed;
+            int percent = (int) Math.floor((placed * 100.0) / total);
+            LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
+                    guard.getUuidAsString(), placed, total, percent);
+        }
     }
 
     // -------------------------------------------------------------------------
