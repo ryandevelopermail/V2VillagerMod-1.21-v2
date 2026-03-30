@@ -68,6 +68,9 @@ public final class JobBlockPairingHelper {
     private static final int BACKGROUND_CATCHUP_ENTITY_BUDGET = 64;
     private static final long WORLD_AGE_WARMUP_TICKS = 200L;
     private static final int CHUNK_LOAD_IMMEDIATE_ENTITY_BUDGET = 24;
+    private static final int BOOTSTRAP_CHUNK_ENQUEUE_BUDGET = 384;
+    private static final int MAX_BOOTSTRAP_CHUNK_SPAN_PER_AXIS = 96;
+    private static final int ANCHOR_SEED_SAMPLE_COUNT = 8;
     private static final Map<RegistryKey<World>, HydrationState> HYDRATION_STATE = new HashMap<>();
 
     static {
@@ -320,13 +323,21 @@ public final class JobBlockPairingHelper {
     }
 
     public static void refreshWorldPairings(ServerWorld world) {
-        VillageAnchorState.get(world.getServer()).pruneInvalidAnchors(world);
-        Box scanBox = buildPlayerProximityBox(world, BOOTSTRAP_PLAYER_PROXIMITY_RADIUS);
-        if (scanBox != null) {
-            enqueueChunksForBox(world, scanBox);
-            if (world.getTime() >= WORLD_AGE_WARMUP_TICKS) {
-                refreshEntitiesInBox(world, scanBox);
-            }
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        anchorState.pruneInvalidAnchors(world);
+
+        HydrationState state = stateFor(world);
+        Box scanBox = buildSpawnPrepSafeScanBox(world, anchorState, state, BOOTSTRAP_PLAYER_PROXIMITY_RADIUS);
+        if (scanBox == null) {
+            // Spawn-prep safe: no nearby players and no known anchors means no broad fallback scan.
+            state.bootstrapScanCursor = null;
+            return;
+        }
+
+        // Spawn-prep safe: queue chunk-local hydration with a hard enqueue budget and resume cursor.
+        enqueueChunksForBoxWithBudget(world, state, scanBox, BOOTSTRAP_CHUNK_ENQUEUE_BUDGET);
+        if (world.getTime() >= WORLD_AGE_WARMUP_TICKS) {
+            refreshEntitiesInBox(world, scanBox);
         }
     }
 
@@ -353,6 +364,15 @@ public final class JobBlockPairingHelper {
     }
 
     @Nullable
+    private static Box buildSpawnPrepSafeScanBox(ServerWorld world, VillageAnchorState anchorState, HydrationState state, double radius) {
+        Box playerBox = buildPlayerProximityBox(world, radius);
+        if (playerBox != null) {
+            return playerBox;
+        }
+        return buildAnchorSeedBox(anchorState, world, state, radius);
+    }
+
+    @Nullable
     private static Box buildPlayerProximityBox(ServerWorld world, double radius) {
         var players = world.getPlayers();
         if (players.isEmpty()) {
@@ -376,6 +396,38 @@ public final class JobBlockPairingHelper {
         return new Box(minX - radius, minY - radius, minZ - radius, maxX + radius, maxY + radius, maxZ + radius);
     }
 
+
+
+    @Nullable
+    private static Box buildAnchorSeedBox(VillageAnchorState anchorState, ServerWorld world, HydrationState state, double radius) {
+        var anchors = new ArrayList<>(anchorState.getAllQmChests(world));
+        if (anchors.isEmpty()) {
+            return null;
+        }
+
+        int sampleSize = Math.min(ANCHOR_SEED_SAMPLE_COUNT, anchors.size());
+        int start = Math.floorMod(state.anchorSeedCursor, anchors.size());
+        state.anchorSeedCursor = (start + sampleSize) % anchors.size();
+
+        double minX = Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        double maxZ = -Double.MAX_VALUE;
+        for (int i = 0; i < sampleSize; i++) {
+            BlockPos anchor = anchors.get((start + i) % anchors.size());
+            minX = Math.min(minX, anchor.getX());
+            minY = Math.min(minY, anchor.getY());
+            minZ = Math.min(minZ, anchor.getZ());
+            maxX = Math.max(maxX, anchor.getX());
+            maxY = Math.max(maxY, anchor.getY());
+            maxZ = Math.max(maxZ, anchor.getZ());
+        }
+
+        return new Box(minX - radius, minY - radius, minZ - radius, maxX + radius, maxY + radius, maxZ + radius);
+    }
+
     private static void refreshEntitiesInBox(ServerWorld world, Box box) {
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, box, JobBlockPairingHelper::isEmployedVillager)) {
             refreshVillagerPairings(world, villager);
@@ -385,16 +437,26 @@ public final class JobBlockPairingHelper {
         }
     }
 
-    private static void enqueueChunksForBox(ServerWorld world, Box box) {
-        int minChunkX = MathHelper.floor(box.minX) >> 4;
-        int maxChunkX = MathHelper.floor(box.maxX) >> 4;
-        int minChunkZ = MathHelper.floor(box.minZ) >> 4;
-        int maxChunkZ = MathHelper.floor(box.maxZ) >> 4;
-        HydrationState state = stateFor(world);
-        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-                enqueueChunk(state, chunkX, chunkZ);
-            }
+    private static void enqueueChunksForBoxWithBudget(ServerWorld world, HydrationState state, Box box, int chunkBudget) {
+        if (chunkBudget <= 0) {
+            return;
+        }
+
+        ChunkBoxCursor nextCursor = ChunkBoxCursor.forBox(box, MAX_BOOTSTRAP_CHUNK_SPAN_PER_AXIS);
+        if (state.bootstrapScanCursor == null || !state.bootstrapScanCursor.sameBounds(nextCursor)) {
+            state.bootstrapScanCursor = nextCursor;
+        }
+
+        ChunkBoxCursor cursor = state.bootstrapScanCursor;
+        int remaining = chunkBudget;
+        while (remaining > 0 && !cursor.complete()) {
+            enqueueChunk(state, cursor.nextChunkX, cursor.nextChunkZ);
+            cursor.advance();
+            remaining--;
+        }
+
+        if (cursor.complete()) {
+            state.bootstrapScanCursor = null;
         }
     }
 
@@ -494,6 +556,63 @@ public final class JobBlockPairingHelper {
         private final Deque<Long> pendingChunks = new ArrayDeque<>();
         private final Set<Long> enqueuedChunks = new HashSet<>();
         private long lastCatchUpTick = Long.MIN_VALUE;
+        private int anchorSeedCursor;
+        @Nullable
+        private ChunkBoxCursor bootstrapScanCursor;
+    }
+
+    private static final class ChunkBoxCursor {
+        private final int minChunkX;
+        private final int maxChunkX;
+        private final int minChunkZ;
+        private final int maxChunkZ;
+        private int nextChunkX;
+        private int nextChunkZ;
+
+        private ChunkBoxCursor(int minChunkX, int maxChunkX, int minChunkZ, int maxChunkZ) {
+            this.minChunkX = minChunkX;
+            this.maxChunkX = maxChunkX;
+            this.minChunkZ = minChunkZ;
+            this.maxChunkZ = maxChunkZ;
+            this.nextChunkX = minChunkX;
+            this.nextChunkZ = minChunkZ;
+        }
+
+        private static ChunkBoxCursor forBox(Box box, int maxChunkSpanPerAxis) {
+            int minChunkX = MathHelper.floor(box.minX) >> 4;
+            int maxChunkX = MathHelper.floor(box.maxX) >> 4;
+            int minChunkZ = MathHelper.floor(box.minZ) >> 4;
+            int maxChunkZ = MathHelper.floor(box.maxZ) >> 4;
+
+            int centerChunkX = (minChunkX + maxChunkX) >> 1;
+            int centerChunkZ = (minChunkZ + maxChunkZ) >> 1;
+            int halfSpan = Math.max(1, maxChunkSpanPerAxis / 2);
+
+            return new ChunkBoxCursor(
+                    Math.max(minChunkX, centerChunkX - halfSpan),
+                    Math.min(maxChunkX, centerChunkX + halfSpan),
+                    Math.max(minChunkZ, centerChunkZ - halfSpan),
+                    Math.min(maxChunkZ, centerChunkZ + halfSpan));
+        }
+
+        private boolean sameBounds(ChunkBoxCursor other) {
+            return this.minChunkX == other.minChunkX
+                    && this.maxChunkX == other.maxChunkX
+                    && this.minChunkZ == other.minChunkZ
+                    && this.maxChunkZ == other.maxChunkZ;
+        }
+
+        private boolean complete() {
+            return nextChunkX > maxChunkX;
+        }
+
+        private void advance() {
+            nextChunkZ++;
+            if (nextChunkZ > maxChunkZ) {
+                nextChunkZ = minChunkZ;
+                nextChunkX++;
+            }
+        }
     }
 
     private static boolean pairFarmerWithBanner(ServerWorld world, VillagerEntity villager, BlockPos bannerPos) {

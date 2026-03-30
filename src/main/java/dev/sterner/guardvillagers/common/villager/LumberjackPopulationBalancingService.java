@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -15,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class LumberjackPopulationBalancingService {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackPopulationBalancingService.class);
@@ -35,8 +37,14 @@ public final class LumberjackPopulationBalancingService {
     @Deprecated
     private static final int MIN_VILLAGERS_PER_GUARD = RATIO_TOTAL;
 
+    private static final int SCHEDULED_REFRESH_REGION_BUDGET = 24;
+    private static final int PLAYER_SEED_SCAN_RANGE = 192;
+    private static final int ANCHOR_SEED_SCAN_RANGE = 128;
+    private static final int MAX_ANCHOR_SEEDS_PER_REFRESH = 8;
+
     private static final Map<RegistryKey<World>, Map<Long, RegionSnapshot>> LATEST_SNAPSHOTS = new HashMap<>();
     private static final Map<RegistryKey<World>, Long> LAST_REFRESH_TICK = new HashMap<>();
+    private static final Map<RegistryKey<World>, Integer> ANCHOR_SEED_CURSOR = new HashMap<>();
 
     private LumberjackPopulationBalancingService() {
     }
@@ -53,6 +61,7 @@ public final class LumberjackPopulationBalancingService {
     public static void onWorldUnload(RegistryKey<World> worldKey) {
         LATEST_SNAPSHOTS.remove(worldKey);
         LAST_REFRESH_TICK.remove(worldKey);
+        ANCHOR_SEED_CURSOR.remove(worldKey);
     }
 
     public static int getSnapshotRegionCount(ServerWorld world) {
@@ -120,24 +129,23 @@ public final class LumberjackPopulationBalancingService {
         Map<Long, RegionSnapshot> worldSnapshots = LATEST_SNAPSHOTS.computeIfAbsent(world.getRegistryKey(), ignored -> new HashMap<>());
         worldSnapshots.clear();
 
-        for (AxeGuardEntity guard : world.getEntitiesByClass(AxeGuardEntity.class,
-                new Box(world.getWorldBorder().getBoundWest(), world.getBottomY(), world.getWorldBorder().getBoundNorth(), world.getWorldBorder().getBoundEast(), world.getTopY(), world.getWorldBorder().getBoundSouth()),
-                LumberjackPopulationBalancingService::isActiveLumberjackGuard)) {
-            RegionSnapshot snapshot = buildSnapshot(world, guard.getBlockPos());
+        Set<Long> scheduledRegions = collectScheduledRefreshRegions(world);
+        int built = 0;
+        for (Long regionKey : scheduledRegions) {
+            if (built >= SCHEDULED_REFRESH_REGION_BUDGET) {
+                break;
+            }
+            BlockPos center = regionCenterFromRegionKey(regionKey, world.getBottomY());
+            RegionSnapshot snapshot = buildSnapshot(world, center);
             worldSnapshots.put(snapshot.regionKey(), snapshot);
+            built++;
         }
 
         LAST_REFRESH_TICK.put(world.getRegistryKey(), world.getTime());
+
         if (worldSnapshots.isEmpty()) {
-            RegionSnapshot fallback = buildSnapshot(world, BlockPos.ORIGIN);
-            worldSnapshots.put(fallback.regionKey(), fallback);
-            LOGGER.debug("lumberjack-balance snapshot source={} region={} villagers={} activeGuards={} unemployed={} ratioThreshold=1:{}",
-                    source,
-                    fallback.regionCenter().toShortString(),
-                    fallback.v2Villagers(),
-                    fallback.activeLumberjackGuards(),
-                    fallback.unemployedCandidates(),
-                    MIN_VILLAGERS_PER_GUARD);
+            // Spawn-prep safe: no player/anchor seeds available yet, so skip broad fallback scans.
+            LOGGER.debug("lumberjack-balance snapshot source={} skipped (no player or anchor seeds)", source);
             return;
         }
 
@@ -149,6 +157,51 @@ public final class LumberjackPopulationBalancingService {
                     snapshot.activeLumberjackGuards(),
                     snapshot.unemployedCandidates(),
                     MIN_VILLAGERS_PER_GUARD);
+        }
+    }
+    private static Set<Long> collectScheduledRefreshRegions(ServerWorld world) {
+        Set<Long> regionKeys = new java.util.LinkedHashSet<>();
+
+        for (var player : world.getPlayers()) {
+            BlockPos pos = player.getBlockPos();
+            addRegionAndNeighbors(regionKeys, pos, PLAYER_SEED_SCAN_RANGE);
+            if (regionKeys.size() >= SCHEDULED_REFRESH_REGION_BUDGET) {
+                return regionKeys;
+            }
+        }
+
+        var anchorState = VillageAnchorState.get(world.getServer());
+        var anchors = new java.util.ArrayList<>(anchorState.getAllQmChests(world));
+        if (anchors.isEmpty()) {
+            return regionKeys;
+        }
+
+        RegistryKey<World> worldKey = world.getRegistryKey();
+        int start = Math.floorMod(ANCHOR_SEED_CURSOR.getOrDefault(worldKey, 0), anchors.size());
+        int sampleSize = Math.min(MAX_ANCHOR_SEEDS_PER_REFRESH, anchors.size());
+        ANCHOR_SEED_CURSOR.put(worldKey, (start + sampleSize) % anchors.size());
+
+        for (int i = 0; i < sampleSize; i++) {
+            BlockPos anchor = anchors.get((start + i) % anchors.size());
+            addRegionAndNeighbors(regionKeys, anchor, ANCHOR_SEED_SCAN_RANGE);
+            if (regionKeys.size() >= SCHEDULED_REFRESH_REGION_BUDGET) {
+                break;
+            }
+        }
+
+        return regionKeys;
+    }
+
+    private static void addRegionAndNeighbors(Set<Long> regionKeys, BlockPos origin, int rangeBlocks) {
+        int minRegionX = Math.floorDiv(origin.getX() - rangeBlocks, REGION_SIZE_BLOCKS);
+        int maxRegionX = Math.floorDiv(origin.getX() + rangeBlocks, REGION_SIZE_BLOCKS);
+        int minRegionZ = Math.floorDiv(origin.getZ() - rangeBlocks, REGION_SIZE_BLOCKS);
+        int maxRegionZ = Math.floorDiv(origin.getZ() + rangeBlocks, REGION_SIZE_BLOCKS);
+
+        for (int regionX = minRegionX; regionX <= maxRegionX; regionX++) {
+            for (int regionZ = minRegionZ; regionZ <= maxRegionZ; regionZ++) {
+                regionKeys.add(((long) regionX << 32) | (regionZ & 0xffffffffL));
+            }
         }
     }
 
@@ -208,6 +261,14 @@ public final class LumberjackPopulationBalancingService {
         int centerX = regionX * REGION_SIZE_BLOCKS + REGION_SIZE_BLOCKS / 2;
         int centerZ = regionZ * REGION_SIZE_BLOCKS + REGION_SIZE_BLOCKS / 2;
         return new BlockPos(centerX, pos.getY(), centerZ);
+    }
+
+    private static BlockPos regionCenterFromRegionKey(long regionKey, int y) {
+        int regionX = (int) (regionKey >> 32);
+        int regionZ = (int) regionKey;
+        int centerX = regionX * REGION_SIZE_BLOCKS + REGION_SIZE_BLOCKS / 2;
+        int centerZ = regionZ * REGION_SIZE_BLOCKS + REGION_SIZE_BLOCKS / 2;
+        return new BlockPos(centerX, y, centerZ);
     }
 
     private record RegionSnapshot(long regionKey,
