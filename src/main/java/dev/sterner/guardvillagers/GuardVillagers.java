@@ -103,6 +103,8 @@ public class GuardVillagers implements ModInitializer {
     private static final int PAIRING_BOOTSTRAP_MAX_ENTITIES_PER_TICK = 96;
     private static final int PAIRING_BOOTSTRAP_ACTIVE_RADIUS_CHUNKS = 3;
     private static final int PAIRING_BOOTSTRAP_FINAL_RADIUS_CHUNKS = 16;
+    private static final long WORLD_LOAD_PHASE_WARN_THRESHOLD_MS = 250L;
+    private static final long WORLD_LOAD_TOTAL_WARN_THRESHOLD_MS = 500L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -271,10 +273,16 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerWorldEvents.LOAD.register((server, world) -> {
-            PENDING_PAIRING_BOOTSTRAP.put(world.getRegistryKey(), new PairingBootstrapState());
-            VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
-            reconcileConvertedWorkerReservations(world, "world-load");
-            RecipeDemandIndex.forWorld(world);
+            long worldLoadStartNanos = System.nanoTime();
+            runTimedWorldLoadPhase(world, "pairing bootstrap", WORLD_LOAD_PHASE_WARN_THRESHOLD_MS,
+                    () -> PENDING_PAIRING_BOOTSTRAP.put(world.getRegistryKey(), new PairingBootstrapState()));
+            runTimedWorldLoadPhase(world, "bell/chest reconciliation", WORLD_LOAD_PHASE_WARN_THRESHOLD_MS,
+                    () -> VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world));
+            runTimedWorldLoadPhase(world, "reservation reconciliation", WORLD_LOAD_PHASE_WARN_THRESHOLD_MS,
+                    () -> reconcileConvertedWorkerReservations(world, "world-load"));
+            runTimedWorldLoadPhase(world, "recipe index build", WORLD_LOAD_PHASE_WARN_THRESHOLD_MS,
+                    () -> RecipeDemandIndex.forWorld(world));
+            logWorldLoadSummary(world, elapsedMsSince(worldLoadStartNanos), WORLD_LOAD_TOTAL_WARN_THRESHOLD_MS);
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
@@ -339,6 +347,43 @@ public class GuardVillagers implements ModInitializer {
                 pairedPos.toShortString(),
                 world.getRegistryKey().getValue(),
                 source);
+    }
+
+    private static void runTimedWorldLoadPhase(ServerWorld world, String taskName, long warnThresholdMs, Runnable task) {
+        long startNanos = System.nanoTime();
+        task.run();
+        long durationMs = elapsedMsSince(startNanos);
+        if (durationMs >= warnThresholdMs) {
+            LOGGER.warn("[world-load-timing] world={} task={} durationMs={} thresholdMs={}",
+                    world.getRegistryKey().getValue(),
+                    taskName,
+                    durationMs,
+                    warnThresholdMs);
+            return;
+        }
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("[world-load-timing] world={} task={} durationMs={}",
+                    world.getRegistryKey().getValue(),
+                    taskName,
+                    durationMs);
+        }
+    }
+
+    private static void logWorldLoadSummary(ServerWorld world, long totalDurationMs, long warnThresholdMs) {
+        if (totalDurationMs >= warnThresholdMs) {
+            LOGGER.warn("[world-load-timing] world={} task=summary durationMs={} thresholdMs={}",
+                    world.getRegistryKey().getValue(),
+                    totalDurationMs,
+                    warnThresholdMs);
+            return;
+        }
+        LOGGER.info("[world-load-timing] world={} task=summary durationMs={}",
+                world.getRegistryKey().getValue(),
+                totalDurationMs);
+    }
+
+    private static long elapsedMsSince(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 
     private static void runPairingBootstrapStep(ServerWorld world) {
