@@ -105,6 +105,10 @@ public class GuardVillagers implements ModInitializer {
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
     private static final Map<RegistryKey<World>, ConversionScheduleState> CONVERSION_SCHEDULE_STATES = new HashMap<>();
     private static final Map<RegistryKey<World>, PairingBootstrapState> PENDING_PAIRING_BOOTSTRAP = new HashMap<>();
+    private static final Set<RegistryKey<World>> WORLD_LOAD_SUMMARY_LOGGED = new HashSet<>();
+    private static final Set<RegistryKey<World>> CONVERSION_WARMUP_START_LOGGED = new HashSet<>();
+    private static final Set<RegistryKey<World>> CONVERSION_WARMUP_END_LOGGED = new HashSet<>();
+    private static final Map<RegistryKey<World>, Map<String, Long>> NON_BREACH_STAGE_LAST_LOG_TICK = new HashMap<>();
     private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
     private static final int PAIRING_BOOTSTRAP_MAX_CHUNKS_PER_TICK = 4;
     private static final int PAIRING_BOOTSTRAP_MAX_ENTITIES_PER_TICK = 96;
@@ -122,6 +126,7 @@ public class GuardVillagers implements ModInitializer {
     private static final int CONVERSION_CATCH_UP_MAX_RUNS_PER_TICK = 2;
     private static final int CONVERSION_PENDING_RUN_CAP = 32;
     private static final long EARLY_TICK_STAGE_WARN_THRESHOLD_MS = 50L;
+    private static final long NON_BREACH_TIMING_SAMPLE_INTERVAL_TICKS = 200L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -300,6 +305,10 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerWorldEvents.LOAD.register((server, world) -> {
+            WORLD_LOAD_SUMMARY_LOGGED.remove(world.getRegistryKey());
+            CONVERSION_WARMUP_START_LOGGED.remove(world.getRegistryKey());
+            CONVERSION_WARMUP_END_LOGGED.remove(world.getRegistryKey());
+            NON_BREACH_STAGE_LAST_LOG_TICK.remove(world.getRegistryKey());
             long worldLoadStartNanos = System.nanoTime();
             runTimedWorldLoadPhase(world, "pairing bootstrap", WORLD_LOAD_PHASE_WARN_THRESHOLD_MS,
                     () -> PENDING_PAIRING_BOOTSTRAP.put(world.getRegistryKey(), new PairingBootstrapState()));
@@ -315,6 +324,10 @@ public class GuardVillagers implements ModInitializer {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             CONVERSION_SCHEDULE_STATES.remove(world.getRegistryKey());
             PENDING_PAIRING_BOOTSTRAP.remove(world.getRegistryKey());
+            WORLD_LOAD_SUMMARY_LOGGED.remove(world.getRegistryKey());
+            CONVERSION_WARMUP_START_LOGGED.remove(world.getRegistryKey());
+            CONVERSION_WARMUP_END_LOGGED.remove(world.getRegistryKey());
+            NON_BREACH_STAGE_LAST_LOG_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
             JobBlockPairingHelper.onWorldUnload(world);
@@ -420,24 +433,25 @@ public class GuardVillagers implements ModInitializer {
             return;
         }
         if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug("[world-load-timing] world={} task={} durationMs={}",
-                    world.getRegistryKey().getValue(),
-                    taskName,
-                    durationMs);
+            if (shouldLogNonBreachTiming(world, "world-load:" + taskName, world.getTime())) {
+                LOGGER.debug("[world-load-timing] world={} task={} durationMs={}",
+                        world.getRegistryKey().getValue(),
+                        taskName,
+                        durationMs);
+            }
         }
     }
 
     private static void logWorldLoadSummary(ServerWorld world, long totalDurationMs, long warnThresholdMs) {
+        if (!WORLD_LOAD_SUMMARY_LOGGED.add(world.getRegistryKey())) {
+            return;
+        }
         if (totalDurationMs >= warnThresholdMs) {
             LOGGER.warn("[world-load-timing] world={} task=summary durationMs={} thresholdMs={}",
                     world.getRegistryKey().getValue(),
                     totalDurationMs,
                     warnThresholdMs);
-            return;
         }
-        LOGGER.info("[world-load-timing] world={} task=summary durationMs={}",
-                world.getRegistryKey().getValue(),
-                totalDurationMs);
     }
 
     private static long elapsedMsSince(long startNanos) {
@@ -621,7 +635,7 @@ public class GuardVillagers implements ModInitializer {
         }
 
         if (state.warmupActive) {
-            if (!state.warmupStartLogged) {
+            if (!state.warmupStartLogged && CONVERSION_WARMUP_START_LOGGED.add(worldKey)) {
                 state.warmupStartLogged = true;
                 LOGGER.info("[conversion-schedule] world={} warmup-start tick={} downsampleFactor={} worldAgeThresholdTicks={}",
                         worldKey.getValue(), worldTick, CONVERSION_WARMUP_DOWNSAMPLE_FACTOR, CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS);
@@ -639,9 +653,11 @@ public class GuardVillagers implements ModInitializer {
 
             state.warmupActive = false;
             long warmupDuration = Math.max(0L, worldTick - state.warmupStartTick);
-            LOGGER.info("[conversion-schedule] world={} warmup-end tick={} durationTicks={} pendingBacklog={} playersOnline={} ageReady={}",
-                    worldKey.getValue(), worldTick, warmupDuration, state.pendingRuns, !world.getPlayers().isEmpty(),
-                    worldTick >= CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS);
+            if (CONVERSION_WARMUP_END_LOGGED.add(worldKey)) {
+                LOGGER.info("[conversion-schedule] world={} warmup-end tick={} durationTicks={} pendingBacklog={} playersOnline={} ageReady={}",
+                        worldKey.getValue(), worldTick, warmupDuration, state.pendingRuns, !world.getPlayers().isEmpty(),
+                        worldTick >= CONVERSION_WARMUP_WORLD_AGE_THRESHOLD_TICKS);
+            }
         }
 
         int runsToExecute = Math.min(state.pendingRuns, CONVERSION_CATCH_UP_MAX_RUNS_PER_TICK);
@@ -688,8 +704,27 @@ public class GuardVillagers implements ModInitializer {
                     world.getRegistryKey().getValue(), tick, stageName, durationMs, EARLY_TICK_STAGE_WARN_THRESHOLD_MS, queueBefore, queueAfter);
             return;
         }
-        LOGGER.debug("[early-tick-timing] world={} tick={} stage={} durationMs={} queueBefore={} queueAfter={}",
-                world.getRegistryKey().getValue(), tick, stageName, durationMs, queueBefore, queueAfter);
+        if (shouldLogNonBreachTiming(world, stageName, tick)) {
+            LOGGER.debug("[early-tick-timing] world={} tick={} stage={} durationMs={} queueBefore={} queueAfter={}",
+                    world.getRegistryKey().getValue(), tick, stageName, durationMs, queueBefore, queueAfter);
+        }
+    }
+
+    private static boolean shouldLogNonBreachTiming(ServerWorld world, String stageName, long tick) {
+        if (!GuardVillagersConfig.enablePerformanceTelemetry) {
+            return false;
+        }
+        if (!LOGGER.isDebugEnabled()) {
+            return false;
+        }
+        RegistryKey<World> worldKey = world.getRegistryKey();
+        Map<String, Long> stageLastLog = NON_BREACH_STAGE_LAST_LOG_TICK.computeIfAbsent(worldKey, ignored -> new HashMap<>());
+        Long lastTick = stageLastLog.get(stageName);
+        if (lastTick != null && tick - lastTick < NON_BREACH_TIMING_SAMPLE_INTERVAL_TICKS) {
+            return false;
+        }
+        stageLastLog.put(stageName, tick);
+        return true;
     }
 
     private static int executeBacklogDump(ServerCommandSource source) {
