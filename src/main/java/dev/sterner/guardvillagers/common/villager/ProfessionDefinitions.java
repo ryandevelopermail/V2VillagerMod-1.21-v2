@@ -30,6 +30,7 @@ public final class ProfessionDefinitions {
     private static final int FALLBACK_CHUNK_SCAN_BUDGET = 24;
     private static final long FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS = 200L;
     private static final long FALLBACK_CHUNK_COOLDOWN_TICKS = 400L;
+    private static final long FALLBACK_SCAN_WARMUP_TICKS = 200L;
 
     private static final List<SpecialModifier> GLOBAL_SPECIAL_MODIFIERS = List.of(
             new SpecialModifier(GuardVillagers.id("guard_stand_modifier"), GuardVillagers.GUARD_STAND_MODIFIER, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE),
@@ -132,6 +133,11 @@ public final class ProfessionDefinitions {
         if (now - state.lastQueueRefreshTick >= FALLBACK_QUEUE_REFRESH_INTERVAL_TICKS) {
             refreshChunkQueueNearPlayers(world, state);
             state.lastQueueRefreshTick = now;
+        }
+        if (now < FALLBACK_SCAN_WARMUP_TICKS) {
+            // Warmup mode: queue chunk work but defer entity scans until the world has
+            // settled for a few seconds after load/join.
+            return;
         }
 
         int remainingBudget = FALLBACK_CHUNK_SCAN_BUDGET;

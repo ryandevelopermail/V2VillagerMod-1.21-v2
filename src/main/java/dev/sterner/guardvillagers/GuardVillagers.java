@@ -27,6 +27,7 @@ import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.behavior.FishermanBehavior;
 import dev.sterner.guardvillagers.compat.morevillagers.MoreVillagersBehaviorBridge;
 import net.fabricmc.loader.api.FabricLoader;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -291,6 +292,7 @@ public class GuardVillagers implements ModInitializer {
             RecipeDemandIndex.clearWorld(world);
             JobBlockPairingHelper.onWorldUnload(world);
             ProfessionDefinitions.onWorldUnload(world);
+            FishermanBehavior.onWorldUnload(world);
         });
 
         ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {
@@ -326,6 +328,7 @@ public class GuardVillagers implements ModInitializer {
                 }
                 runPairingBootstrapStep(world);
                 JobBlockPairingHelper.runBackgroundCatchUp(world);
+                FishermanBehavior.tickDeferredFallbackScans(world);
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
         });
