@@ -126,6 +126,17 @@ public class VillagePenRegistry extends PersistentState {
         JOB_SITE_FALLBACK_CACHE_TTL_TICKS = Math.max(1, ttlTicks);
     }
 
+    public static int getDeferredFallbackScanCount(MinecraftServer server) {
+        VillagePenRegistry registry = get(server);
+        int deferred = 0;
+        for (FallbackCacheEntry entry : registry.fallbackScanCache.values()) {
+            if (entry.continuation != null) {
+                deferred++;
+            }
+        }
+        return deferred;
+    }
+
     private static Type<VillagePenRegistry> getType() {
         return new Type<>(VillagePenRegistry::new, VillagePenRegistry::fromNbt, null);
     }

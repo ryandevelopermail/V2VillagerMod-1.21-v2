@@ -29,6 +29,7 @@ import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import dev.sterner.guardvillagers.common.villager.behavior.FishermanBehavior;
 import dev.sterner.guardvillagers.compat.morevillagers.MoreVillagersBehaviorBridge;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.loader.api.FabricLoader;
 import eu.midnightdust.lib.config.MidnightConfig;
 import net.fabricmc.api.ModInitializer;
@@ -61,10 +62,13 @@ import net.minecraft.registry.Registries;
 import net.minecraft.registry.Registry;
 import net.minecraft.registry.RegistryKey;
 import net.minecraft.screen.ScreenHandlerType;
+import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.sound.BlockSoundGroup;
+import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.Identifier;
@@ -114,6 +118,7 @@ public class GuardVillagers implements ModInitializer {
     private static final int CONVERSION_WARMUP_DOWNSAMPLE_FACTOR = 6;
     private static final int CONVERSION_CATCH_UP_MAX_RUNS_PER_TICK = 2;
     private static final int CONVERSION_PENDING_RUN_CAP = 32;
+    private static final long EARLY_TICK_STAGE_WARN_THRESHOLD_MS = 50L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -212,6 +217,11 @@ public class GuardVillagers implements ModInitializer {
 
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                dispatcher.register(CommandManager.literal("guardvillagers")
+                        .requires(source -> source.hasPermissionLevel(2))
+                        .then(CommandManager.literal("backlogs")
+                                .executes(context -> executeBacklogDump(context.getSource())))));
 
         ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> {
             entries.add(GUARD_SPAWN_EGG);
@@ -277,7 +287,12 @@ public class GuardVillagers implements ModInitializer {
         });
 
         ServerChunkEvents.CHUNK_LOAD.register((world, chunk) -> {
+            int queueBefore = VillagerConversionCandidateIndex.getQueuedChunkScanCount(world);
+            long stageStartNanos = System.nanoTime();
             VillagerConversionCandidateIndex.enqueueChunkScan(world, chunk.getPos().x, chunk.getPos().z);
+            int queueAfter = VillagerConversionCandidateIndex.getQueuedChunkScanCount(world);
+            logTimedEarlyTickStage(world, "chunk-load-candidate-enqueue", world.getTime(), elapsedMsSince(stageStartNanos),
+                    queueBefore, queueAfter);
             JobBlockPairingHelper.onChunkLoaded(world, chunk);
         });
 
@@ -330,9 +345,15 @@ public class GuardVillagers implements ModInitializer {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
                 processQueuedCandidateChunkMarking(world);
-                LumberjackPopulationBalancingService.tick(world);
+                runTimedEarlyTickStage(world, "lumberjack-balancing-tick", world.getTime(),
+                        LumberjackPopulationBalancingService::getSnapshotRegionCount,
+                        ignored -> LumberjackPopulationBalancingService.getSnapshotRegionCount(world),
+                        () -> LumberjackPopulationBalancingService.tick(world));
                 VillageLumberjackSpawnManager.tick(world);
-                VillagePenRegistry.tick(world);
+                runTimedEarlyTickStage(world, "pen-registry-tick", world.getTime(),
+                        ignored -> VillagePenRegistry.getDeferredFallbackScanCount(world.getServer()),
+                        ignored -> VillagePenRegistry.getDeferredFallbackScanCount(world.getServer()),
+                        () -> VillagePenRegistry.tick(world));
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
@@ -358,7 +379,11 @@ public class GuardVillagers implements ModInitializer {
                 : CANDIDATE_CHUNK_SCAN_LIVE_BUDGET)
                 : CANDIDATE_CHUNK_SCAN_STARTUP_BUDGET;
 
+        long stageStartNanos = System.nanoTime();
         VillagerConversionCandidateIndex.processQueuedChunkScans(world, budget);
+        int queueAfter = VillagerConversionCandidateIndex.getQueuedChunkScanCount(world);
+        logTimedEarlyTickStage(world, "chunk-load-candidate-process", world.getTime(), elapsedMsSince(stageStartNanos),
+                queuedChunks, queueAfter);
     }
 
 
@@ -568,7 +593,7 @@ public class GuardVillagers implements ModInitializer {
             if (!warmupReady) {
                 long downsampleInterval = executionInterval * CONVERSION_WARMUP_DOWNSAMPLE_FACTOR;
                 if (state.pendingRuns > 0 && worldTick % downsampleInterval == 0L) {
-                    runConversionHooks(world, worldKey, 1);
+                    runConversionHooks(world, worldKey, worldTick, 1, state.pendingRuns);
                     state.pendingRuns--;
                 }
                 return;
@@ -586,15 +611,66 @@ public class GuardVillagers implements ModInitializer {
             return;
         }
 
-        runConversionHooks(world, worldKey, runsToExecute);
+        runConversionHooks(world, worldKey, worldTick, runsToExecute, state.pendingRuns);
         state.pendingRuns -= runsToExecute;
     }
 
-    private static void runConversionHooks(ServerWorld world, RegistryKey<World> worldKey, int runCount) {
+    private static void runConversionHooks(ServerWorld world, RegistryKey<World> worldKey, long tick, int runCount, int pendingBacklog) {
+        int queueBefore = Math.max(0, pendingBacklog);
+        long stageStartNanos = System.nanoTime();
         for (int i = 0; i < runCount; i++) {
             ProfessionDefinitions.runConversionHooks(world);
             LAST_CONVERSION_EXECUTION_TICK.put(worldKey, world.getTime());
         }
+        int queueAfter = Math.max(0, pendingBacklog - runCount);
+        logTimedEarlyTickStage(world, "conversion-hook-pass", tick, elapsedMsSince(stageStartNanos), queueBefore, queueAfter);
+    }
+
+    private static void runTimedEarlyTickStage(ServerWorld world,
+                                               String stageName,
+                                               long tick,
+                                               java.util.function.Function<ServerWorld, Integer> queueBeforeProvider,
+                                               java.util.function.Function<ServerWorld, Integer> queueAfterProvider,
+                                               Runnable stageWork) {
+        int queueBefore = Math.max(0, queueBeforeProvider.apply(world));
+        long stageStartNanos = System.nanoTime();
+        stageWork.run();
+        int queueAfter = Math.max(0, queueAfterProvider.apply(world));
+        logTimedEarlyTickStage(world, stageName, tick, elapsedMsSince(stageStartNanos), queueBefore, queueAfter);
+    }
+
+    private static void logTimedEarlyTickStage(ServerWorld world,
+                                               String stageName,
+                                               long tick,
+                                               long durationMs,
+                                               int queueBefore,
+                                               int queueAfter) {
+        if (durationMs >= EARLY_TICK_STAGE_WARN_THRESHOLD_MS) {
+            LOGGER.warn("[early-tick-timing] world={} tick={} stage={} durationMs={} thresholdMs={} queueBefore={} queueAfter={}",
+                    world.getRegistryKey().getValue(), tick, stageName, durationMs, EARLY_TICK_STAGE_WARN_THRESHOLD_MS, queueBefore, queueAfter);
+            return;
+        }
+        LOGGER.info("[early-tick-timing] world={} tick={} stage={} durationMs={} queueBefore={} queueAfter={}",
+                world.getRegistryKey().getValue(), tick, stageName, durationMs, queueBefore, queueAfter);
+    }
+
+    private static int executeBacklogDump(ServerCommandSource source) {
+        source.sendFeedback(() -> Text.literal("[guardvillagers] backlog snapshot start"), false);
+        for (ServerWorld world : source.getServer().getWorlds()) {
+            int candidateChunkQueue = VillagerConversionCandidateIndex.getQueuedChunkScanCount(world);
+            ConversionScheduleState scheduleState = CONVERSION_SCHEDULE_STATES.get(world.getRegistryKey());
+            int conversionBacklog = scheduleState == null ? 0 : Math.max(0, scheduleState.pendingRuns);
+            int lumberjackSnapshotRegions = LumberjackPopulationBalancingService.getSnapshotRegionCount(world);
+            int penDeferredFallbackScans = VillagePenRegistry.getDeferredFallbackScanCount(source.getServer());
+            source.sendFeedback(() -> Text.literal("[guardvillagers] world=" + world.getRegistryKey().getValue()
+                    + " tick=" + world.getTime()
+                    + " candidateChunkQueue=" + candidateChunkQueue
+                    + " conversionPendingRuns=" + conversionBacklog
+                    + " lumberjackSnapshotRegions=" + lumberjackSnapshotRegions
+                    + " penDeferredFallbackScans=" + penDeferredFallbackScans), false);
+        }
+        source.sendFeedback(() -> Text.literal("[guardvillagers] backlog snapshot end"), false);
+        return 1;
     }
 
 
