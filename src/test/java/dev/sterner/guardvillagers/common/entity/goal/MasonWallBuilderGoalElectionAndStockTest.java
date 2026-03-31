@@ -27,8 +27,8 @@ class MasonWallBuilderGoalElectionAndStockTest {
     void waitForStock_withThresholdWallsAndMissingJobPos_advancesToMoveToSegment() {
         MasonWallBuilderGoal.WaitForStockDecision decision = MasonWallBuilderGoal.decideWaitForStockTransition(
                 12,
-                12,
-                false
+                0,
+                8
         );
 
         assertEquals(MasonWallBuilderGoal.WaitForStockDecision.MOVE_TO_SEGMENT, decision);

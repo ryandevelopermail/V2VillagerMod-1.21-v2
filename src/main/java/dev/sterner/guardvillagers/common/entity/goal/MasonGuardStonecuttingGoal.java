@@ -24,6 +24,8 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 public class MasonGuardStonecuttingGoal extends Goal {
+    // Gameplay cadence: while a wall build is waiting for stock, masons re-check the chest
+    // and attempt a stonecutting craft every ~10 seconds (200 ticks).
     private static final int CHECK_INTERVAL_TICKS = 200;
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
@@ -68,6 +70,8 @@ public class MasonGuardStonecuttingGoal extends Goal {
         if (world.getTime() < nextCheckTime) {
             return false;
         }
+        // Throttle all conversion attempts to this shared cadence so wall-stock wait loops
+        // can rely on deterministic periodic crafting checks.
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
 
         Optional<Inventory> inventory = getChestInventory(world, chestPos);
