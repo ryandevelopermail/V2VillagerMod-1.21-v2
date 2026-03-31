@@ -169,18 +169,40 @@ public class MasonGuardStonecuttingGoal extends Goal {
     }
 
     private MasonRecipe pickRandomRecipe(List<MasonRecipe> craftableRecipes) {
-        if (craftableRecipes.size() <= 1 || this.lastCraftedOutputItem == null) {
-            return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
+        int selectedIndex = pickRecipeIndex(
+                craftableRecipes.stream().map(recipe -> recipe.output().getItem()).collect(Collectors.toList()),
+                this.lastCraftedOutputItem,
+                guard.getRandom().nextInt(Math.max(1, craftableRecipes.size())),
+                guard.isWallBuildPending()
+        );
+        if (selectedIndex >= 0) {
+            return craftableRecipes.get(selectedIndex);
         }
 
-        List<MasonRecipe> alternatives = craftableRecipes.stream()
-                .filter(recipe -> recipe.output().getItem() != this.lastCraftedOutputItem)
-                .collect(Collectors.toList());
-        if (alternatives.isEmpty()) {
-            return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
-        }
+        return craftableRecipes.get(guard.getRandom().nextInt(craftableRecipes.size()));
+    }
 
-        return alternatives.get(guard.getRandom().nextInt(alternatives.size()));
+    static int pickRecipeIndex(List<Item> outputs, Item lastCraftedOutputItem, int randomIndex, boolean prioritizeCobblestoneWall) {
+        if (outputs.isEmpty()) {
+            return -1;
+        }
+        if (prioritizeCobblestoneWall) {
+            for (int i = 0; i < outputs.size(); i++) {
+                if (outputs.get(i) == Items.COBBLESTONE_WALL) {
+                    return i;
+                }
+            }
+        }
+        if (outputs.size() <= 1 || lastCraftedOutputItem == null) {
+            return Math.floorMod(randomIndex, outputs.size());
+        }
+        for (int i = 0; i < outputs.size(); i++) {
+            int idx = Math.floorMod(randomIndex + i, outputs.size());
+            if (outputs.get(idx) != lastCraftedOutputItem) {
+                return idx;
+            }
+        }
+        return Math.floorMod(randomIndex, outputs.size());
     }
 
     private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output, boolean reserveCobblestone) {
