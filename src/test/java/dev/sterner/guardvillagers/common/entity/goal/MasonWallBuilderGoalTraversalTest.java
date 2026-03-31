@@ -49,4 +49,26 @@ class MasonWallBuilderGoalTraversalTest {
     private static int manhattan2d(BlockPos a, BlockPos b) {
         return Math.abs(a.getX() - b.getX()) + Math.abs(a.getZ() - b.getZ());
     }
+
+    @Test
+    void batchedSorties_reduceAverageTravelAndMeetMinimumBatchWhenLocalCandidatesExist() {
+        List<BlockPos> rectanglePerimeter = MasonWallBuilderGoal.computePerimeterTraversal(0, 0, 16, 10, 64);
+        List<BlockPos> oppositeFaceOrdering = new java.util.ArrayList<>();
+        int half = rectanglePerimeter.size() / 2;
+        for (int i = 0; i < half; i++) {
+            oppositeFaceOrdering.add(rectanglePerimeter.get(i));
+            oppositeFaceOrdering.add(rectanglePerimeter.get(i + half));
+        }
+
+        BlockPos start = new BlockPos(0, 64, 0);
+        MasonWallBuilderGoal.TraversalSimulationResult sequential =
+                MasonWallBuilderGoal.simulateSequentialTraversal(oppositeFaceOrdering, start);
+        MasonWallBuilderGoal.TraversalSimulationResult batched =
+                MasonWallBuilderGoal.simulateBatchedTraversal(oppositeFaceOrdering, start);
+
+        assertTrue(batched.averageTravelPerPlacement() < sequential.averageTravelPerPlacement(),
+                "Expected batching to reduce average travel distance per placement");
+        assertEquals(batched.sortiesWithMinCandidates(), batched.sortiesMeetingMinPlacements(),
+                "Every sortie with >=3 nearby candidates should place at least 3 segments");
+    }
 }
