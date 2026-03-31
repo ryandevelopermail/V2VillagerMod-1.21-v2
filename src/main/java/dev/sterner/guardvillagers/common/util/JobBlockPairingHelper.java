@@ -42,9 +42,13 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import org.jetbrains.annotations.Nullable;
 
 public final class JobBlockPairingHelper {
@@ -54,6 +58,7 @@ public final class JobBlockPairingHelper {
     private static final double SHEPHERD_BANNER_PAIR_RANGE = 500.0D;
     private static final double BUTCHER_BANNER_PAIR_RANGE = 64.0D;
     private static final Set<Block> PAIRING_BLOCKS = Sets.newIdentityHashSet();
+    private static final Map<WorldKey, Map<UUID, CachedVillagerChestPairing>> CACHED_VILLAGER_CHESTS = new HashMap<>();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
     static {
@@ -162,6 +167,7 @@ public final class JobBlockPairingHelper {
 
         if (globalPos.pos().isWithinDistance(placedPos, JOB_BLOCK_PAIRING_RANGE)) {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
+            cacheVillagerChestPairing(world, villager, globalPos.pos(), placedPos);
             VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
         }
     }
@@ -269,6 +275,7 @@ public final class JobBlockPairingHelper {
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
         if (!isEmployedVillager(villager)) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
             return;
         }
 
@@ -279,6 +286,7 @@ public final class JobBlockPairingHelper {
 
         GlobalPos globalPos = jobSite.get();
         if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
             return;
         }
 
@@ -286,7 +294,11 @@ public final class JobBlockPairingHelper {
         VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
         // Exclude jobPos itself so that a fisherman's barrel job block doesn't self-match as its chest.
         Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
-        nearbyChest.ifPresent(chestPos -> VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos));
+        nearbyChest.ifPresentOrElse(chestPos -> {
+                    cacheVillagerChestPairing(world, villager, jobPos, chestPos);
+                    VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos);
+                },
+                () -> invalidateVillagerChestPairing(world, villager.getUuid()));
 
         if (nearbyChest.isPresent()) {
             Optional<BlockPos> craftingTablePos = findNearbyCraftingTable(world, jobPos);
@@ -600,6 +612,103 @@ public final class JobBlockPairingHelper {
             }
         }
         return Optional.empty();
+    }
+
+    public static void cacheVillagerChestPairing(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        if (!villager.isAlive() || villager.isRemoved()) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
+            return;
+        }
+        if (!isEmployedVillager(villager)) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
+            return;
+        }
+        if (!jobPos.isWithinDistance(chestPos, JOB_BLOCK_PAIRING_RANGE)) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
+            return;
+        }
+        if (!isPairingBlock(world.getBlockState(chestPos))) {
+            invalidateVillagerChestPairing(world, villager.getUuid());
+            return;
+        }
+        WorldKey worldKey = WorldKey.of(world);
+        CACHED_VILLAGER_CHESTS
+                .computeIfAbsent(worldKey, ignored -> new HashMap<>())
+                .put(villager.getUuid(), new CachedVillagerChestPairing(
+                        villager.getUuid(),
+                        villager.getVillagerData().getProfession(),
+                        jobPos.toImmutable(),
+                        chestPos.toImmutable()));
+    }
+
+    public static void invalidateVillagerChestPairing(ServerWorld world, UUID villagerUuid) {
+        WorldKey worldKey = WorldKey.of(world);
+        Map<UUID, CachedVillagerChestPairing> byVillager = CACHED_VILLAGER_CHESTS.get(worldKey);
+        if (byVillager == null) {
+            return;
+        }
+        byVillager.remove(villagerUuid);
+        if (byVillager.isEmpty()) {
+            CACHED_VILLAGER_CHESTS.remove(worldKey);
+        }
+    }
+
+    public static List<CachedVillagerChestPairing> getCachedVillagerChestPairings(ServerWorld world) {
+        WorldKey worldKey = WorldKey.of(world);
+        Map<UUID, CachedVillagerChestPairing> byVillager = CACHED_VILLAGER_CHESTS.get(worldKey);
+        if (byVillager == null || byVillager.isEmpty()) {
+            return List.of();
+        }
+
+        List<CachedVillagerChestPairing> valid = new ArrayList<>(byVillager.size());
+        var iterator = byVillager.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, CachedVillagerChestPairing> entry = iterator.next();
+            CachedVillagerChestPairing pairing = entry.getValue();
+            Entity entity = world.getEntity(entry.getKey());
+            if (!(entity instanceof VillagerEntity villager) || !villager.isAlive() || villager.isRemoved()) {
+                iterator.remove();
+                continue;
+            }
+
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSite.isEmpty()
+                    || !Objects.equals(jobSite.get().dimension(), world.getRegistryKey())
+                    || !jobSite.get().pos().equals(pairing.jobPos())) {
+                iterator.remove();
+                continue;
+            }
+
+            if (!isEmployedVillager(villager)
+                    || !isPairingBlock(world.getBlockState(pairing.chestPos()))
+                    || !pairing.jobPos().isWithinDistance(pairing.chestPos(), JOB_BLOCK_PAIRING_RANGE)) {
+                iterator.remove();
+                continue;
+            }
+
+            valid.add(new CachedVillagerChestPairing(
+                    villager.getUuid(),
+                    villager.getVillagerData().getProfession(),
+                    pairing.jobPos(),
+                    pairing.chestPos()));
+        }
+
+        if (byVillager.isEmpty()) {
+            CACHED_VILLAGER_CHESTS.remove(worldKey);
+        }
+        return valid;
+    }
+
+    public static void clearWorldCaches(ServerWorld world) {
+        CACHED_VILLAGER_CHESTS.remove(WorldKey.of(world));
+    }
+
+    public record CachedVillagerChestPairing(UUID villagerUuid, VillagerProfession profession, BlockPos jobPos, BlockPos chestPos) {}
+
+    private record WorldKey(String dimensionId) {
+        private static WorldKey of(ServerWorld world) {
+            return new WorldKey(world.getRegistryKey().getValue().toString());
+        }
     }
 
 

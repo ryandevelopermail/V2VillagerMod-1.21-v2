@@ -35,6 +35,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
@@ -497,40 +498,15 @@ public class QuartermasterGoal extends Goal {
                 findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
             }
         }
-        // Protect shepherd chests — they contain beds + wool + planks needed for bed economy.
-        // Without this, QM Priority-3 hauls beds out of the shepherd chest into the bell chest.
-        for (VillagerEntity shepherd : world.getEntitiesByClass(VillagerEntity.class, box,
-                v -> v.isAlive() && v.getVillagerData().getProfession() == VillagerProfession.SHEPHERD)) {
-            BlockPos jobSite = shepherd.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                    .filter(gp -> gp.dimension() == world.getRegistryKey())
-                    .map(GlobalPos::pos)
-                    .orElse(null);
-            if (jobSite != null) {
-                JobBlockPairingHelper.findNearbyChest(world, jobSite).ifPresent(shepherdChest -> {
-                    protectedChests.add(shepherdChest);
-                    // Also protect the other half if it is a double-chest.
-                    findDoubleChestOtherHalf(world, shepherdChest).ifPresent(protectedChests::add);
-                });
+        UUID quartermasterUuid = villager.getUuid();
+        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+            if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
+            if (!pairing.jobPos().isWithinDistance(jobPos, SCAN_RANGE)) continue;
+            if (pairing.profession() == VillagerProfession.SHEPHERD) {
+                protectedChests.add(pairing.chestPos());
+                findDoubleChestOtherHalf(world, pairing.chestPos()).ifPresent(protectedChests::add);
             }
-        }
-
-        // Discover surplus chests via JOB_SITE brain memory, NOT v.getBlockPos().
-        // Villagers wander constantly; their chest is almost never within ±3 blocks of wherever
-        // they happen to be standing when this scan fires. Scanning by job-site makes chest
-        // discovery reliable regardless of villager movement. This was the root cause of
-        // Priority-3 surplus haul almost never firing despite chests having surplus material.
-        List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
-        for (VillagerEntity v : villagers) {
-            if (v == villager) continue;
-            BlockPos vJobSite = v.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                    .filter(gp -> gp.dimension() == world.getRegistryKey())
-                    .map(GlobalPos::pos)
-                    .orElse(null);
-            if (vJobSite == null) continue;
-            // Use the same pairing helper the rest of the mod uses to find a chest near a job site.
-            Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, vJobSite);
-            if (pairedChest.isEmpty()) continue;
-            BlockPos immutable = pairedChest.get().toImmutable();
+            BlockPos immutable = pairing.chestPos();
             // Skip all protected chests (bell, QM transit, mason, lumberjack, shepherd)
             if (protectedChests.contains(immutable)) continue;
             // Only count whitelisted bulk materials so specialist trade goods (arrows, potions,
