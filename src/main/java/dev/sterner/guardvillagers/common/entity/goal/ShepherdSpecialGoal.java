@@ -2352,8 +2352,6 @@ public class ShepherdSpecialGoal extends Goal {
                 }
             }
         }
-        return gates;
-    }
 
         List<BlockPos> gates = new ArrayList<>();
         for (BlockPos gatePos : gateSet) {
@@ -2372,32 +2370,7 @@ public class ShepherdSpecialGoal extends Goal {
         if (gates.size() > limit) {
             return new ArrayList<>(gates.subList(0, limit));
         }
-
-        int radiusSq = radius * radius;
-        List<BlockPos> filtered = new ArrayList<>();
-        for (BlockPos gatePos : gateCandidates) {
-            if (gatePos.getY() < minY || gatePos.getY() > maxY) {
-                continue;
-            }
-            boolean inRange = false;
-            for (BlockPos anchor : anchors) {
-                int dx = gatePos.getX() - anchor.getX();
-                int dz = gatePos.getZ() - anchor.getZ();
-                if ((dx * dx) + (dz * dz) <= radiusSq) {
-                    inRange = true;
-                    break;
-                }
-            }
-            if (inRange) {
-                filtered.add(gatePos.toImmutable());
-            }
-        }
-
-        filtered.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
-        if (filtered.size() > limit) {
-            return new ArrayList<>(filtered.subList(0, limit));
-        }
-        return filtered;
+        return gates;
     }
 
     private int getLocalMinY(ServerWorld world, BlockPos center) {
