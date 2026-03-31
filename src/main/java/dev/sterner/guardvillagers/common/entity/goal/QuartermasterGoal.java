@@ -32,6 +32,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -83,6 +84,14 @@ public class QuartermasterGoal extends Goal {
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
+    /** Hard cap of cached candidate chests checked in one planning cycle. */
+    private static final int MAX_SURPLUS_CANDIDATE_CHESTS_PER_CYCLE = 12;
+    /** Hard cap of inventories inspected in one planning cycle. */
+    private static final int MAX_SURPLUS_INVENTORIES_PER_CYCLE = 12;
+    /** Hard cap of villager pairing entries scanned while rebuilding candidate cache. */
+    private static final int MAX_PAIRINGS_SCANNED_PER_CYCLE = 24;
+    /** Candidate chest cache refresh cadence. */
+    private static final int CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS = 20 * 30;
     /**
      * Runtime-only active quartermaster registry, keyed by world + anchor chest position.
      *
@@ -143,6 +152,14 @@ public class QuartermasterGoal extends Goal {
     private BlockPos sourcePos = null;
     private BlockPos destPos = null;
     private ItemStack transferStack = ItemStack.EMPTY;
+    private final List<BlockPos> cachedSurplusCandidates = new ArrayList<>();
+    private final List<BlockPos> rebuildingSurplusCandidates = new ArrayList<>();
+    private int surplusCandidateCursor = 0;
+    private int pairingRebuildCursor = 0;
+    private int cachedPairingCount = -1;
+    private boolean candidateCacheStale = true;
+    private long nextCandidateCacheRefreshTick = 0L;
+    private SurplusScanMetrics lastSurplusScanMetrics = SurplusScanMetrics.empty();
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -552,6 +569,12 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<BlockPos> findSurplusChest(ServerWorld world, BlockPos bellChestPos) {
+        SurplusScanBudget budget = new SurplusScanBudget(
+                MAX_SURPLUS_CANDIDATE_CHESTS_PER_CYCLE,
+                MAX_SURPLUS_INVENTORIES_PER_CYCLE);
+
+        rebuildSurplusCandidateCacheIncrementally(world);
+
         // Find any chest near job-site villagers with more items than threshold.
         // Must exclude:
         //   - bellChestPos  (we're trying to fill it, not drain it further)
@@ -584,22 +607,51 @@ public class QuartermasterGoal extends Goal {
                 findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
             }
         }
+        Optional<BlockPos> fromCache = scanSurplusCandidatesWithBudget(world, protectedChests, budget);
+        if (fromCache.isPresent()) {
+            lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+            return fromCache;
+        }
+
+        // Fallback discovery: only used while cache is empty or stale, and still budget-limited.
+        if (cachedSurplusCandidates.isEmpty() || candidateCacheStale) {
+            Optional<BlockPos> fallback = scanFallbackPairingsWithBudget(world, protectedChests, budget);
+            if (fallback.isPresent()) {
+                lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+                return fallback;
+            }
+        }
+        lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+        return Optional.empty();
+    }
+
+    private void rebuildSurplusCandidateCacheIncrementally(ServerWorld world) {
+        List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
+        long now = world.getTime();
+        boolean refreshDue = now >= nextCandidateCacheRefreshTick;
+        boolean pairingCountChanged = cachedPairingCount != pairings.size();
+        if (refreshDue || pairingCountChanged) {
+            candidateCacheStale = true;
+        }
+        if (!candidateCacheStale) return;
+
         UUID quartermasterUuid = villager.getUuid();
-        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+        int scanned = 0;
+        while (scanned < MAX_PAIRINGS_SCANNED_PER_CYCLE && pairingRebuildCursor < pairings.size()) {
+            JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor++);
+            scanned++;
             if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
             if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
             if (pairing.profession() == VillagerProfession.SHEPHERD) {
-                protectedChests.add(pairing.chestPos());
-                findDoubleChestOtherHalf(world, pairing.chestPos()).ifPresent(protectedChests::add);
+                protectedChests.add(candidate);
             }
-            BlockPos immutable = pairing.chestPos();
-            // Skip all protected chests (bell, QM transit, mason, lumberjack, shepherd)
-            if (protectedChests.contains(immutable)) continue;
-            // Only count whitelisted bulk materials so specialist trade goods (arrows, potions,
-            // enchanted books, iron gear, fish, maps, meat) never trigger the threshold.
-            if (countWhitelistedItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                return Optional.of(immutable);
+            budget.recordCandidateCheck();
+            if (protectedChests.contains(candidate)) continue;
+            budget.recordInventoryInspection();
+            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                return Optional.of(candidate);
             }
+            if (pairingRebuildCursor == scanStart) break;
         }
         return Optional.empty();
     }
@@ -893,5 +945,53 @@ public class QuartermasterGoal extends Goal {
         MOVE_TO_DEST,
         INSERT_TO_DEST,
         DONE
+    }
+
+    static SurplusScanMetrics getLastSurplusScanMetricsForTest(QuartermasterGoal goal) {
+        return goal.lastSurplusScanMetrics;
+    }
+
+    static final class SurplusScanMetrics {
+        private final int candidatesChecked;
+        private final int inventoriesInspected;
+        private final int cachedCandidates;
+        private final boolean cacheStale;
+
+        private SurplusScanMetrics(int candidatesChecked, int inventoriesInspected, int cachedCandidates, boolean cacheStale) {
+            this.candidatesChecked = candidatesChecked;
+            this.inventoriesInspected = inventoriesInspected;
+            this.cachedCandidates = cachedCandidates;
+            this.cacheStale = cacheStale;
+        }
+
+        static SurplusScanMetrics empty() {
+            return new SurplusScanMetrics(0, 0, 0, true);
+        }
+
+        int candidatesChecked() { return candidatesChecked; }
+        int inventoriesInspected() { return inventoriesInspected; }
+        int cachedCandidates() { return cachedCandidates; }
+        boolean cacheStale() { return cacheStale; }
+    }
+
+    private static final class SurplusScanBudget {
+        private final int maxCandidates;
+        private final int maxInventories;
+        private int candidatesChecked;
+        private int inventoriesInspected;
+
+        private SurplusScanBudget(int maxCandidates, int maxInventories) {
+            this.maxCandidates = maxCandidates;
+            this.maxInventories = maxInventories;
+        }
+
+        boolean canCheckAnotherCandidate() { return candidatesChecked < maxCandidates; }
+        boolean canInspectAnotherInventory() { return inventoriesInspected < maxInventories; }
+        void recordCandidateCheck() { candidatesChecked++; }
+        void recordInventoryInspection() { inventoriesInspected++; }
+
+        SurplusScanMetrics toMetrics(int cachedCandidates, boolean cacheStale) {
+            return new SurplusScanMetrics(candidatesChecked, inventoriesInspected, cachedCandidates, cacheStale);
+        }
     }
 }
