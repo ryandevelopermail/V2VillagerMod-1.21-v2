@@ -80,6 +80,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double MOVE_SPEED = 0.55D;
     // Reach distance squared (close enough to place)
     private static final double REACH_SQ = 3.5D * 3.5D;
+    private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
+    private static final int PATH_RETRY_WINDOW_TICKS = 40;
+    private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
     // Local batching heuristic when a mason reaches the perimeter.
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
     static final int MAX_SEGMENTS_PER_SORTIE = 5;
@@ -100,11 +103,16 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos activeMoveTarget = null;
     private int activeMoveTargetTicks = 0;
     private double lastMoveDistSq = Double.MAX_VALUE;
+    private int failedPathAttempts = 0;
+    private long firstPathFailureTick = -1L;
+    private BlockPos lastTriedNavTarget = null;
     private final Deque<BlockPos> localSortieQueue = new ArrayDeque<>();
     private final Set<BlockPos> skippedSegments = new HashSet<>();
+    private final Deque<BlockPos> hardUnreachableRetryQueue = new ArrayDeque<>();
     private int sortiePlacements = 0;
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
+    private boolean hardRetryPassStarted = false;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -173,11 +181,16 @@ public class MasonWallBuilderGoal extends Goal {
         activeMoveTarget = null;
         activeMoveTargetTicks = 0;
         lastMoveDistSq = Double.MAX_VALUE;
+        failedPathAttempts = 0;
+        firstPathFailureTick = -1L;
+        lastTriedNavTarget = null;
         localSortieQueue.clear();
         skippedSegments.clear();
+        hardUnreachableRetryQueue.clear();
         sortiePlacements = 0;
         placedSegments = 0;
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
+        hardRetryPassStarted = false;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -201,6 +214,9 @@ public class MasonWallBuilderGoal extends Goal {
         }
         stage = Stage.IDLE;
         isElectedBuilder = false;
+        resetPathFailureState();
+        hardUnreachableRetryQueue.clear();
+        hardRetryPassStarted = false;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -454,6 +470,7 @@ public class MasonWallBuilderGoal extends Goal {
             activeMoveTarget = target;
             activeMoveTargetTicks = 0;
             lastMoveDistSq = Double.MAX_VALUE;
+            resetPathFailureState();
         }
         double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
@@ -461,6 +478,7 @@ public class MasonWallBuilderGoal extends Goal {
             activeMoveTarget = null;
             activeMoveTargetTicks = 0;
             lastMoveDistSq = Double.MAX_VALUE;
+            resetPathFailureState();
             stage = Stage.PLACE_BLOCK;
         } else {
             boolean pathStarted = guard.getNavigation().startMovingTo(
@@ -470,14 +488,11 @@ public class MasonWallBuilderGoal extends Goal {
                     MOVE_SPEED
             );
             if (!pathStarted) {
-                LOGGER.info("MasonWallBuilder {}: skipping unreachable segment {} (path not found, navTarget={})",
-                        guard.getUuidAsString(), target.toShortString(), navigationTarget.toShortString());
-                localSortieQueue.pollFirst();
-                skippedSegments.add(target);
-                activeMoveTarget = null;
-                activeMoveTargetTicks = 0;
-                lastMoveDistSq = Double.MAX_VALUE;
+                registerPathFailure(world, target, navigationTarget);
                 return;
+            }
+            if (failedPathAttempts > 0) {
+                resetPathFailureState();
             }
 
             activeMoveTargetTicks++;
@@ -492,6 +507,7 @@ public class MasonWallBuilderGoal extends Goal {
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
                 lastMoveDistSq = Double.MAX_VALUE;
+                resetPathFailureState();
             }
         }
     }
@@ -503,11 +519,103 @@ public class MasonWallBuilderGoal extends Goal {
      * segment when the guard is within placement reach.
      */
     private BlockPos resolveSegmentNavigationTarget(ServerWorld world, BlockPos segmentPos) {
+        List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentPos);
+        int index = Math.min(Math.max(0, failedPathAttempts), Math.max(0, candidates.size() - 1));
+        return candidates.get(index);
+    }
+
+    private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos) {
+        List<BlockPos> candidates = new ArrayList<>();
         BlockPos below = segmentPos.down();
-        if (world.getBlockState(below).isSolidBlock(world, below)) {
-            return below;
+        if (isStandable(world, below)) {
+            candidates.add(below.toImmutable());
         }
-        return segmentPos;
+        candidates.add(segmentPos.toImmutable());
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            BlockPos offset = segmentPos.offset(direction);
+            if (isStandable(world, offset) && !candidates.contains(offset)) {
+                candidates.add(offset.toImmutable());
+            }
+        }
+        BlockPos nearestStandable = findNearestStandable(world, segmentPos, NEAREST_STANDABLE_SEARCH_RADIUS);
+        if (nearestStandable != null && !candidates.contains(nearestStandable)) {
+            candidates.add(nearestStandable);
+        }
+        return candidates;
+    }
+
+    private BlockPos findNearestStandable(ServerWorld world, BlockPos center, int radius) {
+        BlockPos best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                BlockPos candidate = center.add(dx, 0, dz);
+                if (!isStandable(world, candidate)) continue;
+                double distSq = center.getSquaredDistance(candidate);
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq;
+                    best = candidate.toImmutable();
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isStandable(ServerWorld world, BlockPos pos) {
+        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return false;
+        BlockPos above = pos.up();
+        BlockPos twoAbove = above.up();
+        return world.getBlockState(above).isAir() && world.getBlockState(twoAbove).isAir();
+    }
+
+    private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        if (firstPathFailureTick < 0L) {
+            firstPathFailureTick = world.getTime();
+        }
+        failedPathAttempts++;
+        lastTriedNavTarget = attemptedNavTarget.toImmutable();
+
+        List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentTarget);
+        if (failedPathAttempts < candidates.size()) {
+            BlockPos fallback = candidates.get(failedPathAttempts);
+            LOGGER.info("MasonWallBuilder {}: fallback_target_used segment={} attempted={} fallback={}",
+                    guard.getUuidAsString(), segmentTarget.toShortString(),
+                    attemptedNavTarget.toShortString(), fallback.toShortString());
+        }
+
+        boolean allFallbackTargetsFailed = failedPathAttempts >= candidates.size();
+        if (!(allFallbackTargetsFailed && shouldMarkHardUnreachable(failedPathAttempts, firstPathFailureTick, world.getTime()))) {
+            LOGGER.info("MasonWallBuilder {}: transient_path_fail_retrying segment={} attempt={} navTarget={} windowTicks={} allFallbacksFailed={}",
+                    guard.getUuidAsString(),
+                    segmentTarget.toShortString(),
+                    failedPathAttempts,
+                    attemptedNavTarget.toShortString(),
+                    (world.getTime() - firstPathFailureTick),
+                    allFallbackTargetsFailed);
+            return;
+        }
+
+        LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
+                guard.getUuidAsString(),
+                segmentTarget.toShortString(),
+                failedPathAttempts,
+                firstPathFailureTick,
+                lastTriedNavTarget == null ? "none" : lastTriedNavTarget.toShortString());
+        localSortieQueue.pollFirst();
+        skippedSegments.add(segmentTarget);
+        if (!hardRetryPassStarted) {
+            hardUnreachableRetryQueue.offerLast(segmentTarget.toImmutable());
+        }
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        resetPathFailureState();
+    }
+
+    private void resetPathFailureState() {
+        failedPathAttempts = 0;
+        firstPathFailureTick = -1L;
+        lastTriedNavTarget = null;
     }
 
     private void tickPlaceBlock(ServerWorld world) {
@@ -606,6 +714,17 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private BlockPos findNextIndexAnchor(ServerWorld world) {
+        if (!hardUnreachableRetryQueue.isEmpty()) {
+            hardRetryPassStarted = true;
+        }
+        while (!hardUnreachableRetryQueue.isEmpty()) {
+            BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
+            if (retryCandidate == null) continue;
+            skippedSegments.remove(retryCandidate);
+            if (isBuildableCandidate(world, retryCandidate)) {
+                return retryCandidate;
+            }
+        }
         while (currentSegmentIndex < pendingSegments.size()) {
             BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
             if (isBuildableCandidate(world, candidate)) {
@@ -850,6 +969,31 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return new TraversalSimulationResult(travel / Math.max(1, placed), sortiesMeetingMin, sortiesWithMinCandidates);
+    }
+
+    static PathRetrySimulationResult simulatePathRetryPolicy(List<Boolean> pathStartSuccessPerTick,
+                                                             int maxAttempts,
+                                                             int retryWindowTicks) {
+        int failedAttempts = 0;
+        long firstFailureTick = -1L;
+        for (int tick = 0; tick < pathStartSuccessPerTick.size(); tick++) {
+            if (pathStartSuccessPerTick.get(tick)) {
+                return new PathRetrySimulationResult(false, tick + 1, failedAttempts);
+            }
+            if (firstFailureTick < 0L) {
+                firstFailureTick = tick;
+            }
+            failedAttempts++;
+            if (failedAttempts >= maxAttempts || (tick - firstFailureTick) >= retryWindowTicks) {
+                return new PathRetrySimulationResult(true, tick + 1, failedAttempts);
+            }
+        }
+        return new PathRetrySimulationResult(false, pathStartSuccessPerTick.size(), failedAttempts);
+    }
+
+    private static boolean shouldMarkHardUnreachable(int failedAttempts, long firstFailureTick, long currentTick) {
+        if (firstFailureTick < 0L) return false;
+        return failedAttempts >= PATH_RETRY_MAX_ATTEMPTS || (currentTick - firstFailureTick) >= PATH_RETRY_WINDOW_TICKS;
     }
 
     private static List<BlockPos> buildSimulationLocalBatch(List<BlockPos> remaining, BlockPos anchor, int radiusSq) {
@@ -1178,4 +1322,6 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
+
+    record PathRetrySimulationResult(boolean skippedAsHardUnreachable, int decisionTick, int failedAttempts) {}
 }
