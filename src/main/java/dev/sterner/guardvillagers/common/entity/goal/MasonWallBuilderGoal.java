@@ -607,15 +607,8 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> segments = new ArrayList<>();
         int bellY = rect.y();
 
-        // North face (z = minZ), South face (z = maxZ)
-        for (int x = rect.minX(); x <= rect.maxX(); x++) {
-            resolveWallColumn(world, x, rect.minZ(), bellY, segments);
-            resolveWallColumn(world, x, rect.maxZ(), bellY, segments);
-        }
-        // West face (x = minX), East face (x = maxX) — corners already covered above
-        for (int z = rect.minZ() + 1; z < rect.maxZ(); z++) {
-            resolveWallColumn(world, rect.minX(), z, bellY, segments);
-            resolveWallColumn(world, rect.maxX(), z, bellY, segments);
+        for (BlockPos perimeterPos : computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), bellY)) {
+            resolveWallColumn(world, perimeterPos.getX(), perimeterPos.getZ(), bellY, segments);
         }
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
@@ -627,6 +620,32 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         return segments;
+    }
+
+    static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ, int y) {
+        List<BlockPos> perimeter = new ArrayList<>();
+
+        // North face: minX -> maxX at minZ
+        for (int x = minX; x <= maxX; x++) {
+            perimeter.add(new BlockPos(x, y, minZ));
+        }
+
+        // East face: minZ+1 -> maxZ-1 at maxX (corners already included)
+        for (int z = minZ + 1; z < maxZ; z++) {
+            perimeter.add(new BlockPos(maxX, y, z));
+        }
+
+        // South face: maxX -> minX at maxZ
+        for (int x = maxX; x >= minX; x--) {
+            perimeter.add(new BlockPos(x, y, maxZ));
+        }
+
+        // West face: maxZ-1 -> minZ+1 at minX (corners already included)
+        for (int z = maxZ - 1; z > minZ; z--) {
+            perimeter.add(new BlockPos(minX, y, z));
+        }
+
+        return perimeter;
     }
 
     /**
