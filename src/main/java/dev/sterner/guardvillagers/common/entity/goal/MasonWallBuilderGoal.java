@@ -463,8 +463,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void tickWaitForWallStock(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
-        BlockPos stonecutterPos = guard.getPairedJobPos();
-        if (chestPos == null || stonecutterPos == null) {
+        if (chestPos == null) {
             stage = Stage.DONE;
             return;
         }
@@ -473,7 +472,15 @@ public class MasonWallBuilderGoal extends Goal {
         guard.setWallBuildPending(true, threshold);
         int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
         if (availableWalls >= threshold) {
+            LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
+                    guard.getUuidAsString(), availableWalls, threshold);
             stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
+        BlockPos stonecutterPos = guard.getPairedJobPos();
+        if (stonecutterPos == null) {
+            stage = Stage.DONE;
             return;
         }
 
