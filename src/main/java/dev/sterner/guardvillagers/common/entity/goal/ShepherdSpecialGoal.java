@@ -35,6 +35,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Predicate;
 import org.slf4j.Logger;
@@ -1600,7 +1601,9 @@ public class ShepherdSpecialGoal extends Goal {
 
 
     private void logGateCandidate(BlockPos gatePos, String reason) {
-        LOGGER.info("Shepherd {} gate candidate {} rejected: {}", villager.getUuidAsString(), gatePos.toShortString(), reason);
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Shepherd {} gate candidate {} rejected: {}", villager.getUuidAsString(), gatePos.toShortString(), reason);
+        }
     }
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
@@ -1614,56 +1617,85 @@ public class ShepherdSpecialGoal extends Goal {
         int minY = getLocalMinY(world, villagerPos);
         int maxY = getLocalMaxY(world, villagerPos);
         List<BlockPos> gateCandidates = collectFallbackGateCandidates(world, villagerPos, minY, maxY);
-        LOGGER.info("Shepherd {} evaluating {} gate candidate(s) within {} blocks", villager.getUuidAsString(), gateCandidates.size(), PEN_SCAN_RANGE);
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("Shepherd {} evaluating {} gate candidate(s) within {} blocks",
+                    villager.getUuidAsString(),
+                    gateCandidates.size(),
+                    PEN_SCAN_RANGE);
+        }
 
         BlockPos nearestGate = null;
         double nearestDistance = Double.MAX_VALUE;
+        int acceptedCount = 0;
+        Map<String, Integer> rejectedByReason = new java.util.LinkedHashMap<>();
+        boolean debugEnabled = LOGGER.isDebugEnabled();
 
         for (BlockPos gatePos : gateCandidates) {
             BlockState state = world.getBlockState(gatePos);
             if (!(state.getBlock() instanceof FenceGateBlock)) {
+                rejectedByReason.merge("not_gate_block", 1, Integer::sum);
                 logGateCandidate(gatePos, "not a fence gate block state at evaluation time");
                 continue;
             }
 
             BlockPos insidePos = getPenInterior(world, gatePos, state);
             if (insidePos == null) {
+                rejectedByReason.merge("no_enclosed_interior", 1, Integer::sum);
                 logGateCandidate(gatePos, "could not resolve enclosed interior from either gate side");
                 continue;
             }
 
             if (!isInsideFencePen(world, insidePos)) {
-                logGateCandidate(gatePos, "interior candidate " + insidePos.toShortString() + " is not fully enclosed by fence");
+                rejectedByReason.merge("interior_not_enclosed", 1, Integer::sum);
+                if (debugEnabled) {
+                    logGateCandidate(gatePos, "interior candidate " + insidePos.toShortString() + " is not fully enclosed by fence");
+                }
                 continue;
             }
 
             BlockPos penCenter = getPenCenter(world, insidePos);
             if (penCenter == null) {
-                logGateCandidate(gatePos, "failed to compute pen center from interior " + insidePos.toShortString());
+                rejectedByReason.merge("no_pen_center", 1, Integer::sum);
+                if (debugEnabled) {
+                    logGateCandidate(gatePos, "failed to compute pen center from interior " + insidePos.toShortString());
+                }
                 continue;
             }
 
             if (hasBannerInPen(world, penCenter)) {
-                logGateCandidate(gatePos, "pen already contains banner near center " + penCenter.toShortString());
+                rejectedByReason.merge("banner_already_present", 1, Integer::sum);
+                if (debugEnabled) {
+                    logGateCandidate(gatePos, "pen already contains banner near center " + penCenter.toShortString());
+                }
                 continue;
             }
 
             double distance = villager.squaredDistanceTo(gatePos.getX() + 0.5D, gatePos.getY() + 0.5D, gatePos.getZ() + 0.5D);
-            LOGGER.info("Shepherd {} gate candidate {} accepted (center {}, distanceSq={})",
-                    villager.getUuidAsString(),
-                    gatePos.toShortString(),
-                    penCenter.toShortString(),
-                    String.format("%.2f", distance));
+            acceptedCount++;
+            if (debugEnabled) {
+                LOGGER.debug("Shepherd {} gate candidate {} accepted (center {}, distanceSq={})",
+                        villager.getUuidAsString(),
+                        gatePos.toShortString(),
+                        penCenter.toShortString(),
+                        distance);
+            }
             if (distance < nearestDistance) {
                 nearestDistance = distance;
                 nearestGate = gatePos.toImmutable();
             }
         }
 
-        if (nearestGate == null) {
-            LOGGER.info("Shepherd {} found no valid gate candidates after evaluating {} gate(s)", villager.getUuidAsString(), gateCandidates.size());
-        } else {
-            LOGGER.info("Shepherd {} selected gate {} as nearest valid pen entry", villager.getUuidAsString(), nearestGate.toShortString());
+        int rejectedCount = gateCandidates.size() - acceptedCount;
+        LOGGER.info("Shepherd {} gate scan summary: considered={}, accepted={}, rejected={} by reason={}",
+                villager.getUuidAsString(),
+                gateCandidates.size(),
+                acceptedCount,
+                rejectedCount,
+                formatGateRejectionSummary(rejectedByReason));
+        if (debugEnabled && nearestGate != null) {
+            LOGGER.debug("Shepherd {} selected gate {} as nearest valid pen entry",
+                    villager.getUuidAsString(),
+                    nearestGate.toShortString());
         }
 
         cachedNearestPenTarget = nearestGate;
@@ -1671,6 +1703,17 @@ public class ShepherdSpecialGoal extends Goal {
         markExpensiveSpatialRefreshed(now);
         penGatePos = nearestGate;
         return nearestGate;
+    }
+
+    private String formatGateRejectionSummary(Map<String, Integer> rejectedByReason) {
+        if (rejectedByReason.isEmpty()) {
+            return "none";
+        }
+        List<String> entries = new ArrayList<>(rejectedByReason.size());
+        for (Map.Entry<String, Integer> entry : rejectedByReason.entrySet()) {
+            entries.add(entry.getKey() + "=" + entry.getValue());
+        }
+        return String.join(", ", entries);
     }
 
     private List<BlockPos> collectFallbackGateCandidates(ServerWorld world, BlockPos villagerPos, int minY, int maxY) {
