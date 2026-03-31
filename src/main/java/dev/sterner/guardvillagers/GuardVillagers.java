@@ -153,6 +153,7 @@ public class GuardVillagers implements ModInitializer {
     @Override
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
+        GuardVillagersConfig.validateClampedRanges();
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(AXE_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());

@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -66,7 +67,7 @@ public class QuartermasterGoal extends Goal {
 
     private static final int CHECK_INTERVAL_TICKS = 300;
     private static final int STRUCTURAL_CHECK_INTERVAL_TICKS = 20;
-    private static final double SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
+    private static final double DEFAULT_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
     private static final double REACH_SQ = 3.0D * 3.0D;
     /** Minimum stone in mason chest before we top it up. */
@@ -223,6 +224,11 @@ public class QuartermasterGoal extends Goal {
             unregisterAnchor(world);
             anchorRegistered = false;
         }
+    }
+
+    private double getScanRange() {
+        int configured = GuardVillagersConfig.quartermasterScanRange;
+        return configured > 0 ? configured : DEFAULT_SCAN_RANGE;
     }
 
     // -------------------------------------------------------------------------
@@ -475,7 +481,7 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private Optional<MasonGuardEntity> findMasonNeedingStone(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         return world.getEntitiesByClass(MasonGuardEntity.class, box,
                 mason -> mason.isAlive()
                         && mason.getPairedChestPos() != null
@@ -487,7 +493,7 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<LumberjackGuardEntity> findLumberjackNeedingPlanks(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         return world.getEntitiesByClass(LumberjackGuardEntity.class, box,
                 lj -> lj.isAlive()
                         && lj.getPairedChestPos() != null
@@ -506,7 +512,7 @@ public class QuartermasterGoal extends Goal {
      * - No furnace or blast furnace exists within FURNACE_CHECK_RADIUS of the lumberjack's job pos
      */
     private Optional<LumberjackFurnaceStoneNeed> findLumberjackNeedingFurnaceStone(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
             BlockPos ljChest = lj.getPairedChestPos();
             BlockPos ljJob = lj.getPairedJobPos();
@@ -540,7 +546,7 @@ public class QuartermasterGoal extends Goal {
 
     /** Finds the nearest mason paired chest that has at least minAmount cobblestone. */
     private BlockPos findMasonChestWithCobblestone(ServerWorld world, int minAmount) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
             BlockPos mc = mason.getPairedChestPos();
             if (mc != null && countItem(world, mc, Items.COBBLESTONE) >= minAmount) {
@@ -554,7 +560,7 @@ public class QuartermasterGoal extends Goal {
 
     private Optional<BlockPos> findWeaponsmithChestNeedingPlanks(ServerWorld world) {
         for (BlockPos chestPos : WeaponsmithBehavior.getPairedChestPositions()) {
-            if (chestPos.isWithinDistance(jobPos, SCAN_RANGE)
+            if (chestPos.isWithinDistance(jobPos, getScanRange())
                     && countTagItems(world, chestPos, ItemTags.PLANKS) < WEAPONSMITH_PLANK_THRESHOLD) {
                 return Optional.of(chestPos);
             }
@@ -575,7 +581,7 @@ public class QuartermasterGoal extends Goal {
         //   - chestPos      (the QM's own transit buffer — draining it causes haul loops)
         //   - mason paired chests  (draining them undoes Priority 1 stone hauls)
         //   - lumberjack paired chests (draining them undoes Priority 2 plank hauls)
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
 
         // Build the protected set of specialist chests we must never drain.
         Set<BlockPos> protectedChests = new HashSet<>();
@@ -635,62 +641,7 @@ public class QuartermasterGoal extends Goal {
             JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor++);
             scanned++;
             if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
-            if (!pairing.jobPos().isWithinDistance(jobPos, SCAN_RANGE)) continue;
-            BlockPos candidate = pairing.chestPos().toImmutable();
-            if (!rebuildingSurplusCandidates.contains(candidate)) {
-                rebuildingSurplusCandidates.add(candidate);
-            }
-        }
-        if (pairingRebuildCursor >= pairings.size()) {
-            cachedSurplusCandidates.clear();
-            cachedSurplusCandidates.addAll(rebuildingSurplusCandidates);
-            rebuildingSurplusCandidates.clear();
-            pairingRebuildCursor = 0;
-            surplusCandidateCursor = Math.min(surplusCandidateCursor, Math.max(0, cachedSurplusCandidates.size() - 1));
-            cachedPairingCount = pairings.size();
-            candidateCacheStale = false;
-            nextCandidateCacheRefreshTick = now + CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS;
-        }
-    }
-
-    private Optional<BlockPos> scanSurplusCandidatesWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
-        if (cachedSurplusCandidates.isEmpty()) return Optional.empty();
-        int startCursor = Math.min(surplusCandidateCursor, cachedSurplusCandidates.size() - 1);
-        int checked = 0;
-        while (checked < cachedSurplusCandidates.size()
-                && budget.canCheckAnotherCandidate()
-                && budget.canInspectAnotherInventory()) {
-            BlockPos candidate = cachedSurplusCandidates.get(surplusCandidateCursor).toImmutable();
-            surplusCandidateCursor = (surplusCandidateCursor + 1) % cachedSurplusCandidates.size();
-            checked++;
-            budget.recordCandidateCheck();
-            if (protectedChests.contains(candidate)) continue;
-            budget.recordInventoryInspection();
-            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                return Optional.of(candidate);
-            }
-            if (surplusCandidateCursor == startCursor) break;
-        }
-        return Optional.empty();
-    }
-
-    private Optional<BlockPos> scanFallbackPairingsWithBudget(ServerWorld world,
-                                                              Set<BlockPos> protectedChests,
-                                                              SurplusScanBudget budget) {
-        UUID quartermasterUuid = villager.getUuid();
-        List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
-        int scanStart = Math.min(pairingRebuildCursor, Math.max(0, pairings.size() - 1));
-        int scanned = 0;
-        while (!pairings.isEmpty()
-                && scanned < pairings.size()
-                && budget.canCheckAnotherCandidate()
-                && budget.canInspectAnotherInventory()) {
-            JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor);
-            pairingRebuildCursor = (pairingRebuildCursor + 1) % pairings.size();
-            scanned++;
-            if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
-            if (!pairing.jobPos().isWithinDistance(jobPos, SCAN_RANGE)) continue;
-            BlockPos candidate = pairing.chestPos().toImmutable();
+            if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
             if (pairing.profession() == VillagerProfession.SHEPHERD) {
                 protectedChests.add(candidate);
             }
