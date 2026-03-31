@@ -14,6 +14,10 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -30,8 +34,8 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         NONE,
         DEDICATED_FENCE_GOAL
     }
-    private static final long SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS = 10L;
-    private static final long SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS = 40L;
+    private static final long CHEST_WAKE_DEBOUNCE_TICKS = 10L;
+    private static final long CHEST_WAKE_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final int SPECIAL_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
@@ -48,7 +52,15 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ShepherdFencePlacerGoal> FENCE_PLACER_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
-    private static final Map<VillagerEntity, Long> LAST_SPECIAL_GOAL_CHECK_TICKS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_WAKE_TICKS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> QUEUED_WAKE_TICKS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Integer> DIRTY_WAKE_FLAGS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ChestCategorySnapshot> LAST_CHEST_SNAPSHOTS = new WeakHashMap<>();
+    private static final int DIRTY_SPECIAL = 1 << 0;
+    private static final int DIRTY_CRAFTING = 1 << 1;
+    private static final int DIRTY_DISTRIBUTION = 1 << 2;
+    private static final int DIRTY_BED = 1 << 3;
+    private static final int DIRTY_FENCE = 1 << 4;
 
     static FenceCraftingOwner resolveFenceCraftingOwner(boolean craftingTablePaired) {
         return craftingTablePaired ? FenceCraftingOwner.DEDICATED_FENCE_GOAL : FenceCraftingOwner.NONE;
@@ -81,7 +93,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             specialGoal.setTargets(jobPos, chestPos);
         }
         specialGoal.requestImmediateCheck();
-        LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, world.getTime());
+        LAST_WAKE_TICKS.put(villager, world.getTime());
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -188,7 +200,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             removeChestListener(existing);
             CHEST_REGISTRATIONS.remove(villager);
-            LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
+            clearWakeScheduler(villager);
         }
 
         for (BlockPos observedPos : observedChestPositions) {
@@ -209,60 +221,168 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             if (!villager.isAlive() || villager.getWorld() != world) {
                 continue;
             }
-            triggerChestWakeups(world, villager);
+            int dirtyFlags = detectDirtyCategories(world, villager, chestPos);
+            scheduleVillagerWakeup(world, villager, dirtyFlags);
         }
     }
 
-    private static void triggerChestWakeups(ServerWorld world, VillagerEntity villager) {
-        ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
-        if (specialGoal != null) {
-            specialGoal.onChestInventoryChanged(world);
-            long now = world.getTime();
-            long lastWakeTick = LAST_SPECIAL_GOAL_CHECK_TICKS.getOrDefault(villager, Long.MIN_VALUE);
-            if (now - lastWakeTick >= SPECIAL_GOAL_CHECK_DEBOUNCE_TICKS) {
-                specialGoal.requestImmediateCheck();
-                LAST_SPECIAL_GOAL_CHECK_TICKS.put(villager, now);
-            } else {
-                specialGoal.requestCheckNoSoonerThan(lastWakeTick + SPECIAL_GOAL_CHECK_MAX_COALESCE_DELAY_TICKS);
+    private static int detectDirtyCategories(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
+        ChestCategorySnapshot currentSnapshot = ChestCategorySnapshot.capture(world, chestPos);
+        ChestCategorySnapshot previousSnapshot = LAST_CHEST_SNAPSHOTS.put(villager, currentSnapshot);
+        if (previousSnapshot == null) {
+            return DIRTY_SPECIAL | DIRTY_CRAFTING | DIRTY_DISTRIBUTION | DIRTY_BED | DIRTY_FENCE;
+        }
+        return computeDirtyFlags(previousSnapshot, currentSnapshot);
+    }
+
+    private static int computeDirtyFlags(ChestCategorySnapshot previous, ChestCategorySnapshot current) {
+        if (previous.equals(current)) {
+            return 0;
+        }
+        int flags = 0;
+        boolean specialItemsChanged = previous.banners != current.banners
+                || previous.shears != current.shears
+                || previous.wheat != current.wheat;
+        if (specialItemsChanged) {
+            flags |= DIRTY_SPECIAL;
+        }
+
+        boolean craftingMaterialsChanged = previous.wool != current.wool
+                || previous.sticks != current.sticks;
+        if (craftingMaterialsChanged) {
+            flags |= DIRTY_CRAFTING;
+        }
+
+        boolean distributionItemsChanged = previous.wool != current.wool
+                || previous.stringCount != current.stringCount;
+        if (distributionItemsChanged) {
+            flags |= DIRTY_DISTRIBUTION;
+        }
+
+        boolean bedRelatedChanged = previous.beds != current.beds
+                || previous.wool != current.wool
+                || previous.planks != current.planks;
+        if (bedRelatedChanged) {
+            flags |= DIRTY_BED;
+        }
+
+        boolean fenceRelatedChanged = previous.fences != current.fences
+                || previous.fenceGates != current.fenceGates
+                || previous.planks != current.planks
+                || previous.sticks != current.sticks;
+        if (fenceRelatedChanged) {
+            flags |= DIRTY_FENCE;
+        }
+        return flags;
+    }
+
+    private static void scheduleVillagerWakeup(ServerWorld world, VillagerEntity villager, int dirtyFlags) {
+        if (dirtyFlags == 0) {
+            return;
+        }
+        int accumulatedFlags = DIRTY_WAKE_FLAGS.getOrDefault(villager, 0) | dirtyFlags;
+        DIRTY_WAKE_FLAGS.put(villager, accumulatedFlags);
+
+        long now = world.getTime();
+        long lastWakeTick = LAST_WAKE_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+        if (now - lastWakeTick >= CHEST_WAKE_DEBOUNCE_TICKS) {
+            QUEUED_WAKE_TICKS.remove(villager);
+            triggerChestWakeups(world, villager, accumulatedFlags);
+            DIRTY_WAKE_FLAGS.remove(villager);
+            LAST_WAKE_TICKS.put(villager, now);
+            return;
+        }
+
+        long targetTick = lastWakeTick + CHEST_WAKE_MAX_COALESCE_DELAY_TICKS;
+        long existingTarget = QUEUED_WAKE_TICKS.getOrDefault(villager, Long.MAX_VALUE);
+        if (targetTick < existingTarget) {
+            QUEUED_WAKE_TICKS.put(villager, targetTick);
+        }
+        requestDeferredWake(villager, world, targetTick, accumulatedFlags);
+    }
+
+    private static void requestDeferredWake(VillagerEntity villager, ServerWorld world, long targetTick, int dirtyFlags) {
+        if ((dirtyFlags & DIRTY_SPECIAL) != 0) {
+            ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
+            if (specialGoal != null) {
+                specialGoal.onChestInventoryChanged(world);
+                specialGoal.requestCheckNoSoonerThan(targetTick);
             }
         }
-
-        ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
-        if (craftingGoal != null) {
-            craftingGoal.requestImmediateCraft(world);
+        if ((dirtyFlags & DIRTY_CRAFTING) != 0) {
+            ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null) {
+                craftingGoal.requestCraftNoSoonerThan(targetTick);
+            }
         }
-
-        ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal != null) {
-            distributionGoal.requestImmediateDistribution();
+        if ((dirtyFlags & DIRTY_BED) != 0) {
+            ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
+            if (bedCraftingGoal != null) {
+                bedCraftingGoal.requestCraftNoSoonerThan(targetTick);
+            }
         }
-
-        ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
-        if (bedCraftingGoal != null) {
-            bedCraftingGoal.requestImmediateCraft(world);
-        }
-
-        ShepherdBedPlacerGoal bedPlacerGoal = BED_PLACER_GOALS.get(villager);
-        if (bedPlacerGoal != null) {
-            bedPlacerGoal.requestImmediateCheck();
-        }
-
-        if (resolveFenceCraftingOwner(FENCE_CRAFTING_GOALS.containsKey(villager)) == FenceCraftingOwner.DEDICATED_FENCE_GOAL) {
+        if ((dirtyFlags & DIRTY_FENCE) != 0 && resolveFenceCraftingOwner(FENCE_CRAFTING_GOALS.containsKey(villager)) == FenceCraftingOwner.DEDICATED_FENCE_GOAL) {
             ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
             if (fenceCraftingGoal != null) {
-                fenceCraftingGoal.requestImmediateCraft(world);
+                fenceCraftingGoal.requestCraftNoSoonerThan(targetTick);
             }
         }
+    }
 
-        ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
-        if (fencePlacerGoal != null) {
-            fencePlacerGoal.requestImmediateCheck();
+    private static void triggerChestWakeups(ServerWorld world, VillagerEntity villager, int dirtyFlags) {
+        if ((dirtyFlags & DIRTY_SPECIAL) != 0) {
+            ShepherdSpecialGoal specialGoal = SPECIAL_GOALS.get(villager);
+            if (specialGoal != null) {
+                specialGoal.onChestInventoryChanged(world);
+                specialGoal.requestImmediateCheck();
+            }
         }
+        if ((dirtyFlags & DIRTY_CRAFTING) != 0) {
+            ShepherdCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+            if (craftingGoal != null) {
+                craftingGoal.requestImmediateCraft(world);
+            }
+        }
+        if ((dirtyFlags & DIRTY_DISTRIBUTION) != 0) {
+            ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+            if (distributionGoal != null) {
+                distributionGoal.requestImmediateDistribution();
+            }
+        }
+        if ((dirtyFlags & DIRTY_BED) != 0) {
+            ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
+            if (bedCraftingGoal != null) {
+                bedCraftingGoal.requestImmediateCraft(world);
+            }
+            ShepherdBedPlacerGoal bedPlacerGoal = BED_PLACER_GOALS.get(villager);
+            if (bedPlacerGoal != null) {
+                bedPlacerGoal.requestImmediateCheck();
+            }
+        }
+        if ((dirtyFlags & DIRTY_FENCE) != 0) {
+            if (resolveFenceCraftingOwner(FENCE_CRAFTING_GOALS.containsKey(villager)) == FenceCraftingOwner.DEDICATED_FENCE_GOAL) {
+                ShepherdFenceCraftingGoal fenceCraftingGoal = FENCE_CRAFTING_GOALS.get(villager);
+                if (fenceCraftingGoal != null) {
+                    fenceCraftingGoal.requestImmediateCraft(world);
+                }
+            }
+            ShepherdFencePlacerGoal fencePlacerGoal = FENCE_PLACER_GOALS.get(villager);
+            if (fencePlacerGoal != null) {
+                fencePlacerGoal.requestImmediateCheck();
+            }
+        }
+    }
+
+    private static void clearWakeScheduler(VillagerEntity villager) {
+        LAST_WAKE_TICKS.remove(villager);
+        QUEUED_WAKE_TICKS.remove(villager);
+        DIRTY_WAKE_FLAGS.remove(villager);
+        LAST_CHEST_SNAPSHOTS.remove(villager);
     }
 
     private void clearChestListener(VillagerEntity villager) {
         ChestRegistration existing = CHEST_REGISTRATIONS.remove(villager);
-        LAST_SPECIAL_GOAL_CHECK_TICKS.remove(villager);
+        clearWakeScheduler(villager);
         if (existing != null) {
             removeChestListener(existing);
         }
@@ -310,6 +430,53 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         private ChestRegistration(VillagerEntity villager, Set<BlockPos> observedChestPositions) {
             this.villager = villager;
             this.observedChestPositions = Set.copyOf(observedChestPositions);
+        }
+    }
+
+    private record ChestCategorySnapshot(int banners, int shears, int wheat, int wool, int sticks, int planks,
+                                         int beds, int fences, int fenceGates, int stringCount) {
+        private static ChestCategorySnapshot capture(ServerWorld world, BlockPos chestPos) {
+            BlockState state = world.getBlockState(chestPos);
+            if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+                return empty();
+            }
+            Inventory inventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
+            if (inventory == null) {
+                return empty();
+            }
+
+            int banners = 0;
+            int shears = 0;
+            int wheat = 0;
+            int wool = 0;
+            int sticks = 0;
+            int planks = 0;
+            int beds = 0;
+            int fences = 0;
+            int fenceGates = 0;
+            int stringCount = 0;
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                ItemStack stack = inventory.getStack(slot);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                int count = stack.getCount();
+                if (stack.isIn(ItemTags.BANNERS)) banners += count;
+                if (stack.isOf(Items.SHEARS)) shears += count;
+                if (stack.isOf(Items.WHEAT)) wheat += count;
+                if (stack.isIn(ItemTags.WOOL)) wool += count;
+                if (stack.isOf(Items.STICK)) sticks += count;
+                if (stack.isIn(ItemTags.PLANKS)) planks += count;
+                if (stack.isIn(ItemTags.BEDS)) beds += count;
+                if (stack.isIn(ItemTags.FENCES)) fences += count;
+                if (stack.isIn(ItemTags.FENCE_GATES)) fenceGates += count;
+                if (stack.isOf(Items.STRING)) stringCount += count;
+            }
+            return new ChestCategorySnapshot(banners, shears, wheat, wool, sticks, planks, beds, fences, fenceGates, stringCount);
+        }
+
+        private static ChestCategorySnapshot empty() {
+            return new ChestCategorySnapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
     }
 }
