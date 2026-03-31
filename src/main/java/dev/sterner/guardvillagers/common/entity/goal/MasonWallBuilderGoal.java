@@ -58,7 +58,8 @@ public class MasonWallBuilderGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonWallBuilderGoal.class);
 
-    // How often to re-evaluate whether we should start (in ticks)
+    // Gameplay cadence: attempt a fresh build cycle every ~20 seconds (400 ticks),
+    // if election/planning/material preconditions pass.
     private static final int SCAN_INTERVAL_TICKS = 400;
     // Blocks to expand the village bounding box outward to form the wall rectangle
     private static final int WALL_EXPAND = 10;
@@ -83,7 +84,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
-    // Local batching heuristic when a mason reaches the perimeter.
+    // Gameplay cadence: placements happen in short local sorties of 3-5 segments
+    // before the guard picks a new nearby anchor.
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
     static final int MAX_SEGMENTS_PER_SORTIE = 5;
     static final int LOCAL_SORTIE_RADIUS = 5;
@@ -114,6 +116,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int plannedPlacementCount = 0;
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
+    private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -193,6 +196,7 @@ public class MasonWallBuilderGoal extends Goal {
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        cycleEndReason = CycleEndReason.WALL_COMPLETE;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -493,10 +497,13 @@ public class MasonWallBuilderGoal extends Goal {
         WaitForStockDecision decision = decideWaitForStockTransition(
                 availableWalls,
                 availableCobblestone,
-                threshold,
-                guard.getPairedJobPos() != null
+                threshold
         );
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
+            if (conversionWaitActive) {
+                LOGGER.info("MasonWallBuilder {}: conversion success detected (walls_now={} >= threshold={})",
+                        guard.getUuidAsString(), availableWalls, threshold);
+            }
             conversionWaitActive = false;
             LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, threshold);
@@ -505,26 +512,19 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (decision == WaitForStockDecision.DONE) {
             conversionWaitActive = false;
-            stage = Stage.DONE;
+            completeCycle(CycleEndReason.OUT_OF_MATERIALS);
             return;
         }
         if (decision == WaitForStockDecision.WAIT_FOR_CONVERSION) {
+            if (!conversionWaitActive) {
+                LOGGER.info("MasonWallBuilder {}: entering conversion wait (walls={}, cobblestone={}, threshold={})",
+                        guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+            }
             conversionWaitActive = true;
             guard.getNavigation().stop();
             LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
             return;
-        }
-
-        conversionWaitActive = false;
-        BlockPos stonecutterPos = guard.getPairedJobPos();
-        if (stonecutterPos != null) {
-            guard.getNavigation().startMovingTo(
-                    stonecutterPos.getX() + 0.5D,
-                    stonecutterPos.getY() + 0.5D,
-                    stonecutterPos.getZ() + 0.5D,
-                    MOVE_SPEED
-            );
         }
     }
 
@@ -532,7 +532,7 @@ public class MasonWallBuilderGoal extends Goal {
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             if (!startNextSortie(world)) {
-                completeCycle();
+                completeCycle(hasRemainingSegments(world) ? CycleEndReason.UNREACHABLE_SEGMENTS : CycleEndReason.WALL_COMPLETE);
                 return;
             }
         }
@@ -863,14 +863,15 @@ public class MasonWallBuilderGoal extends Goal {
                 && !skippedSegments.contains(pos);
     }
 
-    private void completeCycle() {
+    private void completeCycle(CycleEndReason reason) {
+        cycleEndReason = reason;
         stage = Stage.DONE;
         guard.clearWallSegments();
         guard.setWallBuildPending(false, 0);
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
-        LOGGER.info("MasonWallBuilder {}: build cycle complete", guard.getUuidAsString());
+        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
     }
 
     // -------------------------------------------------------------------------
@@ -1071,18 +1072,14 @@ public class MasonWallBuilderGoal extends Goal {
 
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
                                                             int availableCobblestone,
-                                                            int threshold,
-                                                            boolean hasPairedJobPos) {
+                                                            int threshold) {
         if (availableWalls >= threshold) {
             return WaitForStockDecision.MOVE_TO_SEGMENT;
         }
         if (availableCobblestone > 0) {
             return WaitForStockDecision.WAIT_FOR_CONVERSION;
         }
-        if (!hasPairedJobPos) {
-            return WaitForStockDecision.DONE;
-        }
-        return WaitForStockDecision.NAVIGATE_TO_STONECUTTER;
+        return WaitForStockDecision.DONE;
     }
 
     static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates) {
@@ -1449,7 +1446,18 @@ public class MasonWallBuilderGoal extends Goal {
     enum WaitForStockDecision {
         MOVE_TO_SEGMENT,
         WAIT_FOR_CONVERSION,
-        NAVIGATE_TO_STONECUTTER,
         DONE
+    }
+
+    private enum CycleEndReason {
+        WALL_COMPLETE("wall_complete"),
+        OUT_OF_MATERIALS("out_of_materials"),
+        UNREACHABLE_SEGMENTS("unreachable_segments");
+
+        private final String logValue;
+
+        CycleEndReason(String logValue) {
+            this.logValue = logValue;
+        }
     }
 }
