@@ -24,7 +24,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.EnumSet;
+import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -77,6 +80,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double MOVE_SPEED = 0.55D;
     // Reach distance squared (close enough to place)
     private static final double REACH_SQ = 3.5D * 3.5D;
+    // Local batching heuristic when a mason reaches the perimeter.
+    static final int MIN_SEGMENTS_PER_SORTIE = 3;
+    static final int MAX_SEGMENTS_PER_SORTIE = 5;
+    static final int LOCAL_SORTIE_RADIUS = 5;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -92,6 +99,11 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos activeMoveTarget = null;
     private int activeMoveTargetTicks = 0;
     private double lastMoveDistSq = Double.MAX_VALUE;
+    private final Deque<BlockPos> localSortieQueue = new ArrayDeque<>();
+    private final Set<BlockPos> skippedSegments = new HashSet<>();
+    private int sortiePlacements = 0;
+    private int placedSegments = 0;
+    private int plannedPlacementCount = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -160,6 +172,11 @@ public class MasonWallBuilderGoal extends Goal {
         activeMoveTarget = null;
         activeMoveTargetTicks = 0;
         lastMoveDistSq = Double.MAX_VALUE;
+        localSortieQueue.clear();
+        skippedSegments.clear();
+        sortiePlacements = 0;
+        placedSegments = 0;
+        plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -382,28 +399,20 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickMoveToSegment(ServerWorld world) {
-        // Skip already-built or gate-reserved segments
-        while (currentSegmentIndex < pendingSegments.size()) {
-            BlockPos pos = pendingSegments.get(currentSegmentIndex);
-            if (isGatePosition(pos) || isPlacedWallBlock(world.getBlockState(pos))) {
-                currentSegmentIndex++;
-                continue;
+        pruneSortieQueue(world);
+        if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
+            if (!startNextSortie(world)) {
+                completeCycle();
+                return;
             }
-            break;
         }
 
-        if (currentSegmentIndex >= pendingSegments.size()) {
+        BlockPos target = localSortieQueue.peekFirst();
+        if (target == null) {
             stage = Stage.DONE;
-            guard.clearWallSegments();
-            // Invalidate cached rect so next cycle recomputes with updated village bounds
-            cachedWallRect = null;
-            cachedWallRectAnchor = null;
-            cachedPoiFootprintSignature = null;
-            LOGGER.info("MasonWallBuilder {}: build cycle complete", guard.getUuidAsString());
             return;
         }
 
-        BlockPos target = pendingSegments.get(currentSegmentIndex);
         BlockPos navigationTarget = resolveSegmentNavigationTarget(world, target);
         if (!target.equals(activeMoveTarget)) {
             activeMoveTarget = target;
@@ -427,7 +436,8 @@ public class MasonWallBuilderGoal extends Goal {
             if (!pathStarted) {
                 LOGGER.info("MasonWallBuilder {}: skipping unreachable segment {} (path not found, navTarget={})",
                         guard.getUuidAsString(), target.toShortString(), navigationTarget.toShortString());
-                currentSegmentIndex++;
+                localSortieQueue.pollFirst();
+                skippedSegments.add(target);
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
                 lastMoveDistSq = Double.MAX_VALUE;
@@ -441,7 +451,8 @@ public class MasonWallBuilderGoal extends Goal {
             } else if (activeMoveTargetTicks > 200) {
                 LOGGER.info("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
                         guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
-                currentSegmentIndex++;
+                localSortieQueue.pollFirst();
+                skippedSegments.add(target);
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
                 lastMoveDistSq = Double.MAX_VALUE;
@@ -464,20 +475,15 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickPlaceBlock(ServerWorld world) {
-        if (currentSegmentIndex >= pendingSegments.size()) {
-            stage = Stage.DONE;
-            guard.clearWallSegments();
-            cachedWallRect = null;
-            cachedWallRectAnchor = null;
-            cachedPoiFootprintSignature = null;
+        BlockPos target = localSortieQueue.peekFirst();
+        if (target == null) {
+            stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
 
-        BlockPos target = pendingSegments.get(currentSegmentIndex);
-
         // Verify still unbuilt
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
-            currentSegmentIndex++;
+            localSortieQueue.pollFirst();
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -502,21 +508,120 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.debug("MasonWallBuilder {}: placed {} at {}",
                 guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
-        currentSegmentIndex++;
+        localSortieQueue.pollFirst();
+        sortiePlacements++;
+        placedSegments++;
         maybeLogPlacementProgress();
         stage = Stage.MOVE_TO_SEGMENT;
     }
 
     private void maybeLogPlacementProgress() {
-        if (!isElectedBuilder || pendingSegments.isEmpty()) return;
-        int placed = currentSegmentIndex;
-        int total = pendingSegments.size();
+        if (!isElectedBuilder || plannedPlacementCount <= 0) return;
+        int placed = placedSegments;
+        int total = plannedPlacementCount;
         if (placed >= total || placed <= 10 || placed - lastProgressLoggedSegmentCount >= 25) {
             lastProgressLoggedSegmentCount = placed;
             int percent = (int) Math.floor((placed * 100.0) / total);
             LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
                     guard.getUuidAsString(), placed, total, percent);
         }
+    }
+
+    private void pruneSortieQueue(ServerWorld world) {
+        while (!localSortieQueue.isEmpty()) {
+            BlockPos head = localSortieQueue.peekFirst();
+            if (head == null || isGatePosition(head) || isPlacedWallBlock(world.getBlockState(head))) {
+                localSortieQueue.pollFirst();
+            } else {
+                break;
+            }
+        }
+    }
+
+    private boolean startNextSortie(ServerWorld world) {
+        localSortieQueue.clear();
+        sortiePlacements = 0;
+
+        BlockPos anchor = findNextIndexAnchor(world);
+        if (anchor == null) {
+            return false;
+        }
+
+        List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor);
+        if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
+            BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos());
+            if (nearest != null) {
+                anchorBatch = buildLocalSortieCandidates(world, nearest);
+            }
+        }
+        if (anchorBatch.isEmpty()) {
+            skippedSegments.add(anchor);
+            return hasRemainingSegments(world) && startNextSortie(world);
+        }
+        localSortieQueue.addAll(anchorBatch);
+        return true;
+    }
+
+    private BlockPos findNextIndexAnchor(ServerWorld world) {
+        while (currentSegmentIndex < pendingSegments.size()) {
+            BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
+            if (isBuildableCandidate(world, candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from) {
+        BlockPos best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (BlockPos pos : pendingSegments) {
+            if (!isBuildableCandidate(world, pos)) continue;
+            double distSq = from.getSquaredDistance(pos);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = pos;
+            }
+        }
+        return best;
+    }
+
+    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor) {
+        int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
+        List<BlockPos> local = new ArrayList<>();
+        for (BlockPos pos : pendingSegments) {
+            if (!isBuildableCandidate(world, pos)) continue;
+            if (anchor.getSquaredDistance(pos) <= radiusSq) {
+                local.add(pos);
+            }
+        }
+        local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        if (local.size() > MAX_SEGMENTS_PER_SORTIE) {
+            return new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
+        }
+        return local;
+    }
+
+    private boolean hasRemainingSegments(ServerWorld world) {
+        for (BlockPos pos : pendingSegments) {
+            if (isBuildableCandidate(world, pos)) return true;
+        }
+        return false;
+    }
+
+    private boolean isBuildableCandidate(ServerWorld world, BlockPos pos) {
+        return !isGatePosition(pos)
+                && !isPlacedWallBlock(world.getBlockState(pos))
+                && !skippedSegments.contains(pos);
+    }
+
+    private void completeCycle() {
+        stage = Stage.DONE;
+        guard.clearWallSegments();
+        cachedWallRect = null;
+        cachedWallRectAnchor = null;
+        cachedPoiFootprintSignature = null;
+        LOGGER.info("MasonWallBuilder {}: build cycle complete", guard.getUuidAsString());
     }
 
     // -------------------------------------------------------------------------
@@ -646,6 +751,79 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         return perimeter;
+    }
+
+    static TraversalSimulationResult simulateSequentialTraversal(List<BlockPos> orderedSegments, BlockPos startPos) {
+        if (orderedSegments.isEmpty()) return new TraversalSimulationResult(0.0D, 0, 0);
+        double travel = 0.0D;
+        BlockPos current = startPos;
+        for (BlockPos segment : orderedSegments) {
+            travel += manhattan2d(current, segment);
+            current = segment;
+        }
+        return new TraversalSimulationResult(travel / orderedSegments.size(), orderedSegments.size(), orderedSegments.size());
+    }
+
+    static TraversalSimulationResult simulateBatchedTraversal(List<BlockPos> orderedSegments, BlockPos startPos) {
+        if (orderedSegments.isEmpty()) return new TraversalSimulationResult(0.0D, 0, 0);
+
+        List<BlockPos> remaining = new ArrayList<>(orderedSegments);
+        BlockPos current = startPos;
+        double travel = 0.0D;
+        int placed = 0;
+        int sortiesMeetingMin = 0;
+        int sortiesWithMinCandidates = 0;
+        int index = 0;
+        int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
+
+        while (!remaining.isEmpty()) {
+            if (index >= remaining.size()) index = 0;
+            BlockPos anchor = remaining.get(index);
+            List<BlockPos> local = buildSimulationLocalBatch(remaining, anchor, radiusSq);
+            if (local.size() < MIN_SEGMENTS_PER_SORTIE) {
+                anchor = findNearestSimulationCandidate(remaining, current);
+                local = buildSimulationLocalBatch(remaining, anchor, radiusSq);
+            }
+            if (local.size() >= MIN_SEGMENTS_PER_SORTIE) {
+                sortiesWithMinCandidates++;
+            }
+            int batchSize = Math.min(local.size(), MAX_SEGMENTS_PER_SORTIE);
+            if (batchSize >= MIN_SEGMENTS_PER_SORTIE) sortiesMeetingMin++;
+            for (int i = 0; i < batchSize; i++) {
+                BlockPos target = local.get(i);
+                travel += manhattan2d(current, target);
+                current = target;
+                remaining.remove(target);
+                placed++;
+            }
+        }
+        return new TraversalSimulationResult(travel / Math.max(1, placed), sortiesMeetingMin, sortiesWithMinCandidates);
+    }
+
+    private static List<BlockPos> buildSimulationLocalBatch(List<BlockPos> remaining, BlockPos anchor, int radiusSq) {
+        List<BlockPos> local = new ArrayList<>();
+        for (BlockPos candidate : remaining) {
+            if (anchor.getSquaredDistance(candidate) <= radiusSq) local.add(candidate);
+        }
+        local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        return local;
+    }
+
+    private static BlockPos findNearestSimulationCandidate(List<BlockPos> remaining, BlockPos from) {
+        BlockPos best = remaining.get(0);
+        int bestDist = Integer.MAX_VALUE;
+        for (BlockPos candidate : remaining) {
+            int dist = manhattan2d(from, candidate);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private static int manhattan2d(BlockPos a, BlockPos b) {
+        return Math.abs(a.getX() - b.getX()) + Math.abs(a.getZ() - b.getZ());
     }
 
     /**
@@ -919,4 +1097,6 @@ public class MasonWallBuilderGoal extends Goal {
             return blockState;
         }
     }
+
+    record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
 }
