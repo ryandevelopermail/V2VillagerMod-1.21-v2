@@ -62,6 +62,7 @@ public class QuartermasterGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(QuartermasterGoal.class);
 
     private static final int CHECK_INTERVAL_TICKS = 300;
+    private static final int STRUCTURAL_CHECK_INTERVAL_TICKS = 20;
     private static final double SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
     private static final double REACH_SQ = 3.0D * 3.0D;
@@ -119,9 +120,13 @@ public class QuartermasterGoal extends Goal {
     private final BlockPos chestPos;  // librarian's paired chest (double-chest second half)
 
     private long nextCheckTick = 0L;
+    private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
     private boolean demoted = false;
+    private boolean forceStructuralRevalidation = true;
+    private boolean prerequisitesValid = false;
+    private BlockPos cachedSecondChestPos = null;
 
     // Current active transfer
     private BlockPos sourcePos = null;
@@ -150,6 +155,15 @@ public class QuartermasterGoal extends Goal {
         VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
     }
 
+    /**
+     * Signals that prerequisites should be revalidated immediately on the next goal evaluation.
+     * Used by known invalidation paths such as chest listener updates.
+     */
+    public void requestImmediatePrerequisiteRevalidation() {
+        forceStructuralRevalidation = true;
+        nextStructuralCheckTick = 0L;
+    }
+
     private void ensureAnchorUnregistered(ServerWorld world) {
         if (anchorRegistered) {
             unregisterAnchor(world);
@@ -164,11 +178,11 @@ public class QuartermasterGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
-        if (!villager.isAlive() || villager.isRemoved()) {
+        if (!passesFastEntityChecks(world)) {
             ensureAnchorUnregistered(world);
             return false;
         }
-        if (!validateAndSyncPrerequisites(world)) return false;
+        if (!validateAndSyncPrerequisites(world, false)) return false;
         if (!anchorRegistered) {
             registerAnchor(world);
             anchorRegistered = true;
@@ -207,13 +221,13 @@ public class QuartermasterGoal extends Goal {
             stage = Stage.DONE;
             return;
         }
-        if (!villager.isAlive() || villager.isRemoved()) {
+        if (!passesFastEntityChecks(world)) {
             ensureAnchorUnregistered(world);
             stage = Stage.DONE;
             villager.getNavigation().stop();
             return;
         }
-        if (!validateAndSyncPrerequisites(world)) {
+        if (!validateAndSyncPrerequisites(world, stage == Stage.TAKE_FROM_SOURCE || stage == Stage.INSERT_TO_DEST)) {
             stage = Stage.DONE;
             villager.getNavigation().stop();
             return;
@@ -252,18 +266,40 @@ public class QuartermasterGoal extends Goal {
         }
     }
 
-    private boolean validateAndSyncPrerequisites(ServerWorld world) {
+    private boolean passesFastEntityChecks(ServerWorld world) {
+        return villager.isAlive()
+                && !villager.isRemoved()
+                && villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN;
+    }
+
+    private boolean validateAndSyncPrerequisites(ServerWorld world, boolean forceNow) {
+        long worldTime = world.getTime();
+        if (!forceNow
+                && !forceStructuralRevalidation
+                && worldTime < nextStructuralCheckTick
+                && prerequisitesValid) {
+            return true;
+        }
         QuartermasterPrerequisiteHelper.Result result =
                 QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
+        forceStructuralRevalidation = false;
+        nextStructuralCheckTick = worldTime + STRUCTURAL_CHECK_INTERVAL_TICKS;
         if (result.valid()) {
             demoted = false;
+            prerequisitesValid = true;
+            cachedSecondChestPos = result.secondChestPos();
             return true;
         }
 
         ensureAnchorUnregistered(world);
+        BlockPos lastKnownSecondChestPos = cachedSecondChestPos;
+        prerequisitesValid = false;
+        cachedSecondChestPos = null;
+        forceStructuralRevalidation = true;
         if (!demoted) {
-            Optional<BlockPos> secondChest = findDoubleChestOtherHalf(world, chestPos);
-            String secondChestText = secondChest.map(BlockPos::toShortString).orElse("none");
+            String secondChestText = Optional.ofNullable(lastKnownSecondChestPos)
+                    .map(BlockPos::toShortString)
+                    .orElse("none");
             LOGGER.info("Librarian {} demoted from Quartermaster (chest={} second_chest={} job_site={})",
                     villager.getUuidAsString(),
                     chestPos.toShortString(),
@@ -524,7 +560,11 @@ public class QuartermasterGoal extends Goal {
 
     private boolean takeFromInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty() || transferStack.isEmpty()) return false;
+        if (inv.isEmpty()) {
+            requestImmediatePrerequisiteRevalidation();
+            return false;
+        }
+        if (transferStack.isEmpty()) return false;
         Inventory inventory = inv.get();
         net.minecraft.item.Item item = transferStack.getItem();
         int needed = transferStack.getCount();
@@ -550,7 +590,11 @@ public class QuartermasterGoal extends Goal {
 
     private void insertToInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty() || transferStack.isEmpty()) return;
+        if (inv.isEmpty()) {
+            requestImmediatePrerequisiteRevalidation();
+            return;
+        }
+        if (transferStack.isEmpty()) return;
         Inventory inventory = inv.get();
         ItemStack remaining = transferStack.copy();
 
