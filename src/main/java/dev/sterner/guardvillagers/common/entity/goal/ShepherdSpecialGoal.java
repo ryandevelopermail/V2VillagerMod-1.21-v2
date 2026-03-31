@@ -25,6 +25,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
@@ -2240,23 +2241,88 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
-        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        if (bannerCandidates.isEmpty()) {
+            return List.of();
+        }
+
+        int minX = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxZ = Integer.MIN_VALUE;
         for (BlockPos bannerPos : bannerCandidates) {
-            int yStart = Math.max(minY, bannerPos.getY() - PEN_SEARCH_Y_RANGE);
-            int yEnd = Math.min(maxY, bannerPos.getY() + PEN_SEARCH_Y_RANGE);
-            for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
-                for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
-                    for (int y = yStart; y <= yEnd; y++) {
-                        BlockPos pos = new BlockPos(x, y, z);
-                        if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
-                            gateSet.add(pos.toImmutable());
+            minX = Math.min(minX, bannerPos.getX() - radius);
+            maxX = Math.max(maxX, bannerPos.getX() + radius);
+            minZ = Math.min(minZ, bannerPos.getZ() - radius);
+            maxZ = Math.max(maxZ, bannerPos.getZ() + radius);
+        }
+
+        int chunkMinX = minX >> 4;
+        int chunkMaxX = maxX >> 4;
+        int chunkMinZ = minZ >> 4;
+        int chunkMaxZ = maxZ >> 4;
+        int sectionMinY = minY >> 4;
+        int sectionMaxY = maxY >> 4;
+
+        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        for (int chunkX = chunkMinX; chunkX <= chunkMaxX; chunkX++) {
+            for (int chunkZ = chunkMinZ; chunkZ <= chunkMaxZ; chunkZ++) {
+                Chunk chunk = world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+
+                ChunkSection[] sections = chunk.getSectionArray();
+                for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+                    int sectionY = world.getBottomSectionCoord() + sectionIndex;
+                    if (sectionY < sectionMinY || sectionY > sectionMaxY) {
+                        continue;
+                    }
+
+                    ChunkSection section = sections[sectionIndex];
+                    if (section == null || section.isEmpty() || !section.hasAny(state -> state.getBlock() instanceof FenceGateBlock)) {
+                        continue;
+                    }
+
+                    int worldMinY = Math.max(minY, sectionY << 4);
+                    int worldMaxY = Math.min(maxY, (sectionY << 4) + 15);
+                    int minLocalX = chunkX == chunkMinX ? Math.floorMod(minX, 16) : 0;
+                    int maxLocalX = chunkX == chunkMaxX ? Math.floorMod(maxX, 16) : 15;
+                    int minLocalZ = chunkZ == chunkMinZ ? Math.floorMod(minZ, 16) : 0;
+                    int maxLocalZ = chunkZ == chunkMaxZ ? Math.floorMod(maxZ, 16) : 15;
+                    int minLocalY = Math.floorMod(worldMinY, 16);
+                    int maxLocalY = Math.floorMod(worldMaxY, 16);
+
+                    for (int localX = minLocalX; localX <= maxLocalX; localX++) {
+                        for (int localZ = minLocalZ; localZ <= maxLocalZ; localZ++) {
+                            for (int localY = minLocalY; localY <= maxLocalY; localY++) {
+                                BlockState state = section.getBlockState(localX, localY, localZ);
+                                if (!(state.getBlock() instanceof FenceGateBlock)) {
+                                    continue;
+                                }
+                                int worldX = (chunkX << 4) + localX;
+                                int worldY = (sectionY << 4) + localY;
+                                int worldZ = (chunkZ << 4) + localZ;
+                                gateSet.add(new BlockPos(worldX, worldY, worldZ));
+                            }
                         }
                     }
                 }
             }
         }
 
-        List<BlockPos> gates = new ArrayList<>(gateSet);
+        List<BlockPos> gates = new ArrayList<>();
+        for (BlockPos gatePos : gateSet) {
+            if (gatePos.getY() < minY || gatePos.getY() > maxY) {
+                continue;
+            }
+            for (BlockPos bannerPos : bannerCandidates) {
+                if (bannerPos.isWithinDistance(gatePos, radius)) {
+                    gates.add(gatePos.toImmutable());
+                    break;
+                }
+            }
+        }
+
         gates.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
         if (gates.size() > limit) {
             return new ArrayList<>(gates.subList(0, limit));
