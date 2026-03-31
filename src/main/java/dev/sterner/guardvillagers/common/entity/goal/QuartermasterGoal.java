@@ -655,7 +655,7 @@ public class QuartermasterGoal extends Goal {
             pairingRebuildCursor = 0;
             cachedPairingCount = pairings.size();
             candidateCacheStale = false;
-            nextCandidateCacheRefreshTick = now + CANDIDATE_CACHE_REFRESH_TICKS;
+            nextCandidateCacheRefreshTick = now + CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS;
             if (surplusCandidateCursor >= cachedSurplusCandidates.size()) {
                 surplusCandidateCursor = 0;
             }
