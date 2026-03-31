@@ -342,18 +342,44 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredSegments={}, wallsAvailable={}, cobblestoneConvertible={}, plannedConversions={})",
                 guard.getUuidAsString(), requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
-        // 6. Elect builder — the mason (including self) with the most stone
-        MasonGuardEntity electedBuilder = guard;
-        int electedStone = myWalls + myCobblestone;
+        // 6. Elect builder — only masons with both chest + job pairing are eligible.
+        MasonGuardEntity electedBuilder = null;
+        int electedStone = -1;
+        if (guard.getPairedChestPos() != null && guard.getPairedJobPos() != null) {
+            electedBuilder = guard;
+            electedStone = myWalls + myCobblestone;
+        } else {
+            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
+                    guard.getUuidAsString(),
+                    guard.getUuidAsString(),
+                    guard.getPairedChestPos() != null,
+                    guard.getPairedJobPos() != null);
+        }
+
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
-            if (peer.getPairedChestPos() == null) continue;
-            int peerStone = countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE_WALL)
-                    + countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE);
-            if (peerStone > electedStone) {
+            BlockPos peerChestPos = peer.getPairedChestPos();
+            BlockPos peerJobPos = peer.getPairedJobPos();
+            if (peerChestPos == null || peerJobPos == null) {
+                LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
+                        guard.getUuidAsString(),
+                        peer.getUuidAsString(),
+                        peerChestPos != null,
+                        peerJobPos != null);
+                continue;
+            }
+            int peerStone = countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
+            if (electedBuilder == null || peerStone > electedStone) {
                 electedStone = peerStone;
                 electedBuilder = peer;
             }
+        }
+
+        if (electedBuilder == null) {
+            LOGGER.info("MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
+            return false;
         }
 
         if (electedBuilder != guard) {
@@ -372,11 +398,20 @@ public class MasonWallBuilderGoal extends Goal {
         pendingTransfers = new ArrayList<>();
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
-            if (peer.getPairedChestPos() == null) continue;
-            int peerStone = countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE_WALL)
-                    + countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE);
+            BlockPos peerChestPos = peer.getPairedChestPos();
+            if (peerChestPos == null) {
+                LOGGER.debug("MasonWallBuilder {}: transfer exclusion candidate={} reason=missing paired chest",
+                        guard.getUuidAsString(), peer.getUuidAsString());
+                continue;
+            }
+            if (peer.getPairedJobPos() == null) {
+                LOGGER.debug("MasonWallBuilder {}: transfer donor candidate={} has no paired job but remains eligible (paired chest present)",
+                        guard.getUuidAsString(), peer.getUuidAsString());
+            }
+            int peerStone = countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
             if (peerStone > 0) {
-                pendingTransfers.add(new TransferTask(peer.getPairedChestPos(), guard.getPairedChestPos(), peerStone));
+                pendingTransfers.add(new TransferTask(peerChestPos, guard.getPairedChestPos(), peerStone));
             }
         }
 
@@ -388,8 +423,8 @@ public class MasonWallBuilderGoal extends Goal {
         guard.setWallGatePositions(gatePositions);
         guard.setWallBuildPending(true, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
 
-        LOGGER.info("MasonWallBuilder {}: elected builder; {} segments to place, {} transfers pending",
-                guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size());
+        LOGGER.info("MasonWallBuilder {}: elected builder={} (stone={}); {} segments to place, {} transfers pending",
+                guard.getUuidAsString(), electedBuilder.getUuidAsString(), electedStone, pendingSegments.size(), pendingTransfers.size());
         return true;
     }
 
