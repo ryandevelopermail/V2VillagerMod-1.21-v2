@@ -642,11 +642,82 @@ public class QuartermasterGoal extends Goal {
             scanned++;
             if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
             if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
-            if (pairing.profession() == VillagerProfession.SHEPHERD) {
-                protectedChests.add(candidate);
+            if (pairing.profession() == VillagerProfession.SHEPHERD) continue;
+            BlockPos candidate = pairing.chestPos();
+            if (candidate != null) {
+                rebuildingSurplusCandidates.add(candidate.toImmutable());
             }
+        }
+        if (pairingRebuildCursor >= pairings.size()) {
+            cachedSurplusCandidates.clear();
+            cachedSurplusCandidates.addAll(rebuildingSurplusCandidates);
+            rebuildingSurplusCandidates.clear();
+            pairingRebuildCursor = 0;
+            cachedPairingCount = pairings.size();
+            candidateCacheStale = false;
+            nextCandidateCacheRefreshTick = now + CANDIDATE_CACHE_REFRESH_TICKS;
+            if (surplusCandidateCursor >= cachedSurplusCandidates.size()) {
+                surplusCandidateCursor = 0;
+            }
+        }
+    }
+
+    private Optional<BlockPos> scanSurplusCandidatesWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+        if (cachedSurplusCandidates.isEmpty()) return Optional.empty();
+
+        int scanStart = Math.floorMod(surplusCandidateCursor, cachedSurplusCandidates.size());
+        while (budget.canCheckAnotherCandidate()) {
+            BlockPos candidate = cachedSurplusCandidates.get(surplusCandidateCursor);
+            surplusCandidateCursor = (surplusCandidateCursor + 1) % cachedSurplusCandidates.size();
+
             budget.recordCandidateCheck();
             if (protectedChests.contains(candidate)) continue;
+            if (!budget.canInspectAnotherInventory()) break;
+
+            budget.recordInventoryInspection();
+            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                return Optional.of(candidate);
+            }
+            if (surplusCandidateCursor == scanStart) break;
+        }
+        return Optional.empty();
+    }
+
+    private Optional<BlockPos> scanFallbackPairingsWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+        List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
+        if (pairings.isEmpty()) return Optional.empty();
+
+        int scanStart = Math.floorMod(pairingRebuildCursor, pairings.size());
+        while (budget.canCheckAnotherCandidate()) {
+            JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor);
+            pairingRebuildCursor = (pairingRebuildCursor + 1) % pairings.size();
+
+            if (pairing.villagerUuid().equals(villager.getUuid())) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (pairing.profession() == VillagerProfession.SHEPHERD) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+
+            BlockPos candidate = pairing.chestPos();
+            if (candidate == null) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+
+            budget.recordCandidateCheck();
+            if (protectedChests.contains(candidate)) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (!budget.canInspectAnotherInventory()) break;
+
             budget.recordInventoryInspection();
             if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
                 return Optional.of(candidate);
