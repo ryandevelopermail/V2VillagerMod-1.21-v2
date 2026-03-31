@@ -2240,28 +2240,120 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private List<BlockPos> collectNearbyGateCandidates(ServerWorld world, BlockPos sortOrigin, List<BlockPos> bannerCandidates, int radius, int minY, int maxY, int limit) {
-        LinkedHashSet<BlockPos> gateSet = new LinkedHashSet<>();
+        if (bannerCandidates.isEmpty()) {
+            return List.of();
+        }
+
+        LinkedHashSet<BlockPos> discoveredCandidates = new LinkedHashSet<>();
+        VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
+
+        // Prefer cheap indexed lookup from pen registry; this avoids an O(x*y*z) world scan.
         for (BlockPos bannerPos : bannerCandidates) {
-            int yStart = Math.max(minY, bannerPos.getY() - PEN_SEARCH_Y_RANGE);
-            int yEnd = Math.min(maxY, bannerPos.getY() + PEN_SEARCH_Y_RANGE);
-            for (int x = bannerPos.getX() - radius; x <= bannerPos.getX() + radius; x++) {
-                for (int z = bannerPos.getZ() - radius; z <= bannerPos.getZ() + radius; z++) {
-                    for (int y = yStart; y <= yEnd; y++) {
-                        BlockPos pos = new BlockPos(x, y, z);
-                        if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
-                            gateSet.add(pos.toImmutable());
+            List<VillagePenRegistry.PenEntry> indexedPens = registry.getNearestBellPensWithJobSiteFallback(world, bannerPos, radius * 2);
+            for (VillagePenRegistry.PenEntry penEntry : indexedPens) {
+                BlockPos gatePos = penEntry.gate();
+                if (gatePos != null) {
+                    discoveredCandidates.add(gatePos.toImmutable());
+                }
+            }
+        }
+
+        List<BlockPos> gates = filterGateCandidatesByRangeAndHeight(sortOrigin, bannerCandidates, discoveredCandidates, radius, minY, maxY, limit);
+        if (!gates.isEmpty()) {
+            return gates;
+        }
+
+        // Fallback when registry has no nearby pens (legacy worlds / stale registry): bounded chunk scan.
+        LinkedHashSet<BlockPos> fallbackCandidates = collectGateCandidatesFromLoadedChunks(world, bannerCandidates, radius);
+        return filterGateCandidatesByRangeAndHeight(sortOrigin, bannerCandidates, fallbackCandidates, radius, minY, maxY, limit);
+    }
+
+    private LinkedHashSet<BlockPos> collectGateCandidatesFromLoadedChunks(ServerWorld world, List<BlockPos> anchors, int radius) {
+        int minX = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int minZ = Integer.MAX_VALUE;
+        int maxZ = Integer.MIN_VALUE;
+        for (BlockPos anchor : anchors) {
+            minX = Math.min(minX, anchor.getX() - radius);
+            maxX = Math.max(maxX, anchor.getX() + radius);
+            minZ = Math.min(minZ, anchor.getZ() - radius);
+            maxZ = Math.max(maxZ, anchor.getZ() + radius);
+        }
+
+        int minChunkX = minX >> 4;
+        int maxChunkX = maxX >> 4;
+        int minChunkZ = minZ >> 4;
+        int maxChunkZ = maxZ >> 4;
+
+        LinkedHashSet<BlockPos> gates = new LinkedHashSet<>();
+        int worldMinY = world.getBottomY();
+        int worldMaxY = world.getTopY() - 1;
+
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                Chunk chunk = world.getChunkManager().getChunk(chunkX, chunkZ, ChunkStatus.FULL, false);
+                if (chunk == null) {
+                    continue;
+                }
+
+                int startX = Math.max(minX, chunkX << 4);
+                int endX = Math.min(maxX, (chunkX << 4) + 15);
+                int startZ = Math.max(minZ, chunkZ << 4);
+                int endZ = Math.min(maxZ, (chunkZ << 4) + 15);
+
+                for (int x = startX; x <= endX; x++) {
+                    for (int z = startZ; z <= endZ; z++) {
+                        for (int y = worldMinY; y <= worldMaxY; y++) {
+                            BlockPos pos = new BlockPos(x, y, z);
+                            if (world.getBlockState(pos).getBlock() instanceof FenceGateBlock) {
+                                gates.add(pos.toImmutable());
+                            }
                         }
                     }
                 }
             }
         }
-
-        List<BlockPos> gates = new ArrayList<>(gateSet);
-        gates.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
-        if (gates.size() > limit) {
-            return new ArrayList<>(gates.subList(0, limit));
-        }
         return gates;
+    }
+
+    static List<BlockPos> filterGateCandidatesByRangeAndHeight(
+            BlockPos sortOrigin,
+            List<BlockPos> anchors,
+            java.util.Collection<BlockPos> gateCandidates,
+            int radius,
+            int minY,
+            int maxY,
+            int limit
+    ) {
+        if (gateCandidates.isEmpty() || anchors.isEmpty() || limit <= 0) {
+            return List.of();
+        }
+
+        int radiusSq = radius * radius;
+        List<BlockPos> filtered = new ArrayList<>();
+        for (BlockPos gatePos : gateCandidates) {
+            if (gatePos.getY() < minY || gatePos.getY() > maxY) {
+                continue;
+            }
+            boolean inRange = false;
+            for (BlockPos anchor : anchors) {
+                int dx = gatePos.getX() - anchor.getX();
+                int dz = gatePos.getZ() - anchor.getZ();
+                if ((dx * dx) + (dz * dz) <= radiusSq) {
+                    inRange = true;
+                    break;
+                }
+            }
+            if (inRange) {
+                filtered.add(gatePos.toImmutable());
+            }
+        }
+
+        filtered.sort(Comparator.comparingDouble(sortOrigin::getSquaredDistance));
+        if (filtered.size() > limit) {
+            return new ArrayList<>(filtered.subList(0, limit));
+        }
+        return filtered;
     }
 
     private int getLocalMinY(ServerWorld world, BlockPos center) {
