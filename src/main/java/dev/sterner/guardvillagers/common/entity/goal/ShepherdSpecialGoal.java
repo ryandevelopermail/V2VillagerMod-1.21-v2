@@ -72,7 +72,8 @@ public class ShepherdSpecialGoal extends Goal {
     private static final int GATHER_CIRCLE_WAYPOINT_COUNT = 16;
     private static final int GATHER_BANNER_HOLD_TICKS = 1200;
     private static final double GATHER_GATE_ALIGNMENT_DOT_THRESHOLD = 0.96D;
-    private static final long SPATIAL_SEARCH_CACHE_TTL_TICKS = 40L;
+    private static final int SPATIAL_REFRESH_INTERVAL_MIN_TICKS = 200;
+    private static final int SPATIAL_REFRESH_INTERVAL_MAX_TICKS = 400;
     private static final long SHEARS_CHEST_RETURN_TIMEOUT_TICKS = 600L;
     private static final long SHEARS_EXIT_PEN_RETRY_TICKS = 200L;
     private static final long GATHER_EXIT_PEN_RETRY_TICKS = 200L;
@@ -130,16 +131,20 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos gatherExitTarget;
     private boolean gatherHalfLogged;
     private final List<AnimalEntity> activeHerd = new ArrayList<>();
-    private long nearestPenCacheTick = Long.MIN_VALUE;
     private BlockPos cachedNearestPenTarget;
     private BlockPos cachedNearestPenGatePos;
-    private long nearestGroundBannerCacheTick = Long.MIN_VALUE;
     private BlockPos cachedNearestGroundBanner;
+    private PenTarget cachedNearestGatherPen;
     private int observedChestBannerCount = -1;
     private int observedChestWheatCount = -1;
+    private int observedChestShearsCount = -1;
+    private final int expensiveSpatialRefreshIntervalTicks;
+    private long nextExpensiveSpatialRefreshTick = Long.MIN_VALUE;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
+        this.expensiveSpatialRefreshIntervalTicks = SPATIAL_REFRESH_INTERVAL_MIN_TICKS
+                + villager.getRandom().nextInt(SPATIAL_REFRESH_INTERVAL_MAX_TICKS - SPATIAL_REFRESH_INTERVAL_MIN_TICKS + 1);
         setTargets(jobPos, chestPos);
         setControls(EnumSet.of(Control.MOVE));
     }
@@ -153,6 +158,7 @@ public class ShepherdSpecialGoal extends Goal {
         invalidateSpatialSearchCache();
         observedChestBannerCount = -1;
         observedChestWheatCount = -1;
+        observedChestShearsCount = -1;
     }
 
     public void requestImmediateCheck() {
@@ -168,14 +174,25 @@ public class ShepherdSpecialGoal extends Goal {
     public void onChestInventoryChanged(ServerWorld world) {
         int currentBannerCount = countBannersInChest(world);
         int currentWheatCount = countWheatInChest(world);
-        boolean bannerChanged = observedChestBannerCount != currentBannerCount;
-        boolean wheatChanged = observedChestWheatCount != currentWheatCount;
+        int currentShearsCount = countShearsInChest(world);
+        boolean bannerAdded = observedChestBannerCount < 0 ? currentBannerCount > 0 : currentBannerCount > observedChestBannerCount;
+        boolean wheatAdded = observedChestWheatCount < 0 ? currentWheatCount > 0 : currentWheatCount > observedChestWheatCount;
+        boolean shearsAdded = observedChestShearsCount < 0 ? currentShearsCount > 0 : currentShearsCount > observedChestShearsCount;
         observedChestBannerCount = currentBannerCount;
         observedChestWheatCount = currentWheatCount;
+        observedChestShearsCount = currentShearsCount;
 
-        if (bannerChanged || wheatChanged) {
-            invalidateSpatialSearchCache();
+        if (bannerAdded || wheatAdded || shearsAdded) {
+            requestSpatialRefresh();
         }
+    }
+
+    public void onPenSpatialAnchorUpdated() {
+        requestSpatialRefresh();
+    }
+
+    public void onPenRegistryUpdated() {
+        requestSpatialRefresh();
     }
 
     @Override
@@ -879,37 +896,36 @@ public class ShepherdSpecialGoal extends Goal {
         boolean hasBannerInInventoryOrHand = hasBannerInInventoryOrHand();
         boolean hasShearsInInventoryOrHand = hasShearsInInventoryOrHand();
         boolean hasWheatInInventoryOrOffhand = hasWheatInInventoryOrOffhand();
-        boolean nearestBannerPenExists = findNearestPenTarget(world) != null;
-        boolean nearestGatherPenExists = resolveNearestGatherPen(world) != null;
 
         boolean hasBannerInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
         boolean hasShearsInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS));
         boolean hasWheatInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.WHEAT));
 
         boolean hasBannerAvailable = hasBannerInInventoryOrHand || hasBannerInChest;
-        boolean hasBannerPlacementTarget = hasBannerAvailable && nearestBannerPenExists;
         boolean hasShearsAvailable = hasShearsInInventoryOrHand || hasShearsInChest;
         boolean hasWheatAvailable = hasWheatInInventoryOrOffhand || hasWheatInChest;
 
-        if (inventory == null) {
-            TaskType selectedTask = selectTaskTypeByAvailability(
-                    hasBannerAvailable,
-                    hasBannerPlacementTarget,
-                    hasShearsAvailable,
-                    hasWheatAvailable,
-                    nearestGatherPenExists);
-            logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
-            return selectedTask;
+        if (hasBannerAvailable) {
+            boolean hasBannerPlacementTarget = findNearestPenTarget(world) != null;
+            if (hasBannerPlacementTarget) {
+                return TaskType.BANNER;
+            }
+            TaskType fallbackTask = selectNonBannerTaskType(hasShearsAvailable, hasWheatAvailable, false);
+            if (fallbackTask != TaskType.WHEAT_GATHER && hasWheatAvailable && resolveNearestGatherPen(world) != null) {
+                fallbackTask = TaskType.WHEAT_GATHER;
+            }
+            logBannerFallbackSelection(true, false, fallbackTask);
+            return fallbackTask;
         }
 
-        TaskType selectedTask = selectTaskTypeByAvailability(
-                hasBannerAvailable,
-                hasBannerPlacementTarget,
-                hasShearsAvailable,
-                hasWheatAvailable,
-                nearestGatherPenExists);
-        logBannerFallbackSelection(hasBannerAvailable, hasBannerPlacementTarget, selectedTask);
-        return selectedTask;
+        if (hasShearsAvailable) {
+            return TaskType.SHEARS;
+        }
+
+        if (hasWheatAvailable && resolveNearestGatherPen(world) != null) {
+            return TaskType.WHEAT_GATHER;
+        }
+        return null;
     }
 
     private void logBannerFallbackSelection(boolean hasBannerAvailable, boolean hasBannerPlacementTarget, TaskType selectedTask) {
@@ -1589,7 +1605,7 @@ public class ShepherdSpecialGoal extends Goal {
 
     private BlockPos findNearestPenTarget(ServerWorld world) {
         long now = world.getTime();
-        if (now - nearestPenCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+        if (!shouldRefreshExpensiveSpatial(now, cachedNearestPenTarget != null)) {
             penGatePos = cachedNearestPenGatePos;
             return cachedNearestPenTarget;
         }
@@ -1650,9 +1666,9 @@ public class ShepherdSpecialGoal extends Goal {
             LOGGER.info("Shepherd {} selected gate {} as nearest valid pen entry", villager.getUuidAsString(), nearestGate.toShortString());
         }
 
-        nearestPenCacheTick = now;
         cachedNearestPenTarget = nearestGate;
         cachedNearestPenGatePos = nearestGate;
+        markExpensiveSpatialRefreshed(now);
         penGatePos = nearestGate;
         return nearestGate;
     }
@@ -2136,7 +2152,7 @@ public class ShepherdSpecialGoal extends Goal {
 
     private BlockPos findNearestGroundBanner(ServerWorld world) {
         long now = world.getTime();
-        if (now - nearestGroundBannerCacheTick <= SPATIAL_SEARCH_CACHE_TTL_TICKS) {
+        if (!shouldRefreshExpensiveSpatial(now, cachedNearestGroundBanner != null)) {
             return cachedNearestGroundBanner;
         }
 
@@ -2157,8 +2173,8 @@ public class ShepherdSpecialGoal extends Goal {
                 nearest = pos.toImmutable();
             }
         }
-        nearestGroundBannerCacheTick = now;
         cachedNearestGroundBanner = nearest;
+        markExpensiveSpatialRefreshed(now);
         return nearest;
     }
 
@@ -2322,6 +2338,10 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private PenTarget resolveNearestGatherPen(ServerWorld world) {
+        long now = world.getTime();
+        if (!shouldRefreshExpensiveSpatial(now, cachedNearestGatherPen != null)) {
+            return cachedNearestGatherPen;
+        }
         // Use VillagePenRegistry first; fall back to job-site geometry scan when bell cache is empty.
         BlockPos villagerPos = villager.getBlockPos();
         List<VillagePenRegistry.PenEntry> registryPens =
@@ -2340,16 +2360,22 @@ public class ShepherdSpecialGoal extends Goal {
                     nearest = entry;
                 }
             }
-            return new PenTarget(nearest.center(), nearest.center(), nearest.gate());
+            PenTarget gatheredPen = new PenTarget(nearest.center(), nearest.center(), nearest.gate());
+            cachedNearestGatherPen = gatheredPen;
+            markExpensiveSpatialRefreshed(now);
+            return gatheredPen;
         }
 
         // Legacy fallback: banner-based scan.
         List<PenTarget> pens = findShearPensLegacyBannerScan(world);
         if (pens.isEmpty()) {
+            cachedNearestGatherPen = null;
             return null;
         }
         pens.sort(Comparator.comparingDouble(pen -> villagerPos.getSquaredDistance(pen.banner())));
-        return pens.get(0);
+        cachedNearestGatherPen = pens.get(0);
+        markExpensiveSpatialRefreshed(now);
+        return cachedNearestGatherPen;
     }
 
     private List<BlockPos> buildGatherCircleWaypoints(BlockPos center) {
@@ -2453,11 +2479,26 @@ public class ShepherdSpecialGoal extends Goal {
     }
 
     private void invalidateSpatialSearchCache() {
-        nearestPenCacheTick = Long.MIN_VALUE;
         cachedNearestPenTarget = null;
         cachedNearestPenGatePos = null;
-        nearestGroundBannerCacheTick = Long.MIN_VALUE;
         cachedNearestGroundBanner = null;
+        cachedNearestGatherPen = null;
+        nextExpensiveSpatialRefreshTick = Long.MIN_VALUE;
+    }
+
+    private void requestSpatialRefresh() {
+        invalidateSpatialSearchCache();
+    }
+
+    private boolean shouldRefreshExpensiveSpatial(long now, boolean hasCachedTarget) {
+        if (!hasCachedTarget) {
+            return true;
+        }
+        return now >= nextExpensiveSpatialRefreshTick;
+    }
+
+    private void markExpensiveSpatialRefreshed(long now) {
+        nextExpensiveSpatialRefreshTick = now + expensiveSpatialRefreshIntervalTicks;
     }
 
     private enum Stage {
