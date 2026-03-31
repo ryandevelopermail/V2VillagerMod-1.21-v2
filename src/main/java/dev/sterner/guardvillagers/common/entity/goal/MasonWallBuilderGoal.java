@@ -343,40 +343,52 @@ public class MasonWallBuilderGoal extends Goal {
                 guard.getUuidAsString(), requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
         // 6. Elect builder — only masons with both chest + job pairing are eligible.
-        MasonGuardEntity electedBuilder = null;
-        int electedStone = -1;
-        if (guard.getPairedChestPos() != null && guard.getPairedJobPos() != null) {
-            electedBuilder = guard;
-            electedStone = myWalls + myCobblestone;
-        } else {
-            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
-                    guard.getUuidAsString(),
-                    guard.getUuidAsString(),
-                    guard.getPairedChestPos() != null,
-                    guard.getPairedJobPos() != null);
-        }
-
+        List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
+        electionCandidates.add(new ElectionCandidateSnapshot(
+                guard.getUuidAsString(),
+                guard.getPairedChestPos() != null,
+                guard.getPairedJobPos() != null,
+                myWalls + myCobblestone
+        ));
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
             BlockPos peerChestPos = peer.getPairedChestPos();
-            BlockPos peerJobPos = peer.getPairedJobPos();
-            if (peerChestPos == null || peerJobPos == null) {
-                LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
-                        guard.getUuidAsString(),
-                        peer.getUuidAsString(),
-                        peerChestPos != null,
-                        peerJobPos != null);
-                continue;
-            }
-            int peerStone = countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
-                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
-            if (electedBuilder == null || peerStone > electedStone) {
-                electedStone = peerStone;
-                electedBuilder = peer;
+            int peerStone = peerChestPos == null ? 0 :
+                    countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                            + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
+            electionCandidates.add(new ElectionCandidateSnapshot(
+                    peer.getUuidAsString(),
+                    peerChestPos != null,
+                    peer.getPairedJobPos() != null,
+                    peerStone
+            ));
+        }
+        ElectionDecision electionDecision = electBuilderCandidate(electionCandidates);
+        for (ElectionCandidateSnapshot excluded : electionDecision.excludedCandidates()) {
+            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
+                    guard.getUuidAsString(),
+                    excluded.candidateId(),
+                    excluded.hasPairedChest(),
+                    excluded.hasPairedJob());
+        }
+
+        MasonGuardEntity electedBuilder = null;
+        int electedStone = electionDecision.electedStoneCount();
+        String electedCandidateId = electionDecision.electedCandidateId();
+        if (electedCandidateId != null) {
+            if (guard.getUuidAsString().equals(electedCandidateId)) {
+                electedBuilder = guard;
+            } else {
+                for (MasonGuardEntity peer : peers) {
+                    if (peer.getUuidAsString().equals(electedCandidateId)) {
+                        electedBuilder = peer;
+                        break;
+                    }
+                }
             }
         }
 
-        if (electedBuilder == null) {
+        if (electionDecision.shouldLogNoEligibleBuilder() || electedBuilder == null) {
             LOGGER.info("MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
                     guard.getUuidAsString(), anchorPos.toShortString());
             return false;
@@ -471,25 +483,31 @@ public class MasonWallBuilderGoal extends Goal {
         int threshold = computeCurrentSortieThreshold(world);
         guard.setWallBuildPending(true, threshold);
         int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
-        if (availableWalls >= threshold) {
+        WaitForStockDecision decision = decideWaitForStockTransition(
+                availableWalls,
+                threshold,
+                guard.getPairedJobPos() != null
+        );
+        if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
             LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, threshold);
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
-
-        BlockPos stonecutterPos = guard.getPairedJobPos();
-        if (stonecutterPos == null) {
+        if (decision == WaitForStockDecision.DONE) {
             stage = Stage.DONE;
             return;
         }
 
-        guard.getNavigation().startMovingTo(
-                stonecutterPos.getX() + 0.5D,
-                stonecutterPos.getY() + 0.5D,
-                stonecutterPos.getZ() + 0.5D,
-                MOVE_SPEED
-        );
+        BlockPos stonecutterPos = guard.getPairedJobPos();
+        if (stonecutterPos != null) {
+            guard.getNavigation().startMovingTo(
+                    stonecutterPos.getX() + 0.5D,
+                    stonecutterPos.getY() + 0.5D,
+                    stonecutterPos.getZ() + 0.5D,
+                    MOVE_SPEED
+            );
+        }
     }
 
     private void tickMoveToSegment(ServerWorld world) {
@@ -1033,6 +1051,36 @@ public class MasonWallBuilderGoal extends Goal {
         return new PathRetrySimulationResult(false, pathStartSuccessPerTick.size(), failedAttempts);
     }
 
+    static WaitForStockDecision decideWaitForStockTransition(int availableWalls, int threshold, boolean hasPairedJobPos) {
+        if (availableWalls >= threshold) {
+            return WaitForStockDecision.MOVE_TO_SEGMENT;
+        }
+        if (!hasPairedJobPos) {
+            return WaitForStockDecision.DONE;
+        }
+        return WaitForStockDecision.NAVIGATE_TO_STONECUTTER;
+    }
+
+    static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates) {
+        ElectionCandidateSnapshot elected = null;
+        List<ElectionCandidateSnapshot> excluded = new ArrayList<>();
+        for (ElectionCandidateSnapshot candidate : candidates) {
+            if (!candidate.hasPairedChest() || !candidate.hasPairedJob()) {
+                excluded.add(candidate);
+                continue;
+            }
+            if (elected == null || candidate.stoneCount() > elected.stoneCount()) {
+                elected = candidate;
+            }
+        }
+        return new ElectionDecision(
+                elected == null ? null : elected.candidateId(),
+                elected == null ? -1 : elected.stoneCount(),
+                excluded,
+                elected == null
+        );
+    }
+
     private static boolean shouldMarkHardUnreachable(int failedAttempts, long firstFailureTick, long currentTick) {
         if (firstFailureTick < 0L) return false;
         return failedAttempts >= PATH_RETRY_MAX_ATTEMPTS || (currentTick - firstFailureTick) >= PATH_RETRY_WINDOW_TICKS;
@@ -1366,4 +1414,17 @@ public class MasonWallBuilderGoal extends Goal {
     record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
 
     record PathRetrySimulationResult(boolean skippedAsHardUnreachable, int decisionTick, int failedAttempts) {}
+
+    record ElectionCandidateSnapshot(String candidateId, boolean hasPairedChest, boolean hasPairedJob, int stoneCount) {}
+
+    record ElectionDecision(String electedCandidateId,
+                            int electedStoneCount,
+                            List<ElectionCandidateSnapshot> excludedCandidates,
+                            boolean shouldLogNoEligibleBuilder) {}
+
+    enum WaitForStockDecision {
+        MOVE_TO_SEGMENT,
+        NAVIGATE_TO_STONECUTTER,
+        DONE
+    }
 }
