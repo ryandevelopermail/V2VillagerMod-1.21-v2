@@ -28,6 +28,7 @@ public class LibrarianCraftingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
+    private static final int IMMEDIATE_REQUEST_DEBOUNCE_TICKS = 30;
 
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
@@ -42,6 +43,7 @@ public class LibrarianCraftingGoal extends Goal {
     private int craftedToday;
     private int lastCheckCount;
     private boolean immediateCheckPending;
+    private long lastImmediateRequestTick = Long.MIN_VALUE;
 
     public LibrarianCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, @Nullable BlockPos craftingTablePos) {
         this.villager = villager;
@@ -62,6 +64,11 @@ public class LibrarianCraftingGoal extends Goal {
 
     public void requestImmediateCraft(ServerWorld world) {
         refreshDailyLimit(world);
+        long currentTick = world.getTime();
+        if (immediateCheckPending || currentTick - lastImmediateRequestTick < IMMEDIATE_REQUEST_DEBOUNCE_TICKS) {
+            return;
+        }
+        lastImmediateRequestTick = currentTick;
         immediateCheckPending = true;
         nextCheckTime = 0L;
     }

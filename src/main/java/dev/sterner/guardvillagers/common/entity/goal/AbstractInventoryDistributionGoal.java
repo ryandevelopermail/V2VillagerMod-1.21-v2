@@ -31,6 +31,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final double DEFAULT_OVERFLOW_FULLNESS_TRIGGER = 0.825D;
     protected static final double DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE = 24.0D;
     protected static final int DEFAULT_OVERFLOW_QM_SEARCH_RADIUS = 300;
+    protected static final int IMMEDIATE_REQUEST_DEBOUNCE_TICKS = 30;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -44,6 +45,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
+    protected long lastImmediateRequestTick = Long.MIN_VALUE;
     protected boolean pendingUniversalRoute;
     protected boolean pendingOverflowTransfer;
 
@@ -190,6 +192,11 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     public void requestImmediateDistribution() {
+        long currentTick = villager.getWorld().getTime();
+        if (immediateCheckPending || currentTick - lastImmediateRequestTick < IMMEDIATE_REQUEST_DEBOUNCE_TICKS) {
+            return;
+        }
+        lastImmediateRequestTick = currentTick;
         immediateCheckPending = true;
         nextCheckTime = 0L;
     }

@@ -28,11 +28,14 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final int QUARTERMASTER_GOAL_PRIORITY = 3;
+    private static final long INVENTORY_MUTATION_DEBOUNCE_TICKS = 30L;
     private static final Map<VillagerEntity, LibrarianCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LibrarianBellChestDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, QuartermasterGoal> QUARTERMASTER_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHEST_POS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_IMMEDIATE_REQUEST_TICK = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Boolean> INVENTORY_DIRTY_FLAGS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -79,6 +82,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
         }
         updateChestListener(world, villager, chestPos);
+        scheduleImmediateInventoryRefresh(world, villager, true);
 
         syncQuartermasterState(world, villager, jobPos, chestPos, "chest_paired");
         PAIRED_CHEST_POS.put(villager, chestPos);
@@ -113,7 +117,6 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         } else {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
-        goal.requestImmediateCraft(world);
 
         LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -125,18 +128,21 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         updateChestListener(world, villager, chestPos);
+        scheduleImmediateInventoryRefresh(world, villager, true);
         syncQuartermasterState(world, villager, jobPos, chestPos, "pairing_refresh");
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {
         Inventory inventory = getChestInventory(world, chestPos);
         ChestListener existing = CHEST_LISTENERS.get(villager);
+        boolean bypassDebounce = false;
         if (existing != null && existing.inventory() == inventory) {
             return;
         }
         if (existing != null) {
             removeChestListener(existing);
             CHEST_LISTENERS.remove(villager);
+            bypassDebounce = true;
         }
         if (!(inventory instanceof SimpleInventory simpleInventory)) {
             demoteQuartermaster(world, villager, "missing_or_invalid_chest");
@@ -145,19 +151,14 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         InventoryChangedListener listener = sender -> {
             LibrarianCraftingGoal goal = CRAFTING_GOALS.get(villager);
             if (goal != null && villager.getWorld() instanceof ServerWorld serverWorld) {
-                goal.requestImmediateCraft(serverWorld);
-            }
-            LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-            if (distributionGoal != null) {
-                distributionGoal.requestImmediateDistribution();
-            }
-            QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
-            if (quartermasterGoal != null) {
-                quartermasterGoal.requestImmediatePrerequisiteRevalidation();
+                scheduleImmediateInventoryRefresh(serverWorld, villager, false);
             }
         };
         simpleInventory.addListener(listener);
         CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
+        if (bypassDebounce) {
+            scheduleImmediateInventoryRefresh(world, villager, true);
+        }
     }
 
     private void clearChestListener(VillagerEntity villager) {
@@ -165,10 +166,36 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         if (existing != null) {
             removeChestListener(existing);
         }
+        INVENTORY_DIRTY_FLAGS.remove(villager);
+        LAST_IMMEDIATE_REQUEST_TICK.remove(villager);
     }
 
     private void removeChestListener(ChestListener existing) {
         existing.inventory().removeListener(existing.listener());
+    }
+
+    private void scheduleImmediateInventoryRefresh(ServerWorld world, VillagerEntity villager, boolean bypassDebounce) {
+        INVENTORY_DIRTY_FLAGS.put(villager, true);
+        long currentTick = world.getTime();
+        long lastTick = LAST_IMMEDIATE_REQUEST_TICK.getOrDefault(villager, Long.MIN_VALUE);
+        if (!bypassDebounce && currentTick - lastTick < INVENTORY_MUTATION_DEBOUNCE_TICKS) {
+            return;
+        }
+
+        LibrarianCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        if (goal != null) {
+            goal.requestImmediateCraft(world);
+        }
+        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
+        if (distributionGoal != null) {
+            distributionGoal.requestImmediateDistribution();
+        }
+        QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
+        if (quartermasterGoal != null) {
+            quartermasterGoal.requestImmediatePrerequisiteRevalidation();
+        }
+        LAST_IMMEDIATE_REQUEST_TICK.put(villager, currentTick);
+        INVENTORY_DIRTY_FLAGS.put(villager, false);
     }
 
     private Inventory getChestInventory(ServerWorld world, BlockPos chestPos) {
