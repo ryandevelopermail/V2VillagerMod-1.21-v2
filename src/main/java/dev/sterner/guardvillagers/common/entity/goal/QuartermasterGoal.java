@@ -390,12 +390,17 @@ public class QuartermasterGoal extends Goal {
                 sourcePos = bellChestPos;
                 destPos = weaponsmithChestNeedingPlanks.get();
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                LOGGER.info("QM {}: hauling {} planks from bell chest to weaponsmith at {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: hauling {} planks from bell chest to weaponsmith at {}",
+                            villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                }
                 return true;
             } else {
-                LOGGER.info("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
-                        villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
-                        bellChestPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
+                            villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
+                            bellChestPos.toShortString());
+                }
             }
         }
 
@@ -416,8 +421,10 @@ public class QuartermasterGoal extends Goal {
                 sourcePos = stoneSource;
                 destPos = need.chestPos();
                 transferStack = new ItemStack(Items.COBBLESTONE, toDeliver);
-                LOGGER.info("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
-                        villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
+                            villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                }
                 return true;
             }
         }
@@ -656,9 +663,11 @@ public class QuartermasterGoal extends Goal {
         // If dest chest was full, remaining items would be silently lost.
         // Drop them at the villager's feet so items are never destroyed.
         if (!remaining.isEmpty()) {
-            LOGGER.info("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
-                    villager.getUuidAsString(), pos.toShortString(),
-                    remaining.getCount(), remaining.getItem());
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
+                        villager.getUuidAsString(), pos.toShortString(),
+                        remaining.getCount(), remaining.getItem());
+            }
             ItemEntity drop = new ItemEntity(
                     world, villager.getX(), villager.getY(), villager.getZ(), remaining.copy());
             drop.setPickupDelay(10);
