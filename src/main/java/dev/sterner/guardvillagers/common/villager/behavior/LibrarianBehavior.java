@@ -196,6 +196,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         QuartermasterGoal qmGoal = new QuartermasterGoal(villager, jobPos, chestPos);
         QUARTERMASTER_GOALS.put(villager, qmGoal);
         villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
+        QuartermasterGoal.registerActiveQuartermaster(world, chestPos, villager.getUuid());
         LOGGER.info("Librarian {} promoted to Quartermaster (reason={}, chest={} second_chest={} job_site={})",
                 villager.getUuidAsString(),
                 reason,
@@ -211,6 +212,9 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         }
         villager.goalSelector.remove(qmGoal);
         BlockPos pairedChestPos = PAIRED_CHEST_POS.get(villager);
+        if (pairedChestPos != null) {
+            QuartermasterGoal.unregisterActiveQuartermaster(world, pairedChestPos, villager.getUuid());
+        }
         if (pairedChestPos != null && world.getServer() != null) {
             VillageAnchorState.get(world.getServer()).unregister(world, pairedChestPos);
         }

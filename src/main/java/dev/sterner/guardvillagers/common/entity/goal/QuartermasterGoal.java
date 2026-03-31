@@ -31,8 +31,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -80,6 +82,14 @@ public class QuartermasterGoal extends Goal {
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
+    /**
+     * Runtime-only active quartermaster registry, keyed by world + anchor chest position.
+     *
+     * <p>This avoids repeatedly scanning nearby librarians and their goal selectors for
+     * "is any QM active?" checks.
+     */
+    private static final Map<net.minecraft.registry.RegistryKey<net.minecraft.world.World>, Map<BlockPos, Set<UUID>>>
+            ACTIVE_QM_BY_WORLD_ANCHOR = new HashMap<>();
 
     /**
      * Item whitelist for Priority-3 surplus haul.
@@ -153,6 +163,33 @@ public class QuartermasterGoal extends Goal {
      */
     public void unregisterAnchor(ServerWorld world) {
         VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
+    }
+
+    /**
+     * Registers a Quartermaster as active in the runtime registry.
+     * Called when the goal is installed.
+     */
+    public static void registerActiveQuartermaster(ServerWorld world, BlockPos anchorPos, UUID villagerId) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.computeIfAbsent(world.getRegistryKey(), k -> new HashMap<>());
+        byAnchor.computeIfAbsent(anchorPos.toImmutable(), k -> new HashSet<>()).add(villagerId);
+    }
+
+    /**
+     * Unregisters a Quartermaster from the runtime registry.
+     * Called when the goal is removed.
+     */
+    public static void unregisterActiveQuartermaster(ServerWorld world, BlockPos anchorPos, UUID villagerId) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null) return;
+        Set<UUID> ids = byAnchor.get(anchorPos);
+        if (ids == null) return;
+        ids.remove(villagerId);
+        if (ids.isEmpty()) {
+            byAnchor.remove(anchorPos);
+        }
+        if (byAnchor.isEmpty()) {
+            ACTIVE_QM_BY_WORLD_ANCHOR.remove(world.getRegistryKey());
+        }
     }
 
     /**
@@ -765,32 +802,60 @@ public class QuartermasterGoal extends Goal {
      * QuartermasterGoal exists within {@code range} blocks of {@code anchor}.
      */
     public static boolean isAnyActive(ServerWorld world, BlockPos anchor, double range) {
-        Box box = new Box(anchor).expand(range);
-        List<net.minecraft.entity.passive.VillagerEntity> librarians = world.getEntitiesByClass(
-                net.minecraft.entity.passive.VillagerEntity.class,
-                box,
-                v -> v.isAlive()
-                        && v.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.LIBRARIAN);
+        Set<BlockPos> anchors = VillageAnchorState.get(world.getServer()).getAllQmChests(world);
+        if (anchors.isEmpty()) {
+            return false;
+        }
 
-        for (net.minecraft.entity.passive.VillagerEntity librarian : librarians) {
-            for (PrioritizedGoal prioritizedGoal : librarian.goalSelector.getGoals()) {
-                if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+        double rangeSq = range * range;
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null || byAnchor.isEmpty()) {
+            return false;
+        }
+
+        for (BlockPos anchorPos : anchors) {
+            if (anchorPos.getSquaredDistance(anchor) > rangeSq) continue;
+            Set<UUID> ids = byAnchor.get(anchorPos);
+            if (ids == null || ids.isEmpty()) continue;
+
+            Set<UUID> stale = new HashSet<>();
+            for (UUID id : ids) {
+                Entity entity = world.getEntity(id);
+                if (entity instanceof VillagerEntity villager
+                        && villager.isAlive()
+                        && !villager.isRemoved()
+                        && villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN
+                        && hasInstalledQuartermasterGoal(villager)) {
                     LOGGER.debug(
-                            "Quartermaster presence check: true (anchor={} range={} librarian={} running={})",
+                            "Quartermaster presence check: true (anchor={} range={} librarian={})",
                             anchor.toShortString(),
                             range,
-                            librarian.getUuidAsString(),
-                            prioritizedGoal.isRunning());
+                            villager.getUuidAsString());
                     return true;
+                }
+                stale.add(id);
+            }
+            if (!stale.isEmpty()) {
+                ids.removeAll(stale);
+                if (ids.isEmpty()) {
+                    byAnchor.remove(anchorPos);
                 }
             }
         }
 
-        LOGGER.debug(
-                "Quartermaster presence check: false (anchor={} range={} librarians_scanned={})",
-                anchor.toShortString(),
-                range,
-                librarians.size());
+        if (byAnchor.isEmpty()) {
+            ACTIVE_QM_BY_WORLD_ANCHOR.remove(world.getRegistryKey());
+        }
+        LOGGER.debug("Quartermaster presence check: false (anchor={} range={})", anchor.toShortString(), range);
+        return false;
+    }
+
+    private static boolean hasInstalledQuartermasterGoal(VillagerEntity villager) {
+        for (PrioritizedGoal prioritizedGoal : villager.goalSelector.getGoals()) {
+            if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+                return true;
+            }
+        }
         return false;
     }
 
