@@ -18,6 +18,7 @@ import java.lang.reflect.Method;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -69,6 +70,51 @@ class QuartermasterGoalSurplusCacheTest {
             BlockPos workerJob = new BlockPos(16 + i, 64, 16 + i);
             verify(world, never()).getBlockState(workerJob);
         }
+        JobBlockPairingHelper.clearWorldCaches(world);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void findSurplusChest_enforcesBoundedPerCycleBudgetWithLargePairingCache() throws Exception {
+        ServerWorld world = mock(ServerWorld.class);
+        when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
+        when(world.getTime()).thenReturn(2000L);
+        JobBlockPairingHelper.clearWorldCaches(world);
+
+        BlockPos quartermasterJob = new BlockPos(0, 64, 0);
+        BlockPos quartermasterChest = new BlockPos(1, 64, 0);
+        VillagerEntity quartermaster = villagerWithJobSite(
+                world,
+                UUID.randomUUID(),
+                VillagerProfession.LIBRARIAN,
+                quartermasterJob,
+                quartermasterChest
+        );
+        QuartermasterGoal goal = new QuartermasterGoal(quartermaster, quartermasterJob, quartermasterChest);
+
+        for (int i = 0; i < 512; i++) {
+            BlockPos workerJob = new BlockPos(8 + i, 64, 8 + i);
+            BlockPos workerChest = workerJob.east();
+            VillagerEntity worker = villagerWithJobSite(
+                    world,
+                    UUID.randomUUID(),
+                    VillagerProfession.FARMER,
+                    workerJob,
+                    workerChest
+            );
+            JobBlockPairingHelper.cacheVillagerChestPairing(world, worker, workerJob, workerChest);
+        }
+
+        Method findSurplusChest = QuartermasterGoal.class.getDeclaredMethod("findSurplusChest", ServerWorld.class, BlockPos.class);
+        findSurplusChest.setAccessible(true);
+        Optional<BlockPos> result = (Optional<BlockPos>) findSurplusChest.invoke(goal, world, quartermasterChest);
+        assertFalse(result.isPresent());
+
+        QuartermasterGoal.SurplusScanMetrics metrics = QuartermasterGoal.getLastSurplusScanMetricsForTest(goal);
+        assertTrue(metrics.candidatesChecked() <= 12, "candidate checks exceeded hard per-cycle budget");
+        assertTrue(metrics.inventoriesInspected() <= 12, "inventory inspections exceeded hard per-cycle budget");
+        assertTrue(metrics.cachedCandidates() >= 0);
+
         JobBlockPairingHelper.clearWorldCaches(world);
     }
 
