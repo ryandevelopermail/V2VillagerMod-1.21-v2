@@ -113,6 +113,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
     private boolean hardRetryPassStarted = false;
+    private boolean conversionWaitActive = false;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -170,7 +171,7 @@ public class MasonWallBuilderGoal extends Goal {
     @Override
     public boolean canStop() {
         // Keep the elected builder focused until the current build cycle finishes.
-        return !isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE;
+        return !isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE || conversionWaitActive;
     }
 
     @Override
@@ -191,6 +192,7 @@ public class MasonWallBuilderGoal extends Goal {
         placedSegments = 0;
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
         hardRetryPassStarted = false;
+        conversionWaitActive = false;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -217,6 +219,7 @@ public class MasonWallBuilderGoal extends Goal {
         resetPathFailureState();
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
+        conversionWaitActive = false;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -483,22 +486,37 @@ public class MasonWallBuilderGoal extends Goal {
         int threshold = computeCurrentSortieThreshold(world);
         guard.setWallBuildPending(true, threshold);
         int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
+        int availableCobblestone = countItemInChest(world, chestPos, Items.COBBLESTONE);
+        LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK inventory (availableWalls={}, availableCobblestone={}, threshold={})",
+                guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+
         WaitForStockDecision decision = decideWaitForStockTransition(
                 availableWalls,
+                availableCobblestone,
                 threshold,
                 guard.getPairedJobPos() != null
         );
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
+            conversionWaitActive = false;
             LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, threshold);
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
+            conversionWaitActive = false;
             stage = Stage.DONE;
             return;
         }
+        if (decision == WaitForStockDecision.WAIT_FOR_CONVERSION) {
+            conversionWaitActive = true;
+            guard.getNavigation().stop();
+            LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
+                    guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+            return;
+        }
 
+        conversionWaitActive = false;
         BlockPos stonecutterPos = guard.getPairedJobPos();
         if (stonecutterPos != null) {
             guard.getNavigation().startMovingTo(
@@ -1051,9 +1069,15 @@ public class MasonWallBuilderGoal extends Goal {
         return new PathRetrySimulationResult(false, pathStartSuccessPerTick.size(), failedAttempts);
     }
 
-    static WaitForStockDecision decideWaitForStockTransition(int availableWalls, int threshold, boolean hasPairedJobPos) {
+    static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
+                                                            int availableCobblestone,
+                                                            int threshold,
+                                                            boolean hasPairedJobPos) {
         if (availableWalls >= threshold) {
             return WaitForStockDecision.MOVE_TO_SEGMENT;
+        }
+        if (availableCobblestone > 0) {
+            return WaitForStockDecision.WAIT_FOR_CONVERSION;
         }
         if (!hasPairedJobPos) {
             return WaitForStockDecision.DONE;
@@ -1424,6 +1448,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     enum WaitForStockDecision {
         MOVE_TO_SEGMENT,
+        WAIT_FOR_CONVERSION,
         NAVIGATE_TO_STONECUTTER,
         DONE
     }
