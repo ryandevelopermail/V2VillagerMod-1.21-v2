@@ -151,6 +151,10 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             if (distributionGoal != null) {
                 distributionGoal.requestImmediateDistribution();
             }
+            QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
+            if (quartermasterGoal != null) {
+                quartermasterGoal.requestImmediatePrerequisiteRevalidation();
+            }
         };
         simpleInventory.addListener(listener);
         CHEST_LISTENERS.put(villager, new ChestListener(simpleInventory, listener));
