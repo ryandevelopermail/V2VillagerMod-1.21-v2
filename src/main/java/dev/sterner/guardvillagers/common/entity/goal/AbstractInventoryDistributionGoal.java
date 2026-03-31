@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
@@ -372,7 +373,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected double getOverflowRecipientScanRange() {
-        return DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
+        int configured = GuardVillagersConfig.overflowRecipientScanRange;
+        return configured > 0 ? configured : DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
     }
 
     protected boolean isOverflowModeActive(ServerWorld world, Inventory sourceInventory) {
@@ -475,7 +477,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected int getOverflowQmSearchRadius() {
-        return DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
+        int configured = GuardVillagersConfig.overflowFallbackQmSearchRadius;
+        return configured > 0 ? configured : DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
     }
 
     protected Optional<BlockPos> resolveOverflowFallbackQmChest(ServerWorld world) {
@@ -592,7 +595,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected double getUniversalRecipientRange() {
-        return 24.0D;
+        return getOverflowRecipientScanRange();
     }
 
     protected Optional<UniversalDistributionRouter.ResolvedRoute> resolveUniversalRoute(ServerWorld world, Inventory inventory) {

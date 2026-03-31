@@ -6,6 +6,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class GuardVillagersConfig extends MidnightConfig {
+    public static final int MIN_HEAVY_SCAN_RANGE = 32;
+    public static final int MAX_HEAVY_SCAN_RANGE = 512;
+    public static final int MIN_OVERFLOW_RECIPIENT_SCAN_RANGE = 16;
+    public static final int MAX_OVERFLOW_RECIPIENT_SCAN_RANGE = 256;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -97,4 +101,23 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackVillageMinLargeVillage = 2;
     @Entry(min=1)
     public static int lumberjackVillageMinLargeVillagePopulation = 12;
+    @Entry
+    public static int quartermasterScanRange = 128;
+    @Entry
+    public static int armorerFallbackScanRange = 128;
+    @Entry
+    public static int overflowRecipientScanRange = 96;
+    @Entry
+    public static int overflowFallbackQmSearchRadius = 128;
+
+    public static void validateClampedRanges() {
+        quartermasterScanRange = clamp(quartermasterScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
+        armorerFallbackScanRange = clamp(armorerFallbackScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
+        overflowRecipientScanRange = clamp(overflowRecipientScanRange, MIN_OVERFLOW_RECIPIENT_SCAN_RANGE, MAX_OVERFLOW_RECIPIENT_SCAN_RANGE);
+        overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
 }
