@@ -183,16 +183,20 @@ public class ArmorerIronRoutingGoal extends Goal {
                     sourcePos = chestPos;
                     destPos = toolsmithChest;
                     ironAmount = IRON_FOR_PICKAXE;
-                    LOGGER.info("ArmorerIronRouting: routing {} iron to toolsmith {} for mason pickaxe (no QM)",
-                            ironAmount, destPos.toShortString());
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("ArmorerIronRouting: routing {} iron to toolsmith {} for mason pickaxe (no QM)",
+                                ironAmount, destPos.toShortString());
+                    }
                     return true;
                 }
                 // No toolsmith — route direct to mason chest
                 sourcePos = chestPos;
                 destPos = masonWithoutPick.get().getPairedChestPos();
                 ironAmount = IRON_FOR_PICKAXE;
-                LOGGER.info("ArmorerIronRouting: routing {} iron direct to mason {} (no toolsmith, no QM)",
-                        ironAmount, destPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("ArmorerIronRouting: routing {} iron direct to mason {} (no toolsmith, no QM)",
+                            ironAmount, destPos.toShortString());
+                }
                 return true;
             }
         }
@@ -212,8 +216,10 @@ public class ArmorerIronRoutingGoal extends Goal {
                     sourcePos = chestPos;
                     destPos = toolsmithChest;
                     ironAmount = IRON_FOR_SHEARS;
-                    LOGGER.info("ArmorerIronRouting: routing {} iron to toolsmith {} for shepherd shears (no QM)",
-                            ironAmount, destPos.toShortString());
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("ArmorerIronRouting: routing {} iron to toolsmith {} for shepherd shears (no QM)",
+                                ironAmount, destPos.toShortString());
+                    }
                     return true;
                 }
                 // No toolsmith — route iron directly to shepherd chest
@@ -222,8 +228,10 @@ public class ArmorerIronRoutingGoal extends Goal {
                     sourcePos = chestPos;
                     destPos = shepherdChest;
                     ironAmount = IRON_FOR_SHEARS;
-                    LOGGER.info("ArmorerIronRouting: routing {} iron direct to shepherd {} (no toolsmith, no QM)",
-                            ironAmount, destPos.toShortString());
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("ArmorerIronRouting: routing {} iron direct to shepherd {} (no toolsmith, no QM)",
+                                ironAmount, destPos.toShortString());
+                    }
                     return true;
                 }
             }
