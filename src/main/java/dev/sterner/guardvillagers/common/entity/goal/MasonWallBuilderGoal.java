@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -106,6 +107,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
+    private BlockPos activeAnchorPos = null;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -213,6 +215,7 @@ public class MasonWallBuilderGoal extends Goal {
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        activeAnchorPos = null;
         plannedWallBaseY = 0;
         pendingSegments.clear();
         pendingTransfers.clear();
@@ -282,6 +285,18 @@ public class MasonWallBuilderGoal extends Goal {
             cachedWallRectAnchor = anchorPos.toImmutable();
             cachedPoiFootprintSignature = currentSignature;
         }
+        VillageWallProjectState wallProjectState = VillageWallProjectState.get(world.getServer());
+        VillageWallProjectState.PerimeterBounds perimeterBounds = new VillageWallProjectState.PerimeterBounds(
+                rect.minX(), rect.maxX(), rect.minZ(), rect.maxZ()
+        );
+        VillageWallProjectState.PerimeterSignature perimeterSignature =
+                new VillageWallProjectState.PerimeterSignature(currentSignature.poiCount(), currentSignature.poiHash());
+        wallProjectState.upsertProject(world.getRegistryKey(), anchorPos, perimeterBounds, perimeterSignature);
+        if (wallProjectState.isProjectComplete(world.getRegistryKey(), anchorPos)) {
+            LOGGER.debug("MasonWallBuilder {}: wall project already complete for anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
+            return false;
+        }
 
         // 3. Compute all wall segment positions for the rectangle
         List<BlockPos> allSegments = computeWallSegments(world, rect);
@@ -295,6 +310,7 @@ public class MasonWallBuilderGoal extends Goal {
                 .toList();
         if (unbuilt.isEmpty()) {
             LOGGER.debug("MasonWallBuilder {}: wall already complete", guard.getUuidAsString());
+            wallProjectState.markAllLayersComplete(world.getRegistryKey(), anchorPos);
             return false;
         }
 
@@ -427,6 +443,7 @@ public class MasonWallBuilderGoal extends Goal {
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
         plannedWallBaseY = rect.y();
+        activeAnchorPos = anchorPos.toImmutable();
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
@@ -878,9 +895,15 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void completeCycle(CycleEndReason reason) {
         cycleEndReason = reason;
+        if (reason == CycleEndReason.WALL_COMPLETE
+                && guard.getWorld() instanceof ServerWorld world
+                && activeAnchorPos != null) {
+            VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
+        }
         stage = Stage.DONE;
         guard.clearWallSegments();
         guard.setWallBuildPending(false, 0);
+        activeAnchorPos = null;
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;

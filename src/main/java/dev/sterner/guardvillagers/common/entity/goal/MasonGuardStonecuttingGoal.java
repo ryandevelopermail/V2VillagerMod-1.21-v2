@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
@@ -158,11 +159,17 @@ public class MasonGuardStonecuttingGoal extends Goal {
         List<MasonRecipe> recipes = new ArrayList<>();
         boolean reserveCobblestone = requiresCobblestoneReserve(world);
         boolean projectActive = isWallProjectActive();
+        boolean suppressWallOutput = isInsideCompletedWallPerimeter(world);
         int suppressedNonWallRecipeCount = 0;
+        int suppressedWallRecipeCount = 0;
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.craft(new net.minecraft.recipe.input.SingleStackRecipeInput(ItemStack.EMPTY), world.getRegistryManager());
             if (result.isEmpty()) {
+                continue;
+            }
+            if (suppressWallOutput && result.getItem() == Items.COBBLESTONE_WALL) {
+                suppressedWallRecipeCount++;
                 continue;
             }
             if (projectActive && result.getItem() != Items.COBBLESTONE_WALL) {
@@ -181,6 +188,10 @@ public class MasonGuardStonecuttingGoal extends Goal {
         if (projectActive && suppressedNonWallRecipeCount > 0) {
             LOGGER.info("MasonStonecutting {}: suppressed {} non-wall outputs while wall project is active",
                     guard.getUuidAsString(), suppressedNonWallRecipeCount);
+        }
+        if (suppressWallOutput && suppressedWallRecipeCount > 0) {
+            LOGGER.info("MasonStonecutting {}: suppressed {} cobblestone wall outputs inside completed wall perimeter",
+                    guard.getUuidAsString(), suppressedWallRecipeCount);
         }
         return recipes;
     }
@@ -225,6 +236,11 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     private boolean isWallProjectActive() {
         return guard.isWallBuildPending() && !guard.getWallSegments().isEmpty();
+    }
+
+    private boolean isInsideCompletedWallPerimeter(ServerWorld world) {
+        return VillageWallProjectState.get(world.getServer())
+                .isCompletedProjectContaining(world.getRegistryKey(), guard.getBlockPos());
     }
 
     private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output, boolean reserveCobblestone) {
