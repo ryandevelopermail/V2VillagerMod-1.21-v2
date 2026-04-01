@@ -11,8 +11,6 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -26,6 +24,8 @@ public final class VillagerFenceGateEscapeHelper {
     static final int SCAN_RADIUS = 6;
     private static final int PEN_FENCE_RANGE = 8;
     private static final int GATE_INTERIOR_MAX_DISTANCE = 8;
+    private static final int OUTSIDE_PEN_RECHECK_TICKS = 60;
+    private static final int FAILED_GATE_SCAN_RETRY_TICKS = 100;
     private static final double NAVIGATION_SPEED = 0.85D;
     static final double CROSS_DISTANCE_SQ = 2.25D;
 
@@ -53,14 +53,17 @@ public final class VillagerFenceGateEscapeHelper {
         BlockPos villagerPos = villager.getBlockPos();
         boolean insidePen = isInsideFencePen(world, villagerPos);
         if (!shouldActivateEscape(now, lastAttemptTick, cadence, insidePen, false)) {
-            return new EscapeState(null, false, insidePen ? lastAttemptTick : now);
+            long deferredAttemptTick = insidePen
+                    ? lastAttemptTick
+                    : deferAttemptTick(now, cadence, OUTSIDE_PEN_RECHECK_TICKS);
+            return new EscapeState(null, false, deferredAttemptTick);
         }
 
         lastAttemptTick = now;
         EscapeCandidate candidate = findEscapeCandidate(world, villagerPos);
         if (candidate == null) {
             LOGGER.debug("{} abort-no-gate villager={} pos={}", LOG_PREFIX, villager.getUuidAsString(), villagerPos.toShortString());
-            return new EscapeState(null, false, lastAttemptTick);
+            return new EscapeState(null, false, deferAttemptTick(now, cadence, FAILED_GATE_SCAN_RETRY_TICKS));
         }
 
         BlockPos gatePos = candidate.gatePos();
@@ -144,34 +147,26 @@ public final class VillagerFenceGateEscapeHelper {
 
     @Nullable
     private static EscapeCandidate findEscapeCandidate(ServerWorld world, BlockPos villagerPos) {
-        List<BlockPos> gateCandidates = new ArrayList<>();
         BlockPos min = villagerPos.add(-SCAN_RADIUS, 0, -SCAN_RADIUS);
         BlockPos max = villagerPos.add(SCAN_RADIUS, 0, SCAN_RADIUS);
+        EscapeCandidate best = null;
+        double bestDist = Double.MAX_VALUE;
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             if (!isWithinScanRadius(villagerPos, cursor, SCAN_RADIUS)) {
                 continue;
             }
             BlockState state = world.getBlockState(cursor);
-            if (state.getBlock() instanceof FenceGateBlock) {
-                gateCandidates.add(cursor.toImmutable());
-            }
-        }
-
-        EscapeCandidate best = null;
-        double bestDist = Double.MAX_VALUE;
-        for (BlockPos gatePos : gateCandidates) {
-            BlockState gateState = world.getBlockState(gatePos);
-            if (!(gateState.getBlock() instanceof FenceGateBlock)) {
+            if (!(state.getBlock() instanceof FenceGateBlock)) {
                 continue;
             }
-            EscapeGateSides sides = resolveGateSides(world, gatePos, gateState);
+            EscapeGateSides sides = resolveGateSides(world, cursor, state);
             if (sides == null || sides.outsideTarget() == null) {
                 continue;
             }
-            double dist = gatePos.getSquaredDistance(villagerPos);
+            double dist = cursor.getSquaredDistance(villagerPos);
             if (dist < bestDist) {
                 bestDist = dist;
-                best = new EscapeCandidate(gatePos.toImmutable(), sides.outsideTarget().toImmutable());
+                best = new EscapeCandidate(cursor.toImmutable(), sides.outsideTarget().toImmutable());
             }
         }
         return best;
@@ -230,7 +225,7 @@ public final class VillagerFenceGateEscapeHelper {
         }
 
         java.util.ArrayDeque<BlockPos> queue = new java.util.ArrayDeque<>();
-        java.util.LinkedHashSet<BlockPos> visited = new java.util.LinkedHashSet<>();
+        java.util.HashSet<BlockPos> visited = new java.util.HashSet<>();
         BlockPos immutableStart = startPos.toImmutable();
         queue.add(immutableStart);
         visited.add(immutableStart);
@@ -325,6 +320,10 @@ public final class VillagerFenceGateEscapeHelper {
 
     private static int getCadenceTicks(UUID uuid) {
         return 10 + (int) (Math.floorMod(uuid.getLeastSignificantBits(), 11));
+    }
+
+    private static long deferAttemptTick(long now, int cadenceTicks, int deferTicks) {
+        return now - cadenceTicks + deferTicks;
     }
 
     private static void tryCloseGate(ServerWorld world, BlockPos gatePos, BlockState gateState, VillagerEntity villager, String reason) {

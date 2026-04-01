@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
+import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -16,7 +17,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.Heightmap;
 import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
@@ -24,9 +24,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.EnumSet;
+import java.util.ArrayDeque;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -42,8 +47,8 @@ import java.util.stream.Stream;
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
  *   <li>The elected builder must have enough cobblestone for ALL planned perimeter placements
- *       (excluding gap positions) before placing any block. This is a one-thick perimeter in
- *       X/Z that may include vertical fill columns where terrain dips below anchor level.</li>
+ *       (excluding gap positions) before placing any block. Planning uses a deterministic
+ *       3-layer perimeter (base/base+1/base+2) with strict layer-first ordering.</li>
  *   <li>Gap rules: skip DIRT_PATH positions; always leave at least 1 forced gap so the wall
  *       is never fully closed; reserve one position per face (4 total) for lumberjack fence
  *       gates (stored in entity NBT, not placed here).</li>
@@ -55,28 +60,28 @@ public class MasonWallBuilderGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonWallBuilderGoal.class);
 
-    // How often to re-evaluate whether we should start (in ticks)
+    // Gameplay cadence: attempt a fresh build cycle every ~20 seconds (400 ticks),
+    // if election/planning/material preconditions pass.
     private static final int SCAN_INTERVAL_TICKS = 400;
     // Blocks to expand the village bounding box outward to form the wall rectangle
     private static final int WALL_EXPAND = 10;
     // Minimum stone needed before the elected builder starts placing
     // (required total is per planned block placement, including anti-gap vertical fill columns).
     private static final int STONE_PER_SEGMENT = 1;
-    /**
-     * Maximum allowed height difference between a perimeter position's surface Y
-     * and the bell Y before that position is considered too steep to wall.
-     * Positions steeper than this are skipped entirely (left open).
-     */
-    private static final int STEEP_SKIP_THRESHOLD = 3;
-    /**
-     * Maximum number of blocks a fill column can extend downward to close a terrain dip.
-     * Dips deeper than this are also skipped to avoid filling ravines/caves.
-     */
-    private static final int MAX_FILL_DEPTH = 4;
     // Movement speed
     private static final double MOVE_SPEED = 0.55D;
     // Reach distance squared (close enough to place)
     private static final double REACH_SQ = 3.5D * 3.5D;
+    private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
+    private static final int PATH_RETRY_WINDOW_TICKS = 40;
+    private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
+    // Gameplay cadence: placements happen in short local sorties of 3-5 segments
+    // before the guard picks a new nearby anchor.
+    static final int MIN_SEGMENTS_PER_SORTIE = 3;
+    static final int MAX_SEGMENTS_PER_SORTIE = 5;
+    static final int LOCAL_SORTIE_RADIUS = 5;
+    static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
+    private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -88,6 +93,24 @@ public class MasonWallBuilderGoal extends Goal {
     // The computed wall segments for this run (only on the elected builder)
     private List<BlockPos> pendingSegments = new ArrayList<>();
     private int currentSegmentIndex = 0;
+    private int lastProgressLoggedSegmentCount = 0;
+    private BlockPos activeMoveTarget = null;
+    private int activeMoveTargetTicks = 0;
+    private double lastMoveDistSq = Double.MAX_VALUE;
+    private int failedPathAttempts = 0;
+    private long firstPathFailureTick = -1L;
+    private BlockPos lastTriedNavTarget = null;
+    private final Deque<BlockPos> localSortieQueue = new ArrayDeque<>();
+    private final Set<BlockPos> skippedSegments = new HashSet<>();
+    private final Deque<BlockPos> hardUnreachableRetryQueue = new ArrayDeque<>();
+    private int sortiePlacements = 0;
+    private int placedSegments = 0;
+    private int plannedPlacementCount = 0;
+    private int plannedWallBaseY = 0;
+    private boolean hardRetryPassStarted = false;
+    private boolean conversionWaitActive = false;
+    private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
+    private BlockPos activeAnchorPos = null;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -143,25 +166,63 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     @Override
+    public boolean canStop() {
+        // Keep the elected builder focused until the current build cycle finishes.
+        return !isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE || conversionWaitActive;
+    }
+
+    @Override
     public void start() {
         currentSegmentIndex = 0;
         currentTransferIndex = 0;
+        lastProgressLoggedSegmentCount = 0;
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        failedPathAttempts = 0;
+        firstPathFailureTick = -1L;
+        lastTriedNavTarget = null;
+        localSortieQueue.clear();
+        skippedSegments.clear();
+        hardUnreachableRetryQueue.clear();
+        sortiePlacements = 0;
+        placedSegments = 0;
+        plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
+        hardRetryPassStarted = false;
+        conversionWaitActive = false;
+        cycleEndReason = CycleEndReason.WALL_COMPLETE;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
-            stage = Stage.MOVE_TO_SEGMENT;
+            stage = Stage.WAIT_FOR_WALL_STOCK;
         } else {
             stage = Stage.DONE;
+        }
+        if (isElectedBuilder) {
+            String firstTarget = pendingSegments.isEmpty() ? "none" : pendingSegments.get(0).toShortString();
+            LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={})",
+                    guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size(), firstTarget);
         }
     }
 
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        if (isElectedBuilder && currentSegmentIndex > 0 && currentSegmentIndex < pendingSegments.size()) {
+            LOGGER.info("MasonWallBuilder {}: build cycle paused/interrupted at {}/{}",
+                    guard.getUuidAsString(), currentSegmentIndex, pendingSegments.size());
+        }
         stage = Stage.IDLE;
         isElectedBuilder = false;
+        resetPathFailureState();
+        hardUnreachableRetryQueue.clear();
+        hardRetryPassStarted = false;
+        conversionWaitActive = false;
+        activeAnchorPos = null;
+        plannedWallBaseY = 0;
         pendingSegments.clear();
         pendingTransfers.clear();
+        guard.setWallBuildPending(false, 0);
     }
 
     @Override
@@ -173,6 +234,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         switch (stage) {
             case TRANSFER_FROM_PEERS -> tickTransfer(world);
+            case WAIT_FOR_WALL_STOCK -> tickWaitForWallStock(world);
             case MOVE_TO_SEGMENT -> tickMoveToSegment(world);
             case PLACE_BLOCK -> tickPlaceBlock(world);
             case DONE -> stage = Stage.IDLE;
@@ -194,8 +256,8 @@ public class MasonWallBuilderGoal extends Goal {
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
         if (poiMode != lastLoggedPoiMode) {
             LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
-            LOGGER.info("MasonWallBuilder {}: wall profile=one-thick perimeter with anti-gap vertical fill (maxDepth={})",
-                    guard.getUuidAsString(), MAX_FILL_DEPTH);
+            LOGGER.info("MasonWallBuilder {}: wall profile=deterministic 3-layer perimeter (layer-first build order)",
+                    guard.getUuidAsString());
             lastLoggedPoiMode = poiMode;
         }
 
@@ -226,6 +288,18 @@ public class MasonWallBuilderGoal extends Goal {
             cachedWallRectAnchor = anchorPos.toImmutable();
             cachedPoiFootprintSignature = currentSignature;
         }
+        VillageWallProjectState wallProjectState = VillageWallProjectState.get(world.getServer());
+        VillageWallProjectState.PerimeterBounds perimeterBounds = new VillageWallProjectState.PerimeterBounds(
+                rect.minX(), rect.maxX(), rect.minZ(), rect.maxZ()
+        );
+        VillageWallProjectState.PerimeterSignature perimeterSignature =
+                new VillageWallProjectState.PerimeterSignature(currentSignature.poiCount(), currentSignature.poiHash());
+        wallProjectState.upsertProject(world.getRegistryKey(), anchorPos, perimeterBounds, perimeterSignature);
+        if (wallProjectState.isProjectComplete(world.getRegistryKey(), anchorPos)) {
+            LOGGER.debug("MasonWallBuilder {}: wall project already complete for anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
+            return false;
+        }
 
         // 3. Compute all wall segment positions for the rectangle
         List<BlockPos> allSegments = computeWallSegments(world, rect);
@@ -235,10 +309,11 @@ public class MasonWallBuilderGoal extends Goal {
 
         // Filter to unbuilt segments only
         List<BlockPos> unbuilt = allSegments.stream()
-                .filter(pos -> !world.getBlockState(pos).isOf(Blocks.COBBLESTONE))
+                .filter(pos -> !isPlacedWallBlock(world.getBlockState(pos)))
                 .toList();
         if (unbuilt.isEmpty()) {
             LOGGER.debug("MasonWallBuilder {}: wall already complete", guard.getUuidAsString());
+            wallProjectState.markAllLayersComplete(world.getRegistryKey(), anchorPos);
             return false;
         }
 
@@ -247,13 +322,13 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> gatePositions = pickGatePositions(rect, unbuilt);
         Set<BlockPos> gateSet = new HashSet<>(gatePositions);
 
-        int requiredStone = unbuilt.stream()
-                .filter(pos -> !gateSet.contains(pos))
+        int requiredWallSegments = unbuilt.stream()
+                .filter(pos -> !isGateColumnPosition(pos, gateSet))
                 .mapToInt(pos -> STONE_PER_SEGMENT)
                 .sum();
-        if (requiredStone < 1) {
+        if (requiredWallSegments < 1) {
             LOGGER.debug("MasonWallBuilder {}: no non-gate wall segments remain (available={}, required={})",
-                    guard.getUuidAsString(), 0, requiredStone);
+                    guard.getUuidAsString(), 0, requiredWallSegments);
             return false;
         }
 
@@ -261,34 +336,78 @@ public class MasonWallBuilderGoal extends Goal {
         List<MasonGuardEntity> peers = getPeerMasons(world, anchorPos);
 
         // 5. Count cobblestone across all peers (including self)
-        int myStone = countCobblestoneInChest(world, guard.getPairedChestPos());
-        int totalStone = myStone;
+        int myWalls = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE_WALL);
+        int myCobblestone = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE);
+        int totalWalls = myWalls;
+        int totalCobblestone = myCobblestone;
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
             if (peer.getPairedChestPos() != null) {
-                totalStone += countCobblestoneInChest(world, peer.getPairedChestPos());
+                totalWalls += countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE_WALL);
+                totalCobblestone += countItemInChest(world, peer.getPairedChestPos(), Items.COBBLESTONE);
             }
         }
 
-        if (totalStone < requiredStone) {
-            LOGGER.info("MasonWallBuilder {}: insufficient stone (available={}, required={})",
-                    guard.getUuidAsString(), totalStone, requiredStone);
+        int totalConvertibleWalls = totalWalls + totalCobblestone;
+        if (totalConvertibleWalls < requiredWallSegments) {
+            LOGGER.info("MasonWallBuilder {}: insufficient wall material (walls={}, cobblestone={}, requiredWalls={})",
+                    guard.getUuidAsString(), totalWalls, totalCobblestone, requiredWallSegments);
             return false;
         }
-        LOGGER.info("MasonWallBuilder {}: stone threshold met (available={}, required={})",
-                guard.getUuidAsString(), totalStone, requiredStone);
+        int plannedConversions = Math.max(0, requiredWallSegments - totalWalls);
+        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredSegments={}, wallsAvailable={}, cobblestoneConvertible={}, plannedConversions={})",
+                guard.getUuidAsString(), requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
-        // 6. Elect builder — the mason (including self) with the most stone
-        MasonGuardEntity electedBuilder = guard;
-        int electedStone = myStone;
+        // 6. Elect builder — only masons with both chest + job pairing are eligible.
+        List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
+        electionCandidates.add(new ElectionCandidateSnapshot(
+                guard.getUuidAsString(),
+                guard.getPairedChestPos() != null,
+                guard.getPairedJobPos() != null,
+                myWalls + myCobblestone
+        ));
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
-            if (peer.getPairedChestPos() == null) continue;
-            int peerStone = countCobblestoneInChest(world, peer.getPairedChestPos());
-            if (peerStone > electedStone) {
-                electedStone = peerStone;
-                electedBuilder = peer;
+            BlockPos peerChestPos = peer.getPairedChestPos();
+            int peerStone = peerChestPos == null ? 0 :
+                    countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                            + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
+            electionCandidates.add(new ElectionCandidateSnapshot(
+                    peer.getUuidAsString(),
+                    peerChestPos != null,
+                    peer.getPairedJobPos() != null,
+                    peerStone
+            ));
+        }
+        ElectionDecision electionDecision = electBuilderCandidate(electionCandidates);
+        for (ElectionCandidateSnapshot excluded : electionDecision.excludedCandidates()) {
+            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
+                    guard.getUuidAsString(),
+                    excluded.candidateId(),
+                    excluded.hasPairedChest(),
+                    excluded.hasPairedJob());
+        }
+
+        MasonGuardEntity electedBuilder = null;
+        int electedStone = electionDecision.electedStoneCount();
+        String electedCandidateId = electionDecision.electedCandidateId();
+        if (electedCandidateId != null) {
+            if (guard.getUuidAsString().equals(electedCandidateId)) {
+                electedBuilder = guard;
+            } else {
+                for (MasonGuardEntity peer : peers) {
+                    if (peer.getUuidAsString().equals(electedCandidateId)) {
+                        electedBuilder = peer;
+                        break;
+                    }
+                }
             }
+        }
+
+        if (electionDecision.shouldLogNoEligibleBuilder() || electedBuilder == null) {
+            LOGGER.info("MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
+                    guard.getUuidAsString(), anchorPos.toShortString());
+            return false;
         }
 
         if (electedBuilder != guard) {
@@ -307,22 +426,35 @@ public class MasonWallBuilderGoal extends Goal {
         pendingTransfers = new ArrayList<>();
         for (MasonGuardEntity peer : peers) {
             if (peer == guard) continue;
-            if (peer.getPairedChestPos() == null) continue;
-            int peerStone = countCobblestoneInChest(world, peer.getPairedChestPos());
+            BlockPos peerChestPos = peer.getPairedChestPos();
+            if (peerChestPos == null) {
+                LOGGER.debug("MasonWallBuilder {}: transfer exclusion candidate={} reason=missing paired chest",
+                        guard.getUuidAsString(), peer.getUuidAsString());
+                continue;
+            }
+            if (peer.getPairedJobPos() == null) {
+                LOGGER.debug("MasonWallBuilder {}: transfer donor candidate={} has no paired job but remains eligible (paired chest present)",
+                        guard.getUuidAsString(), peer.getUuidAsString());
+            }
+            int peerStone = countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
             if (peerStone > 0) {
-                pendingTransfers.add(new TransferTask(peer.getPairedChestPos(), guard.getPairedChestPos(), peerStone));
+                pendingTransfers.add(new TransferTask(peerChestPos, guard.getPairedChestPos(), peerStone));
             }
         }
 
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
+        plannedWallBaseY = rect.y();
+        activeAnchorPos = anchorPos.toImmutable();
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
         guard.setWallGatePositions(gatePositions);
+        guard.setWallBuildPending(true, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
 
-        LOGGER.info("MasonWallBuilder {}: elected builder; {} segments to place, {} transfers pending",
-                guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size());
+        LOGGER.info("MasonWallBuilder {}: elected builder={} (stone={}); {} segments to place, {} transfers pending",
+                guard.getUuidAsString(), electedBuilder.getUuidAsString(), electedStone, pendingSegments.size(), pendingTransfers.size());
         return true;
     }
 
@@ -332,7 +464,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void tickTransfer(ServerWorld world) {
         if (currentTransferIndex >= pendingTransfers.size()) {
-            stage = pendingSegments.isEmpty() ? Stage.DONE : Stage.MOVE_TO_SEGMENT;
+            stage = pendingSegments.isEmpty() ? Stage.DONE : Stage.WAIT_FOR_WALL_STOCK;
             return;
         }
 
@@ -358,76 +490,536 @@ public class MasonWallBuilderGoal extends Goal {
         currentTransferIndex++;
     }
 
-    private void tickMoveToSegment(ServerWorld world) {
-        // Skip already-built or gate-reserved segments
-        while (currentSegmentIndex < pendingSegments.size()) {
-            BlockPos pos = pendingSegments.get(currentSegmentIndex);
-            if (isGatePosition(pos) || world.getBlockState(pos).isOf(Blocks.COBBLESTONE)) {
-                currentSegmentIndex++;
-                continue;
-            }
-            break;
-        }
 
-        if (currentSegmentIndex >= pendingSegments.size()) {
+    private void tickWaitForWallStock(ServerWorld world) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) {
             stage = Stage.DONE;
-            guard.clearWallSegments();
-            // Invalidate cached rect so next cycle recomputes with updated village bounds
-            cachedWallRect = null;
-            cachedWallRectAnchor = null;
-            cachedPoiFootprintSignature = null;
             return;
         }
 
-        BlockPos target = pendingSegments.get(currentSegmentIndex);
-        double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
+        int threshold = computeCurrentSortieThreshold(world);
+        guard.setWallBuildPending(true, threshold);
+        int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
+        int availableCobblestone = countItemInChest(world, chestPos, Items.COBBLESTONE);
+        LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK inventory (availableWalls={}, availableCobblestone={}, threshold={})",
+                guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
 
-        if (distSq <= REACH_SQ) {
-            stage = Stage.PLACE_BLOCK;
-        } else {
-            guard.getNavigation().startMovingTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5, MOVE_SPEED);
+        WaitForStockDecision decision = decideWaitForStockTransition(
+                availableWalls,
+                availableCobblestone,
+                threshold
+        );
+        if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
+            if (conversionWaitActive) {
+                LOGGER.info("MasonWallBuilder {}: conversion success detected (walls_now={} >= threshold={})",
+                        guard.getUuidAsString(), availableWalls, threshold);
+            }
+            conversionWaitActive = false;
+            LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
+                    guard.getUuidAsString(), availableWalls, threshold);
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+        if (decision == WaitForStockDecision.DONE) {
+            conversionWaitActive = false;
+            completeCycle(CycleEndReason.OUT_OF_MATERIALS);
+            return;
+        }
+        if (decision == WaitForStockDecision.WAIT_FOR_CONVERSION) {
+            if (!conversionWaitActive) {
+                LOGGER.info("MasonWallBuilder {}: entering conversion wait (walls={}, cobblestone={}, threshold={})",
+                        guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+            }
+            conversionWaitActive = true;
+            guard.getNavigation().stop();
+            LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
+                    guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+            return;
         }
     }
 
-    private void tickPlaceBlock(ServerWorld world) {
-        if (currentSegmentIndex >= pendingSegments.size()) {
+    private void tickMoveToSegment(ServerWorld world) {
+        pruneSortieQueue(world);
+        if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
+            if (!startNextSortie(world)) {
+                runCompletionSweepAndFinish(world);
+                return;
+            }
+        }
+
+        BlockPos target = localSortieQueue.peekFirst();
+        if (target == null) {
             stage = Stage.DONE;
-            guard.clearWallSegments();
-            cachedWallRect = null;
-            cachedWallRectAnchor = null;
-            cachedPoiFootprintSignature = null;
             return;
         }
 
-        BlockPos target = pendingSegments.get(currentSegmentIndex);
+        BlockPos navigationTarget = resolveSegmentNavigationTarget(world, target);
+        if (!target.equals(activeMoveTarget)) {
+            activeMoveTarget = target;
+            activeMoveTargetTicks = 0;
+            lastMoveDistSq = Double.MAX_VALUE;
+            resetPathFailureState();
+        }
+        double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
-        // Verify still unbuilt
-        if (world.getBlockState(target).isOf(Blocks.COBBLESTONE) || isGatePosition(target)) {
-            currentSegmentIndex++;
+        if (distSq <= REACH_SQ) {
+            activeMoveTarget = null;
+            activeMoveTargetTicks = 0;
+            lastMoveDistSq = Double.MAX_VALUE;
+            resetPathFailureState();
+            stage = Stage.PLACE_BLOCK;
+        } else {
+            boolean pathStarted = guard.getNavigation().startMovingTo(
+                    navigationTarget.getX() + 0.5,
+                    navigationTarget.getY() + 0.5,
+                    navigationTarget.getZ() + 0.5,
+                    MOVE_SPEED
+            );
+            if (!pathStarted) {
+                registerPathFailure(world, target, navigationTarget);
+                return;
+            }
+            if (failedPathAttempts > 0) {
+                resetPathFailureState();
+            }
+
+            activeMoveTargetTicks++;
+            if (distSq < lastMoveDistSq - 0.01D) {
+                lastMoveDistSq = distSq;
+                activeMoveTargetTicks = 0;
+            } else if (activeMoveTargetTicks > 200) {
+                LOGGER.info("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
+                        guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
+                localSortieQueue.pollFirst();
+                skippedSegments.add(target);
+                activeMoveTarget = null;
+                activeMoveTargetTicks = 0;
+                lastMoveDistSq = Double.MAX_VALUE;
+                resetPathFailureState();
+            }
+        }
+    }
+
+    /**
+     * Wall segments are frequently air blocks one block above terrain. Pathfinding directly
+     * to those coordinates often fails because entities cannot stand in that space. Route
+     * navigation to a nearby standable position instead, while still placing on the original
+     * segment when the guard is within placement reach.
+     */
+    private BlockPos resolveSegmentNavigationTarget(ServerWorld world, BlockPos segmentPos) {
+        List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentPos);
+        int index = Math.min(Math.max(0, failedPathAttempts), Math.max(0, candidates.size() - 1));
+        return candidates.get(index);
+    }
+
+    private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos) {
+        List<BlockPos> candidates = new ArrayList<>();
+        BlockPos below = segmentPos.down();
+        if (isStandable(world, below)) {
+            candidates.add(below.toImmutable());
+        }
+        candidates.add(segmentPos.toImmutable());
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            BlockPos offset = segmentPos.offset(direction);
+            if (isStandable(world, offset) && !candidates.contains(offset)) {
+                candidates.add(offset.toImmutable());
+            }
+        }
+        BlockPos nearestStandable = findNearestStandable(world, segmentPos, NEAREST_STANDABLE_SEARCH_RADIUS);
+        if (nearestStandable != null && !candidates.contains(nearestStandable)) {
+            candidates.add(nearestStandable);
+        }
+        return candidates;
+    }
+
+    private BlockPos findNearestStandable(ServerWorld world, BlockPos center, int radius) {
+        BlockPos best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                BlockPos candidate = center.add(dx, 0, dz);
+                if (!isStandable(world, candidate)) continue;
+                double distSq = center.getSquaredDistance(candidate);
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq;
+                    best = candidate.toImmutable();
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean isStandable(ServerWorld world, BlockPos pos) {
+        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return false;
+        BlockPos above = pos.up();
+        BlockPos twoAbove = above.up();
+        return world.getBlockState(above).isAir() && world.getBlockState(twoAbove).isAir();
+    }
+
+    private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        if (firstPathFailureTick < 0L) {
+            firstPathFailureTick = world.getTime();
+        }
+        failedPathAttempts++;
+        lastTriedNavTarget = attemptedNavTarget.toImmutable();
+
+        List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentTarget);
+        if (failedPathAttempts < candidates.size()) {
+            BlockPos fallback = candidates.get(failedPathAttempts);
+            LOGGER.info("MasonWallBuilder {}: fallback_target_used segment={} attempted={} fallback={}",
+                    guard.getUuidAsString(), segmentTarget.toShortString(),
+                    attemptedNavTarget.toShortString(), fallback.toShortString());
+        }
+
+        boolean allFallbackTargetsFailed = failedPathAttempts >= candidates.size();
+        if (!(allFallbackTargetsFailed && shouldMarkHardUnreachable(failedPathAttempts, firstPathFailureTick, world.getTime()))) {
+            LOGGER.info("MasonWallBuilder {}: transient_path_fail_retrying segment={} attempt={} navTarget={} windowTicks={} allFallbacksFailed={}",
+                    guard.getUuidAsString(),
+                    segmentTarget.toShortString(),
+                    failedPathAttempts,
+                    attemptedNavTarget.toShortString(),
+                    (world.getTime() - firstPathFailureTick),
+                    allFallbackTargetsFailed);
+            return;
+        }
+
+        LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
+                guard.getUuidAsString(),
+                segmentTarget.toShortString(),
+                failedPathAttempts,
+                firstPathFailureTick,
+                lastTriedNavTarget == null ? "none" : lastTriedNavTarget.toShortString());
+        localSortieQueue.pollFirst();
+        skippedSegments.add(segmentTarget);
+        if (!hardRetryPassStarted) {
+            hardUnreachableRetryQueue.offerLast(segmentTarget.toImmutable());
+        }
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        resetPathFailureState();
+    }
+
+    private void resetPathFailureState() {
+        failedPathAttempts = 0;
+        firstPathFailureTick = -1L;
+        lastTriedNavTarget = null;
+    }
+
+    private void tickPlaceBlock(ServerWorld world) {
+        BlockPos target = localSortieQueue.peekFirst();
+        if (target == null) {
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
 
-        // Check we still have stone in our chest
+        // Verify still unbuilt
+        if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
+            localSortieQueue.pollFirst();
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
+        // Check we still have wall blocks in our chest
         BlockPos chestPos = guard.getPairedChestPos();
-        if (chestPos == null || countCobblestoneInChest(world, chestPos) < 1) {
-            LOGGER.debug("MasonWallBuilder {}: ran out of stone mid-build", guard.getUuidAsString());
+        if (chestPos == null) {
             stage = Stage.DONE;
             return;
         }
 
-        // Consume 1 cobblestone from chest
-        if (!consumeCobblestoneFromChest(world, chestPos, 1)) {
+        int sortieThreshold = computeCurrentSortieThreshold(world);
+        int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
+        if (availableWalls < sortieThreshold) {
+            stage = Stage.WAIT_FOR_WALL_STOCK;
+            return;
+        }
+
+        // Consume 1 unit of wall placement material from chest.
+        WallPlacementMaterial placementMaterial = consumeWallMaterialFromChest(world, chestPos);
+        if (placementMaterial == null) {
             stage = Stage.DONE;
             return;
         }
 
         // Place the block
-        world.setBlockState(target, Blocks.COBBLESTONE.getDefaultState());
-        LOGGER.debug("MasonWallBuilder {}: placed cobblestone at {}", guard.getUuidAsString(), target.toShortString());
+        world.setBlockState(target, placementMaterial.blockState());
+        LOGGER.debug("MasonWallBuilder {}: placed {} at {}",
+                guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
-        currentSegmentIndex++;
+        localSortieQueue.pollFirst();
+        sortiePlacements++;
+        placedSegments++;
+        guard.setWallBuildPending(hasRemainingSegments(world), computeCurrentSortieThreshold(world));
+        maybeLogPlacementProgress();
         stage = Stage.MOVE_TO_SEGMENT;
+    }
+
+    private void maybeLogPlacementProgress() {
+        if (!isElectedBuilder || plannedPlacementCount <= 0) return;
+        int placed = placedSegments;
+        int total = plannedPlacementCount;
+        if (placed >= total || placed <= 10 || placed - lastProgressLoggedSegmentCount >= 25) {
+            lastProgressLoggedSegmentCount = placed;
+            int percent = (int) Math.floor((placed * 100.0) / total);
+            LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
+                    guard.getUuidAsString(), placed, total, percent);
+        }
+    }
+
+    private void pruneSortieQueue(ServerWorld world) {
+        while (!localSortieQueue.isEmpty()) {
+            BlockPos head = localSortieQueue.peekFirst();
+            if (head == null || isGatePosition(head) || isPlacedWallBlock(world.getBlockState(head))) {
+                localSortieQueue.pollFirst();
+            } else {
+                break;
+            }
+        }
+    }
+
+    private boolean startNextSortie(ServerWorld world) {
+        localSortieQueue.clear();
+        sortiePlacements = 0;
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1) {
+            return false;
+        }
+
+        BlockPos anchor = findNextIndexAnchor(world, activeLayer);
+        if (anchor == null) {
+            return false;
+        }
+
+        List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer);
+        if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
+            BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer);
+            if (nearest != null) {
+                anchorBatch = buildLocalSortieCandidates(world, nearest, activeLayer);
+            }
+        }
+        if (anchorBatch.isEmpty()) {
+            skippedSegments.add(anchor);
+            return hasRemainingSegments(world) && startNextSortie(world);
+        }
+        localSortieQueue.addAll(anchorBatch);
+        return true;
+    }
+
+    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer) {
+        if (!hardUnreachableRetryQueue.isEmpty()) {
+            hardRetryPassStarted = true;
+        }
+        while (!hardUnreachableRetryQueue.isEmpty()) {
+            BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
+            if (retryCandidate == null) continue;
+            skippedSegments.remove(retryCandidate);
+            if (getSegmentLayer(retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
+                return retryCandidate;
+            }
+        }
+        while (currentSegmentIndex < pendingSegments.size()) {
+            BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
+            if (getSegmentLayer(candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer) {
+        BlockPos best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (!isBuildableCandidate(world, pos)) continue;
+            double distSq = from.getSquaredDistance(pos);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = pos;
+            }
+        }
+        return best;
+    }
+
+    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer) {
+        int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
+        List<BlockPos> local = new ArrayList<>();
+        for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (!isBuildableCandidate(world, pos)) continue;
+            if (anchor.getSquaredDistance(pos) <= radiusSq) {
+                local.add(pos);
+            }
+        }
+        local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        if (local.size() > MAX_SEGMENTS_PER_SORTIE) {
+            return new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
+        }
+        return local;
+    }
+
+    private int computeCurrentSortieThreshold(ServerWorld world) {
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1) return 1;
+        int remaining = 0;
+        for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (isBuildableCandidate(world, pos)) remaining++;
+        }
+        return Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, remaining));
+    }
+
+    private int findLowestPendingLayer(ServerWorld world) {
+        for (BlockPos pos : pendingSegments) {
+            if (isBuildableCandidate(world, pos)) {
+                return getSegmentLayer(pos);
+            }
+        }
+        return -1;
+    }
+
+    private int getSegmentLayer(BlockPos pos) {
+        return (pos.getY() - plannedWallBaseY) + 1;
+    }
+
+    private boolean hasRemainingSegments(ServerWorld world) {
+        for (BlockPos pos : pendingSegments) {
+            if (isBuildableCandidate(world, pos)) return true;
+        }
+        return false;
+    }
+
+    private boolean isBuildableCandidate(ServerWorld world, BlockPos pos) {
+        return !isGatePosition(pos)
+                && !isPlacedWallBlock(world.getBlockState(pos))
+                && !skippedSegments.contains(pos);
+    }
+
+    private void runCompletionSweepAndFinish(ServerWorld world) {
+        SweepSummary summary = runCompletionSweep(world);
+        if (summary.remainingAfterSweep == 0) {
+            completeCycle(CycleEndReason.WALL_COMPLETE);
+            return;
+        }
+
+        LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} irrecoverableReasons={}",
+                guard.getUuidAsString(), summary.remainingAfterSweep, summary.irrecoverableReasons);
+        completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
+    }
+
+    private SweepSummary runCompletionSweep(ServerWorld world) {
+        List<BlockPos> remainingUnbuilt = findRemainingUnbuiltSegments(world);
+        if (remainingUnbuilt.isEmpty()) {
+            LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
+                    guard.getUuidAsString(), Map.of());
+            return new SweepSummary(0, 0, 0, Map.of());
+        }
+
+        int filledDuringSweep = 0;
+        int irrecoverableCount = 0;
+        Map<String, Integer> irrecoverableReasons = new HashMap<>();
+        BlockPos chestPos = guard.getPairedChestPos();
+
+        for (BlockPos segment : remainingUnbuilt) {
+            skippedSegments.remove(segment);
+            hardUnreachableRetryQueue.remove(segment);
+
+            if (isPlacedWallBlock(world.getBlockState(segment))) {
+                continue;
+            }
+            if (chestPos == null) {
+                irrecoverableCount++;
+                incrementReason(irrecoverableReasons, "missing_chest");
+                continue;
+            }
+
+            boolean filled = false;
+            String failureReason = "placement_unresolved";
+            for (int attempt = 1; attempt <= COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT; attempt++) {
+                if (isPlacedWallBlock(world.getBlockState(segment))) {
+                    filled = true;
+                    break;
+                }
+
+                boolean inReach = guard.squaredDistanceTo(
+                        segment.getX() + 0.5, segment.getY() + 0.5, segment.getZ() + 0.5
+                ) <= REACH_SQ;
+                if (!inReach) {
+                    BlockPos navigationTarget = resolveSegmentNavigationTarget(world, segment);
+                    boolean startedPath = guard.getNavigation().startMovingTo(
+                            navigationTarget.getX() + 0.5,
+                            navigationTarget.getY() + 0.5,
+                            navigationTarget.getZ() + 0.5,
+                            MOVE_SPEED
+                    );
+                    failureReason = startedPath ? "not_in_reach" : "navigation_failed";
+                    continue;
+                }
+
+                WallPlacementMaterial material = consumeWallMaterialFromChest(world, chestPos);
+                if (material == null) {
+                    failureReason = "out_of_materials";
+                    break;
+                }
+
+                world.setBlockState(segment, material.blockState());
+                filled = true;
+                filledDuringSweep++;
+                break;
+            }
+
+            if (!filled) {
+                irrecoverableCount++;
+                incrementReason(irrecoverableReasons, failureReason);
+            }
+        }
+
+        int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
+        LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} irrecoverable={} reasons={}",
+                guard.getUuidAsString(),
+                remainingUnbuilt.size(),
+                filledDuringSweep,
+                irrecoverableCount,
+                irrecoverableReasons);
+
+        return new SweepSummary(
+                remainingAfterSweep,
+                filledDuringSweep,
+                irrecoverableCount,
+                Map.copyOf(irrecoverableReasons)
+        );
+    }
+
+    private List<BlockPos> findRemainingUnbuiltSegments(ServerWorld world) {
+        List<BlockPos> remaining = new ArrayList<>();
+        for (BlockPos pos : pendingSegments) {
+            if (isGatePosition(pos)) continue;
+            if (isPlacedWallBlock(world.getBlockState(pos))) continue;
+            remaining.add(pos);
+        }
+        return remaining;
+    }
+
+    private void incrementReason(Map<String, Integer> reasons, String reason) {
+        reasons.merge(reason, 1, Integer::sum);
+    }
+
+    private void completeCycle(CycleEndReason reason) {
+        cycleEndReason = reason;
+        if (reason == CycleEndReason.WALL_COMPLETE
+                && guard.getWorld() instanceof ServerWorld world
+                && activeAnchorPos != null) {
+            VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
+        }
+        stage = Stage.DONE;
+        guard.clearWallSegments();
+        guard.setWallBuildPending(false, 0);
+        activeAnchorPos = null;
+        cachedWallRect = null;
+        cachedWallRectAnchor = null;
+        cachedPoiFootprintSignature = null;
+        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
     }
 
     // -------------------------------------------------------------------------
@@ -501,37 +1093,26 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Returns all planned wall block placements around the rectangle perimeter with terrain adaptation:
-     * <ul>
-     *   <li>Skip DIRT_PATH positions (natural gaps / roads)</li>
-     *   <li>Skip positions where {@code |surfaceY - bellY| > STEEP_SKIP_THRESHOLD} (too steep)</li>
-     *   <li>Skip positions where the dip depth exceeds {@code MAX_FILL_DEPTH} (ravine guard)</li>
-     *   <li>For positions above ground level: place wall block on top of the surface
-     *       (wall sits on hill rather than being buried inside it)</li>
-     *   <li>For positions below anchor level: emit a column of blocks from surfaceY+1
-     *       down to bellY, filling the dip so the wall has no gap underneath</li>
-     *   <li>Force at least 1 gap so the wall is never fully enclosed</li>
-     *   <li>Gate positions (1 per face) are included in the list but tagged separately</li>
-     * </ul>
+     * Returns deterministic 3-layer wall placements around the rectangle perimeter:
+     * baseY, baseY+1, and baseY+2. Layers are appended in that order so planning
+     * is stable and layer-first.
      */
     private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
         List<BlockPos> segments = new ArrayList<>();
-        int bellY = rect.y();
+        int baseY = rect.y();
 
-        // North face (z = minZ), South face (z = maxZ)
-        for (int x = rect.minX(); x <= rect.maxX(); x++) {
-            resolveWallColumn(world, x, rect.minZ(), bellY, segments);
-            resolveWallColumn(world, x, rect.maxZ(), bellY, segments);
-        }
-        // West face (x = minX), East face (x = maxX) — corners already covered above
-        for (int z = rect.minZ() + 1; z < rect.maxZ(); z++) {
-            resolveWallColumn(world, rect.minX(), z, bellY, segments);
-            resolveWallColumn(world, rect.maxX(), z, bellY, segments);
+        for (int layer = 0; layer < 3; layer++) {
+            int layerY = baseY + layer;
+            for (BlockPos perimeterPos : computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), layerY)) {
+                if (world.getBlockState(perimeterPos).isOf(Blocks.DIRT_PATH)) continue;
+                if (world.getBlockState(perimeterPos).isOf(Blocks.COBBLESTONE)) continue;
+                segments.add(perimeterPos.toImmutable());
+            }
         }
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
-            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ());
+            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ()) * 3;
             if (segments.size() >= perimeterTotal) {
                 segments.remove(segments.size() - 1);
             }
@@ -540,67 +1121,176 @@ public class MasonWallBuilderGoal extends Goal {
         return segments;
     }
 
-    /**
-     * Resolves planned wall block placement(s) for one perimeter (x, z) position, adapting to terrain:
-     *
-     * <ol>
-     *   <li>Sample surface Y via {@code MOTION_BLOCKING_NO_LEAVES} heightmap
-     *       (top of solid/liquid column, ignoring leaf canopy).</li>
-     *   <li>Compute {@code delta = surfaceY - bellY}.</li>
-     *   <li>If {@code delta > STEEP_SKIP_THRESHOLD}: the ground rises more than the threshold
-     *       above bell level — the position is on a steep hill; skip it.</li>
-     *   <li>If {@code -delta > MAX_FILL_DEPTH}: the ground is too far below bell level
-     *       (ravine / cliff) — skip it.</li>
-     *   <li>If {@code delta >= 0}: the surface is at or above bell level. Place the wall
-     *       block at {@code surfaceY + 1} so it sits visibly on top of the ground.</li>
-     *   <li>If {@code delta < 0}: the surface dips below bell level. Emit a column of
-     *       blocks from {@code surfaceY + 1} up to {@code bellY} (inclusive) to fill the
-     *       gap underneath the one-thick wall line.</li>
-     *   <li>In all cases, skip DIRT_PATH and already-cobblestone positions.</li>
-     * </ol>
-     */
-    private void resolveWallColumn(ServerWorld world, int x, int z, int bellY, List<BlockPos> out) {
-        // Surface Y = top of the solid column (leaves excluded so forest canopy doesn't skew it)
-        int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
-        int delta = surfaceY - bellY;
+    static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ, int y) {
+        List<BlockPos> perimeter = new ArrayList<>();
 
-        // Too steep upward — skip
-        if (delta > STEEP_SKIP_THRESHOLD) {
-            return;
+        // North face: minX -> maxX at minZ
+        for (int x = minX; x <= maxX; x++) {
+            perimeter.add(new BlockPos(x, y, minZ));
         }
 
-        // Too deep downward — skip (ravine / cliff guard)
-        if (-delta > MAX_FILL_DEPTH) {
-            return;
+        // East face: minZ+1 -> maxZ-1 at maxX (corners already included)
+        for (int z = minZ + 1; z < maxZ; z++) {
+            perimeter.add(new BlockPos(maxX, y, z));
         }
 
-        if (delta >= 0) {
-            // Ground is at or above bell level: place wall block on top of surface
-            BlockPos pos = new BlockPos(x, surfaceY + 1, z);
-            addSegmentIfValid(world, pos, out);
-        } else {
-            // Ground dips below bell level: fill column from ground surface up to bell Y
-            // so there is no gap underneath the wall line.
-            for (int y = surfaceY + 1; y <= bellY; y++) {
-                BlockPos pos = new BlockPos(x, y, z);
-                addSegmentIfValid(world, pos, out);
-            }
+        // South face: maxX -> minX at maxZ
+        for (int x = maxX; x >= minX; x--) {
+            perimeter.add(new BlockPos(x, y, maxZ));
         }
+
+        // West face: maxZ-1 -> minZ+1 at minX (corners already included)
+        for (int z = maxZ - 1; z > minZ; z--) {
+            perimeter.add(new BlockPos(minX, y, z));
+        }
+
+        return perimeter;
     }
 
-    private void addSegmentIfValid(ServerWorld world, BlockPos pos, List<BlockPos> segments) {
-        // Skip road tiles — natural gaps should stay open
-        if (world.getBlockState(pos).isOf(Blocks.DIRT_PATH)) return;
-        // Skip already-built positions
-        if (world.getBlockState(pos).isOf(Blocks.COBBLESTONE)) return;
-        segments.add(pos.toImmutable());
+    static TraversalSimulationResult simulateSequentialTraversal(List<BlockPos> orderedSegments, BlockPos startPos) {
+        if (orderedSegments.isEmpty()) return new TraversalSimulationResult(0.0D, 0, 0);
+        double travel = 0.0D;
+        BlockPos current = startPos;
+        for (BlockPos segment : orderedSegments) {
+            travel += manhattan2d(current, segment);
+            current = segment;
+        }
+        return new TraversalSimulationResult(travel / orderedSegments.size(), orderedSegments.size(), orderedSegments.size());
+    }
+
+    static TraversalSimulationResult simulateBatchedTraversal(List<BlockPos> orderedSegments, BlockPos startPos) {
+        if (orderedSegments.isEmpty()) return new TraversalSimulationResult(0.0D, 0, 0);
+
+        List<BlockPos> remaining = new ArrayList<>(orderedSegments);
+        BlockPos current = startPos;
+        double travel = 0.0D;
+        int placed = 0;
+        int sortiesMeetingMin = 0;
+        int sortiesWithMinCandidates = 0;
+        int index = 0;
+        int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
+
+        while (!remaining.isEmpty()) {
+            if (index >= remaining.size()) index = 0;
+            BlockPos anchor = remaining.get(index);
+            List<BlockPos> local = buildSimulationLocalBatch(remaining, anchor, radiusSq);
+            if (local.size() < MIN_SEGMENTS_PER_SORTIE) {
+                anchor = findNearestSimulationCandidate(remaining, current);
+                local = buildSimulationLocalBatch(remaining, anchor, radiusSq);
+            }
+            if (local.size() >= MIN_SEGMENTS_PER_SORTIE) {
+                sortiesWithMinCandidates++;
+            }
+            int batchSize = Math.min(local.size(), MAX_SEGMENTS_PER_SORTIE);
+            if (batchSize >= MIN_SEGMENTS_PER_SORTIE) sortiesMeetingMin++;
+            for (int i = 0; i < batchSize; i++) {
+                BlockPos target = local.get(i);
+                travel += manhattan2d(current, target);
+                current = target;
+                remaining.remove(target);
+                placed++;
+            }
+        }
+        return new TraversalSimulationResult(travel / Math.max(1, placed), sortiesMeetingMin, sortiesWithMinCandidates);
+    }
+
+    static PathRetrySimulationResult simulatePathRetryPolicy(List<Boolean> pathStartSuccessPerTick,
+                                                             int maxAttempts,
+                                                             int retryWindowTicks) {
+        int failedAttempts = 0;
+        long firstFailureTick = -1L;
+        for (int tick = 0; tick < pathStartSuccessPerTick.size(); tick++) {
+            if (pathStartSuccessPerTick.get(tick)) {
+                return new PathRetrySimulationResult(false, tick + 1, failedAttempts);
+            }
+            if (firstFailureTick < 0L) {
+                firstFailureTick = tick;
+            }
+            failedAttempts++;
+            if (failedAttempts >= maxAttempts || (tick - firstFailureTick) >= retryWindowTicks) {
+                return new PathRetrySimulationResult(true, tick + 1, failedAttempts);
+            }
+        }
+        return new PathRetrySimulationResult(false, pathStartSuccessPerTick.size(), failedAttempts);
+    }
+
+    static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
+                                                            int availableCobblestone,
+                                                            int threshold) {
+        if (availableWalls >= threshold) {
+            return WaitForStockDecision.MOVE_TO_SEGMENT;
+        }
+        if (availableCobblestone > 0) {
+            return WaitForStockDecision.WAIT_FOR_CONVERSION;
+        }
+        return WaitForStockDecision.DONE;
+    }
+
+    static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates) {
+        ElectionCandidateSnapshot elected = null;
+        List<ElectionCandidateSnapshot> excluded = new ArrayList<>();
+        for (ElectionCandidateSnapshot candidate : candidates) {
+            if (!candidate.hasPairedChest() || !candidate.hasPairedJob()) {
+                excluded.add(candidate);
+                continue;
+            }
+            if (elected == null || candidate.stoneCount() > elected.stoneCount()) {
+                elected = candidate;
+            }
+        }
+        return new ElectionDecision(
+                elected == null ? null : elected.candidateId(),
+                elected == null ? -1 : elected.stoneCount(),
+                excluded,
+                elected == null
+        );
+    }
+
+    private static boolean shouldMarkHardUnreachable(int failedAttempts, long firstFailureTick, long currentTick) {
+        if (firstFailureTick < 0L) return false;
+        return failedAttempts >= PATH_RETRY_MAX_ATTEMPTS || (currentTick - firstFailureTick) >= PATH_RETRY_WINDOW_TICKS;
+    }
+
+    private static List<BlockPos> buildSimulationLocalBatch(List<BlockPos> remaining, BlockPos anchor, int radiusSq) {
+        List<BlockPos> local = new ArrayList<>();
+        for (BlockPos candidate : remaining) {
+            if (anchor.getSquaredDistance(candidate) <= radiusSq) local.add(candidate);
+        }
+        local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        return local;
+    }
+
+    private static BlockPos findNearestSimulationCandidate(List<BlockPos> remaining, BlockPos from) {
+        BlockPos best = remaining.get(0);
+        int bestDist = Integer.MAX_VALUE;
+        for (BlockPos candidate : remaining) {
+            int dist = manhattan2d(from, candidate);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    private static int manhattan2d(BlockPos a, BlockPos b) {
+        return Math.abs(a.getX() - b.getX()) + Math.abs(a.getZ() - b.getZ());
+    }
+
+    static net.minecraft.item.Item selectPlacementItemForCounts(int wallCount, int cobblestoneCount) {
+        if (wallCount > 0) {
+            return Items.COBBLESTONE_WALL;
+        }
+        if (ALLOW_COBBLESTONE_PLACEMENT_FALLBACK && cobblestoneCount > 0) {
+            return Items.COBBLESTONE;
+        }
+        return null;
     }
 
     /**
      * Picks one gate position per wall face (N/S/E/W) — the unbuilt segment closest to the
-     * midpoint of each face.  Actual segment Y varies with terrain (surfaceY + 1), so we
-     * search by X/Z proximity rather than constructing a fixed-Y position that would never
-     * match any computed segment.
+     * midpoint of each face. Gate reservation is tracked per X/Z column and applies across
+     * all 3 planned layers.
      *
      * These are stored on the guard entity for lumberjack fence gate placement later.
      */
@@ -656,7 +1346,22 @@ public class MasonWallBuilderGoal extends Goal {
 
     private boolean isGatePosition(BlockPos pos) {
         List<BlockPos> gates = guard.getWallGatePositions();
-        return gates != null && gates.contains(pos);
+        if (gates == null || gates.isEmpty()) return false;
+        for (BlockPos gate : gates) {
+            if (isSameColumn(pos, gate)) return true;
+        }
+        return false;
+    }
+
+    private boolean isGateColumnPosition(BlockPos pos, Set<BlockPos> gates) {
+        for (BlockPos gate : gates) {
+            if (isSameColumn(pos, gate)) return true;
+        }
+        return false;
+    }
+
+    private boolean isSameColumn(BlockPos a, BlockPos b) {
+        return a.getX() == b.getX() && a.getZ() == b.getZ();
     }
 
     // -------------------------------------------------------------------------
@@ -673,39 +1378,53 @@ public class MasonWallBuilderGoal extends Goal {
     // Inventory utilities
     // -------------------------------------------------------------------------
 
-    private int countCobblestoneInChest(ServerWorld world, BlockPos chestPos) {
+    private int countWallMaterialUnitsInChest(ServerWorld world, BlockPos chestPos) {
         Optional<Inventory> inv = getInventory(world, chestPos);
         if (inv.isEmpty()) return 0;
         int count = 0;
         Inventory inventory = inv.get();
         for (int i = 0; i < inventory.size(); i++) {
             ItemStack stack = inventory.getStack(i);
-            if (!stack.isEmpty() && stack.isOf(Items.COBBLESTONE)) {
+            if (!stack.isEmpty() && isWallMaterialItem(stack.getItem())) {
                 count += stack.getCount();
             }
         }
         return count;
     }
 
-    private boolean consumeCobblestoneFromChest(ServerWorld world, BlockPos chestPos, int amount) {
+    private int countItemInChest(ServerWorld world, BlockPos chestPos, net.minecraft.item.Item item) {
         Optional<Inventory> inv = getInventory(world, chestPos);
-        if (inv.isEmpty()) return false;
+        if (inv.isEmpty()) return 0;
+        int count = 0;
         Inventory inventory = inv.get();
-        int remaining = amount;
-        for (int i = 0; i < inventory.size() && remaining > 0; i++) {
+        for (int i = 0; i < inventory.size(); i++) {
             ItemStack stack = inventory.getStack(i);
-            if (!stack.isEmpty() && stack.isOf(Items.COBBLESTONE)) {
-                int consumed = Math.min(stack.getCount(), remaining);
-                stack.decrement(consumed);
-                if (stack.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
-                remaining -= consumed;
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                count += stack.getCount();
             }
         }
-        if (remaining == 0) {
-            inventory.markDirty();
-            return true;
+        return count;
+    }
+
+    private WallPlacementMaterial consumeWallMaterialFromChest(ServerWorld world, BlockPos chestPos) {
+        Optional<Inventory> inv = getInventory(world, chestPos);
+        if (inv.isEmpty()) return null;
+        Inventory inventory = inv.get();
+        WallPlacementMaterial[] priority = ALLOW_COBBLESTONE_PLACEMENT_FALLBACK
+                ? WallPlacementMaterial.values()
+                : new WallPlacementMaterial[]{WallPlacementMaterial.COBBLESTONE_WALL};
+        for (WallPlacementMaterial material : priority) {
+            for (int i = 0; i < inventory.size(); i++) {
+                ItemStack stack = inventory.getStack(i);
+                if (!stack.isEmpty() && stack.isOf(material.item())) {
+                    stack.decrement(1);
+                    if (stack.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
+                    inventory.markDirty();
+                    return material;
+                }
+            }
         }
-        return false;
+        return null;
     }
 
     private void transferCobblestone(ServerWorld world, BlockPos sourcePos, BlockPos destPos, int maxAmount) {
@@ -719,7 +1438,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         for (int i = 0; i < src.size() && transferred < maxAmount; i++) {
             ItemStack stack = src.getStack(i);
-            if (stack.isEmpty() || !stack.isOf(Items.COBBLESTONE)) continue;
+            if (stack.isEmpty() || !isWallMaterialItem(stack.getItem())) continue;
 
             int toMove = Math.min(stack.getCount(), maxAmount - transferred);
             ItemStack moving = stack.copyWithCount(toMove);
@@ -736,9 +1455,17 @@ public class MasonWallBuilderGoal extends Goal {
         if (transferred > 0) {
             src.markDirty();
             dst.markDirty();
-            LOGGER.debug("MasonWallBuilder {}: transferred {} cobblestone from {} to {}",
+            LOGGER.debug("MasonWallBuilder {}: transferred {} wall material from {} to {}",
                     guard.getUuidAsString(), transferred, sourcePos.toShortString(), destPos.toShortString());
         }
+    }
+
+    private boolean isPlacedWallBlock(BlockState state) {
+        return state.isOf(Blocks.COBBLESTONE) || state.isOf(Blocks.COBBLESTONE_WALL);
+    }
+
+    private boolean isWallMaterialItem(net.minecraft.item.Item item) {
+        return item == Items.COBBLESTONE || item == Items.COBBLESTONE_WALL;
     }
 
     private ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
@@ -775,6 +1502,7 @@ public class MasonWallBuilderGoal extends Goal {
     private enum Stage {
         IDLE,
         TRANSFER_FROM_PEERS,
+        WAIT_FOR_WALL_STOCK,
         MOVE_TO_SEGMENT,
         PLACE_BLOCK,
         DONE
@@ -785,4 +1513,61 @@ public class MasonWallBuilderGoal extends Goal {
     private record PoiFootprintSignature(int minX, int minZ, int maxX, int maxZ, int poiCount, int poiHash) {}
 
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
+
+    private enum WallPlacementMaterial {
+        COBBLESTONE_WALL(Items.COBBLESTONE_WALL, Blocks.COBBLESTONE_WALL.getDefaultState());
+
+        private final net.minecraft.item.Item item;
+        private final BlockState blockState;
+
+        WallPlacementMaterial(net.minecraft.item.Item item, BlockState blockState) {
+            this.item = item;
+            this.blockState = blockState;
+        }
+
+        net.minecraft.item.Item item() {
+            return item;
+        }
+
+        BlockState blockState() {
+            return blockState;
+        }
+    }
+
+    record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
+
+    record PathRetrySimulationResult(boolean skippedAsHardUnreachable, int decisionTick, int failedAttempts) {}
+
+    record ElectionCandidateSnapshot(String candidateId, boolean hasPairedChest, boolean hasPairedJob, int stoneCount) {}
+
+    record ElectionDecision(String electedCandidateId,
+                            int electedStoneCount,
+                            List<ElectionCandidateSnapshot> excludedCandidates,
+                            boolean shouldLogNoEligibleBuilder) {}
+
+    enum WaitForStockDecision {
+        MOVE_TO_SEGMENT,
+        WAIT_FOR_CONVERSION,
+        DONE
+    }
+
+    private record SweepSummary(
+            int remainingAfterSweep,
+            int filledDuringSweep,
+            int irrecoverableCount,
+            Map<String, Integer> irrecoverableReasons
+    ) {
+    }
+
+    private enum CycleEndReason {
+        WALL_COMPLETE("wall_complete"),
+        OUT_OF_MATERIALS("out_of_materials"),
+        UNREACHABLE_SEGMENTS("unreachable_segments");
+
+        private final String logValue;
+
+        CycleEndReason(String logValue) {
+            this.logValue = logValue;
+        }
+    }
 }

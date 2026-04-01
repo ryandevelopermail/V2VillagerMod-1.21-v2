@@ -60,6 +60,10 @@ public class MasonGuardEntity extends GuardEntity {
     private List<BlockPos> wallSegments = new ArrayList<>();
     /** Gate positions reserved per wall face (1 per face, max 4). For lumberjack fence gates. */
     private List<BlockPos> wallGatePositions = new ArrayList<>();
+    /** Cross-goal signal used to prioritize stonecutting wall output while a wall plan is pending. */
+    private boolean wallBuildPending;
+    /** Number of cobblestone walls needed before the next wall placement sortie can start. */
+    private int wallSortieWallThreshold;
 
     public MasonGuardEntity(EntityType<? extends GuardEntity> type, World world) {
         super(type, world);
@@ -152,6 +156,19 @@ public class MasonGuardEntity extends GuardEntity {
         this.wallGatePositions = gates == null ? new ArrayList<>() : new ArrayList<>(gates);
     }
 
+    public boolean isWallBuildPending() {
+        return wallBuildPending;
+    }
+
+    public int getWallSortieWallThreshold() {
+        return wallSortieWallThreshold;
+    }
+
+    public void setWallBuildPending(boolean wallBuildPending, int wallSortieWallThreshold) {
+        this.wallBuildPending = wallBuildPending;
+        this.wallSortieWallThreshold = Math.max(0, wallSortieWallThreshold);
+    }
+
     public void clearMiningProgress() {
         this.miningOrigin = null;
         this.miningStartPos = null;
@@ -215,7 +232,9 @@ public class MasonGuardEntity extends GuardEntity {
         this.goalSelector.add(2, new MasonGuardStonecuttingGoal(this));
         this.goalSelector.add(3, new MasonMiningStairGoal(this));
         this.goalSelector.add(3, new MasonGuardChestDistributionGoal(this));
-        this.goalSelector.add(4, new MasonWallBuilderGoal(this));
+        // Keep wall building at the same priority band as movement goals so it is not starved
+        // by idle village wandering when a full perimeter plan is ready.
+        this.goalSelector.add(3, new MasonWallBuilderGoal(this));
         this.goalSelector.add(3, new WanderAroundPointOfInterestGoal(this, 0.5D, false));
         this.goalSelector.add(3, new IronGolemWanderAroundGoal(this, 0.5D));
         this.goalSelector.add(3, new MoveThroughVillageGoal(this, 0.5D, false, 4, () -> false));
@@ -279,6 +298,8 @@ public class MasonGuardEntity extends GuardEntity {
         // Cluster 4 — Wall builder state (bell-based anchor removed; QM chest is now the anchor)
         this.wallSegments = readBlockPosList(nbt, "MasonWallSegments");
         this.wallGatePositions = readBlockPosList(nbt, "MasonWallGates");
+        this.wallBuildPending = nbt.getBoolean("MasonWallBuildPending");
+        this.wallSortieWallThreshold = Math.max(0, nbt.getInt("MasonWallSortieWallThreshold"));
 
         if (nbt.contains("MasonMiningOriginX")) {
             this.miningOrigin = new BlockPos(nbt.getInt("MasonMiningOriginX"), nbt.getInt("MasonMiningOriginY"), nbt.getInt("MasonMiningOriginZ"));
@@ -320,6 +341,8 @@ public class MasonGuardEntity extends GuardEntity {
         // Cluster 4 — Wall builder state (bell-based anchor removed; QM chest is now the anchor)
         nbt.put("MasonWallSegments", writeBlockPosList(this.wallSegments));
         nbt.put("MasonWallGates", writeBlockPosList(this.wallGatePositions));
+        nbt.putBoolean("MasonWallBuildPending", this.wallBuildPending);
+        nbt.putInt("MasonWallSortieWallThreshold", this.wallSortieWallThreshold);
 
         nbt.putLong("MasonNextMiningStartTick", this.nextMiningStartTick);
         nbt.putBoolean("MasonMiningSessionActive", this.miningSessionActive);

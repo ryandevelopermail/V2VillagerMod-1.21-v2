@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
@@ -31,6 +32,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final double DEFAULT_OVERFLOW_FULLNESS_TRIGGER = 0.825D;
     protected static final double DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE = 24.0D;
     protected static final int DEFAULT_OVERFLOW_QM_SEARCH_RADIUS = 300;
+    protected static final int IMMEDIATE_REQUEST_DEBOUNCE_TICKS = 30;
 
     protected final VillagerEntity villager;
     protected BlockPos jobPos;
@@ -44,6 +46,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
     protected long lastPathRequestTick = Long.MIN_VALUE;
+    protected long lastImmediateRequestTick = Long.MIN_VALUE;
     protected boolean pendingUniversalRoute;
     protected boolean pendingOverflowTransfer;
 
@@ -190,6 +193,11 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     public void requestImmediateDistribution() {
+        long currentTick = villager.getWorld().getTime();
+        if (immediateCheckPending || currentTick - lastImmediateRequestTick < IMMEDIATE_REQUEST_DEBOUNCE_TICKS) {
+            return;
+        }
+        lastImmediateRequestTick = currentTick;
         immediateCheckPending = true;
         nextCheckTime = 0L;
     }
@@ -365,7 +373,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected double getOverflowRecipientScanRange() {
-        return DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
+        int configured = GuardVillagersConfig.overflowRecipientScanRange;
+        return configured > 0 ? configured : DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
     }
 
     protected boolean isOverflowModeActive(ServerWorld world, Inventory sourceInventory) {
@@ -468,7 +477,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected int getOverflowQmSearchRadius() {
-        return DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
+        int configured = GuardVillagersConfig.overflowFallbackQmSearchRadius;
+        return configured > 0 ? configured : DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
     }
 
     protected Optional<BlockPos> resolveOverflowFallbackQmChest(ServerWorld world) {
@@ -585,7 +595,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected double getUniversalRecipientRange() {
-        return 24.0D;
+        return getOverflowRecipientScanRange();
     }
 
     protected Optional<UniversalDistributionRouter.ResolvedRoute> resolveUniversalRoute(ServerWorld world, Inventory inventory) {

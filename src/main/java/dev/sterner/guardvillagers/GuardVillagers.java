@@ -153,6 +153,7 @@ public class GuardVillagers implements ModInitializer {
     @Override
     public void onInitialize() {
         MidnightConfig.init(MODID, GuardVillagersConfig.class);
+        GuardVillagersConfig.validateClampedRanges();
         FabricDefaultAttributeRegistry.register(GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(AXE_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(BUTCHER_GUARD_VILLAGER, GuardEntity.createAttributes());
@@ -251,6 +252,11 @@ public class GuardVillagers implements ModInitializer {
                 rehydrateConvertedWorkerReservation(serverWorld, guardEntity, guardEntity.getPairedCraftingTablePos(), VillagerProfession.NONE, "paired crafting table");
             }
         });
+        ServerEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
+            if (entity instanceof VillagerEntity villagerEntity && world instanceof ServerWorld serverWorld) {
+                JobBlockPairingHelper.invalidateVillagerChestPairing(serverWorld, villagerEntity.getUuid());
+            }
+        });
 
         ServerChunkEvents.CHUNK_LOAD.register((world, chunk) ->
                 VillagerConversionCandidateIndex.markCandidatesInChunk(world, chunk.getPos().x, chunk.getPos().z));
@@ -265,6 +271,7 @@ public class GuardVillagers implements ModInitializer {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
+            JobBlockPairingHelper.clearWorldCaches(world);
         });
 
         ServerLifecycleEvents.END_DATA_PACK_RELOAD.register((server, resourceManager, success) -> {

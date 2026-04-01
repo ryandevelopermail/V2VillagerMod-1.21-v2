@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -31,10 +32,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
@@ -61,7 +66,8 @@ public class QuartermasterGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(QuartermasterGoal.class);
 
     private static final int CHECK_INTERVAL_TICKS = 300;
-    private static final double SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
+    private static final int STRUCTURAL_CHECK_INTERVAL_TICKS = 20;
+    private static final double DEFAULT_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
     private static final double REACH_SQ = 3.0D * 3.0D;
     /** Minimum stone in mason chest before we top it up. */
@@ -78,6 +84,22 @@ public class QuartermasterGoal extends Goal {
     private static final int BELL_CHEST_LOW_THRESHOLD = 32;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
+    /** Hard cap of cached candidate chests checked in one planning cycle. */
+    private static final int MAX_SURPLUS_CANDIDATE_CHESTS_PER_CYCLE = 12;
+    /** Hard cap of inventories inspected in one planning cycle. */
+    private static final int MAX_SURPLUS_INVENTORIES_PER_CYCLE = 12;
+    /** Hard cap of villager pairing entries scanned while rebuilding candidate cache. */
+    private static final int MAX_PAIRINGS_SCANNED_PER_CYCLE = 24;
+    /** Candidate chest cache refresh cadence. */
+    private static final int CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS = 20 * 30;
+    /**
+     * Runtime-only active quartermaster registry, keyed by world + anchor chest position.
+     *
+     * <p>This avoids repeatedly scanning nearby librarians and their goal selectors for
+     * "is any QM active?" checks.
+     */
+    private static final Map<net.minecraft.registry.RegistryKey<net.minecraft.world.World>, Map<BlockPos, Set<UUID>>>
+            ACTIVE_QM_BY_WORLD_ANCHOR = new HashMap<>();
 
     /**
      * Item whitelist for Priority-3 surplus haul.
@@ -118,14 +140,26 @@ public class QuartermasterGoal extends Goal {
     private final BlockPos chestPos;  // librarian's paired chest (double-chest second half)
 
     private long nextCheckTick = 0L;
+    private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
     private boolean demoted = false;
+    private boolean forceStructuralRevalidation = true;
+    private boolean prerequisitesValid = false;
+    private BlockPos cachedSecondChestPos = null;
 
     // Current active transfer
     private BlockPos sourcePos = null;
     private BlockPos destPos = null;
     private ItemStack transferStack = ItemStack.EMPTY;
+    private final List<BlockPos> cachedSurplusCandidates = new ArrayList<>();
+    private final List<BlockPos> rebuildingSurplusCandidates = new ArrayList<>();
+    private int surplusCandidateCursor = 0;
+    private int pairingRebuildCursor = 0;
+    private int cachedPairingCount = -1;
+    private boolean candidateCacheStale = true;
+    private long nextCandidateCacheRefreshTick = 0L;
+    private SurplusScanMetrics lastSurplusScanMetrics = SurplusScanMetrics.empty();
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -149,11 +183,52 @@ public class QuartermasterGoal extends Goal {
         VillageAnchorState.get(world.getServer()).unregister(world, chestPos);
     }
 
+    /**
+     * Registers a Quartermaster as active in the runtime registry.
+     * Called when the goal is installed.
+     */
+    public static void registerActiveQuartermaster(ServerWorld world, BlockPos anchorPos, UUID villagerId) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.computeIfAbsent(world.getRegistryKey(), k -> new HashMap<>());
+        byAnchor.computeIfAbsent(anchorPos.toImmutable(), k -> new HashSet<>()).add(villagerId);
+    }
+
+    /**
+     * Unregisters a Quartermaster from the runtime registry.
+     * Called when the goal is removed.
+     */
+    public static void unregisterActiveQuartermaster(ServerWorld world, BlockPos anchorPos, UUID villagerId) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null) return;
+        Set<UUID> ids = byAnchor.get(anchorPos);
+        if (ids == null) return;
+        ids.remove(villagerId);
+        if (ids.isEmpty()) {
+            byAnchor.remove(anchorPos);
+        }
+        if (byAnchor.isEmpty()) {
+            ACTIVE_QM_BY_WORLD_ANCHOR.remove(world.getRegistryKey());
+        }
+    }
+
+    /**
+     * Signals that prerequisites should be revalidated immediately on the next goal evaluation.
+     * Used by known invalidation paths such as chest listener updates.
+     */
+    public void requestImmediatePrerequisiteRevalidation() {
+        forceStructuralRevalidation = true;
+        nextStructuralCheckTick = 0L;
+    }
+
     private void ensureAnchorUnregistered(ServerWorld world) {
         if (anchorRegistered) {
             unregisterAnchor(world);
             anchorRegistered = false;
         }
+    }
+
+    private double getScanRange() {
+        int configured = GuardVillagersConfig.quartermasterScanRange;
+        return configured > 0 ? configured : DEFAULT_SCAN_RANGE;
     }
 
     // -------------------------------------------------------------------------
@@ -163,11 +238,11 @@ public class QuartermasterGoal extends Goal {
     @Override
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
-        if (!villager.isAlive() || villager.isRemoved()) {
+        if (!passesFastEntityChecks(world)) {
             ensureAnchorUnregistered(world);
             return false;
         }
-        if (!validateAndSyncPrerequisites(world)) return false;
+        if (!validateAndSyncPrerequisites(world, false)) return false;
         if (!anchorRegistered) {
             registerAnchor(world);
             anchorRegistered = true;
@@ -206,13 +281,13 @@ public class QuartermasterGoal extends Goal {
             stage = Stage.DONE;
             return;
         }
-        if (!villager.isAlive() || villager.isRemoved()) {
+        if (!passesFastEntityChecks(world)) {
             ensureAnchorUnregistered(world);
             stage = Stage.DONE;
             villager.getNavigation().stop();
             return;
         }
-        if (!validateAndSyncPrerequisites(world)) {
+        if (!validateAndSyncPrerequisites(world, stage == Stage.TAKE_FROM_SOURCE || stage == Stage.INSERT_TO_DEST)) {
             stage = Stage.DONE;
             villager.getNavigation().stop();
             return;
@@ -251,18 +326,40 @@ public class QuartermasterGoal extends Goal {
         }
     }
 
-    private boolean validateAndSyncPrerequisites(ServerWorld world) {
+    private boolean passesFastEntityChecks(ServerWorld world) {
+        return villager.isAlive()
+                && !villager.isRemoved()
+                && villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN;
+    }
+
+    private boolean validateAndSyncPrerequisites(ServerWorld world, boolean forceNow) {
+        long worldTime = world.getTime();
+        if (!forceNow
+                && !forceStructuralRevalidation
+                && worldTime < nextStructuralCheckTick
+                && prerequisitesValid) {
+            return true;
+        }
         QuartermasterPrerequisiteHelper.Result result =
                 QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
+        forceStructuralRevalidation = false;
+        nextStructuralCheckTick = worldTime + STRUCTURAL_CHECK_INTERVAL_TICKS;
         if (result.valid()) {
             demoted = false;
+            prerequisitesValid = true;
+            cachedSecondChestPos = result.secondChestPos();
             return true;
         }
 
         ensureAnchorUnregistered(world);
+        BlockPos lastKnownSecondChestPos = cachedSecondChestPos;
+        prerequisitesValid = false;
+        cachedSecondChestPos = null;
+        forceStructuralRevalidation = true;
         if (!demoted) {
-            Optional<BlockPos> secondChest = findDoubleChestOtherHalf(world, chestPos);
-            String secondChestText = secondChest.map(BlockPos::toShortString).orElse("none");
+            String secondChestText = Optional.ofNullable(lastKnownSecondChestPos)
+                    .map(BlockPos::toShortString)
+                    .orElse("none");
             LOGGER.info("Librarian {} demoted from Quartermaster (chest={} second_chest={} job_site={})",
                     villager.getUuidAsString(),
                     chestPos.toShortString(),
@@ -316,12 +413,17 @@ public class QuartermasterGoal extends Goal {
                 sourcePos = bellChestPos;
                 destPos = weaponsmithChestNeedingPlanks.get();
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                LOGGER.info("QM {}: hauling {} planks from bell chest to weaponsmith at {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: hauling {} planks from bell chest to weaponsmith at {}",
+                            villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                }
                 return true;
             } else {
-                LOGGER.info("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
-                        villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
-                        bellChestPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
+                            villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
+                            bellChestPos.toShortString());
+                }
             }
         }
 
@@ -342,8 +444,10 @@ public class QuartermasterGoal extends Goal {
                 sourcePos = stoneSource;
                 destPos = need.chestPos();
                 transferStack = new ItemStack(Items.COBBLESTONE, toDeliver);
-                LOGGER.info("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
-                        villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
+                            villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                }
                 return true;
             }
         }
@@ -377,7 +481,7 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private Optional<MasonGuardEntity> findMasonNeedingStone(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         return world.getEntitiesByClass(MasonGuardEntity.class, box,
                 mason -> mason.isAlive()
                         && mason.getPairedChestPos() != null
@@ -389,7 +493,7 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<LumberjackGuardEntity> findLumberjackNeedingPlanks(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         return world.getEntitiesByClass(LumberjackGuardEntity.class, box,
                 lj -> lj.isAlive()
                         && lj.getPairedChestPos() != null
@@ -408,7 +512,7 @@ public class QuartermasterGoal extends Goal {
      * - No furnace or blast furnace exists within FURNACE_CHECK_RADIUS of the lumberjack's job pos
      */
     private Optional<LumberjackFurnaceStoneNeed> findLumberjackNeedingFurnaceStone(ServerWorld world) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         for (LumberjackGuardEntity lj : world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive)) {
             BlockPos ljChest = lj.getPairedChestPos();
             BlockPos ljJob = lj.getPairedJobPos();
@@ -442,7 +546,7 @@ public class QuartermasterGoal extends Goal {
 
     /** Finds the nearest mason paired chest that has at least minAmount cobblestone. */
     private BlockPos findMasonChestWithCobblestone(ServerWorld world, int minAmount) {
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
             BlockPos mc = mason.getPairedChestPos();
             if (mc != null && countItem(world, mc, Items.COBBLESTONE) >= minAmount) {
@@ -456,7 +560,7 @@ public class QuartermasterGoal extends Goal {
 
     private Optional<BlockPos> findWeaponsmithChestNeedingPlanks(ServerWorld world) {
         for (BlockPos chestPos : WeaponsmithBehavior.getPairedChestPositions()) {
-            if (chestPos.isWithinDistance(jobPos, SCAN_RANGE)
+            if (chestPos.isWithinDistance(jobPos, getScanRange())
                     && countTagItems(world, chestPos, ItemTags.PLANKS) < WEAPONSMITH_PLANK_THRESHOLD) {
                 return Optional.of(chestPos);
             }
@@ -465,13 +569,19 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<BlockPos> findSurplusChest(ServerWorld world, BlockPos bellChestPos) {
+        SurplusScanBudget budget = new SurplusScanBudget(
+                MAX_SURPLUS_CANDIDATE_CHESTS_PER_CYCLE,
+                MAX_SURPLUS_INVENTORIES_PER_CYCLE);
+
+        rebuildSurplusCandidateCacheIncrementally(world);
+
         // Find any chest near job-site villagers with more items than threshold.
         // Must exclude:
         //   - bellChestPos  (we're trying to fill it, not drain it further)
         //   - chestPos      (the QM's own transit buffer — draining it causes haul loops)
         //   - mason paired chests  (draining them undoes Priority 1 stone hauls)
         //   - lumberjack paired chests (draining them undoes Priority 2 plank hauls)
-        Box box = new Box(jobPos).expand(SCAN_RANGE);
+        Box box = new Box(jobPos).expand(getScanRange());
 
         // Build the protected set of specialist chests we must never drain.
         Set<BlockPos> protectedChests = new HashSet<>();
@@ -497,47 +607,122 @@ public class QuartermasterGoal extends Goal {
                 findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
             }
         }
-        // Protect shepherd chests — they contain beds + wool + planks needed for bed economy.
-        // Without this, QM Priority-3 hauls beds out of the shepherd chest into the bell chest.
-        for (VillagerEntity shepherd : world.getEntitiesByClass(VillagerEntity.class, box,
-                v -> v.isAlive() && v.getVillagerData().getProfession() == VillagerProfession.SHEPHERD)) {
-            BlockPos jobSite = shepherd.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                    .filter(gp -> gp.dimension() == world.getRegistryKey())
-                    .map(GlobalPos::pos)
-                    .orElse(null);
-            if (jobSite != null) {
-                JobBlockPairingHelper.findNearbyChest(world, jobSite).ifPresent(shepherdChest -> {
-                    protectedChests.add(shepherdChest);
-                    // Also protect the other half if it is a double-chest.
-                    findDoubleChestOtherHalf(world, shepherdChest).ifPresent(protectedChests::add);
-                });
-            }
+        Optional<BlockPos> fromCache = scanSurplusCandidatesWithBudget(world, protectedChests, budget);
+        if (fromCache.isPresent()) {
+            lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+            return fromCache;
         }
 
-        // Discover surplus chests via JOB_SITE brain memory, NOT v.getBlockPos().
-        // Villagers wander constantly; their chest is almost never within ±3 blocks of wherever
-        // they happen to be standing when this scan fires. Scanning by job-site makes chest
-        // discovery reliable regardless of villager movement. This was the root cause of
-        // Priority-3 surplus haul almost never firing despite chests having surplus material.
-        List<VillagerEntity> villagers = world.getEntitiesByClass(VillagerEntity.class, box, Entity::isAlive);
-        for (VillagerEntity v : villagers) {
-            if (v == villager) continue;
-            BlockPos vJobSite = v.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                    .filter(gp -> gp.dimension() == world.getRegistryKey())
-                    .map(GlobalPos::pos)
-                    .orElse(null);
-            if (vJobSite == null) continue;
-            // Use the same pairing helper the rest of the mod uses to find a chest near a job site.
-            Optional<BlockPos> pairedChest = JobBlockPairingHelper.findNearbyChest(world, vJobSite);
-            if (pairedChest.isEmpty()) continue;
-            BlockPos immutable = pairedChest.get().toImmutable();
-            // Skip all protected chests (bell, QM transit, mason, lumberjack, shepherd)
-            if (protectedChests.contains(immutable)) continue;
-            // Only count whitelisted bulk materials so specialist trade goods (arrows, potions,
-            // enchanted books, iron gear, fish, maps, meat) never trigger the threshold.
-            if (countWhitelistedItems(world, immutable) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                return Optional.of(immutable);
+        // Fallback discovery: only used while cache is empty or stale, and still budget-limited.
+        if (cachedSurplusCandidates.isEmpty() || candidateCacheStale) {
+            Optional<BlockPos> fallback = scanFallbackPairingsWithBudget(world, protectedChests, budget);
+            if (fallback.isPresent()) {
+                lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+                return fallback;
             }
+        }
+        lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
+        return Optional.empty();
+    }
+
+    private void rebuildSurplusCandidateCacheIncrementally(ServerWorld world) {
+        List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
+        long now = world.getTime();
+        boolean refreshDue = now >= nextCandidateCacheRefreshTick;
+        boolean pairingCountChanged = cachedPairingCount != pairings.size();
+        if (refreshDue || pairingCountChanged) {
+            candidateCacheStale = true;
+        }
+        if (!candidateCacheStale) return;
+
+        UUID quartermasterUuid = villager.getUuid();
+        int scanned = 0;
+        while (scanned < MAX_PAIRINGS_SCANNED_PER_CYCLE && pairingRebuildCursor < pairings.size()) {
+            JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor++);
+            scanned++;
+            if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
+            if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
+            if (pairing.profession() == VillagerProfession.SHEPHERD) continue;
+            BlockPos candidate = pairing.chestPos();
+            if (candidate != null) {
+                rebuildingSurplusCandidates.add(candidate.toImmutable());
+            }
+        }
+        if (pairingRebuildCursor >= pairings.size()) {
+            cachedSurplusCandidates.clear();
+            cachedSurplusCandidates.addAll(rebuildingSurplusCandidates);
+            rebuildingSurplusCandidates.clear();
+            pairingRebuildCursor = 0;
+            cachedPairingCount = pairings.size();
+            candidateCacheStale = false;
+            nextCandidateCacheRefreshTick = now + CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS;
+            if (surplusCandidateCursor >= cachedSurplusCandidates.size()) {
+                surplusCandidateCursor = 0;
+            }
+        }
+    }
+
+    private Optional<BlockPos> scanSurplusCandidatesWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+        if (cachedSurplusCandidates.isEmpty()) return Optional.empty();
+
+        int scanStart = Math.floorMod(surplusCandidateCursor, cachedSurplusCandidates.size());
+        while (budget.canCheckAnotherCandidate()) {
+            BlockPos candidate = cachedSurplusCandidates.get(surplusCandidateCursor);
+            surplusCandidateCursor = (surplusCandidateCursor + 1) % cachedSurplusCandidates.size();
+
+            budget.recordCandidateCheck();
+            if (protectedChests.contains(candidate)) continue;
+            if (!budget.canInspectAnotherInventory()) break;
+
+            budget.recordInventoryInspection();
+            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                return Optional.of(candidate);
+            }
+            if (surplusCandidateCursor == scanStart) break;
+        }
+        return Optional.empty();
+    }
+
+    private Optional<BlockPos> scanFallbackPairingsWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+        List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
+        if (pairings.isEmpty()) return Optional.empty();
+
+        int scanStart = Math.floorMod(pairingRebuildCursor, pairings.size());
+        while (budget.canCheckAnotherCandidate()) {
+            JobBlockPairingHelper.CachedVillagerChestPairing pairing = pairings.get(pairingRebuildCursor);
+            pairingRebuildCursor = (pairingRebuildCursor + 1) % pairings.size();
+
+            if (pairing.villagerUuid().equals(villager.getUuid())) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (pairing.profession() == VillagerProfession.SHEPHERD) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+
+            BlockPos candidate = pairing.chestPos();
+            if (candidate == null) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+
+            budget.recordCandidateCheck();
+            if (protectedChests.contains(candidate)) {
+                if (pairingRebuildCursor == scanStart) break;
+                continue;
+            }
+            if (!budget.canInspectAnotherInventory()) break;
+
+            budget.recordInventoryInspection();
+            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
+                return Optional.of(candidate);
+            }
+            if (pairingRebuildCursor == scanStart) break;
         }
         return Optional.empty();
     }
@@ -548,7 +733,11 @@ public class QuartermasterGoal extends Goal {
 
     private boolean takeFromInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty() || transferStack.isEmpty()) return false;
+        if (inv.isEmpty()) {
+            requestImmediatePrerequisiteRevalidation();
+            return false;
+        }
+        if (transferStack.isEmpty()) return false;
         Inventory inventory = inv.get();
         net.minecraft.item.Item item = transferStack.getItem();
         int needed = transferStack.getCount();
@@ -574,7 +763,11 @@ public class QuartermasterGoal extends Goal {
 
     private void insertToInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty() || transferStack.isEmpty()) return;
+        if (inv.isEmpty()) {
+            requestImmediatePrerequisiteRevalidation();
+            return;
+        }
+        if (transferStack.isEmpty()) return;
         Inventory inventory = inv.get();
         ItemStack remaining = transferStack.copy();
 
@@ -599,9 +792,11 @@ public class QuartermasterGoal extends Goal {
         // If dest chest was full, remaining items would be silently lost.
         // Drop them at the villager's feet so items are never destroyed.
         if (!remaining.isEmpty()) {
-            LOGGER.info("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
-                    villager.getUuidAsString(), pos.toShortString(),
-                    remaining.getCount(), remaining.getItem());
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
+                        villager.getUuidAsString(), pos.toShortString(),
+                        remaining.getCount(), remaining.getItem());
+            }
             ItemEntity drop = new ItemEntity(
                     world, villager.getX(), villager.getY(), villager.getZ(), remaining.copy());
             drop.setPickupDelay(10);
@@ -745,32 +940,60 @@ public class QuartermasterGoal extends Goal {
      * QuartermasterGoal exists within {@code range} blocks of {@code anchor}.
      */
     public static boolean isAnyActive(ServerWorld world, BlockPos anchor, double range) {
-        Box box = new Box(anchor).expand(range);
-        List<net.minecraft.entity.passive.VillagerEntity> librarians = world.getEntitiesByClass(
-                net.minecraft.entity.passive.VillagerEntity.class,
-                box,
-                v -> v.isAlive()
-                        && v.getVillagerData().getProfession() == net.minecraft.village.VillagerProfession.LIBRARIAN);
+        Set<BlockPos> anchors = VillageAnchorState.get(world.getServer()).getAllQmChests(world);
+        if (anchors.isEmpty()) {
+            return false;
+        }
 
-        for (net.minecraft.entity.passive.VillagerEntity librarian : librarians) {
-            for (PrioritizedGoal prioritizedGoal : librarian.goalSelector.getGoals()) {
-                if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+        double rangeSq = range * range;
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null || byAnchor.isEmpty()) {
+            return false;
+        }
+
+        for (BlockPos anchorPos : anchors) {
+            if (anchorPos.getSquaredDistance(anchor) > rangeSq) continue;
+            Set<UUID> ids = byAnchor.get(anchorPos);
+            if (ids == null || ids.isEmpty()) continue;
+
+            Set<UUID> stale = new HashSet<>();
+            for (UUID id : ids) {
+                Entity entity = world.getEntity(id);
+                if (entity instanceof VillagerEntity villager
+                        && villager.isAlive()
+                        && !villager.isRemoved()
+                        && villager.getVillagerData().getProfession() == VillagerProfession.LIBRARIAN
+                        && hasInstalledQuartermasterGoal(villager)) {
                     LOGGER.debug(
-                            "Quartermaster presence check: true (anchor={} range={} librarian={} running={})",
+                            "Quartermaster presence check: true (anchor={} range={} librarian={})",
                             anchor.toShortString(),
                             range,
-                            librarian.getUuidAsString(),
-                            prioritizedGoal.isRunning());
+                            villager.getUuidAsString());
                     return true;
+                }
+                stale.add(id);
+            }
+            if (!stale.isEmpty()) {
+                ids.removeAll(stale);
+                if (ids.isEmpty()) {
+                    byAnchor.remove(anchorPos);
                 }
             }
         }
 
-        LOGGER.debug(
-                "Quartermaster presence check: false (anchor={} range={} librarians_scanned={})",
-                anchor.toShortString(),
-                range,
-                librarians.size());
+        if (byAnchor.isEmpty()) {
+            ACTIVE_QM_BY_WORLD_ANCHOR.remove(world.getRegistryKey());
+        }
+        LOGGER.debug("Quartermaster presence check: false (anchor={} range={})", anchor.toShortString(), range);
+        return false;
+    }
+
+    private static boolean hasInstalledQuartermasterGoal(VillagerEntity villager) {
+        for (PrioritizedGoal prioritizedGoal : villager.goalSelector.getGoals()) {
+            if (prioritizedGoal.getGoal() instanceof QuartermasterGoal) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -793,5 +1016,53 @@ public class QuartermasterGoal extends Goal {
         MOVE_TO_DEST,
         INSERT_TO_DEST,
         DONE
+    }
+
+    static SurplusScanMetrics getLastSurplusScanMetricsForTest(QuartermasterGoal goal) {
+        return goal.lastSurplusScanMetrics;
+    }
+
+    static final class SurplusScanMetrics {
+        private final int candidatesChecked;
+        private final int inventoriesInspected;
+        private final int cachedCandidates;
+        private final boolean cacheStale;
+
+        private SurplusScanMetrics(int candidatesChecked, int inventoriesInspected, int cachedCandidates, boolean cacheStale) {
+            this.candidatesChecked = candidatesChecked;
+            this.inventoriesInspected = inventoriesInspected;
+            this.cachedCandidates = cachedCandidates;
+            this.cacheStale = cacheStale;
+        }
+
+        static SurplusScanMetrics empty() {
+            return new SurplusScanMetrics(0, 0, 0, true);
+        }
+
+        int candidatesChecked() { return candidatesChecked; }
+        int inventoriesInspected() { return inventoriesInspected; }
+        int cachedCandidates() { return cachedCandidates; }
+        boolean cacheStale() { return cacheStale; }
+    }
+
+    private static final class SurplusScanBudget {
+        private final int maxCandidates;
+        private final int maxInventories;
+        private int candidatesChecked;
+        private int inventoriesInspected;
+
+        private SurplusScanBudget(int maxCandidates, int maxInventories) {
+            this.maxCandidates = maxCandidates;
+            this.maxInventories = maxInventories;
+        }
+
+        boolean canCheckAnotherCandidate() { return candidatesChecked < maxCandidates; }
+        boolean canInspectAnotherInventory() { return inventoriesInspected < maxInventories; }
+        void recordCandidateCheck() { candidatesChecked++; }
+        void recordInventoryInspection() { inventoriesInspected++; }
+
+        SurplusScanMetrics toMetrics(int cachedCandidates, boolean cacheStale) {
+            return new SurplusScanMetrics(candidatesChecked, inventoriesInspected, cachedCandidates, cacheStale);
+        }
     }
 }
