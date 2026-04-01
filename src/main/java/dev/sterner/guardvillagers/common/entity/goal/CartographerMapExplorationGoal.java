@@ -388,6 +388,16 @@ public class CartographerMapExplorationGoal extends Goal {
             return false;
         }
 
+        // Preserve the in-progress territory map for chest deposit on timeout so we do not
+        // intermittently lose a completed/partially-completed map from this cycle.
+        if (workflowIndex >= 0
+                && workflowIndex < workflowMaps.size()
+                && !activeMap.isEmpty()
+                && activeMap.isOf(Items.FILLED_MAP)) {
+            forceCompleteMapStack(world, activeMap);
+            completedWorkflowIndices.add(workflowIndex);
+        }
+
         LOGGER.warn("Cartographer {} mapping batch exceeded {} ticks (completed {}/{}); returning to chest with partial maps",
                 villager.getUuidAsString(),
                 MAPPING_BATCH_TIMEOUT_TICKS,

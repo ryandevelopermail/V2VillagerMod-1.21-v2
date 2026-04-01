@@ -349,14 +349,15 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int totalConvertibleWalls = totalWalls + totalCobblestone;
-        if (totalConvertibleWalls < requiredWallSegments) {
-            LOGGER.info("MasonWallBuilder {}: insufficient wall material (walls={}, cobblestone={}, requiredWalls={})",
-                    guard.getUuidAsString(), totalWalls, totalCobblestone, requiredWallSegments);
+        int requiredToStartSession = Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
+        if (totalConvertibleWalls < requiredToStartSession) {
+            LOGGER.info("MasonWallBuilder {}: insufficient wall material to start session (walls={}, cobblestone={}, requiredToStart={}, requiredTotal={})",
+                    guard.getUuidAsString(), totalWalls, totalCobblestone, requiredToStartSession, requiredWallSegments);
             return false;
         }
-        int plannedConversions = Math.max(0, requiredWallSegments - totalWalls);
-        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredSegments={}, wallsAvailable={}, cobblestoneConvertible={}, plannedConversions={})",
-                guard.getUuidAsString(), requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
+        int plannedConversions = Math.max(0, requiredToStartSession - totalWalls);
+        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredToStart={}, requiredTotal={}, wallsAvailable={}, cobblestoneConvertible={}, plannedStartConversions={})",
+                guard.getUuidAsString(), requiredToStartSession, requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
         // 6. Elect builder — only masons with both chest + job pairing are eligible.
         List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
