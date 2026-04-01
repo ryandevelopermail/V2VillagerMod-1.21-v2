@@ -16,6 +16,8 @@ import net.minecraft.recipe.StonecuttingRecipe;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.BlockPos;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -24,6 +26,7 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 
 public class MasonGuardStonecuttingGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(MasonGuardStonecuttingGoal.class);
     // Gameplay cadence: while a wall build is waiting for stock, masons re-check the chest
     // and attempt a stonecutting craft every ~10 seconds (200 ticks).
     private static final int CHECK_INTERVAL_TICKS = 200;
@@ -154,10 +157,16 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
         List<MasonRecipe> recipes = new ArrayList<>();
         boolean reserveCobblestone = requiresCobblestoneReserve(world);
+        boolean projectActive = isWallProjectActive();
+        int suppressedNonWallRecipeCount = 0;
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.craft(new net.minecraft.recipe.input.SingleStackRecipeInput(ItemStack.EMPTY), world.getRegistryManager());
             if (result.isEmpty()) {
+                continue;
+            }
+            if (projectActive && result.getItem() != Items.COBBLESTONE_WALL) {
+                suppressedNonWallRecipeCount++;
                 continue;
             }
 
@@ -169,6 +178,10 @@ public class MasonGuardStonecuttingGoal extends Goal {
             int batchOutputCount = result.getCount() * batchInputCount;
             recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
         }
+        if (projectActive && suppressedNonWallRecipeCount > 0) {
+            LOGGER.info("MasonStonecutting {}: suppressed {} non-wall outputs while wall project is active",
+                    guard.getUuidAsString(), suppressedNonWallRecipeCount);
+        }
         return recipes;
     }
 
@@ -177,7 +190,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 craftableRecipes.stream().map(recipe -> recipe.output().getItem()).collect(Collectors.toList()),
                 this.lastCraftedOutputItem,
                 guard.getRandom().nextInt(Math.max(1, craftableRecipes.size())),
-                guard.isWallBuildPending()
+                isWallProjectActive()
         );
         if (selectedIndex >= 0) {
             return craftableRecipes.get(selectedIndex);
@@ -196,6 +209,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                     return i;
                 }
             }
+            return -1;
         }
         if (outputs.size() <= 1 || lastCraftedOutputItem == null) {
             return Math.floorMod(randomIndex, outputs.size());
@@ -207,6 +221,10 @@ public class MasonGuardStonecuttingGoal extends Goal {
             }
         }
         return Math.floorMod(randomIndex, outputs.size());
+    }
+
+    private boolean isWallProjectActive() {
+        return guard.isWallBuildPending() && !guard.getWallSegments().isEmpty();
     }
 
     private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output, boolean reserveCobblestone) {
