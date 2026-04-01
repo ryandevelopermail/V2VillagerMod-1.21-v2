@@ -29,7 +29,9 @@ import java.util.Deque;
 import java.util.EnumSet;
 import java.util.ArrayDeque;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -79,6 +81,7 @@ public class MasonWallBuilderGoal extends Goal {
     static final int MAX_SEGMENTS_PER_SORTIE = 5;
     static final int LOCAL_SORTIE_RADIUS = 5;
     static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
+    private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -540,7 +543,7 @@ public class MasonWallBuilderGoal extends Goal {
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             if (!startNextSortie(world)) {
-                completeCycle(hasRemainingSegments(world) ? CycleEndReason.UNREACHABLE_SEGMENTS : CycleEndReason.WALL_COMPLETE);
+                runCompletionSweepAndFinish(world);
                 return;
             }
         }
@@ -891,6 +894,115 @@ public class MasonWallBuilderGoal extends Goal {
         return !isGatePosition(pos)
                 && !isPlacedWallBlock(world.getBlockState(pos))
                 && !skippedSegments.contains(pos);
+    }
+
+    private void runCompletionSweepAndFinish(ServerWorld world) {
+        SweepSummary summary = runCompletionSweep(world);
+        if (summary.remainingAfterSweep == 0) {
+            completeCycle(CycleEndReason.WALL_COMPLETE);
+            return;
+        }
+
+        LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} irrecoverableReasons={}",
+                guard.getUuidAsString(), summary.remainingAfterSweep, summary.irrecoverableReasons);
+        completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
+    }
+
+    private SweepSummary runCompletionSweep(ServerWorld world) {
+        List<BlockPos> remainingUnbuilt = findRemainingUnbuiltSegments(world);
+        if (remainingUnbuilt.isEmpty()) {
+            LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
+                    guard.getUuidAsString(), Map.of());
+            return new SweepSummary(0, 0, 0, Map.of());
+        }
+
+        int filledDuringSweep = 0;
+        int irrecoverableCount = 0;
+        Map<String, Integer> irrecoverableReasons = new HashMap<>();
+        BlockPos chestPos = guard.getPairedChestPos();
+
+        for (BlockPos segment : remainingUnbuilt) {
+            skippedSegments.remove(segment);
+            hardUnreachableRetryQueue.remove(segment);
+
+            if (isPlacedWallBlock(world.getBlockState(segment))) {
+                continue;
+            }
+            if (chestPos == null) {
+                irrecoverableCount++;
+                incrementReason(irrecoverableReasons, "missing_chest");
+                continue;
+            }
+
+            boolean filled = false;
+            String failureReason = "placement_unresolved";
+            for (int attempt = 1; attempt <= COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT; attempt++) {
+                if (isPlacedWallBlock(world.getBlockState(segment))) {
+                    filled = true;
+                    break;
+                }
+
+                boolean inReach = guard.squaredDistanceTo(
+                        segment.getX() + 0.5, segment.getY() + 0.5, segment.getZ() + 0.5
+                ) <= REACH_SQ;
+                if (!inReach) {
+                    BlockPos navigationTarget = resolveSegmentNavigationTarget(world, segment);
+                    boolean startedPath = guard.getNavigation().startMovingTo(
+                            navigationTarget.getX() + 0.5,
+                            navigationTarget.getY() + 0.5,
+                            navigationTarget.getZ() + 0.5,
+                            MOVE_SPEED
+                    );
+                    failureReason = startedPath ? "not_in_reach" : "navigation_failed";
+                    continue;
+                }
+
+                WallPlacementMaterial material = consumeWallMaterialFromChest(world, chestPos);
+                if (material == null) {
+                    failureReason = "out_of_materials";
+                    break;
+                }
+
+                world.setBlockState(segment, material.blockState());
+                filled = true;
+                filledDuringSweep++;
+                break;
+            }
+
+            if (!filled) {
+                irrecoverableCount++;
+                incrementReason(irrecoverableReasons, failureReason);
+            }
+        }
+
+        int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
+        LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} irrecoverable={} reasons={}",
+                guard.getUuidAsString(),
+                remainingUnbuilt.size(),
+                filledDuringSweep,
+                irrecoverableCount,
+                irrecoverableReasons);
+
+        return new SweepSummary(
+                remainingAfterSweep,
+                filledDuringSweep,
+                irrecoverableCount,
+                Map.copyOf(irrecoverableReasons)
+        );
+    }
+
+    private List<BlockPos> findRemainingUnbuiltSegments(ServerWorld world) {
+        List<BlockPos> remaining = new ArrayList<>();
+        for (BlockPos pos : pendingSegments) {
+            if (isGatePosition(pos)) continue;
+            if (isPlacedWallBlock(world.getBlockState(pos))) continue;
+            remaining.add(pos);
+        }
+        return remaining;
+    }
+
+    private void incrementReason(Map<String, Integer> reasons, String reason) {
+        reasons.merge(reason, 1, Integer::sum);
     }
 
     private void completeCycle(CycleEndReason reason) {
@@ -1437,6 +1549,14 @@ public class MasonWallBuilderGoal extends Goal {
         MOVE_TO_SEGMENT,
         WAIT_FOR_CONVERSION,
         DONE
+    }
+
+    private record SweepSummary(
+            int remainingAfterSweep,
+            int filledDuringSweep,
+            int irrecoverableCount,
+            Map<String, Integer> irrecoverableReasons
+    ) {
     }
 
     private enum CycleEndReason {
