@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
@@ -108,10 +109,15 @@ public class MasonCraftingGoal extends AbstractCraftingGoal<MasonCraftingGoal.Ma
         }
 
         List<MasonRecipe> recipes = new ArrayList<>();
+        boolean suppressCobblestoneWall = VillageWallProjectState.get(world.getServer())
+                .isCompletedProjectContaining(world.getRegistryKey(), villager.getBlockPos());
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
             if (result.isEmpty() || !isMasonryItem(result)) {
+                continue;
+            }
+            if (suppressCobblestoneWall && result.getItem() == Items.COBBLESTONE_WALL) {
                 continue;
             }
             if (canCraft(inventory, recipe)) {
