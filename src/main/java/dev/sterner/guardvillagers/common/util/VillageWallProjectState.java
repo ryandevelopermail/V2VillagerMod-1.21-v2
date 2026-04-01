@@ -128,6 +128,18 @@ public class VillageWallProjectState extends PersistentState {
         markDirty();
     }
 
+
+    public boolean hasProject(RegistryKey<net.minecraft.world.World> worldKey, BlockPos anchorPos) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        return projects.containsKey(key);
+    }
+
+    public Optional<PerimeterBounds> getProjectBounds(RegistryKey<net.minecraft.world.World> worldKey, BlockPos anchorPos) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        WallProject project = projects.get(key);
+        return project == null ? Optional.empty() : Optional.of(project.bounds());
+    }
+
     public boolean isProjectComplete(RegistryKey<net.minecraft.world.World> worldKey, BlockPos anchorPos) {
         GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
         WallProject project = projects.get(key);
