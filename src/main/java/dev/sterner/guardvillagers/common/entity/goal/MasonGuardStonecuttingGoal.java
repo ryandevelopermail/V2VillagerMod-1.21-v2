@@ -2,7 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
+import dev.sterner.guardvillagers.common.util.WallProjectPolicyResolver;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
@@ -80,7 +80,8 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
         Optional<Inventory> inventory = getChestInventory(world, chestPos);
         this.forceReturnToJob = false;
-        return inventory.filter(value -> !getCraftableRecipes(world, value).isEmpty()).isPresent();
+        WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid());
+        return inventory.filter(value -> !getCraftableRecipes(world, value, wallPolicy).isEmpty()).isPresent();
     }
 
     @Override
@@ -136,13 +137,14 @@ public class MasonGuardStonecuttingGoal extends Goal {
                     return;
                 }
                 Inventory inventory = optionalInventory.get();
-                List<MasonRecipe> craftableRecipes = getCraftableRecipes(world, inventory);
+                WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid());
+                List<MasonRecipe> craftableRecipes = getCraftableRecipes(world, inventory, wallPolicy);
                 if (craftableRecipes.isEmpty()) {
                     stage = Stage.DONE;
                     return;
                 }
 
-                MasonRecipe recipe = pickRandomRecipe(craftableRecipes);
+                MasonRecipe recipe = pickRandomRecipe(craftableRecipes, wallPolicy);
                 if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
                         && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
                     this.lastCraftedOutputItem = recipe.output().getItem();
@@ -155,11 +157,11 @@ public class MasonGuardStonecuttingGoal extends Goal {
         }
     }
 
-    private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+    private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory, WallProjectPolicyResolver.PolicyDecision wallPolicy) {
         List<MasonRecipe> recipes = new ArrayList<>();
         boolean reserveCobblestone = requiresCobblestoneReserve(world);
-        boolean projectActive = isWallProjectActive();
-        boolean suppressWallOutput = isInsideCompletedWallPerimeter(world);
+        boolean projectActive = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY;
+        boolean suppressWallOutput = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.BLOCK_WALLS;
         int suppressedNonWallRecipeCount = 0;
         int suppressedWallRecipeCount = 0;
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
@@ -196,12 +198,12 @@ public class MasonGuardStonecuttingGoal extends Goal {
         return recipes;
     }
 
-    private MasonRecipe pickRandomRecipe(List<MasonRecipe> craftableRecipes) {
+    private MasonRecipe pickRandomRecipe(List<MasonRecipe> craftableRecipes, WallProjectPolicyResolver.PolicyDecision wallPolicy) {
         int selectedIndex = pickRecipeIndex(
                 craftableRecipes.stream().map(recipe -> recipe.output().getItem()).collect(Collectors.toList()),
                 this.lastCraftedOutputItem,
                 guard.getRandom().nextInt(Math.max(1, craftableRecipes.size())),
-                isWallProjectActive()
+                wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY
         );
         if (selectedIndex >= 0) {
             return craftableRecipes.get(selectedIndex);
@@ -232,15 +234,6 @@ public class MasonGuardStonecuttingGoal extends Goal {
             }
         }
         return Math.floorMod(randomIndex, outputs.size());
-    }
-
-    private boolean isWallProjectActive() {
-        return guard.isWallBuildPending() && !guard.getWallSegments().isEmpty();
-    }
-
-    private boolean isInsideCompletedWallPerimeter(ServerWorld world) {
-        return VillageWallProjectState.get(world.getServer())
-                .isCompletedProjectContaining(world.getRegistryKey(), guard.getBlockPos());
     }
 
     private int resolveBatchInputCount(Inventory inventory, StonecuttingRecipe recipe, ItemStack output, boolean reserveCobblestone) {
