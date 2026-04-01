@@ -16,7 +16,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
-import net.minecraft.world.Heightmap;
 import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
@@ -45,8 +44,8 @@ import java.util.stream.Stream;
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
  *   <li>The elected builder must have enough cobblestone for ALL planned perimeter placements
- *       (excluding gap positions) before placing any block. This is a one-thick perimeter in
- *       X/Z that may include vertical fill columns where terrain dips below anchor level.</li>
+ *       (excluding gap positions) before placing any block. Planning uses a deterministic
+ *       3-layer perimeter (base/base+1/base+2) with strict layer-first ordering.</li>
  *   <li>Gap rules: skip DIRT_PATH positions; always leave at least 1 forced gap so the wall
  *       is never fully closed; reserve one position per face (4 total) for lumberjack fence
  *       gates (stored in entity NBT, not placed here).</li>
@@ -66,17 +65,6 @@ public class MasonWallBuilderGoal extends Goal {
     // Minimum stone needed before the elected builder starts placing
     // (required total is per planned block placement, including anti-gap vertical fill columns).
     private static final int STONE_PER_SEGMENT = 1;
-    /**
-     * Maximum allowed height difference between a perimeter position's surface Y
-     * and the bell Y before that position is considered too steep to wall.
-     * Positions steeper than this are skipped entirely (left open).
-     */
-    private static final int STEEP_SKIP_THRESHOLD = 3;
-    /**
-     * Maximum number of blocks a fill column can extend downward to close a terrain dip.
-     * Dips deeper than this are also skipped to avoid filling ravines/caves.
-     */
-    private static final int MAX_FILL_DEPTH = 4;
     // Movement speed
     private static final double MOVE_SPEED = 0.55D;
     // Reach distance squared (close enough to place)
@@ -114,6 +102,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortiePlacements = 0;
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
+    private int plannedWallBaseY = 0;
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
@@ -224,6 +213,7 @@ public class MasonWallBuilderGoal extends Goal {
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        plannedWallBaseY = 0;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -260,8 +250,8 @@ public class MasonWallBuilderGoal extends Goal {
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
         if (poiMode != lastLoggedPoiMode) {
             LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
-            LOGGER.info("MasonWallBuilder {}: wall profile=one-thick perimeter with anti-gap vertical fill (maxDepth={})",
-                    guard.getUuidAsString(), MAX_FILL_DEPTH);
+            LOGGER.info("MasonWallBuilder {}: wall profile=deterministic 3-layer perimeter (layer-first build order)",
+                    guard.getUuidAsString());
             lastLoggedPoiMode = poiMode;
         }
 
@@ -314,7 +304,7 @@ public class MasonWallBuilderGoal extends Goal {
         Set<BlockPos> gateSet = new HashSet<>(gatePositions);
 
         int requiredWallSegments = unbuilt.stream()
-                .filter(pos -> !gateSet.contains(pos))
+                .filter(pos -> !isGateColumnPosition(pos, gateSet))
                 .mapToInt(pos -> STONE_PER_SEGMENT)
                 .sum();
         if (requiredWallSegments < 1) {
@@ -436,6 +426,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
+        plannedWallBaseY = rect.y();
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
@@ -770,17 +761,21 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean startNextSortie(ServerWorld world) {
         localSortieQueue.clear();
         sortiePlacements = 0;
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1) {
+            return false;
+        }
 
-        BlockPos anchor = findNextIndexAnchor(world);
+        BlockPos anchor = findNextIndexAnchor(world, activeLayer);
         if (anchor == null) {
             return false;
         }
 
-        List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor);
+        List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer);
         if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-            BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos());
+            BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer);
             if (nearest != null) {
-                anchorBatch = buildLocalSortieCandidates(world, nearest);
+                anchorBatch = buildLocalSortieCandidates(world, nearest, activeLayer);
             }
         }
         if (anchorBatch.isEmpty()) {
@@ -791,7 +786,7 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private BlockPos findNextIndexAnchor(ServerWorld world) {
+    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer) {
         if (!hardUnreachableRetryQueue.isEmpty()) {
             hardRetryPassStarted = true;
         }
@@ -799,23 +794,24 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
             if (retryCandidate == null) continue;
             skippedSegments.remove(retryCandidate);
-            if (isBuildableCandidate(world, retryCandidate)) {
+            if (getSegmentLayer(retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
         }
         while (currentSegmentIndex < pendingSegments.size()) {
             BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
-            if (isBuildableCandidate(world, candidate)) {
+            if (getSegmentLayer(candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
                 return candidate;
             }
         }
         return null;
     }
 
-    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from) {
+    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer) {
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
         for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             double distSq = from.getSquaredDistance(pos);
             if (distSq < bestDistSq) {
@@ -826,10 +822,11 @@ public class MasonWallBuilderGoal extends Goal {
         return best;
     }
 
-    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor) {
+    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer) {
         int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
         List<BlockPos> local = new ArrayList<>();
         for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             if (anchor.getSquaredDistance(pos) <= radiusSq) {
                 local.add(pos);
@@ -843,11 +840,27 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private int computeCurrentSortieThreshold(ServerWorld world) {
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1) return 1;
         int remaining = 0;
         for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(pos) != activeLayer) continue;
             if (isBuildableCandidate(world, pos)) remaining++;
         }
         return Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, remaining));
+    }
+
+    private int findLowestPendingLayer(ServerWorld world) {
+        for (BlockPos pos : pendingSegments) {
+            if (isBuildableCandidate(world, pos)) {
+                return getSegmentLayer(pos);
+            }
+        }
+        return -1;
+    }
+
+    private int getSegmentLayer(BlockPos pos) {
+        return (pos.getY() - plannedWallBaseY) + 1;
     }
 
     private boolean hasRemainingSegments(ServerWorld world) {
@@ -945,30 +958,26 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Returns all planned wall block placements around the rectangle perimeter with terrain adaptation:
-     * <ul>
-     *   <li>Skip DIRT_PATH positions (natural gaps / roads)</li>
-     *   <li>Skip positions where {@code |surfaceY - bellY| > STEEP_SKIP_THRESHOLD} (too steep)</li>
-     *   <li>Skip positions where the dip depth exceeds {@code MAX_FILL_DEPTH} (ravine guard)</li>
-     *   <li>For positions above ground level: place wall block on top of the surface
-     *       (wall sits on hill rather than being buried inside it)</li>
-     *   <li>For positions below anchor level: emit a column of blocks from surfaceY+1
-     *       down to bellY, filling the dip so the wall has no gap underneath</li>
-     *   <li>Force at least 1 gap so the wall is never fully enclosed</li>
-     *   <li>Gate positions (1 per face) are included in the list but tagged separately</li>
-     * </ul>
+     * Returns deterministic 3-layer wall placements around the rectangle perimeter:
+     * baseY, baseY+1, and baseY+2. Layers are appended in that order so planning
+     * is stable and layer-first.
      */
     private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
         List<BlockPos> segments = new ArrayList<>();
-        int bellY = rect.y();
+        int baseY = rect.y();
 
-        for (BlockPos perimeterPos : computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), bellY)) {
-            resolveWallColumn(world, perimeterPos.getX(), perimeterPos.getZ(), bellY, segments);
+        for (int layer = 0; layer < 3; layer++) {
+            int layerY = baseY + layer;
+            for (BlockPos perimeterPos : computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), layerY)) {
+                if (world.getBlockState(perimeterPos).isOf(Blocks.DIRT_PATH)) continue;
+                if (world.getBlockState(perimeterPos).isOf(Blocks.COBBLESTONE)) continue;
+                segments.add(perimeterPos.toImmutable());
+            }
         }
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
-            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ());
+            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ()) * 3;
             if (segments.size() >= perimeterTotal) {
                 segments.remove(segments.size() - 1);
             }
@@ -1144,66 +1153,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Resolves planned wall block placement(s) for one perimeter (x, z) position, adapting to terrain:
-     *
-     * <ol>
-     *   <li>Sample surface Y via {@code MOTION_BLOCKING_NO_LEAVES} heightmap
-     *       (top of solid/liquid column, ignoring leaf canopy).</li>
-     *   <li>Compute {@code delta = surfaceY - bellY}.</li>
-     *   <li>If {@code delta > STEEP_SKIP_THRESHOLD}: the ground rises more than the threshold
-     *       above bell level — the position is on a steep hill; skip it.</li>
-     *   <li>If {@code -delta > MAX_FILL_DEPTH}: the ground is too far below bell level
-     *       (ravine / cliff) — skip it.</li>
-     *   <li>If {@code delta >= 0}: the surface is at or above bell level. Place the wall
-     *       block at {@code surfaceY + 1} so it sits visibly on top of the ground.</li>
-     *   <li>If {@code delta < 0}: the surface dips below bell level. Emit a column of
-     *       blocks from {@code surfaceY + 1} up to {@code bellY} (inclusive) to fill the
-     *       gap underneath the one-thick wall line.</li>
-     *   <li>In all cases, skip DIRT_PATH and already-cobblestone positions.</li>
-     * </ol>
-     */
-    private void resolveWallColumn(ServerWorld world, int x, int z, int bellY, List<BlockPos> out) {
-        // Surface Y = top of the solid column (leaves excluded so forest canopy doesn't skew it)
-        int surfaceY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
-        int delta = surfaceY - bellY;
-
-        // Too steep upward — skip
-        if (delta > STEEP_SKIP_THRESHOLD) {
-            return;
-        }
-
-        // Too deep downward — skip (ravine / cliff guard)
-        if (-delta > MAX_FILL_DEPTH) {
-            return;
-        }
-
-        if (delta >= 0) {
-            // Ground is at or above bell level: place wall block on top of surface
-            BlockPos pos = new BlockPos(x, surfaceY + 1, z);
-            addSegmentIfValid(world, pos, out);
-        } else {
-            // Ground dips below bell level: fill column from ground surface up to bell Y
-            // so there is no gap underneath the wall line.
-            for (int y = surfaceY + 1; y <= bellY; y++) {
-                BlockPos pos = new BlockPos(x, y, z);
-                addSegmentIfValid(world, pos, out);
-            }
-        }
-    }
-
-    private void addSegmentIfValid(ServerWorld world, BlockPos pos, List<BlockPos> segments) {
-        // Skip road tiles — natural gaps should stay open
-        if (world.getBlockState(pos).isOf(Blocks.DIRT_PATH)) return;
-        // Skip already-built positions
-        if (world.getBlockState(pos).isOf(Blocks.COBBLESTONE)) return;
-        segments.add(pos.toImmutable());
-    }
-
-    /**
      * Picks one gate position per wall face (N/S/E/W) — the unbuilt segment closest to the
-     * midpoint of each face.  Actual segment Y varies with terrain (surfaceY + 1), so we
-     * search by X/Z proximity rather than constructing a fixed-Y position that would never
-     * match any computed segment.
+     * midpoint of each face. Gate reservation is tracked per X/Z column and applies across
+     * all 3 planned layers.
      *
      * These are stored on the guard entity for lumberjack fence gate placement later.
      */
@@ -1259,7 +1211,22 @@ public class MasonWallBuilderGoal extends Goal {
 
     private boolean isGatePosition(BlockPos pos) {
         List<BlockPos> gates = guard.getWallGatePositions();
-        return gates != null && gates.contains(pos);
+        if (gates == null || gates.isEmpty()) return false;
+        for (BlockPos gate : gates) {
+            if (isSameColumn(pos, gate)) return true;
+        }
+        return false;
+    }
+
+    private boolean isGateColumnPosition(BlockPos pos, Set<BlockPos> gates) {
+        for (BlockPos gate : gates) {
+            if (isSameColumn(pos, gate)) return true;
+        }
+        return false;
+    }
+
+    private boolean isSameColumn(BlockPos a, BlockPos b) {
+        return a.getX() == b.getX() && a.getZ() == b.getZ();
     }
 
     // -------------------------------------------------------------------------
