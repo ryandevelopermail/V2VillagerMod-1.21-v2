@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
@@ -25,6 +26,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.Set;
 
 public class MasonMiningStairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
@@ -75,6 +78,7 @@ public class MasonMiningStairGoal extends Goal {
     private int placedSupportCount;
     private ReturnReason lastFailureReason = ReturnReason.NONE;
     private int consecutiveFailureCount;
+    private final Set<BlockPos> protectedBlockSkipPositions = new HashSet<>();
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -173,6 +177,7 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryAttemptedForStep = false;
         this.repairedObstructionCount = 0;
         this.placedSupportCount = 0;
+        this.protectedBlockSkipPositions.clear();
         return true;
     }
 
@@ -604,11 +609,23 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private boolean clearBlockIfNeeded(ServerWorld world, BlockPos pos) {
+        if (protectedBlockSkipPositions.contains(pos)) {
+            return false;
+        }
+
         BlockState state = world.getBlockState(pos);
         if (state.isAir() || state.getCollisionShape(world, pos).isEmpty()) {
             return true;
         }
         if (state.getFluidState().isIn(FluidTags.WATER) || state.getFluidState().isIn(FluidTags.LAVA)) {
+            return false;
+        }
+        if (isProtectedJobBlock(pos, state)) {
+            protectedBlockSkipPositions.add(pos.toImmutable());
+            LOGGER.info("Mason guard {} protected-block-skip blockId={} pos={}",
+                    guard.getUuidAsString(),
+                    Registries.BLOCK.getId(state.getBlock()),
+                    pos.toShortString());
             return false;
         }
         if (!canMine(world, pos, state)) {
@@ -627,6 +644,18 @@ public class MasonMiningStairGoal extends Goal {
         }
         collectNearbyDrops(world, pos);
         return true;
+    }
+
+
+    private boolean isProtectedJobBlock(BlockPos pos, BlockState state) {
+        BlockPos pairedJobPos = guard.getPairedJobPos();
+        if (pairedJobPos != null && pairedJobPos.equals(pos)) {
+            return true;
+        }
+
+        return Registries.VILLAGER_PROFESSION.stream()
+                .filter(ProfessionDefinitions::hasDefinition)
+                .anyMatch(profession -> ProfessionDefinitions.isExpectedJobBlock(profession, state));
     }
 
     private void collectNearbyDrops(ServerWorld world, BlockPos pos) {
@@ -932,6 +961,7 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryMoveTarget = null;
         this.recoveryTicks = 0;
         this.recoveryAttemptedForStep = false;
+        this.protectedBlockSkipPositions.clear();
     }
 
     private boolean clearGravitySensitiveColumns(ServerWorld world, BlockPos footTarget) {
