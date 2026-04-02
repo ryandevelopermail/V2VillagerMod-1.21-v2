@@ -131,7 +131,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int CLUSTER_ANCHOR_VICINITY_RADIUS = 8;
     private static final int CLUSTER_STRUCTURE_PROXIMITY_RADIUS = 2;
     private static final long WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS = 200L;
+    private static final long WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS = 40L;
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
+    private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -252,6 +254,12 @@ public class MasonWallBuilderGoal extends Goal {
     private long nextWaitForStockCycleValidationTick = 0L;
     /** Cached WAIT_FOR_WALL_STOCK cycle validity status between validation ticks. */
     private boolean waitForStockCycleStillValid = true;
+    /** Gate replan attempts (including invalidated cycles) to avoid burst loops under lag. */
+    private long nextWaitForStockReplanAttemptTick = 0L;
+    /** Last footprint planning identity that emitted an INFO log. */
+    private CycleIdentity lastFootprintPlanningLogIdentity = null;
+    /** Last tick footprint-planning DEBUG suppression summary was emitted. */
+    private long lastFootprintPlanningDebugLogTick = Long.MIN_VALUE;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -269,6 +277,13 @@ public class MasonWallBuilderGoal extends Goal {
         if (guard.isMiningSessionActive()) return false;
         if (guard.getPairedChestPos() == null) return false;
         if (world.getTime() < nextScanTick) return false;
+
+        if (stage == Stage.WAIT_FOR_WALL_STOCK && activeCycleIdentity != null && isWaitForStockCycleStillValid(world)) {
+            return false;
+        }
+        if (world.getTime() < nextWaitForStockReplanAttemptTick) {
+            return false;
+        }
 
         BlockPos origin = resolveAnchorOrigin();
         Optional<BlockPos> anchorOpt;
@@ -356,6 +371,7 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
+        nextWaitForStockReplanAttemptTick = 0L;
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
         deferredSegmentRetryQueue.clear();
@@ -494,6 +510,7 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
+        nextWaitForStockReplanAttemptTick = 0L;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -553,7 +570,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         PoiFootprintSignature currentSignature = signatureOpt.get();
         int perimeterSignatureHash = computePerimeterSignatureHash(currentSignature);
-        CycleIdentity candidateCycleIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, world.getTime());
+        CycleIdentity candidateCycleIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, 0, world.getTime());
         if (shouldDebounceReplanForSameCycleIdentity(world, anchorPos, perimeterSignatureHash)) {
             LOGGER.debug("MasonWallBuilder {}: replan_skipped_same_cycle_identity identity={} cooldownRemainingTicks={}",
                     guard.getUuidAsString(),
@@ -575,6 +592,8 @@ public class MasonWallBuilderGoal extends Goal {
             cachedWallRectAnchor = anchorPos.toImmutable();
             cachedPoiFootprintSignature = currentSignature;
         }
+        int boundsHash = computeWallBoundsHash(rect);
+        candidateCycleIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, boundsHash, world.getTime());
         VillageWallProjectState wallProjectState = VillageWallProjectState.get(world.getServer());
         VillageWallProjectState.PerimeterBounds perimeterBounds = new VillageWallProjectState.PerimeterBounds(
                 rect.minX(), rect.maxX(), rect.minZ(), rect.maxZ()
@@ -741,6 +760,7 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockReplanCooldownUntilTick = 0L;
         waitForStockCycleStillValid = true;
         nextWaitForStockCycleValidationTick = 0L;
+        nextWaitForStockReplanAttemptTick = world.getTime() + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS;
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
@@ -2574,6 +2594,9 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
+        nextWaitForStockReplanAttemptTick = worldOrNull() instanceof ServerWorld world
+                ? world.getTime() + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS
+                : 0L;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} retries={} hard_unreachable={} deferred_or_skipped={}",
                 guard.getUuidAsString(),
                 cycleEndReason.logValue,
@@ -2666,7 +2689,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (signatureOpt.isEmpty()) {
             LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; no footprint for active anchor {}",
                     guard.getUuidAsString(), activeAnchorPos.toShortString());
-            waitForStockReplanCooldownUntilTick = 0L;
+            markWaitForStockReplanInvalidated(now);
             return false;
         }
 
@@ -2677,7 +2700,7 @@ public class MasonWallBuilderGoal extends Goal {
                     activeCycleIdentity.perimeterSignatureHash(),
                     currentPerimeterSignatureHash,
                     activeAnchorPos.toShortString());
-            waitForStockReplanCooldownUntilTick = 0L;
+            markWaitForStockReplanInvalidated(now);
             return false;
         }
 
@@ -2689,7 +2712,7 @@ public class MasonWallBuilderGoal extends Goal {
                     guard.getUuidAsString(),
                     activeCycleIdentity.anchorPos().toShortString(),
                     latestAnchorOpt.get().toShortString());
-            waitForStockReplanCooldownUntilTick = 0L;
+            markWaitForStockReplanInvalidated(now);
             return false;
         }
 
@@ -2706,6 +2729,15 @@ public class MasonWallBuilderGoal extends Goal {
                 signature.poiCount(),
                 signature.poiHash()
         );
+    }
+
+    private int computeWallBoundsHash(WallRect rect) {
+        return Objects.hash(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), rect.y());
+    }
+
+    private void markWaitForStockReplanInvalidated(long now) {
+        waitForStockReplanCooldownUntilTick = 0L;
+        nextWaitForStockReplanAttemptTick = Math.max(nextWaitForStockReplanAttemptTick, now + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS);
     }
 
     private boolean verboseMasonWallLogging() {
@@ -3144,27 +3176,48 @@ public class MasonWallBuilderGoal extends Goal {
         String structureBoundsLog = structureEnvelope.foundAny()
                 ? String.format("[minX=%d, minZ=%d, maxX=%d, maxZ=%d]", structureEnvelope.minX(), structureEnvelope.minZ(), structureEnvelope.maxX(), structureEnvelope.maxZ())
                 : "none";
-        LOGGER.info(
-                "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_id={} selected_cluster_size={} selected_cluster_score={} runner_up_score={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] sampled_structure_columns={} traced_structure_columns={} structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
-                anchorPos,
-                candidatePois.size(),
-                clusters.size(),
-                clusterSelection.clusterId(),
-                selectedCluster.size(),
-                String.format("%.3f", clusterSelection.score()),
-                clusterSelection.runnerUpScore() == null ? "none" : String.format("%.3f", clusterSelection.runnerUpScore()),
-                selectedMinX,
-                selectedMinZ,
-                selectedMaxX,
-                selectedMaxZ,
-                structureEnvelope.sampledColumnCount(),
-                structureEnvelope.tracedColumnCount(),
-                structureBoundsLog,
+        int perimeterSignatureHash = Objects.hash(
                 mergedMinX,
                 mergedMinZ,
                 mergedMaxX,
-                mergedMaxZ
+                mergedMaxZ,
+                count + occupancyCount,
+                31 * hash + occupancyHash
         );
+        int boundsHash = Objects.hash(mergedMinX, mergedMinZ, mergedMaxX, mergedMaxZ);
+        CycleIdentity planningIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, boundsHash, 0L);
+        if (!planningIdentity.equals(lastFootprintPlanningLogIdentity)) {
+            LOGGER.info(
+                    "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_id={} selected_cluster_size={} selected_cluster_score={} runner_up_score={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] sampled_structure_columns={} traced_structure_columns={} structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
+                    anchorPos,
+                    candidatePois.size(),
+                    clusters.size(),
+                    clusterSelection.clusterId(),
+                    selectedCluster.size(),
+                    String.format("%.3f", clusterSelection.score()),
+                    clusterSelection.runnerUpScore() == null ? "none" : String.format("%.3f", clusterSelection.runnerUpScore()),
+                    selectedMinX,
+                    selectedMinZ,
+                    selectedMaxX,
+                    selectedMaxZ,
+                    structureEnvelope.sampledColumnCount(),
+                    structureEnvelope.tracedColumnCount(),
+                    structureBoundsLog,
+                    mergedMinX,
+                    mergedMinZ,
+                    mergedMaxX,
+                    mergedMaxZ
+            );
+            lastFootprintPlanningLogIdentity = planningIdentity;
+            lastFootprintPlanningDebugLogTick = Long.MIN_VALUE;
+        } else if (guard.getWorld() instanceof ServerWorld serverWorld) {
+            long now = serverWorld.getTime();
+            if (now - lastFootprintPlanningDebugLogTick >= FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS) {
+                LOGGER.debug("MasonWallBuilder {}: suppressed repeated wall footprint planning info for identity={}",
+                        guard.getUuidAsString(), planningIdentity);
+                lastFootprintPlanningDebugLogTick = now;
+            }
+        }
 
         return Optional.of(new PoiFootprintSignature(
                 mergedMinX,
@@ -4297,7 +4350,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
 
-    private record CycleIdentity(BlockPos anchorPos, int perimeterSignatureHash, long cycleStartTick) {}
+    private record CycleIdentity(BlockPos anchorPos, int perimeterSignatureHash, int boundsHash, long cycleStartTick) {}
 
     private enum WallPlacementMaterial {
         COBBLESTONE_WALL(Items.COBBLESTONE_WALL, Blocks.COBBLESTONE_WALL.getDefaultState());
