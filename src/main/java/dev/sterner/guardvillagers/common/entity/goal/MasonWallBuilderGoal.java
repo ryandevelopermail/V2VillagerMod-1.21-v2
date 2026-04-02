@@ -48,7 +48,7 @@ import java.util.stream.Stream;
  * <p>Behaviour summary:
  * <ol>
  *   <li>Scan configured POI set (job sites only, jobs+beds, or all POIs) within
- *       BELL_EFFECT_RANGE of the nearest QM chest
+ *       the configured mason wall footprint radius of the nearest QM chest
  *       → compute axis-aligned bounding rectangle → expand outward per config.</li>
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
@@ -100,6 +100,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
+    private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -2364,11 +2365,11 @@ public class MasonWallBuilderGoal extends Goal {
     // -------------------------------------------------------------------------
 
     /**
-     * Scans the configured POI subset within BELL_EFFECT_RANGE of the QM chest anchor,
-     * computes their bounding box, applies configurable expansion/caps, and returns a rectangle.
+     * Scans the configured POI subset within the wall footprint scan radius of the QM chest anchor,
+     * computes their bounding box, and returns a footprint signature used for wall planning.
      */
     private Optional<PoiFootprintSignature> computePoiFootprintSignature(ServerWorld world, BlockPos anchorPos) {
-        int range = VillageGuardStandManager.BELL_EFFECT_RANGE;
+        int range = GuardVillagersConfig.masonWallFootprintRadius;
         Box searchBox = new Box(anchorPos).expand(range);
 
         int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
@@ -2438,6 +2439,23 @@ public class MasonWallBuilderGoal extends Goal {
         int mergedMinZ = Math.min(minZ, occupancyMinZ);
         int mergedMaxX = Math.max(maxX, occupancyMaxX);
         int mergedMaxZ = Math.max(maxZ, occupancyMaxZ);
+        int mergedWidth = mergedMaxX - mergedMinX + 1;
+        int mergedDepth = mergedMaxZ - mergedMinZ + 1;
+
+        if (mergedWidth > MASON_WALL_FOOTPRINT_HARD_MAX_SPAN || mergedDepth > MASON_WALL_FOOTPRINT_HARD_MAX_SPAN) {
+            LOGGER.warn(
+                    "MasonWallBuilderGoal: rejecting oversized POI footprint; anchor={} bounds=[minX={}, minZ={}, maxX={}, maxZ={}] width={} depth={} hardMaxSpan={}",
+                    anchorPos,
+                    mergedMinX,
+                    mergedMinZ,
+                    mergedMaxX,
+                    mergedMaxZ,
+                    mergedWidth,
+                    mergedDepth,
+                    MASON_WALL_FOOTPRINT_HARD_MAX_SPAN
+            );
+            return Optional.empty();
+        }
 
         return Optional.of(new PoiFootprintSignature(
                 mergedMinX,

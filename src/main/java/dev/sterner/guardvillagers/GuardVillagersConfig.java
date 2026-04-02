@@ -10,6 +10,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_HEAVY_SCAN_RANGE = 512;
     public static final int MIN_OVERFLOW_RECIPIENT_SCAN_RANGE = 16;
     public static final int MAX_OVERFLOW_RECIPIENT_SCAN_RANGE = 256;
+    public static final int MIN_MASON_WALL_FOOTPRINT_RADIUS = 32;
+    public static final int MAX_MASON_WALL_FOOTPRINT_RADIUS = 256;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -97,6 +99,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonWallMaxWidth = 0;
     @Entry(min=0)
     public static int masonWallMaxDepth = 0;
+    @Entry(min=32)
+    public static int masonWallFootprintRadius = 80;
     @Entry
     public static boolean masonWallVerboseLogging = false;
     @Entry(min=1)
@@ -131,6 +135,7 @@ public class GuardVillagersConfig extends MidnightConfig {
         armorerFallbackScanRange = clamp(armorerFallbackScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         overflowRecipientScanRange = clamp(overflowRecipientScanRange, MIN_OVERFLOW_RECIPIENT_SCAN_RANGE, MAX_OVERFLOW_RECIPIENT_SCAN_RANGE);
         overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
+        masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
     }
 
     private static int clamp(int value, int min, int max) {
