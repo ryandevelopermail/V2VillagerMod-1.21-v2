@@ -240,7 +240,8 @@ public class MasonWallBuilderGoal extends Goal {
         lastSweepLogTick = Long.MIN_VALUE;
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
-        lastPlacementTick = world.getTime();
+        ServerWorld world = worldOrNull();
+        lastPlacementTick = world != null ? world.getTime() : 0L;
         placementsSinceCycleStart = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
