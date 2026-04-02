@@ -1012,8 +1012,13 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
-        LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} irrecoverableReasons={}",
-                guard.getUuidAsString(), summary.remainingAfterSweep, summary.irrecoverableReasons);
+        LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
+                guard.getUuidAsString(),
+                summary.remainingAfterSweep,
+                summary.deferredCount,
+                summary.deferredReasons,
+                summary.irrecoverableCount,
+                summary.irrecoverableReasons);
         completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
     }
 
@@ -1026,6 +1031,8 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int filledDuringSweep = 0;
+        int deferredCount = 0;
+        Map<String, Integer> deferredReasons = new HashMap<>();
         int irrecoverableCount = 0;
         Map<String, Integer> irrecoverableReasons = new HashMap<>();
         BlockPos chestPos = guard.getPairedChestPos();
@@ -1044,6 +1051,7 @@ public class MasonWallBuilderGoal extends Goal {
             }
 
             boolean filled = false;
+            boolean deferred = false;
             String failureReason = "placement_unresolved";
             for (int attempt = 1; attempt <= COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT; attempt++) {
                 if (isPlacedWallBlock(world.getBlockState(segment))) {
@@ -1056,14 +1064,16 @@ public class MasonWallBuilderGoal extends Goal {
                 ) <= REACH_SQ;
                 if (!inReach) {
                     BlockPos navigationTarget = resolveSegmentNavigationTarget(world, segment);
-                    boolean startedPath = guard.getNavigation().startMovingTo(
+                    guard.getNavigation().startMovingTo(
                             navigationTarget.getX() + 0.5,
                             navigationTarget.getY() + 0.5,
                             navigationTarget.getZ() + 0.5,
                             MOVE_SPEED
                     );
-                    failureReason = startedPath ? "not_in_reach" : "navigation_failed";
-                    continue;
+                    deferredCount++;
+                    incrementReason(deferredReasons, "out_of_reach");
+                    deferred = true;
+                    break;
                 }
 
                 WallPlacementMaterial material = consumeWallMaterialFromChest(world, chestPos);
@@ -1078,6 +1088,9 @@ public class MasonWallBuilderGoal extends Goal {
                 break;
             }
 
+            if (deferred) {
+                continue;
+            }
             if (!filled) {
                 irrecoverableCount++;
                 incrementReason(irrecoverableReasons, failureReason);
@@ -1085,16 +1098,20 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
-        LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} irrecoverable={} reasons={}",
+        LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
                 guard.getUuidAsString(),
                 remainingUnbuilt.size(),
                 filledDuringSweep,
+                deferredCount,
+                deferredReasons,
                 irrecoverableCount,
                 irrecoverableReasons);
 
         return new SweepSummary(
                 remainingAfterSweep,
                 filledDuringSweep,
+                deferredCount,
+                Map.copyOf(deferredReasons),
                 irrecoverableCount,
                 Map.copyOf(irrecoverableReasons)
         );
@@ -1785,6 +1802,8 @@ public class MasonWallBuilderGoal extends Goal {
     private record SweepSummary(
             int remainingAfterSweep,
             int filledDuringSweep,
+            int deferredCount,
+            Map<String, Integer> deferredReasons,
             int irrecoverableCount,
             Map<String, Integer> irrecoverableReasons
     ) {
