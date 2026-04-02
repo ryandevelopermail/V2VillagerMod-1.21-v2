@@ -99,6 +99,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final int PLACE_BLOCK_NON_PLACEMENT_ESCALATION_THRESHOLD = 4;
+    private static final int UNBREAKABLE_ESCALATION_BAND_WINDOW_TICKS = 200;
+    private static final int UNBREAKABLE_ESCALATION_BAND_REPEAT_THRESHOLD = 3;
+    private static final int CRITICAL_BUILDABLE_POOL_SIZE = 2;
     private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
     private static final long MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS = 200L;
     private static final long SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS = 240L;
@@ -190,6 +193,8 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<String, FailureBandWindow> failureBandWindows = new HashMap<>();
     private final Map<String, FailureBandWindow> noProgressAbortBandWindows = new HashMap<>();
     private final Map<String, Long> quarantinedBandUntilTick = new HashMap<>();
+    private final Map<String, FailureBandWindow> unbreakableEscalationBandWindows = new HashMap<>();
+    private final Map<Integer, Set<String>> cycleExcludedBandsByLayer = new HashMap<>();
     private final Deque<DeferredSegmentRetry> deferredSegmentRetryQueue = new ArrayDeque<>();
     private boolean vegetationDeferredThenRequeuedLogged = false;
     private final Set<BlockPos> claimedSortieSegments = new HashSet<>();
@@ -403,6 +408,8 @@ public class MasonWallBuilderGoal extends Goal {
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
+        unbreakableEscalationBandWindows.clear();
+        cycleExcludedBandsByLayer.clear();
         deferredSegmentRetryQueue.clear();
         vegetationDeferredThenRequeuedLogged = false;
         claimedSortieSegments.clear();
@@ -497,6 +504,8 @@ public class MasonWallBuilderGoal extends Goal {
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
+        unbreakableEscalationBandWindows.clear();
+        cycleExcludedBandsByLayer.clear();
         deferredSegmentRetryQueue.clear();
         vegetationDeferredThenRequeuedLogged = false;
         releaseAllSegmentClaims(worldOrNull());
@@ -1281,6 +1290,93 @@ public class MasonWallBuilderGoal extends Goal {
         return updated.count();
     }
 
+    private int registerUnbreakableEscalationBandAttempt(ServerWorld world, String bandSignature) {
+        long now = world.getTime();
+        FailureBandWindow state = unbreakableEscalationBandWindows.get(bandSignature);
+        if (state == null || (now - state.firstFailureTick()) > UNBREAKABLE_ESCALATION_BAND_WINDOW_TICKS) {
+            unbreakableEscalationBandWindows.put(bandSignature, new FailureBandWindow(1, now));
+            return 1;
+        }
+        FailureBandWindow updated = new FailureBandWindow(state.count() + 1, state.firstFailureTick());
+        unbreakableEscalationBandWindows.put(bandSignature, updated);
+        return updated.count();
+    }
+
+    private String localExclusionBandSignature(BlockPos segmentTarget, int layer) {
+        return segmentTarget.getX() + "|" + segmentTarget.getZ() + "|" + layer;
+    }
+
+    private boolean isCycleExcludedBand(int layer, String bandSignature) {
+        Set<String> excludedBands = cycleExcludedBandsByLayer.get(layer);
+        return excludedBands != null && excludedBands.contains(bandSignature);
+    }
+
+    private boolean isSegmentInCycleExcludedBand(BlockPos segment, int layer) {
+        return isCycleExcludedBand(layer, localExclusionBandSignature(segment, layer));
+    }
+
+    private boolean hasNonCycleExcludedBuildableSegments(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
+        long now = world.getTime();
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            BlockPos pos = pendingSegments.get(i);
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
+            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
+            if (isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
+            if (isBuildableCandidate(world, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void maybeExcludeBandForUnbreakableEscalation(ServerWorld world, BlockPos triggerSegment, int repeatEscalationsInWindow) {
+        int layer = getSegmentLayer(world, triggerSegment);
+        if (layer < 1) {
+            return;
+        }
+        String bandSignature = localExclusionBandSignature(triggerSegment, layer);
+        if (repeatEscalationsInWindow < UNBREAKABLE_ESCALATION_BAND_REPEAT_THRESHOLD
+                || isCycleExcludedBand(layer, bandSignature)) {
+            return;
+        }
+        cycleExcludedBandsByLayer.computeIfAbsent(layer, ignored -> new HashSet<>()).add(bandSignature);
+        int removedFromQueue = 0;
+        for (java.util.Iterator<BlockPos> it = localSortieQueue.iterator(); it.hasNext(); ) {
+            BlockPos queued = it.next();
+            if (getSegmentLayer(world, queued) != layer) {
+                continue;
+            }
+            if (!bandSignature.equals(localExclusionBandSignature(queued, layer))) {
+                continue;
+            }
+            it.remove();
+            releaseSegmentClaim(world, queued, "band_cycle_excluded");
+            removedFromQueue++;
+        }
+        int affectedSegments = 0;
+        for (BlockPos segment : pendingSegments) {
+            if (getSegmentLayer(world, segment) != layer) {
+                continue;
+            }
+            if (!bandSignature.equals(localExclusionBandSignature(segment, layer))) {
+                continue;
+            }
+            if (isTerminalSegment(segment)) {
+                continue;
+            }
+            markSegmentCycleExcluded(world, segment, "place_block_escalation_band:unbreakable_obstacle_repeat", repeatEscalationsInWindow);
+            affectedSegments++;
+        }
+        LOGGER.warn("MasonWallBuilder {}: band_cycle_excluded layer={} band={} escalationsInWindow={} affectedSegments={} removedQueuedCandidates={}",
+                guard.getUuidAsString(),
+                layer,
+                bandSignature,
+                repeatEscalationsInWindow,
+                affectedSegments,
+                removedFromQueue);
+    }
+
     private void maybeQuarantineBandForNoProgress(ServerWorld world, String bandSignature, int bandAbortHits) {
         long now = world.getTime();
         if (bandAbortHits < BAND_NO_PROGRESS_ABORT_THRESHOLD || isBandQuarantined(bandSignature, now)) {
@@ -1442,6 +1538,14 @@ public class MasonWallBuilderGoal extends Goal {
 
         localSortieQueue.pollFirst();
         markSegmentCycleExcluded(world, immutableTarget, "place_block_escalation:" + reasonCode, placeBlockConsecutiveNonPlacementTicks);
+        if ("unbreakable_obstacle_repeat".equals(reasonCode)) {
+            int layer = getSegmentLayer(world, immutableTarget);
+            if (layer > 0) {
+                String localBand = localExclusionBandSignature(immutableTarget, layer);
+                int escalationCount = registerUnbreakableEscalationBandAttempt(world, localBand);
+                maybeExcludeBandForUnbreakableEscalation(world, immutableTarget, escalationCount);
+            }
+        }
         LOGGER.info("MasonWallBuilder {}: place_block_escalation target={} reason={}",
                 guard.getUuidAsString(),
                 immutableTarget.toShortString(),
@@ -2070,6 +2174,11 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
         boolean preferNonQuarantinedBands = hasNonQuarantinedBuildableSegments(world, activeLayer);
+        int buildablePoolSize = countBuildableSegmentsForLayer(world, activeLayer, preferNonQuarantinedBands, false);
+        boolean preferNonCycleExcludedBands = hasNonCycleExcludedBuildableSegments(world, activeLayer, preferNonQuarantinedBands);
+        if (buildablePoolSize <= CRITICAL_BUILDABLE_POOL_SIZE) {
+            preferNonCycleExcludedBands = false;
+        }
         reconcileSkippedSegmentsForLayer(world, activeLayer, "sortie_start");
         debugLogSegmentStateSanity(world, "sortie_start");
 
@@ -2077,16 +2186,16 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos selectedAnchor = null;
         List<BlockPos> selectedBatch = List.of();
         while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
-            BlockPos anchor = findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands);
+            BlockPos anchor = findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchor == null) {
                 break;
             }
 
-            List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands);
+            List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer, preferNonQuarantinedBands);
+                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
                 if (nearest != null && !nearest.equals(anchor)) {
-                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer, preferNonQuarantinedBands);
+                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
                     if (!nearestBatch.isEmpty()) {
                         anchor = nearest;
                         anchorBatch = nearestBatch;
@@ -2127,7 +2236,7 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
+    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
         if (!hardUnreachableRetryQueue.isEmpty()) {
             hardRetryPassStarted = true;
         }
@@ -2140,19 +2249,26 @@ public class MasonWallBuilderGoal extends Goal {
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, retryCandidate, world.getTime())) {
                 continue;
             }
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(retryCandidate, activeLayer)) {
+                continue;
+            }
             if (tryRecoverSkippedSegmentIfEligible(world, retryCandidate, "hard_queue_retry")
                     && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
         }
-        BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands);
+        BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
         if (rescannedAvailable != null) {
             return rescannedAvailable;
         }
         if (stagnationPivotActive) {
             BlockPos pivotCandidate = findPivotAnchorCandidate(world, activeLayer, preferNonQuarantinedBands);
             if (pivotCandidate != null) {
-                return pivotCandidate;
+                if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pivotCandidate, activeLayer)) {
+                    // continue scanning for a non-excluded anchor when possible
+                } else {
+                    return pivotCandidate;
+                }
             }
         }
         while (currentSegmentIndex < pendingSegments.size()) {
@@ -2164,6 +2280,9 @@ public class MasonWallBuilderGoal extends Goal {
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, world.getTime())) {
                 continue;
             }
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, activeLayer)) {
+                continue;
+            }
             if (getSegmentLayer(world, candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
                 return candidate;
             }
@@ -2171,13 +2290,14 @@ public class MasonWallBuilderGoal extends Goal {
         return null;
     }
 
-    private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
+    private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
         long now = world.getTime();
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos candidate = pendingSegments.get(i);
             if (getSegmentLayer(world, candidate) != activeLayer) continue;
             if (isPivotSuppressedIndex(world, i, candidate)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, activeLayer)) continue;
             if (segmentStates.getOrDefault(candidate, SegmentState.AVAILABLE) != SegmentState.AVAILABLE) continue;
             if (isBuildableCandidate(world, candidate)) {
                 return candidate;
@@ -2186,7 +2306,7 @@ public class MasonWallBuilderGoal extends Goal {
         return null;
     }
 
-    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer, boolean preferNonQuarantinedBands) {
+    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
         long now = world.getTime();
@@ -2195,6 +2315,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotSuppressedIndex(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             double distSq = from.getSquaredDistance(pos);
             if (distSq < bestDistSq) {
@@ -2217,6 +2338,22 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private int countBuildableSegmentsForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean requireNonCycleExcludedBand) {
+        int count = 0;
+        long now = world.getTime();
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            BlockPos pos = pendingSegments.get(i);
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
+            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
+            if (requireNonCycleExcludedBand && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
+            if (isBuildableCandidate(world, pos)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private List<BlockPos> preferDistinctBands(List<BlockPos> candidates, ServerWorld world) {
@@ -2242,7 +2379,7 @@ public class MasonWallBuilderGoal extends Goal {
         return ordered;
     }
 
-    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer, boolean preferNonQuarantinedBands) {
+    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
         int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
         List<BlockPos> local = new ArrayList<>();
         long now = world.getTime();
@@ -2251,6 +2388,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotSuppressedIndex(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isSegmentInCooldown(pos, now)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             if (anchor.getSquaredDistance(pos) <= radiusSq) {
