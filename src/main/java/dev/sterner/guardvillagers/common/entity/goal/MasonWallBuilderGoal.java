@@ -738,56 +738,106 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos) {
-        List<BlockPos> candidates = new ArrayList<>();
-        BlockPos below = segmentPos.down();
-        if (isStandable(world, below)) {
-            candidates.add(below.toImmutable());
-        }
-        BlockPos twoBelow = segmentPos.down(2);
-        if (isStandable(world, twoBelow) && !candidates.contains(twoBelow)) {
-            candidates.add(twoBelow.toImmutable());
-        }
-        candidates.add(segmentPos.toImmutable());
-        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
-            BlockPos offset = segmentPos.offset(direction);
-            if (isStandable(world, offset) && !candidates.contains(offset)) {
-                candidates.add(offset.toImmutable());
-            }
-        }
-        BlockPos nearestStandable = findNearestStandable(world, segmentPos, NEAREST_STANDABLE_SEARCH_RADIUS);
-        if (nearestStandable != null && !candidates.contains(nearestStandable)) {
-            candidates.add(nearestStandable);
-        }
-        return candidates;
-    }
+        Map<BlockPos, NavigationCandidate> deduped = new HashMap<>();
 
-    private BlockPos findNearestStandable(ServerWorld world, BlockPos center, int radius) {
-        BlockPos best = null;
-        double bestDistSq = Double.MAX_VALUE;
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    BlockPos candidate = center.add(dx, dy, dz);
-                    if (!isStandable(world, candidate)) continue;
-                    double distSq = center.getSquaredDistance(candidate);
-                    if (distSq < bestDistSq) {
-                        bestDistSq = distSq;
-                        best = candidate.toImmutable();
+        addNavigationCandidate(world, segmentPos, segmentPos.down(), deduped);
+        addNavigationCandidate(world, segmentPos, segmentPos.down(2), deduped);
+        addNavigationCandidate(world, segmentPos, segmentPos, deduped);
+
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            addNavigationCandidate(world, segmentPos, segmentPos.offset(direction), deduped);
+            addNavigationCandidate(world, segmentPos, segmentPos.down().offset(direction), deduped);
+            addNavigationCandidate(world, segmentPos, segmentPos.offset(direction).down(), deduped);
+        }
+
+        for (int radius = 1; radius <= NEAREST_STANDABLE_SEARCH_RADIUS; radius++) {
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -radius; dx <= radius; dx++) {
+                    for (int dz = -radius; dz <= radius; dz++) {
+                        if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                            continue;
+                        }
+                        BlockPos candidate = segmentPos.add(dx, dy, dz);
+                        addNavigationCandidate(world, segmentPos, candidate, deduped);
                     }
                 }
             }
         }
-        return best;
+
+        List<NavigationCandidate> ranked = new ArrayList<>(deduped.values());
+        ranked.sort(Comparator
+                .comparing(NavigationCandidate::pathAvailable).reversed()
+                .thenComparingDouble(NavigationCandidate::distanceSqToSegment)
+                .thenComparingInt(NavigationCandidate::obstacleCount));
+
+        List<BlockPos> candidates = new ArrayList<>(ranked.size());
+        for (NavigationCandidate candidate : ranked) {
+            candidates.add(candidate.pos());
+        }
+        if (candidates.isEmpty()) {
+            candidates.add(segmentPos.toImmutable());
+        }
+        return candidates;
+    }
+
+    private void addNavigationCandidate(ServerWorld world, BlockPos segmentPos, BlockPos candidatePos, Map<BlockPos, NavigationCandidate> deduped) {
+        StandabilityAssessment standability = assessStandabilityForNavigation(world, candidatePos);
+        if (!standability.standable()) {
+            return;
+        }
+        Path preflightPath = guard.getNavigation().findPathTo(candidatePos, 0);
+        boolean pathAvailable = preflightPath != null && preflightPath.reachesTarget();
+        NavigationCandidate candidate = new NavigationCandidate(
+                candidatePos.toImmutable(),
+                pathAvailable,
+                segmentPos.getSquaredDistance(candidatePos),
+                standability.obstacleCount()
+        );
+        NavigationCandidate existing = deduped.get(candidate.pos());
+        if (existing == null || isBetterNavigationCandidate(candidate, existing)) {
+            deduped.put(candidate.pos(), candidate);
+        }
+    }
+
+    private boolean isBetterNavigationCandidate(NavigationCandidate candidate, NavigationCandidate existing) {
+        if (candidate.pathAvailable() != existing.pathAvailable()) {
+            return candidate.pathAvailable();
+        }
+        int distanceCompare = Double.compare(candidate.distanceSqToSegment(), existing.distanceSqToSegment());
+        if (distanceCompare != 0) {
+            return distanceCompare < 0;
+        }
+        return candidate.obstacleCount() < existing.obstacleCount();
     }
 
     private boolean isStandable(ServerWorld world, BlockPos pos) {
-        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return false;
+        return assessStandabilityForNavigation(world, pos).standable();
+    }
+
+    private StandabilityAssessment assessStandabilityForNavigation(ServerWorld world, BlockPos pos) {
+        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return new StandabilityAssessment(false, Integer.MAX_VALUE);
         BlockPos above = pos.up();
         BlockPos twoAbove = above.up();
-        return world.getBlockState(above).getCollisionShape(world, above).isEmpty()
-                && world.getBlockState(twoAbove).getCollisionShape(world, twoAbove).isEmpty()
-                && world.getFluidState(above).isEmpty()
-                && world.getFluidState(twoAbove).isEmpty();
+        int obstructionCount = 0;
+        int clearableLeafObstructions = 0;
+        for (BlockPos headPos : new BlockPos[]{above, twoAbove}) {
+            BlockState headState = world.getBlockState(headPos);
+            if (!world.getFluidState(headPos).isEmpty()) {
+                return new StandabilityAssessment(false, Integer.MAX_VALUE);
+            }
+            if (headState.getCollisionShape(world, headPos).isEmpty()) {
+                continue;
+            }
+            if (headState.isIn(BlockTags.LEAVES)
+                    && clearableLeafObstructions < 1
+                    && isBreakableWallObstacle(world, headPos, headState)) {
+                clearableLeafObstructions++;
+                obstructionCount++;
+                continue;
+            }
+            return new StandabilityAssessment(false, Integer.MAX_VALUE);
+        }
+        return new StandabilityAssessment(true, obstructionCount);
     }
 
     private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
@@ -2574,6 +2624,15 @@ public class MasonWallBuilderGoal extends Goal {
         PROTECTED_OBSTACLE,
         UNBREAKABLE_OBSTACLE
     }
+
+    private record NavigationCandidate(
+            BlockPos pos,
+            boolean pathAvailable,
+            double distanceSqToSegment,
+            int obstacleCount
+    ) {}
+
+    private record StandabilityAssessment(boolean standable, int obstacleCount) {}
 
     private record WallRect(int minX, int minZ, int maxX, int maxZ, int y) {}
 
