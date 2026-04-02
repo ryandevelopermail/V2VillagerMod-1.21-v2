@@ -85,6 +85,7 @@ public class MasonWallBuilderGoal extends Goal {
     static final int MAX_SEGMENTS_PER_SORTIE = 5;
     static final int LOCAL_SORTIE_RADIUS = 5;
     static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
+    private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -127,7 +128,8 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieHardUnreachableMarked = 0;
     private int sortieCandidatesConsidered = 0;
     private int sortieCandidatesAccepted = 0;
-    private int sortieCandidatesPreflightSkipped = 0;
+    private int sortieCandidatesPreflightRejected = 0;
+    private int sortieCandidatesFallbackAccepted = 0;
     private long nextCompletionSweepAllowedTick = 0L;
     private int consecutiveDeferredSweeps = 0;
     private String lastSweepLogSignature = null;
@@ -225,7 +227,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieHardUnreachableMarked = 0;
         sortieCandidatesConsidered = 0;
         sortieCandidatesAccepted = 0;
-        sortieCandidatesPreflightSkipped = 0;
+        sortieCandidatesPreflightRejected = 0;
+        sortieCandidatesFallbackAccepted = 0;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
         lastSweepLogSignature = null;
@@ -885,29 +888,55 @@ public class MasonWallBuilderGoal extends Goal {
         sortiePlacements = 0;
         sortieCandidatesConsidered = 0;
         sortieCandidatesAccepted = 0;
-        sortieCandidatesPreflightSkipped = 0;
+        sortieCandidatesPreflightRejected = 0;
+        sortieCandidatesFallbackAccepted = 0;
         int activeLayer = findLowestPendingLayer(world);
         if (activeLayer < 1) {
             return false;
         }
 
-        BlockPos anchor = findNextIndexAnchor(world, activeLayer);
-        if (anchor == null) {
+        int anchorAttempts = 0;
+        BlockPos selectedAnchor = null;
+        List<BlockPos> selectedBatch = List.of();
+        while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
+            BlockPos anchor = findNextIndexAnchor(world, activeLayer);
+            if (anchor == null) {
+                break;
+            }
+
+            List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer);
+            if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
+                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer);
+                if (nearest != null && !nearest.equals(anchor)) {
+                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer);
+                    if (!nearestBatch.isEmpty()) {
+                        anchor = nearest;
+                        anchorBatch = nearestBatch;
+                    }
+                }
+            }
+            if (!anchorBatch.isEmpty()) {
+                selectedAnchor = anchor;
+                selectedBatch = anchorBatch;
+                break;
+            }
+            skippedSegments.add(anchor);
+            anchorAttempts++;
+        }
+        if (selectedBatch.isEmpty() || selectedAnchor == null) {
             return false;
         }
-
-        List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer);
-        if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-            BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer);
-            if (nearest != null) {
-                anchorBatch = buildLocalSortieCandidates(world, nearest, activeLayer);
-            }
+        localSortieQueue.addAll(selectedBatch);
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("MasonWallBuilder {}: sortie_start_preflight_summary anchor={} layer={} considered={} accepted={} preflightRejected={} fallbackAccepted={}",
+                    guard.getUuidAsString(),
+                    selectedAnchor.toShortString(),
+                    activeLayer,
+                    sortieCandidatesConsidered,
+                    sortieCandidatesAccepted,
+                    sortieCandidatesPreflightRejected,
+                    sortieCandidatesFallbackAccepted);
         }
-        if (anchorBatch.isEmpty()) {
-            skippedSegments.add(anchor);
-            return hasRemainingSegments(world) && startNextSortie(world);
-        }
-        localSortieQueue.addAll(anchorBatch);
         sortieActive = true;
         sortieActiveLayer = activeLayer;
         sortieTransientRetriesAttempted = 0;
@@ -969,6 +998,7 @@ public class MasonWallBuilderGoal extends Goal {
             bounded = new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
         }
         List<BlockPos> accepted = new ArrayList<>(bounded.size());
+        int boundedPreflightRejected = 0;
         for (BlockPos segment : bounded) {
             sortieCandidatesConsidered++;
             if (isSegmentClaimedByOther(world, segment)) {
@@ -978,12 +1008,11 @@ public class MasonWallBuilderGoal extends Goal {
                             segment.toShortString(),
                             activeAnchorPos == null ? "none" : activeAnchorPos.toShortString());
                 }
-                sortieCandidatesPreflightSkipped++;
                 continue;
             }
             if (!passesSortiePreflight(world, segment)) {
-                skippedSegments.add(segment.toImmutable());
-                sortieCandidatesPreflightSkipped++;
+                boundedPreflightRejected++;
+                sortieCandidatesPreflightRejected++;
                 continue;
             }
             if (!tryClaimSegment(world, segment)) {
@@ -993,11 +1022,27 @@ public class MasonWallBuilderGoal extends Goal {
                             segment.toShortString(),
                             activeAnchorPos == null ? "none" : activeAnchorPos.toShortString());
                 }
-                sortieCandidatesPreflightSkipped++;
                 continue;
             }
             accepted.add(segment);
             sortieCandidatesAccepted++;
+        }
+        if (accepted.isEmpty() && !bounded.isEmpty() && boundedPreflightRejected == bounded.size()) {
+            int fallbackLimit = Math.min(2, bounded.size());
+            for (BlockPos candidate : bounded) {
+                if (accepted.size() >= fallbackLimit) {
+                    break;
+                }
+                if (isSegmentClaimedByOther(world, candidate)) {
+                    continue;
+                }
+                if (!tryClaimSegment(world, candidate)) {
+                    continue;
+                }
+                accepted.add(candidate);
+                sortieCandidatesAccepted++;
+                sortieCandidatesFallbackAccepted++;
+            }
         }
         return accepted;
     }
@@ -1369,13 +1414,14 @@ public class MasonWallBuilderGoal extends Goal {
                 sortieTransientRetriesAttempted,
                 sortieFallbackTargetsTried,
                 sortieHardUnreachableMarked);
-        LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflightSkipped={}",
+        LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflightRejected={} fallbackAccepted={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
                 sortieCandidatesConsidered,
                 sortieCandidatesAccepted,
-                sortieCandidatesPreflightSkipped);
+                sortieCandidatesPreflightRejected,
+                sortieCandidatesFallbackAccepted);
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -1383,7 +1429,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieHardUnreachableMarked = 0;
         sortieCandidatesConsidered = 0;
         sortieCandidatesAccepted = 0;
-        sortieCandidatesPreflightSkipped = 0;
+        sortieCandidatesPreflightRejected = 0;
+        sortieCandidatesFallbackAccepted = 0;
     }
 
     private boolean isSegmentClaimedByOther(ServerWorld world, BlockPos segment) {
