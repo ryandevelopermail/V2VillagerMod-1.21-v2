@@ -113,6 +113,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int plannedWallBaseY = 0;
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
+    private boolean waitForStockProceedLogged = false;
+    private int lastLoggedProceedWalls = -1;
+    private int lastLoggedProceedThreshold = -1;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
@@ -211,6 +214,7 @@ public class MasonWallBuilderGoal extends Goal {
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        resetWaitForStockProceedLogState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         retryLogRateLimitTickBySignature.clear();
         claimedSortieSegments.clear();
@@ -233,6 +237,7 @@ public class MasonWallBuilderGoal extends Goal {
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
             stage = Stage.WAIT_FOR_WALL_STOCK;
         } else {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
         }
         if (isElectedBuilder) {
@@ -255,6 +260,7 @@ public class MasonWallBuilderGoal extends Goal {
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        resetWaitForStockProceedLogState();
         retryLogRateLimitTickBySignature.clear();
         releaseAllSegmentClaims(worldOrNull());
         claimedSortieSegments.clear();
@@ -279,6 +285,7 @@ public class MasonWallBuilderGoal extends Goal {
     @Override
     public void tick() {
         if (!(guard.getWorld() instanceof ServerWorld world)) {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
@@ -546,6 +553,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void tickWaitForWallStock(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null) {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
@@ -563,18 +571,29 @@ public class MasonWallBuilderGoal extends Goal {
                 threshold
         );
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
-            if (conversionWaitActive) {
+            boolean conversionWaitEnded = conversionWaitActive;
+            if (conversionWaitEnded) {
                 LOGGER.info("MasonWallBuilder {}: conversion success detected (walls_now={} >= threshold={})",
                         guard.getUuidAsString(), availableWalls, threshold);
             }
             conversionWaitActive = false;
-            LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
-                    guard.getUuidAsString(), availableWalls, threshold);
+            boolean shouldLogProceed = conversionWaitEnded
+                    || !waitForStockProceedLogged
+                    || availableWalls != lastLoggedProceedWalls
+                    || threshold != lastLoggedProceedThreshold;
+            if (shouldLogProceed) {
+                LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
+                        guard.getUuidAsString(), availableWalls, threshold);
+                waitForStockProceedLogged = true;
+                lastLoggedProceedWalls = availableWalls;
+                lastLoggedProceedThreshold = threshold;
+            }
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
             conversionWaitActive = false;
+            resetWaitForStockProceedLogState();
             completeCycle(CycleEndReason.OUT_OF_MATERIALS);
             return;
         }
@@ -584,6 +603,7 @@ public class MasonWallBuilderGoal extends Goal {
                         guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
             }
             conversionWaitActive = true;
+            resetWaitForStockProceedLogState();
             guard.getNavigation().stop();
             LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
@@ -607,6 +627,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         BlockPos target = localSortieQueue.peekFirst();
         if (target == null) {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
@@ -798,6 +819,7 @@ public class MasonWallBuilderGoal extends Goal {
         // Check we still have wall blocks in our chest
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null) {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
@@ -812,6 +834,7 @@ public class MasonWallBuilderGoal extends Goal {
         // Consume 1 unit of wall placement material from chest.
         WallPlacementMaterial placementMaterial = consumeWallMaterialFromChest(world, chestPos);
         if (placementMaterial == null) {
+            resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
@@ -1303,6 +1326,7 @@ public class MasonWallBuilderGoal extends Goal {
             VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
         }
         releaseAllSegmentClaims(worldOrNull());
+        resetWaitForStockProceedLogState();
         stage = Stage.DONE;
         guard.clearWallSegments();
         guard.setWallBuildPending(false, 0);
@@ -1311,6 +1335,12 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
+    }
+
+    private void resetWaitForStockProceedLogState() {
+        waitForStockProceedLogged = false;
+        lastLoggedProceedWalls = -1;
+        lastLoggedProceedThreshold = -1;
     }
 
     private boolean shouldEmitHardUnreachableInfo(ServerWorld world, BlockPos segmentTarget) {
