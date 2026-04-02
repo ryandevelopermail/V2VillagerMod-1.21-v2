@@ -124,6 +124,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
     private static final int POI_CLUSTER_LINK_DISTANCE = 16;
+    private static final int MIN_VIABLE_POI_CLUSTER_SIZE = 2;
+    private static final double MATERIAL_CLUSTER_SCORE_DELTA = 1.5D;
+    private static final int CLUSTER_ANCHOR_VICINITY_RADIUS = 8;
+    private static final int CLUSTER_STRUCTURE_PROXIMITY_RADIUS = 2;
     private static final long WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS = 200L;
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
     // Maximum range for scanning peers
@@ -2991,7 +2995,8 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         List<List<BlockPos>> clusters = buildPoiClusters(candidatePois, POI_CLUSTER_LINK_DISTANCE);
-        List<BlockPos> selectedCluster = selectAnchorCluster(anchorPos, candidatePois, clusters);
+        ClusterSelectionDecision clusterSelection = selectAnchorCluster(world, anchorPos, clusters, range);
+        List<BlockPos> selectedCluster = clusterSelection.cluster();
         if (selectedCluster.isEmpty()) {
             return Optional.empty();
         }
@@ -3010,15 +3015,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (pos.getZ() > occupancyMaxZ) occupancyMaxZ = pos.getZ();
         }
 
-        StructureEnvelopeScanResult structureEnvelope = scanStructureEnvelope(
-                world,
-                anchorPos,
-                range,
-                selectedMinX,
-                selectedMinZ,
-                selectedMaxX,
-                selectedMaxZ
-        );
+        StructureEnvelopeScanResult structureEnvelope = clusterSelection.structureEnvelope();
 
         if (structureEnvelope.foundAny()) {
             occupancyMinX = Math.min(occupancyMinX, structureEnvelope.minX());
@@ -3059,11 +3056,14 @@ public class MasonWallBuilderGoal extends Goal {
                 ? String.format("[minX=%d, minZ=%d, maxX=%d, maxZ=%d]", structureEnvelope.minX(), structureEnvelope.minZ(), structureEnvelope.maxX(), structureEnvelope.maxZ())
                 : "none";
         LOGGER.info(
-                "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_size={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] sampled_structure_columns={} traced_structure_columns={} structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
+                "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_id={} selected_cluster_size={} selected_cluster_score={} runner_up_score={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] sampled_structure_columns={} traced_structure_columns={} structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
                 anchorPos,
                 candidatePois.size(),
                 clusters.size(),
+                clusterSelection.clusterId(),
                 selectedCluster.size(),
+                String.format("%.3f", clusterSelection.score()),
+                clusterSelection.runnerUpScore() == null ? "none" : String.format("%.3f", clusterSelection.runnerUpScore()),
                 selectedMinX,
                 selectedMinZ,
                 selectedMaxX,
@@ -3289,32 +3289,142 @@ public class MasonWallBuilderGoal extends Goal {
                 && ((z - minZ) % STRUCTURE_ENVELOPE_INTERIOR_STRIDE == 0);
     }
 
-    private List<BlockPos> selectAnchorCluster(BlockPos anchorPos, List<BlockPos> candidatePois, List<List<BlockPos>> clusters) {
+    private ClusterSelectionDecision selectAnchorCluster(ServerWorld world, BlockPos anchorPos, List<List<BlockPos>> clusters, int range) {
         if (clusters.isEmpty()) {
-            return List.of();
+            return ClusterSelectionDecision.empty();
         }
 
-        BlockPos nearestPoi = null;
+        List<ClusterScore> scoredClusters = new ArrayList<>(clusters.size());
+        int largestClusterSize = 0;
+        for (int clusterId = 0; clusterId < clusters.size(); clusterId++) {
+            List<BlockPos> cluster = clusters.get(clusterId);
+            if (cluster.isEmpty()) {
+                continue;
+            }
+            largestClusterSize = Math.max(largestClusterSize, cluster.size());
+            scoredClusters.add(scoreCluster(world, anchorPos, range, clusterId, cluster));
+        }
+
+        if (scoredClusters.isEmpty()) {
+            return ClusterSelectionDecision.empty();
+        }
+
+        scoredClusters.sort(Comparator.comparingDouble(ClusterScore::score).reversed());
+        ClusterScore topScored = scoredClusters.get(0);
+        ClusterScore nearestCluster = scoredClusters.stream()
+                .min(Comparator.comparingDouble(ClusterScore::nearestDistanceSq))
+                .orElse(topScored);
+        ClusterScore selected = nearestCluster;
+        boolean enforceViableClusterThreshold = largestClusterSize >= MIN_VIABLE_POI_CLUSTER_SIZE;
+        ClusterScore bestViableCluster = enforceViableClusterThreshold
+                ? scoredClusters.stream()
+                .filter(clusterScore -> clusterScore.cluster().size() >= MIN_VIABLE_POI_CLUSTER_SIZE)
+                .max(Comparator.comparingDouble(ClusterScore::score))
+                .orElse(null)
+                : topScored;
+
+        if (enforceViableClusterThreshold
+                && nearestCluster.cluster().size() < MIN_VIABLE_POI_CLUSTER_SIZE
+                && bestViableCluster != null
+                && (bestViableCluster.score() - nearestCluster.score()) >= MATERIAL_CLUSTER_SCORE_DELTA) {
+            selected = bestViableCluster;
+        }
+
+        final int selectedId = selected.clusterId();
+        Double runnerUpScore = scoredClusters.stream()
+                .filter(clusterScore -> clusterScore.clusterId() != selectedId)
+                .map(ClusterScore::score)
+                .max(Double::compareTo)
+                .orElse(null);
+        LOGGER.info(
+                "MasonWallBuilderGoal: cluster selection anchor={} selected_cluster_id={} selected_size={} selected_score={} runner_up_score={} nearest_cluster_id={} nearest_size={} nearest_score={} viable_threshold={} largest_cluster_size={}",
+                anchorPos,
+                selected.clusterId(),
+                selected.cluster().size(),
+                String.format("%.3f", selected.score()),
+                runnerUpScore == null ? "none" : String.format("%.3f", runnerUpScore),
+                nearestCluster.clusterId(),
+                nearestCluster.cluster().size(),
+                String.format("%.3f", nearestCluster.score()),
+                MIN_VIABLE_POI_CLUSTER_SIZE,
+                largestClusterSize
+        );
+
+        return new ClusterSelectionDecision(
+                selected.cluster(),
+                selected.clusterId(),
+                selected.score(),
+                runnerUpScore,
+                selected.structureEnvelope()
+        );
+    }
+
+    private ClusterScore scoreCluster(ServerWorld world, BlockPos anchorPos, int range, int clusterId, List<BlockPos> cluster) {
+        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
         double nearestDistanceSq = Double.MAX_VALUE;
-        for (BlockPos poi : candidatePois) {
-            double distanceSq = poi.getSquaredDistance(anchorPos);
+        int anchorVicinityCount = 0;
+        int anchorVicinityRadiusSq = CLUSTER_ANCHOR_VICINITY_RADIUS * CLUSTER_ANCHOR_VICINITY_RADIUS;
+
+        for (BlockPos pos : cluster) {
+            if (pos.getX() < minX) minX = pos.getX();
+            if (pos.getX() > maxX) maxX = pos.getX();
+            if (pos.getZ() < minZ) minZ = pos.getZ();
+            if (pos.getZ() > maxZ) maxZ = pos.getZ();
+            double distanceSq = pos.getSquaredDistance(anchorPos);
             if (distanceSq < nearestDistanceSq) {
                 nearestDistanceSq = distanceSq;
-                nearestPoi = poi;
+            }
+            int dx = pos.getX() - anchorPos.getX();
+            int dz = pos.getZ() - anchorPos.getZ();
+            if ((dx * dx) + (dz * dz) <= anchorVicinityRadiusSq) {
+                anchorVicinityCount++;
             }
         }
 
-        if (nearestPoi != null) {
-            for (List<BlockPos> cluster : clusters) {
-                if (cluster.contains(nearestPoi)) {
-                    return cluster;
+        StructureEnvelopeScanResult structureEnvelope = scanStructureEnvelope(
+                world,
+                anchorPos,
+                range,
+                minX,
+                minZ,
+                maxX,
+                maxZ
+        );
+        int structureAffinity = computeStructureAffinity(cluster, structureEnvelope.protectedColumns());
+        double score = (cluster.size() * 4.0D)
+                - (Math.sqrt(nearestDistanceSq) * 0.35D)
+                + (structureAffinity * 0.75D)
+                + Math.min(2.0D, anchorVicinityCount * 0.5D);
+        return new ClusterScore(clusterId, cluster, score, nearestDistanceSq, structureEnvelope);
+    }
+
+    private int computeStructureAffinity(List<BlockPos> cluster, Set<Long> protectedColumns) {
+        if (protectedColumns.isEmpty()) {
+            return 0;
+        }
+        int affinity = 0;
+        int proximityRadiusSq = CLUSTER_STRUCTURE_PROXIMITY_RADIUS * CLUSTER_STRUCTURE_PROXIMITY_RADIUS;
+        for (BlockPos poi : cluster) {
+            long packed = packXZ(poi.getX(), poi.getZ());
+            if (protectedColumns.contains(packed)) {
+                affinity += 2;
+                continue;
+            }
+            for (int dx = -CLUSTER_STRUCTURE_PROXIMITY_RADIUS; dx <= CLUSTER_STRUCTURE_PROXIMITY_RADIUS; dx++) {
+                for (int dz = -CLUSTER_STRUCTURE_PROXIMITY_RADIUS; dz <= CLUSTER_STRUCTURE_PROXIMITY_RADIUS; dz++) {
+                    if ((dx * dx) + (dz * dz) > proximityRadiusSq) {
+                        continue;
+                    }
+                    if (protectedColumns.contains(packXZ(poi.getX() + dx, poi.getZ() + dz))) {
+                        affinity += 1;
+                        dx = CLUSTER_STRUCTURE_PROXIMITY_RADIUS + 1;
+                        break;
+                    }
                 }
             }
         }
-
-        return clusters.stream()
-                .max(Comparator.comparingInt(List::size))
-                .orElseGet(List::of);
+        return affinity;
     }
 
     private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
@@ -4062,6 +4172,32 @@ public class MasonWallBuilderGoal extends Goal {
                     Set.of(),
                     0,
                     0
+            );
+        }
+    }
+
+    private record ClusterScore(
+            int clusterId,
+            List<BlockPos> cluster,
+            double score,
+            double nearestDistanceSq,
+            StructureEnvelopeScanResult structureEnvelope
+    ) {}
+
+    private record ClusterSelectionDecision(
+            List<BlockPos> cluster,
+            int clusterId,
+            double score,
+            Double runnerUpScore,
+            StructureEnvelopeScanResult structureEnvelope
+    ) {
+        static ClusterSelectionDecision empty() {
+            return new ClusterSelectionDecision(
+                    List.of(),
+                    -1,
+                    Double.NEGATIVE_INFINITY,
+                    null,
+                    StructureEnvelopeScanResult.empty()
             );
         }
     }
