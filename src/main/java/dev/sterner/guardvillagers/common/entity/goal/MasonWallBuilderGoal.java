@@ -124,6 +124,8 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidatesConsidered = 0;
     private int sortieCandidatesAccepted = 0;
     private int sortieCandidatesPreflightSkipped = 0;
+    private long nextCompletionSweepAllowedTick = 0L;
+    private int consecutiveDeferredSweeps = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -214,6 +216,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesConsidered = 0;
         sortieCandidatesAccepted = 0;
         sortieCandidatesPreflightSkipped = 0;
+        nextCompletionSweepAllowedTick = 0L;
+        consecutiveDeferredSweeps = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -249,6 +253,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        nextCompletionSweepAllowedTick = 0L;
+        consecutiveDeferredSweeps = 0;
         activeAnchorPos = null;
         plannedWallBaseY = 0;
         pendingSegments.clear();
@@ -576,6 +582,10 @@ public class MasonWallBuilderGoal extends Goal {
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             logSortieSummaryIfActive();
             if (!startNextSortie(world)) {
+                if (world.getTime() < nextCompletionSweepAllowedTick) {
+                    stage = Stage.WAIT_FOR_WALL_STOCK;
+                    return;
+                }
                 runCompletionSweepAndFinish(world);
                 return;
             }
@@ -866,6 +876,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        consecutiveDeferredSweeps = 0;
         return true;
     }
 
@@ -1007,12 +1018,26 @@ public class MasonWallBuilderGoal extends Goal {
         logSortieSummaryIfActive();
         releaseLocalSortieClaims(world, "completion_sweep");
         SweepSummary summary = runCompletionSweep(world);
+        if (summary.filledDuringSweep > 0) {
+            consecutiveDeferredSweeps = 0;
+        }
         if (summary.remainingAfterSweep == 0) {
             completeCycle(CycleEndReason.WALL_COMPLETE);
             return;
         }
 
         if (!hasTerminalIrrecoverableReasons(summary.irrecoverableReasons)) {
+            if (summary.deferredCount > 0 && summary.irrecoverableCount == 0) {
+                consecutiveDeferredSweeps++;
+                long backoffTicks = computeDeferredSweepBackoffTicks(consecutiveDeferredSweeps);
+                nextCompletionSweepAllowedTick = world.getTime() + backoffTicks;
+                LOGGER.debug("MasonWallBuilder {}: deferring completion sweep retry (deferred={}, streak={}, backoffTicks={}, retryAt={})",
+                        guard.getUuidAsString(),
+                        summary.deferredCount,
+                        consecutiveDeferredSweeps,
+                        backoffTicks,
+                        nextCompletionSweepAllowedTick);
+            }
             LOGGER.info("MasonWallBuilder {}: sweep deferred {} segments, resuming sorties",
                     guard.getUuidAsString(),
                     summary.remainingAfterSweep);
@@ -1030,6 +1055,13 @@ public class MasonWallBuilderGoal extends Goal {
                 summary.irrecoverableCount,
                 summary.irrecoverableReasons);
         completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
+    }
+
+    private long computeDeferredSweepBackoffTicks(int deferredSweepCount) {
+        if (deferredSweepCount <= 1) return 40L;
+        if (deferredSweepCount == 2) return 100L;
+        if (deferredSweepCount == 3) return 200L;
+        return Math.min(600L, 200L + ((long) (deferredSweepCount - 3) * 100L));
     }
 
     private boolean canResumeMoveToSegmentFromSweep(ServerWorld world) {
