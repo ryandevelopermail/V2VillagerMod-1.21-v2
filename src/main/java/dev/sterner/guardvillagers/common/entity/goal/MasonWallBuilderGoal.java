@@ -108,6 +108,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS = 200L;
     private static final int WATCHDOG_REPEAT_RECOVERY_TERMINAL_THRESHOLD = 3;
     private static final long SEGMENT_COOLDOWN_TICKS = 120L;
+    private static final long BAND_QUARANTINE_COOLDOWN_TICKS = 600L;
+    private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
+    private static final int BAND_NO_PROGRESS_ABORT_WINDOW_TICKS = 240;
     private static final long NAV_TARGET_BACKOFF_TICKS = 100L;
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
     private static final int EARLY_HARD_UNREACHABLE_DISTINCT_TARGET_THRESHOLD = 2;
@@ -174,6 +177,8 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
     private final Map<String, FailureBandWindow> failureBandWindows = new HashMap<>();
+    private final Map<String, FailureBandWindow> noProgressAbortBandWindows = new HashMap<>();
+    private final Map<String, Long> quarantinedBandUntilTick = new HashMap<>();
     private final Deque<DeferredSegmentRetry> deferredSegmentRetryQueue = new ArrayDeque<>();
     private boolean vegetationDeferredThenRequeuedLogged = false;
     private final Set<BlockPos> claimedSortieSegments = new HashSet<>();
@@ -374,6 +379,8 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockReplanAttemptTick = 0L;
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
+        noProgressAbortBandWindows.clear();
+        quarantinedBandUntilTick.clear();
         deferredSegmentRetryQueue.clear();
         vegetationDeferredThenRequeuedLogged = false;
         claimedSortieSegments.clear();
@@ -465,6 +472,8 @@ public class MasonWallBuilderGoal extends Goal {
         resetWaitForStockProceedLogState();
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
+        noProgressAbortBandWindows.clear();
+        quarantinedBandUntilTick.clear();
         deferredSegmentRetryQueue.clear();
         vegetationDeferredThenRequeuedLogged = false;
         releaseAllSegmentClaims(worldOrNull());
@@ -1235,6 +1244,49 @@ public class MasonWallBuilderGoal extends Goal {
         return updated.count();
     }
 
+    private int registerNoProgressBandAbort(ServerWorld world, String bandSignature) {
+        long now = world.getTime();
+        FailureBandWindow state = noProgressAbortBandWindows.get(bandSignature);
+        if (state == null || (now - state.firstFailureTick()) > BAND_NO_PROGRESS_ABORT_WINDOW_TICKS) {
+            noProgressAbortBandWindows.put(bandSignature, new FailureBandWindow(1, now));
+            return 1;
+        }
+        FailureBandWindow updated = new FailureBandWindow(state.count() + 1, state.firstFailureTick());
+        noProgressAbortBandWindows.put(bandSignature, updated);
+        return updated.count();
+    }
+
+    private void maybeQuarantineBandForNoProgress(ServerWorld world, String bandSignature, int bandAbortHits) {
+        long now = world.getTime();
+        if (bandAbortHits < BAND_NO_PROGRESS_ABORT_THRESHOLD || isBandQuarantined(bandSignature, now)) {
+            return;
+        }
+        long quarantineUntil = now + BAND_QUARANTINE_COOLDOWN_TICKS;
+        quarantinedBandUntilTick.put(bandSignature, quarantineUntil);
+        LOGGER.warn("MasonWallBuilder {}: band_quarantined band={} hits={} cooldownTicks={} quarantineUntilTick={}",
+                guard.getUuidAsString(),
+                bandSignature,
+                bandAbortHits,
+                BAND_QUARANTINE_COOLDOWN_TICKS,
+                quarantineUntil);
+    }
+
+    private boolean isBandQuarantined(String bandSignature, long now) {
+        Long until = quarantinedBandUntilTick.get(bandSignature);
+        if (until == null) {
+            return false;
+        }
+        if (until <= now) {
+            quarantinedBandUntilTick.remove(bandSignature);
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isSegmentBandQuarantined(ServerWorld world, BlockPos segment, long now) {
+        return isBandQuarantined(segmentBandSignature(world, segment), now);
+    }
+
     private String segmentBandSignature(ServerWorld world, BlockPos segmentTarget) {
         return segmentTarget.getX() + "|" + segmentTarget.getZ() + "|" + getSegmentLayer(world, segmentTarget);
     }
@@ -1488,12 +1540,21 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> cooldownTargets = new ArrayList<>(localSortieQueue);
         releaseLocalSortieClaims(world, "sortie_abort_no_net_progress");
         localSortieQueue.clear();
+        long now = world.getTime();
         for (BlockPos segment : cooldownTargets) {
+            String bandKey = segmentBandSignature(world, segment);
+            int bandAbortHits = registerNoProgressBandAbort(world, bandKey);
+            maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits);
+        }
+        for (BlockPos segment : cooldownTargets) {
+            String bandKey = segmentBandSignature(world, segment);
+            boolean quarantined = isBandQuarantined(bandKey, now);
+            long cooldown = quarantined ? BAND_QUARANTINE_COOLDOWN_TICKS : SEGMENT_COOLDOWN_TICKS;
             requeueSegmentWithCooldown(
                     world,
                     segment,
                     "sortie_abort_no_net_progress",
-                    SEGMENT_COOLDOWN_TICKS,
+                    cooldown,
                     "sortie_abort_cooldown_requeue",
                     -1
             );
@@ -1983,6 +2044,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (activeLayer < 1) {
             return false;
         }
+        boolean preferNonQuarantinedBands = hasNonQuarantinedBuildableSegments(world, activeLayer);
         reconcileSkippedSegmentsForLayer(world, activeLayer, "sortie_start");
         debugLogSegmentStateSanity(world, "sortie_start");
 
@@ -1990,16 +2052,16 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos selectedAnchor = null;
         List<BlockPos> selectedBatch = List.of();
         while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
-            BlockPos anchor = findNextIndexAnchor(world, activeLayer);
+            BlockPos anchor = findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands);
             if (anchor == null) {
                 break;
             }
 
-            List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer);
+            List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer);
+                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer, preferNonQuarantinedBands);
                 if (nearest != null && !nearest.equals(anchor)) {
-                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer);
+                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer, preferNonQuarantinedBands);
                     if (!nearestBatch.isEmpty()) {
                         anchor = nearest;
                         anchorBatch = nearestBatch;
@@ -2040,7 +2102,7 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer) {
+    private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
         if (!hardUnreachableRetryQueue.isEmpty()) {
             hardRetryPassStarted = true;
         }
@@ -2050,17 +2112,23 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, retryCandidate) != activeLayer) {
                 continue;
             }
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, retryCandidate, world.getTime())) {
+                continue;
+            }
             if (tryRecoverSkippedSegmentIfEligible(world, retryCandidate, "hard_queue_retry")
                     && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
         }
-        BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer);
+        BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands);
         if (rescannedAvailable != null) {
             return rescannedAvailable;
         }
         while (currentSegmentIndex < pendingSegments.size()) {
             BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, world.getTime())) {
+                continue;
+            }
             if (getSegmentLayer(world, candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
                 return candidate;
             }
@@ -2068,9 +2136,11 @@ public class MasonWallBuilderGoal extends Goal {
         return null;
     }
 
-    private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer) {
+    private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
+        long now = world.getTime();
         for (BlockPos candidate : pendingSegments) {
             if (getSegmentLayer(world, candidate) != activeLayer) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
             if (segmentStates.getOrDefault(candidate, SegmentState.AVAILABLE) != SegmentState.AVAILABLE) continue;
             if (isBuildableCandidate(world, candidate)) {
                 return candidate;
@@ -2079,11 +2149,13 @@ public class MasonWallBuilderGoal extends Goal {
         return null;
     }
 
-    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer) {
+    private BlockPos findNearestUnbuiltSegment(ServerWorld world, BlockPos from, int activeLayer, boolean preferNonQuarantinedBands) {
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
+        long now = world.getTime();
         for (BlockPos pos : pendingSegments) {
             if (getSegmentLayer(world, pos) != activeLayer) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             double distSq = from.getSquaredDistance(pos);
             if (distSq < bestDistSq) {
@@ -2094,12 +2166,48 @@ public class MasonWallBuilderGoal extends Goal {
         return best;
     }
 
-    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer) {
+    private boolean hasNonQuarantinedBuildableSegments(ServerWorld world, int activeLayer) {
+        long now = world.getTime();
+        for (BlockPos pos : pendingSegments) {
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
+            if (isSegmentBandQuarantined(world, pos, now)) continue;
+            if (isBuildableCandidate(world, pos)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<BlockPos> preferDistinctBands(List<BlockPos> candidates, ServerWorld world) {
+        if (candidates.size() <= 2) {
+            return candidates;
+        }
+        List<BlockPos> ordered = new ArrayList<>(candidates.size());
+        Set<String> usedBands = new HashSet<>();
+        for (BlockPos candidate : candidates) {
+            String band = segmentBandSignature(world, candidate);
+            if (usedBands.add(band)) {
+                ordered.add(candidate);
+            }
+        }
+        for (BlockPos candidate : candidates) {
+            if (ordered.size() >= candidates.size()) {
+                break;
+            }
+            if (!ordered.contains(candidate)) {
+                ordered.add(candidate);
+            }
+        }
+        return ordered;
+    }
+
+    private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer, boolean preferNonQuarantinedBands) {
         int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
         List<BlockPos> local = new ArrayList<>();
         long now = world.getTime();
         for (BlockPos pos : pendingSegments) {
             if (getSegmentLayer(world, pos) != activeLayer) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (isSegmentInCooldown(pos, now)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             if (anchor.getSquaredDistance(pos) <= radiusSq) {
@@ -2107,9 +2215,9 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
-        List<BlockPos> bounded = local;
-        if (local.size() > MAX_SEGMENTS_PER_SORTIE) {
-            bounded = new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
+        List<BlockPos> bounded = preferDistinctBands(local, world);
+        if (bounded.size() > MAX_SEGMENTS_PER_SORTIE) {
+            bounded = new ArrayList<>(bounded.subList(0, MAX_SEGMENTS_PER_SORTIE));
         }
         List<BlockPos> accepted = new ArrayList<>(bounded.size());
         List<BlockPos> preflightFailed = new ArrayList<>(bounded.size());
@@ -2578,6 +2686,8 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
         failureBandWindows.clear();
+        noProgressAbortBandWindows.clear();
+        quarantinedBandUntilTick.clear();
         deferredSegmentRetryQueue.clear();
         skippedSegmentFailMetadata.clear();
         segmentCooldownUntilTick.clear();
