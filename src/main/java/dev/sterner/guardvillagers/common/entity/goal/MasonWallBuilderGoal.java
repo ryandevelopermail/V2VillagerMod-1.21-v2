@@ -819,6 +819,18 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        if (tryClearObstructionsForSegment(world, segmentTarget, attemptedNavTarget)) {
+            LOGGER.debug("MasonWallBuilder {}: movement_obstruction_cleared_retrying segment={} navTarget={}",
+                    guard.getUuidAsString(),
+                    segmentTarget.toShortString(),
+                    attemptedNavTarget.toShortString());
+            activeMoveTarget = null;
+            activeMoveTargetTicks = 0;
+            lastMoveDistSq = Double.MAX_VALUE;
+            resetPathFailureState();
+            return;
+        }
+
         sortieHardUnreachableMarked++;
         if (shouldEmitHardUnreachableInfo(world, segmentTarget)) {
             LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
@@ -838,6 +850,35 @@ public class MasonWallBuilderGoal extends Goal {
         activeMoveTargetTicks = 0;
         lastMoveDistSq = Double.MAX_VALUE;
         resetPathFailureState();
+    }
+
+    private boolean tryClearObstructionsForSegment(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        Set<BlockPos> candidates = new HashSet<>();
+
+        // Segment column at placement Y plus headroom.
+        candidates.add(segmentTarget.toImmutable());
+        candidates.add(segmentTarget.up().toImmutable());
+
+        // Attempted navigation node and immediate neighbors, including headroom blocks.
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            BlockPos neighbor = attemptedNavTarget.offset(direction);
+            candidates.add(neighbor.toImmutable());
+            candidates.add(neighbor.up().toImmutable());
+        }
+        candidates.add(attemptedNavTarget.toImmutable());
+        candidates.add(attemptedNavTarget.up().toImmutable());
+
+        int beforeCleared = obstaclesCleared;
+        for (BlockPos candidate : candidates) {
+            if (world.isAir(candidate)) {
+                continue;
+            }
+            clearObstacleAt(world, segmentTarget, candidate);
+            if (obstaclesCleared > beforeCleared) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void resetPathFailureState() {
@@ -1012,7 +1053,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isBreakableWallObstacle(ServerWorld world, BlockPos pos, BlockState state) {
-        if (!state.isIn(BlockTags.PICKAXE_MINEABLE)) return false;
+        boolean isLeafOrLog = state.isIn(BlockTags.LEAVES) || state.isIn(BlockTags.LOGS);
+        boolean isPickaxeBreakable = state.isIn(BlockTags.PICKAXE_MINEABLE);
+        if (!isLeafOrLog && !isPickaxeBreakable) return false;
         return state.getHardness(world, pos) >= 0.0F;
     }
 
