@@ -105,6 +105,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
+    private static final int POST_EXPANSION_BUFFER_MAX_FOOTPRINT = 96;
     private static final int POI_CLUSTER_LINK_DISTANCE = 16;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -2640,6 +2641,14 @@ public class MasonWallBuilderGoal extends Goal {
         int baseMargin = Math.max(STRUCTURE_MIN_ENCLOSURE_MARGIN, configuredExpand);
         int expandX = adjustedAxisExpansion(baseMargin, footprintWidth);
         int expandZ = adjustedAxisExpansion(baseMargin, footprintDepth);
+        int postExpansionBuffer = Math.max(0, GuardVillagersConfig.masonWallPostExpansionBuffer);
+        boolean postBufferApplied = postExpansionBuffer > 0
+                && footprintWidth <= POST_EXPANSION_BUFFER_MAX_FOOTPRINT
+                && footprintDepth <= POST_EXPANSION_BUFFER_MAX_FOOTPRINT;
+        if (postBufferApplied) {
+            expandX += postExpansionBuffer;
+            expandZ += postExpansionBuffer;
+        }
         expandX = clampExpansionForMaxSize(footprintWidth, expandX, GuardVillagersConfig.masonWallMaxWidth);
         expandZ = clampExpansionForMaxSize(footprintDepth, expandZ, GuardVillagersConfig.masonWallMaxDepth);
 
@@ -2699,11 +2708,14 @@ public class MasonWallBuilderGoal extends Goal {
 
         int wallY = anchorPos.getY(); // wall is at anchor Y level
         logDetailed(
-                "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}]",
+                "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}], dims(occupancy={}x{}, wall={}x{}), post_buffer(applied={}, value={}, footprint_cap={})",
                 guard.getUuidAsString(),
                 minX, maxX, minZ, maxZ, wallY,
                 expandNorth, expandSouth, expandWest, expandEast,
-                occupancyMinX, occupancyMaxX, occupancyMinZ, occupancyMaxZ
+                occupancyMinX, occupancyMaxX, occupancyMinZ, occupancyMaxZ,
+                footprintWidth, footprintDepth,
+                maxX - minX + 1, maxZ - minZ + 1,
+                postBufferApplied, postExpansionBuffer, POST_EXPANSION_BUFFER_MAX_FOOTPRINT
         );
 
         return new WallRect(

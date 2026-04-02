@@ -96,6 +96,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=0)
     public static int masonWallExpandBlocks = 5;
     @Entry(min=0)
+    public static int masonWallPostExpansionBuffer = 1;
+    @Entry(min=0)
     public static int masonWallMaxWidth = 0;
     @Entry(min=0)
     public static int masonWallMaxDepth = 0;
