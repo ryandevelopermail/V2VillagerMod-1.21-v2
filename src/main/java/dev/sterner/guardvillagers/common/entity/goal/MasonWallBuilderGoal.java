@@ -111,6 +111,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS = 200L;
     private static final int WATCHDOG_REPEAT_RECOVERY_TERMINAL_THRESHOLD = 3;
     private static final long SEGMENT_COOLDOWN_TICKS = 120L;
+    private static final long SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS = 960L;
     private static final long BAND_QUARANTINE_COOLDOWN_TICKS = 600L;
     private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
     private static final int BAND_NO_PROGRESS_ABORT_WINDOW_TICKS = 240;
@@ -243,6 +244,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int watchdogSameRecoverySegmentCount = 0;
     private int watchdogPlacementCountAtLastRecovery = 0;
     private final Map<BlockPos, Integer> segmentRepeatRecoveryCounts = new HashMap<>();
+    private final Map<BlockPos, Integer> sortieAbortSegmentRepeatCounts = new HashMap<>();
+    private final Map<String, Integer> sortieAbortBandRepeatCounts = new HashMap<>();
+    private final Map<BlockPos, String> sortieAbortSegmentBandKeys = new HashMap<>();
     private final Map<BlockPos, String> terminalSegmentReasons = new HashMap<>();
     private final Deque<ProgressSnapshot> progressSnapshots = new ArrayDeque<>();
     private boolean stagnationPivotActive = false;
@@ -455,6 +459,9 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
         segmentRepeatRecoveryCounts.clear();
+        sortieAbortSegmentRepeatCounts.clear();
+        sortieAbortBandRepeatCounts.clear();
+        sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
         seedSegmentStateModel(world);
@@ -544,6 +551,9 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
         segmentRepeatRecoveryCounts.clear();
+        sortieAbortSegmentRepeatCounts.clear();
+        sortieAbortBandRepeatCounts.clear();
+        sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
         activeAnchorPos = null;
@@ -1637,6 +1647,7 @@ public class MasonWallBuilderGoal extends Goal {
         releaseSegmentClaim(world, target, "placed");
         transitionSegmentState(world, target, SegmentState.PLACED, "placed");
         clearSegmentFailureState(target);
+        resetSortieAbortBackoffAfterBandPlacement(world, target);
         sortiePlacements++;
         placedSegments++;
         resetSortieNoNetProgressGuard(world);
@@ -1670,22 +1681,29 @@ public class MasonWallBuilderGoal extends Goal {
         releaseLocalSortieClaims(world, "sortie_abort_no_net_progress");
         localSortieQueue.clear();
         long now = world.getTime();
+        Map<String, Integer> bandRepeatCounts = new HashMap<>();
         for (BlockPos segment : cooldownTargets) {
             String bandKey = segmentBandSignature(world, segment);
             int bandAbortHits = registerNoProgressBandAbort(world, bandKey);
             maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits);
+            bandRepeatCounts.computeIfAbsent(bandKey, ignored -> incrementSortieAbortBandRepeatCount(bandKey));
         }
         for (BlockPos segment : cooldownTargets) {
             String bandKey = segmentBandSignature(world, segment);
             boolean quarantined = isBandQuarantined(bandKey, now);
-            long cooldown = quarantined ? BAND_QUARANTINE_COOLDOWN_TICKS : SEGMENT_COOLDOWN_TICKS;
+            int segmentRepeatCount = incrementSortieAbortSegmentRepeatCount(segment, bandKey);
+            int bandRepeatCount = bandRepeatCounts.getOrDefault(bandKey, 1);
+            int repeatCount = Math.max(segmentRepeatCount, bandRepeatCount);
+            long cooldown = quarantined
+                    ? BAND_QUARANTINE_COOLDOWN_TICKS
+                    : computeSortieAbortAdaptiveCooldownTicks(repeatCount);
             requeueSegmentWithCooldown(
                     world,
                     segment,
                     "sortie_abort_no_net_progress",
                     cooldown,
                     "sortie_abort_cooldown_requeue",
-                    -1
+                    repeatCount
             );
         }
 
@@ -1832,6 +1850,43 @@ public class MasonWallBuilderGoal extends Goal {
         segmentNavTargetBackoffUntilTick.remove(immutablePos);
         segmentRepeatRecoveryCounts.remove(immutablePos);
         terminalSegmentReasons.remove(immutablePos);
+    }
+
+    private int incrementSortieAbortBandRepeatCount(String bandKey) {
+        int next = sortieAbortBandRepeatCounts.getOrDefault(bandKey, 0) + 1;
+        sortieAbortBandRepeatCounts.put(bandKey, next);
+        return next;
+    }
+
+    private int incrementSortieAbortSegmentRepeatCount(BlockPos segment, String bandKey) {
+        BlockPos immutableSegment = segment.toImmutable();
+        int next = sortieAbortSegmentRepeatCounts.getOrDefault(immutableSegment, 0) + 1;
+        sortieAbortSegmentRepeatCounts.put(immutableSegment, next);
+        sortieAbortSegmentBandKeys.put(immutableSegment, bandKey);
+        return next;
+    }
+
+    private long computeSortieAbortAdaptiveCooldownTicks(int repeatCount) {
+        long cooldownTicks = SEGMENT_COOLDOWN_TICKS;
+        int growthSteps = Math.max(0, repeatCount - 1);
+        for (int i = 0; i < growthSteps && cooldownTicks < SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS; i++) {
+            cooldownTicks = Math.min(SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS, cooldownTicks * 2L);
+        }
+        return cooldownTicks;
+    }
+
+    private void resetSortieAbortBackoffAfterBandPlacement(ServerWorld world, BlockPos placedSegment) {
+        String placedBandKey = segmentBandSignature(world, placedSegment);
+        sortieAbortBandRepeatCounts.remove(placedBandKey);
+        sortieAbortSegmentRepeatCounts.remove(placedSegment.toImmutable());
+        sortieAbortSegmentBandKeys.remove(placedSegment.toImmutable());
+        sortieAbortSegmentBandKeys.entrySet().removeIf(entry -> {
+            if (!placedBandKey.equals(entry.getValue())) {
+                return false;
+            }
+            sortieAbortSegmentRepeatCounts.remove(entry.getKey());
+            return true;
+        });
     }
 
     private SegmentFailMetadata registerSegmentFailureMetadata(ServerWorld world, BlockPos segment, BlockPos attemptedNavTarget, String reason) {
@@ -2721,6 +2776,7 @@ public class MasonWallBuilderGoal extends Goal {
 
                 world.setBlockState(segment, material.blockState());
                 recordPlacementProgress(world);
+                resetSortieAbortBackoffAfterBandPlacement(world, segment);
                 filled = true;
                 filledDuringSweep++;
                 break;
@@ -2874,6 +2930,9 @@ public class MasonWallBuilderGoal extends Goal {
         segmentCooldownUntilTick.clear();
         segmentNavTargetBackoffUntilTick.clear();
         segmentRepeatRecoveryCounts.clear();
+        sortieAbortSegmentRepeatCounts.clear();
+        sortieAbortBandRepeatCounts.clear();
+        sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         segmentStates.clear();
         clearStagnationPivotState();
