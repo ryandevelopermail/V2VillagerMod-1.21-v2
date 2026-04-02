@@ -96,6 +96,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
+    private static final long MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS = 200L;
+    private static final double MEANINGFUL_PROGRESS_DELTA_DIST_SQ = 0.64D;
+    private static final int WATCHDOG_REPEAT_SEGMENT_THRESHOLD = 2;
+    private static final long WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS = 200L;
     private static final int STRUCTURE_SAMPLE_HORIZONTAL_RADIUS = 7;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
@@ -117,6 +121,8 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos activeMoveTarget = null;
     private int activeMoveTargetTicks = 0;
     private double lastMoveDistSq = Double.MAX_VALUE;
+    private double targetBestDistSq = Double.MAX_VALUE;
+    private long targetLastMeaningfulProgressTick = -1L;
     private int failedPathAttempts = 0;
     private long firstPathFailureTick = -1L;
     private BlockPos lastTriedNavTarget = null;
@@ -173,6 +179,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int deferredOrSkippedSinceCycleStart = 0;
     private boolean firstPlacementLoggedThisCycle = false;
     private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
+    private BlockPos watchdogLastRecoverySegment = null;
+    private int watchdogSameRecoverySegmentCount = 0;
+    private int watchdogPlacementCountAtLastRecovery = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -267,8 +276,7 @@ public class MasonWallBuilderGoal extends Goal {
         currentTransferIndex = 0;
         lastProgressLoggedSegmentCount = 0;
         activeMoveTarget = null;
-        activeMoveTargetTicks = 0;
-        lastMoveDistSq = Double.MAX_VALUE;
+        resetActiveMoveProgressTracking(worldOrNull());
         failedPathAttempts = 0;
         firstPathFailureTick = -1L;
         lastTriedNavTarget = null;
@@ -321,6 +329,9 @@ public class MasonWallBuilderGoal extends Goal {
         deferredOrSkippedSinceCycleStart = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        watchdogLastRecoverySegment = null;
+        watchdogSameRecoverySegmentCount = 0;
+        watchdogPlacementCountAtLastRecovery = 0;
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -389,6 +400,9 @@ public class MasonWallBuilderGoal extends Goal {
         deferredOrSkippedSinceCycleStart = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        watchdogLastRecoverySegment = null;
+        watchdogSameRecoverySegmentCount = 0;
+        watchdogPlacementCountAtLastRecovery = 0;
         activeAnchorPos = null;
         cycleWallRect = null;
         pendingSegments.clear();
@@ -757,16 +771,14 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos navigationTarget = resolveSegmentNavigationTarget(world, target);
         if (!target.equals(activeMoveTarget)) {
             activeMoveTarget = target;
-            activeMoveTargetTicks = 0;
-            lastMoveDistSq = Double.MAX_VALUE;
+            resetActiveMoveProgressTracking(world);
             resetPathFailureState();
         }
         double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
         if (distSq <= REACH_SQ) {
             activeMoveTarget = null;
-            activeMoveTargetTicks = 0;
-            lastMoveDistSq = Double.MAX_VALUE;
+            resetActiveMoveProgressTracking(world);
             resetPathFailureState();
             stage = Stage.PLACE_BLOCK;
         } else {
@@ -785,21 +797,41 @@ public class MasonWallBuilderGoal extends Goal {
             }
 
             activeMoveTargetTicks++;
+            if (distSq + MEANINGFUL_PROGRESS_DELTA_DIST_SQ <= targetBestDistSq) {
+                targetBestDistSq = distSq;
+                targetLastMeaningfulProgressTick = world.getTime();
+            }
             if (distSq < lastMoveDistSq - 0.01D) {
                 lastMoveDistSq = distSq;
-                activeMoveTargetTicks = 0;
-            } else if (activeMoveTargetTicks > 200) {
-                logDetailed("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
-                        guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
+            }
+
+            long elapsedNoMeaningfulProgress = Math.max(0L, world.getTime() - targetLastMeaningfulProgressTick);
+            if (elapsedNoMeaningfulProgress > MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS) {
+                LOGGER.info("MasonWallBuilder {}: move_livelock_guard segment={} bestDistSq={} elapsedTicksNoMeaningfulProgress={}",
+                        guard.getUuidAsString(),
+                        target.toShortString(),
+                        String.format("%.2f", targetBestDistSq),
+                        elapsedNoMeaningfulProgress);
                 localSortieQueue.pollFirst();
-                releaseSegmentClaim(world, target, "stalled");
-                markSkippedSegment(world, target, "stalled_segment");
+                releaseSegmentClaim(world, target, "move_livelock_no_meaningful_progress");
+                markSkippedSegment(world, target, "move_livelock_no_meaningful_progress");
+                transitionSegmentState(world, target, SegmentState.DEFERRED, "move_livelock_no_meaningful_progress");
+                deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(
+                        target.toImmutable(),
+                        world.getTime() + WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS
+                ));
                 activeMoveTarget = null;
-                activeMoveTargetTicks = 0;
-                lastMoveDistSq = Double.MAX_VALUE;
+                resetActiveMoveProgressTracking(world);
                 resetPathFailureState();
             }
         }
+    }
+
+    private void resetActiveMoveProgressTracking(ServerWorld world) {
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        targetBestDistSq = Double.MAX_VALUE;
+        targetLastMeaningfulProgressTick = world == null ? -1L : world.getTime();
     }
 
     /**
@@ -955,8 +987,7 @@ public class MasonWallBuilderGoal extends Goal {
                     segmentTarget.toShortString(),
                     attemptedNavTarget.toShortString());
             activeMoveTarget = null;
-            activeMoveTargetTicks = 0;
-            lastMoveDistSq = Double.MAX_VALUE;
+            resetActiveMoveProgressTracking(world);
             resetPathFailureState();
             return;
         }
@@ -985,8 +1016,7 @@ public class MasonWallBuilderGoal extends Goal {
             queueHardUnreachableRetry(segmentTarget.toImmutable());
         }
         activeMoveTarget = null;
-        activeMoveTargetTicks = 0;
-        lastMoveDistSq = Double.MAX_VALUE;
+        resetActiveMoveProgressTracking(world);
         resetPathFailureState();
     }
 
@@ -1069,8 +1099,7 @@ public class MasonWallBuilderGoal extends Goal {
         transitionSegmentState(world, segmentTarget, SegmentState.DEFERRED, "vegetation_deferred");
         deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(segmentTarget.toImmutable(), requeueTick));
         activeMoveTarget = null;
-        activeMoveTargetTicks = 0;
-        lastMoveDistSq = Double.MAX_VALUE;
+        resetActiveMoveProgressTracking(world);
         resetPathFailureState();
         LOGGER.debug("MasonWallBuilder {}: vegetation_path_defer segment={} navTarget={} clearedNow={} retryAt={}",
                 guard.getUuidAsString(),
@@ -2187,11 +2216,38 @@ public class MasonWallBuilderGoal extends Goal {
         releaseLocalSortieClaims(world, "progress_watchdog_recover");
         localSortieQueue.clear();
         activeMoveTarget = null;
-        activeMoveTargetTicks = 0;
-        lastMoveDistSq = Double.MAX_VALUE;
+        resetActiveMoveProgressTracking(world);
         resetPathFailureState();
         sortiePlacements = MAX_SEGMENTS_PER_SORTIE;
         currentSegmentIndex = findNearestPendingSegmentIndex(world, guard.getBlockPos(), activeLayer);
+
+        BlockPos recoverySegment = getPendingSegmentAt(currentSegmentIndex);
+        if (recoverySegment != null && placementsSinceCycleStart <= watchdogPlacementCountAtLastRecovery) {
+            if (recoverySegment.equals(watchdogLastRecoverySegment)) {
+                watchdogSameRecoverySegmentCount++;
+            } else {
+                watchdogSameRecoverySegmentCount = 1;
+            }
+        } else {
+            watchdogSameRecoverySegmentCount = 1;
+        }
+        watchdogLastRecoverySegment = recoverySegment;
+        watchdogPlacementCountAtLastRecovery = placementsSinceCycleStart;
+
+        if (recoverySegment != null && watchdogSameRecoverySegmentCount >= WATCHDOG_REPEAT_SEGMENT_THRESHOLD) {
+            localSortieQueue.remove(recoverySegment);
+            releaseSegmentClaim(world, recoverySegment, "watchdog_repeat_recovery_segment");
+            markSkippedSegment(world, recoverySegment, "watchdog_repeat_recovery_segment");
+            transitionSegmentState(world, recoverySegment, SegmentState.DEFERRED, "watchdog_repeat_recovery_segment");
+            deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(
+                    recoverySegment.toImmutable(),
+                    world.getTime() + WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS
+            ));
+            LOGGER.info("MasonWallBuilder {}: watchdog promoted repeat segment {} to deferred cooldown after {} recoveries without placements",
+                    guard.getUuidAsString(),
+                    recoverySegment.toShortString(),
+                    watchdogSameRecoverySegmentCount);
+        }
         lastPlacementTick = world.getTime();
 
         LOGGER.info("MasonWallBuilder {}: progress_watchdog_recovery context={} stalledTicks={} placementsSinceCycleStart={} layer={} pending={} buildable={} skipped={} resetIndex={}",
@@ -2221,6 +2277,13 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return nearestIndex;
+    }
+
+    private BlockPos getPendingSegmentAt(int index) {
+        if (index < 0 || index >= pendingSegments.size()) {
+            return null;
+        }
+        return pendingSegments.get(index);
     }
 
     private boolean hasAnyWallMaterial(ServerWorld world) {
