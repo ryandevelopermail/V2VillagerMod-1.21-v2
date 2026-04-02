@@ -14,6 +14,7 @@ import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -85,6 +86,10 @@ public class MasonWallBuilderGoal extends Goal {
     static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
+    private static final int STRUCTURE_SAMPLE_HORIZONTAL_RADIUS = 7;
+    private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
+    private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
+    private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -1644,9 +1649,14 @@ public class MasonWallBuilderGoal extends Goal {
 
         int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        int occupancyMinX = Integer.MAX_VALUE, occupancyMinZ = Integer.MAX_VALUE;
+        int occupancyMaxX = Integer.MIN_VALUE, occupancyMaxZ = Integer.MIN_VALUE;
         int count = 0;
         int hash = 1;
+        int occupancyHash = 1;
+        int occupancyCount = 0;
         boolean found = false;
+        Set<Long> protectedStructureColumns = new HashSet<>();
 
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
 
@@ -1673,33 +1683,211 @@ public class MasonWallBuilderGoal extends Goal {
             int posHash = 31 * (31 * pos.getX() + pos.getY()) + pos.getZ();
             hash = 31 * hash + posHash;
             found = true;
+            if (pos.getX() < occupancyMinX) occupancyMinX = pos.getX();
+            if (pos.getX() > occupancyMaxX) occupancyMaxX = pos.getX();
+            if (pos.getZ() < occupancyMinZ) occupancyMinZ = pos.getZ();
+            if (pos.getZ() > occupancyMaxZ) occupancyMaxZ = pos.getZ();
+
+            for (BlockPos sample : BlockPos.iterate(
+                    pos.add(-STRUCTURE_SAMPLE_HORIZONTAL_RADIUS, -STRUCTURE_SAMPLE_VERTICAL_RADIUS, -STRUCTURE_SAMPLE_HORIZONTAL_RADIUS),
+                    pos.add(STRUCTURE_SAMPLE_HORIZONTAL_RADIUS, STRUCTURE_SAMPLE_VERTICAL_RADIUS, STRUCTURE_SAMPLE_HORIZONTAL_RADIUS))) {
+                if (!searchBox.contains(sample.getX(), sample.getY(), sample.getZ())) continue;
+                BlockState sampleState = world.getBlockState(sample);
+                if (!isVillageStructureBlock(sampleState)) continue;
+                if (sample.getX() < occupancyMinX) occupancyMinX = sample.getX();
+                if (sample.getX() > occupancyMaxX) occupancyMaxX = sample.getX();
+                if (sample.getZ() < occupancyMinZ) occupancyMinZ = sample.getZ();
+                if (sample.getZ() > occupancyMaxZ) occupancyMaxZ = sample.getZ();
+                long packedColumn = packXZ(sample.getX(), sample.getZ());
+                if (protectedStructureColumns.add(packedColumn)) {
+                    occupancyCount++;
+                    occupancyHash = 31 * occupancyHash + Long.hashCode(packedColumn);
+                }
+            }
         }
 
         if (!found) {
             return Optional.empty();
         }
 
-        return Optional.of(new PoiFootprintSignature(minX, minZ, maxX, maxZ, count, hash));
+        int mergedMinX = Math.min(minX, occupancyMinX);
+        int mergedMinZ = Math.min(minZ, occupancyMinZ);
+        int mergedMaxX = Math.max(maxX, occupancyMaxX);
+        int mergedMaxZ = Math.max(maxZ, occupancyMaxZ);
+
+        return Optional.of(new PoiFootprintSignature(
+                mergedMinX,
+                mergedMinZ,
+                mergedMaxX,
+                mergedMaxZ,
+                count + occupancyCount,
+                31 * hash + occupancyHash,
+                protectedStructureColumns
+        ));
     }
 
     private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
-        int footprintWidth = signature.maxX() - signature.minX() + 1;
-        int footprintDepth = signature.maxZ() - signature.minZ() + 1;
+        int occupancyMinX = signature.minX();
+        int occupancyMinZ = signature.minZ();
+        int occupancyMaxX = signature.maxX();
+        int occupancyMaxZ = signature.maxZ();
+        int footprintWidth = occupancyMaxX - occupancyMinX + 1;
+        int footprintDepth = occupancyMaxZ - occupancyMinZ + 1;
         int configuredExpand = Math.max(0, GuardVillagersConfig.masonWallExpandBlocks);
-        int expandX = adjustedAxisExpansion(configuredExpand, footprintWidth);
-        int expandZ = adjustedAxisExpansion(configuredExpand, footprintDepth);
+        int baseMargin = Math.max(STRUCTURE_MIN_ENCLOSURE_MARGIN, configuredExpand);
+        int expandX = adjustedAxisExpansion(baseMargin, footprintWidth);
+        int expandZ = adjustedAxisExpansion(baseMargin, footprintDepth);
         expandX = clampExpansionForMaxSize(footprintWidth, expandX, GuardVillagersConfig.masonWallMaxWidth);
         expandZ = clampExpansionForMaxSize(footprintDepth, expandZ, GuardVillagersConfig.masonWallMaxDepth);
 
+        int minX = occupancyMinX - expandX;
+        int minZ = occupancyMinZ - expandZ;
+        int maxX = occupancyMaxX + expandX;
+        int maxZ = occupancyMaxZ + expandZ;
+
+        int expandNorth = 0;
+        int expandSouth = 0;
+        int expandWest = 0;
+        int expandEast = 0;
+
+        int maxSidePush = Math.max(0, STRUCTURE_PROTECTION_EXPANSION_CAP);
+        Set<Long> protectedColumns = signature.protectedStructureColumns();
+        while (intersectsProtectedColumns(minX, minZ, maxX, maxZ, protectedColumns) && maxSidePush > 0) {
+            boolean changed = false;
+            if (edgeOverlapsProtectedColumns(minX, minZ, maxX, Direction.NORTH, protectedColumns) && expandNorth < STRUCTURE_PROTECTION_EXPANSION_CAP) {
+                minZ -= 1;
+                expandNorth++;
+                maxSidePush--;
+                changed = true;
+            }
+            if (edgeOverlapsProtectedColumns(minX, maxZ, maxX, Direction.SOUTH, protectedColumns) && expandSouth < STRUCTURE_PROTECTION_EXPANSION_CAP) {
+                maxZ += 1;
+                expandSouth++;
+                maxSidePush--;
+                changed = true;
+            }
+            if (edgeOverlapsProtectedColumns(minZ, minX, maxZ, Direction.WEST, protectedColumns) && expandWest < STRUCTURE_PROTECTION_EXPANSION_CAP) {
+                minX -= 1;
+                expandWest++;
+                maxSidePush--;
+                changed = true;
+            }
+            if (edgeOverlapsProtectedColumns(minZ, maxX, maxZ, Direction.EAST, protectedColumns) && expandEast < STRUCTURE_PROTECTION_EXPANSION_CAP) {
+                maxX += 1;
+                expandEast++;
+                maxSidePush--;
+                changed = true;
+            }
+            if (!changed) {
+                break;
+            }
+        }
+
+        if (GuardVillagersConfig.masonWallMaxWidth > 0) {
+            int allowedHalfSpan = Math.max(0, (GuardVillagersConfig.masonWallMaxWidth - footprintWidth) / 2);
+            minX = Math.max(minX, occupancyMinX - allowedHalfSpan);
+            maxX = Math.min(maxX, occupancyMaxX + allowedHalfSpan);
+        }
+        if (GuardVillagersConfig.masonWallMaxDepth > 0) {
+            int allowedHalfSpan = Math.max(0, (GuardVillagersConfig.masonWallMaxDepth - footprintDepth) / 2);
+            minZ = Math.max(minZ, occupancyMinZ - allowedHalfSpan);
+            maxZ = Math.min(maxZ, occupancyMaxZ + allowedHalfSpan);
+        }
+
         int wallY = anchorPos.getY(); // wall is at anchor Y level
+        LOGGER.info(
+                "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}]",
+                guard.getUuidAsString(),
+                minX, maxX, minZ, maxZ, wallY,
+                expandNorth, expandSouth, expandWest, expandEast,
+                occupancyMinX, occupancyMaxX, occupancyMinZ, occupancyMaxZ
+        );
 
         return new WallRect(
-                signature.minX() - expandX,
-                signature.minZ() - expandZ,
-                signature.maxX() + expandX,
-                signature.maxZ() + expandZ,
+                minX,
+                minZ,
+                maxX,
+                maxZ,
                 wallY
         );
+    }
+
+    private boolean intersectsProtectedColumns(int minX, int minZ, int maxX, int maxZ, Set<Long> protectedColumns) {
+        if (protectedColumns.isEmpty()) return false;
+        for (int x = minX; x <= maxX; x++) {
+            if (protectedColumns.contains(packXZ(x, minZ)) || protectedColumns.contains(packXZ(x, maxZ))) {
+                return true;
+            }
+        }
+        for (int z = minZ; z <= maxZ; z++) {
+            if (protectedColumns.contains(packXZ(minX, z)) || protectedColumns.contains(packXZ(maxX, z))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean edgeOverlapsProtectedColumns(int minAxis, int fixedAxis, int maxAxis, Direction edgeDirection, Set<Long> protectedColumns) {
+        for (int axis = minAxis; axis <= maxAxis; axis++) {
+            long packed = switch (edgeDirection) {
+                case NORTH, SOUTH -> packXZ(axis, fixedAxis);
+                case EAST, WEST -> packXZ(fixedAxis, axis);
+                default -> Long.MIN_VALUE;
+            };
+            if (protectedColumns.contains(packed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private long packXZ(int x, int z) {
+        return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
+    }
+
+    private boolean isVillageStructureBlock(BlockState state) {
+        if (state.isAir()) return false;
+        if (state.isIn(BlockTags.LEAVES)
+                || state.isIn(BlockTags.FLOWERS)
+                || state.isIn(BlockTags.SAPLINGS)
+                || state.isIn(BlockTags.REPLACEABLE_BY_TREES)
+                || state.isOf(Blocks.GRASS_BLOCK)
+                || state.isOf(Blocks.DIRT)
+                || state.isOf(Blocks.COARSE_DIRT)
+                || state.isOf(Blocks.PODZOL)
+                || state.isOf(Blocks.MYCELIUM)
+                || state.isOf(Blocks.STONE)
+                || state.isOf(Blocks.ANDESITE)
+                || state.isOf(Blocks.DIORITE)
+                || state.isOf(Blocks.GRANITE)
+                || state.isOf(Blocks.DEEPSLATE)
+                || state.isOf(Blocks.SAND)
+                || state.isOf(Blocks.RED_SAND)
+                || state.isOf(Blocks.GRAVEL)
+                || state.isOf(Blocks.CLAY)
+                || state.isOf(Blocks.WATER)
+                || state.isOf(Blocks.LAVA)) {
+            return false;
+        }
+
+        if (state.isIn(BlockTags.PLANKS)
+                || state.isIn(BlockTags.LOGS)
+                || state.isIn(BlockTags.STAIRS)
+                || state.isIn(BlockTags.SLABS)
+                || state.isIn(BlockTags.DOORS)
+                || state.isIn(BlockTags.FENCES)
+                || state.isIn(BlockTags.FENCE_GATES)
+                || state.isIn(BlockTags.WALLS)
+                || state.isOf(Blocks.STONE_BRICKS)
+                || state.isOf(Blocks.MOSSY_STONE_BRICKS)
+                || state.isOf(Blocks.CRACKED_STONE_BRICKS)
+                || state.isOf(Blocks.CHISELED_STONE_BRICKS)
+                || state.isOf(Blocks.GLASS)
+                || state.isOf(Blocks.WHITE_STAINED_GLASS)) {
+            return true;
+        }
+
+        return state.blocksMovement();
     }
 
     private int adjustedAxisExpansion(int configuredExpand, int footprintAxisSize) {
@@ -2175,7 +2363,15 @@ public class MasonWallBuilderGoal extends Goal {
 
     private record WallRect(int minX, int minZ, int maxX, int maxZ, int y) {}
 
-    private record PoiFootprintSignature(int minX, int minZ, int maxX, int maxZ, int poiCount, int poiHash) {}
+    private record PoiFootprintSignature(
+            int minX,
+            int minZ,
+            int maxX,
+            int maxZ,
+            int poiCount,
+            int poiHash,
+            Set<Long> protectedStructureColumns
+    ) {}
 
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
 
