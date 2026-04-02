@@ -101,6 +101,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
+    private static final int POI_CLUSTER_LINK_DISTANCE = 16;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -2372,16 +2373,16 @@ public class MasonWallBuilderGoal extends Goal {
         int range = GuardVillagersConfig.masonWallFootprintRadius;
         Box searchBox = new Box(anchorPos).expand(range);
 
-        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
-        int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        int selectedMinX = Integer.MAX_VALUE, selectedMinZ = Integer.MAX_VALUE;
+        int selectedMaxX = Integer.MIN_VALUE, selectedMaxZ = Integer.MIN_VALUE;
         int occupancyMinX = Integer.MAX_VALUE, occupancyMinZ = Integer.MAX_VALUE;
         int occupancyMaxX = Integer.MIN_VALUE, occupancyMaxZ = Integer.MIN_VALUE;
         int count = 0;
         int hash = 1;
         int occupancyHash = 1;
         int occupancyCount = 0;
-        boolean found = false;
         Set<Long> protectedStructureColumns = new HashSet<>();
+        List<BlockPos> candidatePois = new ArrayList<>();
 
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
 
@@ -2400,23 +2401,48 @@ public class MasonWallBuilderGoal extends Goal {
 
         for (BlockPos pos : (Iterable<BlockPos>) poiStream::iterator) {
             if (!searchBox.contains(pos.getX(), pos.getY(), pos.getZ())) continue;
-            if (pos.getX() < minX) minX = pos.getX();
-            if (pos.getX() > maxX) maxX = pos.getX();
-            if (pos.getZ() < minZ) minZ = pos.getZ();
-            if (pos.getZ() > maxZ) maxZ = pos.getZ();
+            candidatePois.add(pos.toImmutable());
+        }
+
+        if (candidatePois.isEmpty()) {
+            return Optional.empty();
+        }
+
+        List<List<BlockPos>> clusters = buildPoiClusters(candidatePois, POI_CLUSTER_LINK_DISTANCE);
+        List<BlockPos> selectedCluster = selectAnchorCluster(anchorPos, candidatePois, clusters);
+        if (selectedCluster.isEmpty()) {
+            return Optional.empty();
+        }
+
+        for (BlockPos pos : selectedCluster) {
+            if (pos.getX() < selectedMinX) selectedMinX = pos.getX();
+            if (pos.getX() > selectedMaxX) selectedMaxX = pos.getX();
+            if (pos.getZ() < selectedMinZ) selectedMinZ = pos.getZ();
+            if (pos.getZ() > selectedMaxZ) selectedMaxZ = pos.getZ();
             count++;
             int posHash = 31 * (31 * pos.getX() + pos.getY()) + pos.getZ();
             hash = 31 * hash + posHash;
-            found = true;
             if (pos.getX() < occupancyMinX) occupancyMinX = pos.getX();
             if (pos.getX() > occupancyMaxX) occupancyMaxX = pos.getX();
             if (pos.getZ() < occupancyMinZ) occupancyMinZ = pos.getZ();
             if (pos.getZ() > occupancyMaxZ) occupancyMaxZ = pos.getZ();
+        }
 
+        Box clusterSearchBox = new Box(
+                selectedMinX - STRUCTURE_SAMPLE_HORIZONTAL_RADIUS,
+                anchorPos.getY() - range,
+                selectedMinZ - STRUCTURE_SAMPLE_HORIZONTAL_RADIUS,
+                selectedMaxX + STRUCTURE_SAMPLE_HORIZONTAL_RADIUS + 1,
+                anchorPos.getY() + range + 1,
+                selectedMaxZ + STRUCTURE_SAMPLE_HORIZONTAL_RADIUS + 1
+        );
+
+        for (BlockPos pos : selectedCluster) {
             for (BlockPos sample : BlockPos.iterate(
                     pos.add(-STRUCTURE_SAMPLE_HORIZONTAL_RADIUS, -STRUCTURE_SAMPLE_VERTICAL_RADIUS, -STRUCTURE_SAMPLE_HORIZONTAL_RADIUS),
                     pos.add(STRUCTURE_SAMPLE_HORIZONTAL_RADIUS, STRUCTURE_SAMPLE_VERTICAL_RADIUS, STRUCTURE_SAMPLE_HORIZONTAL_RADIUS))) {
                 if (!searchBox.contains(sample.getX(), sample.getY(), sample.getZ())) continue;
+                if (!clusterSearchBox.contains(sample.getX(), sample.getY(), sample.getZ())) continue;
                 BlockState sampleState = world.getBlockState(sample);
                 if (!isVillageStructureBlock(sampleState)) continue;
                 if (sample.getX() < occupancyMinX) occupancyMinX = sample.getX();
@@ -2431,14 +2457,10 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
 
-        if (!found) {
-            return Optional.empty();
-        }
-
-        int mergedMinX = Math.min(minX, occupancyMinX);
-        int mergedMinZ = Math.min(minZ, occupancyMinZ);
-        int mergedMaxX = Math.max(maxX, occupancyMaxX);
-        int mergedMaxZ = Math.max(maxZ, occupancyMaxZ);
+        int mergedMinX = Math.min(selectedMinX, occupancyMinX);
+        int mergedMinZ = Math.min(selectedMinZ, occupancyMinZ);
+        int mergedMaxX = Math.max(selectedMaxX, occupancyMaxX);
+        int mergedMaxZ = Math.max(selectedMaxZ, occupancyMaxZ);
         int mergedWidth = mergedMaxX - mergedMinX + 1;
         int mergedDepth = mergedMaxZ - mergedMinZ + 1;
 
@@ -2457,6 +2479,18 @@ public class MasonWallBuilderGoal extends Goal {
             return Optional.empty();
         }
 
+        LOGGER.info(
+                "MasonWallBuilderGoal: POI footprint clustering anchor={} total_pois_scanned={} cluster_count={} selected_cluster_size={} final_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
+                anchorPos,
+                candidatePois.size(),
+                clusters.size(),
+                selectedCluster.size(),
+                mergedMinX,
+                mergedMinZ,
+                mergedMaxX,
+                mergedMaxZ
+        );
+
         return Optional.of(new PoiFootprintSignature(
                 mergedMinX,
                 mergedMinZ,
@@ -2466,6 +2500,70 @@ public class MasonWallBuilderGoal extends Goal {
                 31 * hash + occupancyHash,
                 protectedStructureColumns
         ));
+    }
+
+    private List<List<BlockPos>> buildPoiClusters(List<BlockPos> candidatePois, int linkDistance) {
+        int thresholdSq = linkDistance * linkDistance;
+        List<List<BlockPos>> clusters = new ArrayList<>();
+        Set<BlockPos> visited = new HashSet<>();
+
+        for (BlockPos seed : candidatePois) {
+            if (!visited.add(seed)) {
+                continue;
+            }
+            List<BlockPos> cluster = new ArrayList<>();
+            ArrayDeque<BlockPos> frontier = new ArrayDeque<>();
+            frontier.add(seed);
+            cluster.add(seed);
+
+            while (!frontier.isEmpty()) {
+                BlockPos current = frontier.removeFirst();
+                for (BlockPos candidate : candidatePois) {
+                    if (visited.contains(candidate)) {
+                        continue;
+                    }
+                    int dx = current.getX() - candidate.getX();
+                    int dz = current.getZ() - candidate.getZ();
+                    if ((dx * dx) + (dz * dz) > thresholdSq) {
+                        continue;
+                    }
+                    visited.add(candidate);
+                    frontier.addLast(candidate);
+                    cluster.add(candidate);
+                }
+            }
+            clusters.add(cluster);
+        }
+
+        return clusters;
+    }
+
+    private List<BlockPos> selectAnchorCluster(BlockPos anchorPos, List<BlockPos> candidatePois, List<List<BlockPos>> clusters) {
+        if (clusters.isEmpty()) {
+            return List.of();
+        }
+
+        BlockPos nearestPoi = null;
+        double nearestDistanceSq = Double.MAX_VALUE;
+        for (BlockPos poi : candidatePois) {
+            double distanceSq = poi.getSquaredDistance(anchorPos);
+            if (distanceSq < nearestDistanceSq) {
+                nearestDistanceSq = distanceSq;
+                nearestPoi = poi;
+            }
+        }
+
+        if (nearestPoi != null) {
+            for (List<BlockPos> cluster : clusters) {
+                if (cluster.contains(nearestPoi)) {
+                    return cluster;
+                }
+            }
+        }
+
+        return clusters.stream()
+                .max(Comparator.comparingInt(List::size))
+                .orElseGet(List::of);
     }
 
     private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
