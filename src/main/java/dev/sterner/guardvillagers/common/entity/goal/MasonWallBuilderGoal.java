@@ -84,6 +84,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int VEGETATION_CLEAR_PASS_BUDGET_PER_TICK = 2;
     private static final long SEGMENT_CLAIM_DURATION_TICKS = 160L;
     private static final long HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 200L;
+    private static final long PERIODIC_INFO_INTERVAL_TICKS = 200L;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 4;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
@@ -164,6 +165,12 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<BlockPos, String> skippedSegmentReasons = new HashMap<>();
     private final Map<BlockPos, SegmentFailMetadata> skippedSegmentFailMetadata = new HashMap<>();
     private long nextSkippedSegmentReconciliationTick = 0L;
+    private long nextPeriodicInfoTick = 0L;
+    private int pathRetriesSinceCycleStart = 0;
+    private int hardUnreachableSinceCycleStart = 0;
+    private int deferredOrSkippedSinceCycleStart = 0;
+    private boolean firstPlacementLoggedThisCycle = false;
+    private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -280,6 +287,12 @@ public class MasonWallBuilderGoal extends Goal {
         lastPlacementTick = world != null ? world.getTime() : 0L;
         placementsSinceCycleStart = 0;
         nextSkippedSegmentReconciliationTick = world != null ? world.getTime() : 0L;
+        nextPeriodicInfoTick = world != null ? world.getTime() + PERIODIC_INFO_INTERVAL_TICKS : 0L;
+        pathRetriesSinceCycleStart = 0;
+        hardUnreachableSinceCycleStart = 0;
+        deferredOrSkippedSinceCycleStart = 0;
+        firstPlacementLoggedThisCycle = false;
+        infoLogRateLimitTickByType.clear();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -342,6 +355,12 @@ public class MasonWallBuilderGoal extends Goal {
         placementsSinceCycleStart = 0;
         skippedSegmentFailMetadata.clear();
         nextSkippedSegmentReconciliationTick = 0L;
+        nextPeriodicInfoTick = 0L;
+        pathRetriesSinceCycleStart = 0;
+        hardUnreachableSinceCycleStart = 0;
+        deferredOrSkippedSinceCycleStart = 0;
+        firstPlacementLoggedThisCycle = false;
+        infoLogRateLimitTickByType.clear();
         activeAnchorPos = null;
         cycleWallRect = null;
         pendingSegments.clear();
@@ -356,6 +375,8 @@ public class MasonWallBuilderGoal extends Goal {
             stage = Stage.DONE;
             return;
         }
+
+        maybeEmitPeriodicInfo(world);
 
         switch (stage) {
             case TRANSFER_FROM_PEERS -> tickTransfer(world);
@@ -381,8 +402,8 @@ public class MasonWallBuilderGoal extends Goal {
         cycleWallRect = null;
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
         if (poiMode != lastLoggedPoiMode) {
-            LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
-            LOGGER.info("MasonWallBuilder {}: wall profile=deterministic 3-layer perimeter (layer-first build order)",
+            LOGGER.debug("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
+            LOGGER.debug("MasonWallBuilder {}: wall profile=deterministic 3-layer perimeter (layer-first build order)",
                     guard.getUuidAsString());
             lastLoggedPoiMode = poiMode;
         }
@@ -477,12 +498,13 @@ public class MasonWallBuilderGoal extends Goal {
         int totalConvertibleWalls = totalWalls + totalCobblestone;
         int requiredToStartSession = Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
         if (totalConvertibleWalls < requiredToStartSession) {
-            LOGGER.info("MasonWallBuilder {}: insufficient wall material to start session (walls={}, cobblestone={}, requiredToStart={}, requiredTotal={})",
+            logInfoRateLimited(world, "material_exhaustion_precheck", PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: insufficient wall material to start session (walls={}, cobblestone={}, requiredToStart={}, requiredTotal={})",
                     guard.getUuidAsString(), totalWalls, totalCobblestone, requiredToStartSession, requiredWallSegments);
             return false;
         }
         int plannedConversions = Math.max(0, requiredToStartSession - totalWalls);
-        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredToStart={}, requiredTotal={}, wallsAvailable={}, cobblestoneConvertible={}, plannedStartConversions={})",
+        logDetailed("MasonWallBuilder {}: readiness check passed (requiredToStart={}, requiredTotal={}, wallsAvailable={}, cobblestoneConvertible={}, plannedStartConversions={})",
                 guard.getUuidAsString(), requiredToStartSession, requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
         // 6. Elect builder — only masons with both chest + job pairing are eligible.
@@ -532,7 +554,8 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         if (electionDecision.shouldLogNoEligibleBuilder() || electedBuilder == null) {
-            LOGGER.info("MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
+            logInfoRateLimited(world, "election_skipped", PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
                     guard.getUuidAsString(), anchorPos.toShortString());
             return false;
         }
@@ -641,7 +664,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
             boolean conversionWaitEnded = conversionWaitActive;
             if (conversionWaitEnded) {
-                LOGGER.info("MasonWallBuilder {}: conversion success detected (walls_now={} >= threshold={})",
+                logDetailed("MasonWallBuilder {}: conversion success detected (walls_now={} >= threshold={})",
                         guard.getUuidAsString(), availableWalls, threshold);
             }
             conversionWaitActive = false;
@@ -650,7 +673,7 @@ public class MasonWallBuilderGoal extends Goal {
                     || availableWalls != lastLoggedProceedWalls
                     || threshold != lastLoggedProceedThreshold;
             if (shouldLogProceed) {
-                LOGGER.info("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
+                logDetailed("MasonWallBuilder {}: proceeding with existing wall stock without stonecutter (availableWalls={}, threshold={})",
                         guard.getUuidAsString(), availableWalls, threshold);
                 waitForStockProceedLogged = true;
                 lastLoggedProceedWalls = availableWalls;
@@ -667,7 +690,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (decision == WaitForStockDecision.WAIT_FOR_CONVERSION) {
             if (!conversionWaitActive) {
-                LOGGER.info("MasonWallBuilder {}: entering conversion wait (walls={}, cobblestone={}, threshold={})",
+                logDetailed("MasonWallBuilder {}: entering conversion wait (walls={}, cobblestone={}, threshold={})",
                         guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
             }
             conversionWaitActive = true;
@@ -738,7 +761,7 @@ public class MasonWallBuilderGoal extends Goal {
                 lastMoveDistSq = distSq;
                 activeMoveTargetTicks = 0;
             } else if (activeMoveTargetTicks > 200) {
-                LOGGER.info("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
+                logDetailed("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
                         guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
                 localSortieQueue.pollFirst();
                 releaseSegmentClaim(world, target, "stalled");
@@ -887,6 +910,7 @@ public class MasonWallBuilderGoal extends Goal {
         boolean allFallbackTargetsFailed = failedPathAttempts >= candidates.size();
         if (!(allFallbackTargetsFailed && shouldMarkHardUnreachable(failedPathAttempts, firstPathFailureTick, world.getTime()))) {
             sortieTransientRetriesAttempted++;
+            pathRetriesSinceCycleStart++;
             LOGGER.debug("MasonWallBuilder {}: transient_path_fail_retrying segment={} attempt={} navTarget={} windowTicks={} allFallbacksFailed={}",
                     guard.getUuidAsString(),
                     segmentTarget.toShortString(),
@@ -916,8 +940,9 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         sortieHardUnreachableMarked++;
-        if (shouldEmitHardUnreachableInfo(world, segmentTarget)) {
-            LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
+        hardUnreachableSinceCycleStart++;
+        if (shouldEmitHardUnreachableInfo(world, segmentTarget) || verboseMasonWallLogging()) {
+            LOGGER.debug("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
                     guard.getUuidAsString(),
                     segmentTarget.toShortString(),
                     failedPathAttempts,
@@ -1149,6 +1174,12 @@ public class MasonWallBuilderGoal extends Goal {
         // Place the block
         world.setBlockState(target, placementMaterial.blockState());
         recordPlacementProgress(world);
+        if (!firstPlacementLoggedThisCycle) {
+            logInfoRateLimited(world, "first_placement", PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: first placement in cycle at {}",
+                    guard.getUuidAsString(), target.toShortString());
+            firstPlacementLoggedThisCycle = true;
+        }
         LOGGER.debug("MasonWallBuilder {}: placed {} at {}",
                 guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
@@ -1170,7 +1201,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (placed >= total || placed <= 10 || placed - lastProgressLoggedSegmentCount >= 25) {
             lastProgressLoggedSegmentCount = placed;
             int percent = (int) Math.floor((placed * 100.0) / total);
-            LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
+            logDetailed("MasonWallBuilder {}: placement progress {}/{} ({}%)",
                     guard.getUuidAsString(), placed, total, percent);
         }
     }
@@ -1280,6 +1311,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void markSkippedSegment(ServerWorld world, BlockPos pos, String reason) {
         BlockPos immutablePos = pos.toImmutable();
         transitionSegmentState(world, immutablePos, SegmentState.SKIPPED_TEMP, reason);
+        deferredOrSkippedSinceCycleStart++;
         long failTick = world == null ? -1L : world.getTime();
         SegmentFailMetadata previous = skippedSegmentFailMetadata.get(immutablePos);
         int failCount = previous == null ? 1 : previous.failCount() + 1;
@@ -1912,6 +1944,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
+        deferredOrSkippedSinceCycleStart += deferredCount;
         String completionSignature = "completion_summary|" + buildSweepLogSignature(
                 remainingAfterSweep,
                 filledDuringSweep,
@@ -2022,13 +2055,68 @@ public class MasonWallBuilderGoal extends Goal {
         nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
-        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
+        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} retries={} hard_unreachable={} deferred_or_skipped={}",
+                guard.getUuidAsString(),
+                cycleEndReason.logValue,
+                placedSegments,
+                pathRetriesSinceCycleStart,
+                hardUnreachableSinceCycleStart,
+                deferredOrSkippedSinceCycleStart);
     }
 
     private void resetWaitForStockProceedLogState() {
         waitForStockProceedLogged = false;
         lastLoggedProceedWalls = -1;
         lastLoggedProceedThreshold = -1;
+    }
+
+    private boolean verboseMasonWallLogging() {
+        return GuardVillagersConfig.masonWallVerboseLogging;
+    }
+
+    private void logDetailed(String message, Object... args) {
+        if (verboseMasonWallLogging()) {
+            LOGGER.info(message, args);
+        } else {
+            LOGGER.debug(message, args);
+        }
+    }
+
+    private void logInfoRateLimited(ServerWorld world, String messageType, long intervalTicks, String message, Object... args) {
+        long now = world.getTime();
+        Long lastTick = infoLogRateLimitTickByType.get(messageType);
+        if (lastTick != null && (now - lastTick) < intervalTicks) {
+            if (verboseMasonWallLogging()) {
+                LOGGER.debug("MasonWallBuilder {}: suppressed INFO log type={} due to rate limit ({} ticks)",
+                        guard.getUuidAsString(), messageType, intervalTicks);
+            }
+            return;
+        }
+        infoLogRateLimitTickByType.put(messageType, now);
+        LOGGER.info(message, args);
+    }
+
+    private void maybeEmitPeriodicInfo(ServerWorld world) {
+        if (!isElectedBuilder || stage == Stage.IDLE || stage == Stage.DONE) {
+            return;
+        }
+        long now = world.getTime();
+        if (now < nextPeriodicInfoTick) {
+            return;
+        }
+        nextPeriodicInfoTick = now + PERIODIC_INFO_INTERVAL_TICKS;
+        logInfoRateLimited(
+                world,
+                "periodic_cycle_summary",
+                PERIODIC_INFO_INTERVAL_TICKS,
+                "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={}",
+                guard.getUuidAsString(),
+                placedSegments,
+                pathRetriesSinceCycleStart,
+                hardUnreachableSinceCycleStart,
+                deferredOrSkippedSinceCycleStart,
+                stage
+        );
     }
 
     private void recordPlacementProgress(ServerWorld world) {
@@ -2078,7 +2166,7 @@ public class MasonWallBuilderGoal extends Goal {
         currentSegmentIndex = findNearestPendingSegmentIndex(world, guard.getBlockPos(), activeLayer);
         lastPlacementTick = world.getTime();
 
-        LOGGER.warn("MasonWallBuilder {}: progress_watchdog_recovery context={} stalledTicks={} placementsSinceCycleStart={} layer={} pending={} buildable={} skipped={} resetIndex={}",
+        LOGGER.info("MasonWallBuilder {}: progress_watchdog_recovery context={} stalledTicks={} placementsSinceCycleStart={} layer={} pending={} buildable={} skipped={} resetIndex={}",
                 guard.getUuidAsString(),
                 context,
                 PROGRESS_WATCHDOG_TIMEOUT_TICKS,
@@ -2133,7 +2221,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void logSortieSummaryIfActive() {
         if (!sortieActive) return;
-        LOGGER.info("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={}",
+        logDetailed("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
@@ -2405,7 +2493,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int wallY = anchorPos.getY(); // wall is at anchor Y level
-        LOGGER.info(
+        logDetailed(
                 "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}]",
                 guard.getUuidAsString(),
                 minX, maxX, minZ, maxZ, wallY,
