@@ -92,7 +92,9 @@ public class MasonWallBuilderGoal extends Goal {
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
     static final int MAX_SEGMENTS_PER_SORTIE = 5;
     static final int LOCAL_SORTIE_RADIUS = 5;
-    static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
+    static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = true;
+    private static final long WAIT_FOR_STOCK_ESCALATION_TIMEOUT_TICKS = 160L;
+    private static final long WAIT_FOR_STOCK_DIAGNOSTIC_INTERVAL_TICKS = 40L;
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
@@ -160,6 +162,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int plannedPlacementCount = 0;
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
+    private long waitForStockStartedTick = -1L;
+    private long nextWaitForStockDiagnosticTick = 0L;
+    private boolean waitForStockTimeoutEscalated = false;
     private boolean waitForStockProceedLogged = false;
     private int lastLoggedProceedWalls = -1;
     private int lastLoggedProceedThreshold = -1;
@@ -343,6 +348,9 @@ public class MasonWallBuilderGoal extends Goal {
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        waitForStockStartedTick = -1L;
+        nextWaitForStockDiagnosticTick = 0L;
+        waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         waitForStockReplanCooldownUntilTick = 0L;
@@ -435,6 +443,9 @@ public class MasonWallBuilderGoal extends Goal {
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        waitForStockStartedTick = -1L;
+        nextWaitForStockDiagnosticTick = 0L;
+        waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
@@ -777,22 +788,33 @@ public class MasonWallBuilderGoal extends Goal {
     private void tickWaitForWallStock(ServerWorld world) {
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null) {
+            clearWaitForStockState();
             resetWaitForStockProceedLogState();
             stage = Stage.DONE;
             return;
         }
 
-        int threshold = computeCurrentSortieThreshold(world);
+        long now = world.getTime();
+        if (waitForStockStartedTick < 0L) {
+            waitForStockStartedTick = now;
+            nextWaitForStockDiagnosticTick = now;
+            waitForStockTimeoutEscalated = false;
+        }
+
+        int baseThreshold = computeCurrentSortieThreshold(world);
+        int threshold = computeEffectiveSortieThresholdForAvailableStock(world, chestPos, baseThreshold, now);
         guard.setWallBuildPending(true, threshold);
         int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
         int availableCobblestone = countItemInChest(world, chestPos, Items.COBBLESTONE);
-        LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK inventory (availableWalls={}, availableCobblestone={}, threshold={})",
-                guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+        boolean conversionCapable = availableCobblestone > 0;
+        String fallbackMode = describeWaitFallbackMode(baseThreshold, threshold, conversionCapable, availableWalls);
+        maybeLogWaitForStockDiagnostics(world, availableWalls, availableCobblestone, conversionCapable, fallbackMode, baseThreshold, threshold);
 
         WaitForStockDecision decision = decideWaitForStockTransition(
                 availableWalls,
                 availableCobblestone,
-                threshold
+                threshold,
+                ALLOW_COBBLESTONE_PLACEMENT_FALLBACK
         );
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
             boolean conversionWaitEnded = conversionWaitActive;
@@ -814,10 +836,12 @@ public class MasonWallBuilderGoal extends Goal {
             }
             stage = Stage.MOVE_TO_SEGMENT;
             waitForStockReplanCooldownUntilTick = 0L;
+            clearWaitForStockState();
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
             conversionWaitActive = false;
+            clearWaitForStockState();
             resetWaitForStockProceedLogState();
             completeCycle(CycleEndReason.OUT_OF_MATERIALS);
             return;
@@ -1381,9 +1405,8 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
-        int sortieThreshold = computeCurrentSortieThreshold(world);
-        int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
-        if (availableWalls < sortieThreshold) {
+        int availablePlacementUnits = countWallMaterialUnitsInChest(world, chestPos);
+        if (availablePlacementUnits < 1) {
             stage = Stage.WAIT_FOR_WALL_STOCK;
             return;
         }
@@ -2144,6 +2167,23 @@ public class MasonWallBuilderGoal extends Goal {
         return Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, remaining));
     }
 
+    private int computeEffectiveSortieThresholdForAvailableStock(ServerWorld world,
+                                                                 BlockPos chestPos,
+                                                                 int baseThreshold,
+                                                                 long currentTick) {
+        int totalPlacementUnits = countWallMaterialUnitsInChest(world, chestPos);
+        if (totalPlacementUnits <= 0) {
+            waitForStockTimeoutEscalated = false;
+            return baseThreshold;
+        }
+        long waitedTicks = waitForStockStartedTick < 0L ? 0L : Math.max(0L, currentTick - waitForStockStartedTick);
+        if (waitedTicks >= WAIT_FOR_STOCK_ESCALATION_TIMEOUT_TICKS) {
+            waitForStockTimeoutEscalated = true;
+            return Math.max(1, Math.min(baseThreshold, totalPlacementUnits));
+        }
+        return baseThreshold;
+    }
+
     private int findLowestPendingLayer(ServerWorld world) {
         int lowestLayer = Integer.MAX_VALUE;
         for (BlockPos pos : pendingSegments) {
@@ -2258,7 +2298,8 @@ public class MasonWallBuilderGoal extends Goal {
         WaitForStockDecision decision = decideWaitForStockTransition(
                 availableWalls,
                 availableCobblestone,
-                threshold
+                threshold,
+                ALLOW_COBBLESTONE_PLACEMENT_FALLBACK
         );
         return decision == WaitForStockDecision.MOVE_TO_SEGMENT;
     }
@@ -2507,6 +2548,7 @@ public class MasonWallBuilderGoal extends Goal {
             VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
         }
         releaseAllSegmentClaims(worldOrNull());
+        clearWaitForStockState();
         resetWaitForStockProceedLogState();
         stage = Stage.DONE;
         guard.clearWallSegments();
@@ -2545,6 +2587,53 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockProceedLogged = false;
         lastLoggedProceedWalls = -1;
         lastLoggedProceedThreshold = -1;
+    }
+
+    private void clearWaitForStockState() {
+        waitForStockStartedTick = -1L;
+        nextWaitForStockDiagnosticTick = 0L;
+        waitForStockTimeoutEscalated = false;
+    }
+
+    private String describeWaitFallbackMode(int baseThreshold,
+                                            int effectiveThreshold,
+                                            boolean conversionCapable,
+                                            int availableWalls) {
+        if (!ALLOW_COBBLESTONE_PLACEMENT_FALLBACK) {
+            return "walls_only";
+        }
+        if (effectiveThreshold < baseThreshold) {
+            return "threshold_relaxed_to_" + effectiveThreshold;
+        }
+        if (availableWalls < effectiveThreshold && conversionCapable) {
+            return "direct_cobble_fallback";
+        }
+        return "wall_preferred";
+    }
+
+    private void maybeLogWaitForStockDiagnostics(ServerWorld world,
+                                                 int availableWalls,
+                                                 int availableCobblestone,
+                                                 boolean conversionCapable,
+                                                 String fallbackMode,
+                                                 int baseThreshold,
+                                                 int effectiveThreshold) {
+        long now = world.getTime();
+        if (now < nextWaitForStockDiagnosticTick) {
+            return;
+        }
+        long waitedTicks = waitForStockStartedTick < 0L ? 0L : Math.max(0L, now - waitForStockStartedTick);
+        LOGGER.debug("MasonWallBuilder {}: WAIT diagnostics (availableWalls={}, availableCobble={}, conversionCapable={}, fallbackMode={}, baseThreshold={}, effectiveThreshold={}, waitTicks={}, timeoutEscalated={})",
+                guard.getUuidAsString(),
+                availableWalls,
+                availableCobblestone,
+                conversionCapable,
+                fallbackMode,
+                baseThreshold,
+                effectiveThreshold,
+                waitedTicks,
+                waitForStockTimeoutEscalated);
+        nextWaitForStockDiagnosticTick = now + WAIT_FOR_STOCK_DIAGNOSTIC_INTERVAL_TICKS;
     }
 
     private boolean shouldDebounceReplanForSameCycleIdentity(ServerWorld world, BlockPos anchorPos, int perimeterSignatureHash) {
@@ -3819,8 +3908,12 @@ public class MasonWallBuilderGoal extends Goal {
 
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
                                                             int availableCobblestone,
-                                                            int threshold) {
+                                                            int threshold,
+                                                            boolean allowCobblestoneFallback) {
         if (availableWalls >= threshold) {
+            return WaitForStockDecision.MOVE_TO_SEGMENT;
+        }
+        if (allowCobblestoneFallback && availableWalls + availableCobblestone >= threshold) {
             return WaitForStockDecision.MOVE_TO_SEGMENT;
         }
         if (availableCobblestone > 0) {
