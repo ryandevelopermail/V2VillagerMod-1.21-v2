@@ -116,7 +116,13 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STAGNATION_RETRY_DELTA_THRESHOLD = 4;
     private static final int STAGNATION_PIVOT_RANGE_WIDTH = 8;
     private static final long STAGNATION_PIVOT_INTERVAL_TICKS = 200L;
+    private static final long STAGNATION_PIVOT_MIN_ACTIVE_TICKS = 60L;
+    private static final long STAGNATION_PIVOT_REACTIVATION_COOLDOWN_TICKS = 80L;
     private static final int STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK = 3;
+    private static final int STAGNATION_PIVOT_CLEAR_RETRY_RECOVERY_DELTA = 2;
+    private static final int STAGNATION_PIVOT_CLEAR_HARD_RECOVERY_DELTA = 1;
+    private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
+    private static final long STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS = 20L;
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
     private static final int EARLY_HARD_UNREACHABLE_DISTINCT_TARGET_THRESHOLD = 2;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
@@ -241,6 +247,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int stagnationPivotPlacementStreak = 0;
     private int lastPivotActivationRetryDelta = 0;
     private int lastPivotActivationHardDelta = 0;
+    private long stagnationPivotActivatedAtTick = 0L;
+    private long stagnationPivotCooldownUntilTick = 0L;
+    private long nextPivotLifecycleLogTick = 0L;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -2960,9 +2969,6 @@ public class MasonWallBuilderGoal extends Goal {
         placementsSinceCycleStart++;
         if (stagnationPivotActive) {
             stagnationPivotPlacementStreak++;
-            if (stagnationPivotPlacementStreak >= STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK) {
-                clearStagnationPivot(world, "placement_streak");
-            }
         }
     }
 
@@ -2984,9 +2990,23 @@ public class MasonWallBuilderGoal extends Goal {
         int retryDelta = pathRetriesSinceCycleStart - baseline.pathRetries();
         int hardDelta = hardUnreachableSinceCycleStart - baseline.hardUnreachable();
         if (stagnationPivotActive) {
-            if (now >= stagnationPivotSuppressUntilTick) {
-                clearStagnationPivot(world, "interval_expired");
+            long activeDuration = Math.max(0L, now - stagnationPivotActivatedAtTick);
+            int cooldownRemaining = (int) Math.max(0L, stagnationPivotCooldownUntilTick - now);
+            boolean strongPlacementStreak = stagnationPivotPlacementStreak >= STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK;
+            boolean clearConditionMet = strongPlacementStreak || (activeDuration >= STAGNATION_PIVOT_MIN_ACTIVE_TICKS && hasMeaningfulPivotRecovery(retryDelta, hardDelta));
+            maybeLogPivotLifecycle(world, activeDuration, cooldownRemaining, clearConditionMet, retryDelta, hardDelta);
+            if (clearConditionMet) {
+                clearStagnationPivot(world, strongPlacementStreak ? "placement_streak" : "recovered_window", activeDuration, cooldownRemaining, clearConditionMet);
+                return;
             }
+            if (now >= stagnationPivotSuppressUntilTick) {
+                maybeRefreshStagnationPivotSuppressionRange(world);
+                stagnationPivotSuppressUntilTick = now + STAGNATION_PIVOT_INTERVAL_TICKS;
+            }
+            return;
+        }
+        if (now < stagnationPivotCooldownUntilTick) {
+            maybeLogPivotLifecycle(world, 0L, (int) (stagnationPivotCooldownUntilTick - now), false, retryDelta, hardDelta);
             return;
         }
         if (placementDelta > 0 || (retryDelta + hardDelta) < STAGNATION_RETRY_DELTA_THRESHOLD) {
@@ -2998,11 +3018,14 @@ public class MasonWallBuilderGoal extends Goal {
     private void activateStagnationPivot(ServerWorld world, int retryDelta, int hardDelta) {
         int rangeCenter = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
         int rangeRadius = Math.max(1, STAGNATION_PIVOT_RANGE_WIDTH / 2);
-        stagnationPivotSuppressIndexStart = Math.max(0, rangeCenter - rangeRadius);
-        stagnationPivotSuppressIndexEnd = Math.min(Math.max(0, pendingSegments.size() - 1), rangeCenter + rangeRadius);
+        int suppressionStart = Math.max(0, rangeCenter - rangeRadius);
+        int suppressionEnd = Math.min(Math.max(0, pendingSegments.size() - 1), rangeCenter + rangeRadius);
+        applyPivotSuppressionRange(suppressionStart, suppressionEnd);
         stagnationPivotSuppressUntilTick = world.getTime() + STAGNATION_PIVOT_INTERVAL_TICKS;
         stagnationPivotPlacementStreak = 0;
         stagnationPivotActive = true;
+        stagnationPivotActivatedAtTick = world.getTime();
+        nextPivotLifecycleLogTick = world.getTime();
         lastPivotActivationRetryDelta = retryDelta;
         lastPivotActivationHardDelta = hardDelta;
         releaseLocalSortieClaims(world, "stagnation_pivot");
@@ -3020,18 +3043,23 @@ public class MasonWallBuilderGoal extends Goal {
                 stagnationPivotSuppressUntilTick);
     }
 
-    private void clearStagnationPivot(ServerWorld world, String reason) {
+    private void clearStagnationPivot(ServerWorld world, String reason, long activeDuration, int cooldownRemaining, boolean clearConditionMet) {
         if (!stagnationPivotActive) {
             return;
         }
-        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_cleared reason={} placementStreak={} retryDelta={} hardUnreachableDelta={}",
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_cleared reason={} placementStreak={} retryDelta={} hardUnreachableDelta={} activeDuration={} cooldownRemaining={} clearConditionMet={}",
                 guard.getUuidAsString(),
                 reason,
                 stagnationPivotPlacementStreak,
                 lastPivotActivationRetryDelta,
-                lastPivotActivationHardDelta);
+                lastPivotActivationHardDelta,
+                activeDuration,
+                cooldownRemaining,
+                clearConditionMet);
+        long now = world == null ? 0L : world.getTime();
+        stagnationPivotCooldownUntilTick = now + STAGNATION_PIVOT_REACTIVATION_COOLDOWN_TICKS;
         clearStagnationPivotState();
-        stagnationPivotSuppressUntilTick = world == null ? 0L : world.getTime();
+        stagnationPivotSuppressUntilTick = now;
     }
 
     private void clearStagnationPivotState() {
@@ -3043,6 +3071,64 @@ public class MasonWallBuilderGoal extends Goal {
         stagnationPivotPlacementStreak = 0;
         lastPivotActivationRetryDelta = 0;
         lastPivotActivationHardDelta = 0;
+        stagnationPivotActivatedAtTick = 0L;
+        nextPivotLifecycleLogTick = 0L;
+    }
+
+    private void maybeRefreshStagnationPivotSuppressionRange(ServerWorld world) {
+        int rangeCenter = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
+        int rangeRadius = Math.max(1, STAGNATION_PIVOT_RANGE_WIDTH / 2);
+        int suppressionStart = Math.max(0, rangeCenter - rangeRadius);
+        int suppressionEnd = Math.min(Math.max(0, pendingSegments.size() - 1), rangeCenter + rangeRadius);
+        if (!isMaterialPivotSuppressionShift(suppressionStart, suppressionEnd)) {
+            return;
+        }
+        applyPivotSuppressionRange(suppressionStart, suppressionEnd);
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_suppression_updated suppressedRange={}..{}",
+                guard.getUuidAsString(),
+                stagnationPivotSuppressIndexStart,
+                stagnationPivotSuppressIndexEnd);
+    }
+
+    private void applyPivotSuppressionRange(int suppressionStart, int suppressionEnd) {
+        stagnationPivotSuppressIndexStart = suppressionStart;
+        stagnationPivotSuppressIndexEnd = suppressionEnd;
+    }
+
+    private boolean isMaterialPivotSuppressionShift(int suppressionStart, int suppressionEnd) {
+        if (stagnationPivotSuppressIndexStart < 0 || stagnationPivotSuppressIndexEnd < 0) {
+            return true;
+        }
+        int previousCenter = (stagnationPivotSuppressIndexStart + stagnationPivotSuppressIndexEnd) / 2;
+        int newCenter = (suppressionStart + suppressionEnd) / 2;
+        return Math.abs(newCenter - previousCenter) >= STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT;
+    }
+
+    private boolean hasMeaningfulPivotRecovery(int retryDelta, int hardDelta) {
+        return (lastPivotActivationRetryDelta - retryDelta) >= STAGNATION_PIVOT_CLEAR_RETRY_RECOVERY_DELTA
+                || (lastPivotActivationHardDelta - hardDelta) >= STAGNATION_PIVOT_CLEAR_HARD_RECOVERY_DELTA;
+    }
+
+    private void maybeLogPivotLifecycle(ServerWorld world,
+                                        long activeDuration,
+                                        int cooldownRemaining,
+                                        boolean clearConditionMet,
+                                        int retryDelta,
+                                        int hardDelta) {
+        long now = world.getTime();
+        if (now < nextPivotLifecycleLogTick) {
+            return;
+        }
+        nextPivotLifecycleLogTick = now + STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS;
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_lifecycle active={} activeDuration={} cooldownRemaining={} clearConditionMet={} placementStreak={} retryDelta={} hardUnreachableDelta={}",
+                guard.getUuidAsString(),
+                stagnationPivotActive,
+                activeDuration,
+                cooldownRemaining,
+                clearConditionMet,
+                stagnationPivotPlacementStreak,
+                retryDelta,
+                hardDelta);
     }
 
     private boolean isPivotSuppressedIndex(ServerWorld world, int index, BlockPos segment) {
