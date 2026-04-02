@@ -95,6 +95,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
+    private static final int PLACE_BLOCK_NON_PLACEMENT_ESCALATION_THRESHOLD = 4;
     private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
     private static final long MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS = 200L;
     private static final long SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS = 240L;
@@ -197,6 +198,10 @@ public class MasonWallBuilderGoal extends Goal {
     private int pathRetriesSinceCycleStart = 0;
     private int hardUnreachableSinceCycleStart = 0;
     private int deferredOrSkippedSinceCycleStart = 0;
+    private BlockPos placeBlockFailureTarget = null;
+    private int placeBlockConsecutiveNonPlacementTicks = 0;
+    private String placeBlockLastNonPlacementReason = null;
+    private int lastPeriodicSummaryPlacementCount = 0;
     private boolean firstPlacementLoggedThisCycle = false;
     private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
     private BlockPos watchdogLastRecoverySegment = null;
@@ -353,6 +358,10 @@ public class MasonWallBuilderGoal extends Goal {
         pathRetriesSinceCycleStart = 0;
         hardUnreachableSinceCycleStart = 0;
         deferredOrSkippedSinceCycleStart = 0;
+        placeBlockFailureTarget = null;
+        placeBlockConsecutiveNonPlacementTicks = 0;
+        placeBlockLastNonPlacementReason = null;
+        lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
         watchdogLastRecoverySegment = null;
@@ -430,6 +439,10 @@ public class MasonWallBuilderGoal extends Goal {
         pathRetriesSinceCycleStart = 0;
         hardUnreachableSinceCycleStart = 0;
         deferredOrSkippedSinceCycleStart = 0;
+        placeBlockFailureTarget = null;
+        placeBlockConsecutiveNonPlacementTicks = 0;
+        placeBlockLastNonPlacementReason = null;
+        lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
         watchdogLastRecoverySegment = null;
@@ -1239,12 +1252,41 @@ public class MasonWallBuilderGoal extends Goal {
         lastTriedNavTarget = null;
     }
 
+    private void clearPlaceBlockFailureTracking() {
+        placeBlockFailureTarget = null;
+        placeBlockConsecutiveNonPlacementTicks = 0;
+        placeBlockLastNonPlacementReason = null;
+    }
+
+    private boolean recordPlaceBlockNonPlacementAndMaybeEscalate(ServerWorld world, BlockPos target, String reasonCode) {
+        BlockPos immutableTarget = target.toImmutable();
+        if (!immutableTarget.equals(placeBlockFailureTarget)) {
+            placeBlockFailureTarget = immutableTarget;
+            placeBlockConsecutiveNonPlacementTicks = 0;
+        }
+        placeBlockConsecutiveNonPlacementTicks++;
+        placeBlockLastNonPlacementReason = reasonCode;
+        if (placeBlockConsecutiveNonPlacementTicks < PLACE_BLOCK_NON_PLACEMENT_ESCALATION_THRESHOLD) {
+            return false;
+        }
+
+        localSortieQueue.pollFirst();
+        markSegmentCycleExcluded(world, immutableTarget, "place_block_escalation:" + reasonCode, placeBlockConsecutiveNonPlacementTicks);
+        LOGGER.info("MasonWallBuilder {}: place_block_escalation target={} reason={}",
+                guard.getUuidAsString(),
+                immutableTarget.toShortString(),
+                reasonCode);
+        clearPlaceBlockFailureTracking();
+        return true;
+    }
+
     private void tickPlaceBlock(ServerWorld world) {
         if (maybeAbortSortieForNoNetProgress(world, Stage.PLACE_BLOCK)) {
             return;
         }
         BlockPos target = localSortieQueue.peekFirst();
         if (target == null) {
+            clearPlaceBlockFailureTracking();
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -1255,24 +1297,29 @@ public class MasonWallBuilderGoal extends Goal {
             releaseSegmentClaim(world, target, "already_resolved");
             transitionSegmentState(world, target, SegmentState.PLACED, "already_resolved");
             clearSegmentFailureState(target);
+            clearPlaceBlockFailureTracking();
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
 
         ObstacleClearanceResult clearance = prepareSegmentForPlacement(world, target);
         if (clearance == ObstacleClearanceResult.CLEARED_THIS_TICK) {
+            if (recordPlaceBlockNonPlacementAndMaybeEscalate(world, target, "clearance_retry")) {
+                stage = Stage.MOVE_TO_SEGMENT;
+                return;
+            }
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
         if (clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
                 || clearance == ObstacleClearanceResult.UNBREAKABLE_OBSTACLE) {
-            localSortieQueue.pollFirst();
-            releaseSegmentClaim(world, target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
-                    ? "protected_obstacle"
-                    : "unbreakable_obstacle");
-            markSkippedSegment(world, target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
-                    ? "protected_obstacle"
-                    : "unbreakable_obstacle");
+            String reasonCode = clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
+                    ? "protected_obstacle_repeat"
+                    : "unbreakable_obstacle_repeat";
+            if (recordPlaceBlockNonPlacementAndMaybeEscalate(world, target, reasonCode)) {
+                stage = Stage.MOVE_TO_SEGMENT;
+                return;
+            }
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -1303,6 +1350,7 @@ public class MasonWallBuilderGoal extends Goal {
         // Place the block
         world.setBlockState(target, placementMaterial.blockState());
         recordPlacementProgress(world);
+        clearPlaceBlockFailureTracking();
         if (!firstPlacementLoggedThisCycle) {
             logInfoRateLimited(world, "first_placement", PERIODIC_INFO_INTERVAL_TICKS,
                     "MasonWallBuilder {}: first placement in cycle at {}",
@@ -1491,7 +1539,6 @@ public class MasonWallBuilderGoal extends Goal {
     private void markSkippedSegment(ServerWorld world, BlockPos pos, String reason) {
         BlockPos immutablePos = pos.toImmutable();
         transitionSegmentState(world, immutablePos, SegmentState.SKIPPED_TEMP, reason);
-        deferredOrSkippedSinceCycleStart++;
         registerSegmentFailureMetadata(world, immutablePos, null, reason);
     }
 
@@ -1647,6 +1694,9 @@ public class MasonWallBuilderGoal extends Goal {
     private void transitionSegmentState(ServerWorld world, BlockPos pos, SegmentState nextState, String reason) {
         BlockPos immutablePos = pos.toImmutable();
         SegmentState previous = segmentStates.put(immutablePos, nextState);
+        if (didEnterDeferredOrSkippedState(previous, nextState)) {
+            deferredOrSkippedSinceCycleStart++;
+        }
 
         skippedSegments.remove(immutablePos);
         skippedSegmentReasons.remove(immutablePos);
@@ -1672,6 +1722,18 @@ public class MasonWallBuilderGoal extends Goal {
                     nextState,
                     reason);
         }
+    }
+
+    private boolean didEnterDeferredOrSkippedState(SegmentState previous, SegmentState next) {
+        boolean nextIsDeferredOrSkipped = next == SegmentState.SKIPPED_TEMP
+                || next == SegmentState.HARD_UNREACHABLE
+                || next == SegmentState.DEFERRED;
+        if (!nextIsDeferredOrSkipped) {
+            return false;
+        }
+        return previous != SegmentState.SKIPPED_TEMP
+                && previous != SegmentState.HARD_UNREACHABLE
+                && previous != SegmentState.DEFERRED;
     }
 
     private void queueHardUnreachableRetry(BlockPos pos) {
@@ -2284,7 +2346,6 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
-        deferredOrSkippedSinceCycleStart += deferredCount;
         String completionSignature = "completion_summary|" + buildSweepLogSignature(
                 remainingAfterSweep,
                 filledDuringSweep,
@@ -2468,18 +2529,39 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
         nextPeriodicInfoTick = now + PERIODIC_INFO_INTERVAL_TICKS;
-        logInfoRateLimited(
-                world,
-                "periodic_cycle_summary",
-                PERIODIC_INFO_INTERVAL_TICKS,
-                "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={}",
-                guard.getUuidAsString(),
-                placedSegments,
-                pathRetriesSinceCycleStart,
-                hardUnreachableSinceCycleStart,
-                deferredOrSkippedSinceCycleStart,
-                stage
-        );
+        int placementDeltaSinceLastSummary = placedSegments - lastPeriodicSummaryPlacementCount;
+        if (stage == Stage.PLACE_BLOCK && placementDeltaSinceLastSummary <= 0) {
+            String stalledTarget = placeBlockFailureTarget == null ? "none" : placeBlockFailureTarget.toShortString();
+            String stalledReason = placeBlockLastNonPlacementReason == null ? "none" : placeBlockLastNonPlacementReason;
+            logInfoRateLimited(
+                    world,
+                    "periodic_cycle_summary",
+                    PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={}",
+                    guard.getUuidAsString(),
+                    placedSegments,
+                    pathRetriesSinceCycleStart,
+                    hardUnreachableSinceCycleStart,
+                    deferredOrSkippedSinceCycleStart,
+                    stage,
+                    stalledTarget,
+                    stalledReason
+            );
+        } else {
+            logInfoRateLimited(
+                    world,
+                    "periodic_cycle_summary",
+                    PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={}",
+                    guard.getUuidAsString(),
+                    placedSegments,
+                    pathRetriesSinceCycleStart,
+                    hardUnreachableSinceCycleStart,
+                    deferredOrSkippedSinceCycleStart,
+                    stage
+            );
+        }
+        lastPeriodicSummaryPlacementCount = placedSegments;
     }
 
     private void recordPlacementProgress(ServerWorld world) {
