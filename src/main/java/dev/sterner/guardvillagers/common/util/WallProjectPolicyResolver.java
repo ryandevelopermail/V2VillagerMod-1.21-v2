@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.util;
 
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,11 +20,17 @@ public final class WallProjectPolicyResolver {
     }
 
     public static PolicyDecision resolve(ServerWorld world, BlockPos masonPos, UUID masonUuid) {
-        Optional<BlockPos> anchorPosOpt = VillageAnchorState.get(world.getServer())
-                .getNearestQmChest(world, masonPos, ANCHOR_SEARCH_RADIUS);
+        return resolve(world, masonPos, masonUuid, null);
+    }
+
+    public static PolicyDecision resolve(ServerWorld world, BlockPos masonPos, UUID masonUuid, @Nullable BlockPos preferredAnchor) {
+        Optional<BlockPos> anchorPosOpt = preferredAnchor == null
+                ? VillageAnchorState.get(world.getServer()).getNearestQmChest(world, masonPos, ANCHOR_SEARCH_RADIUS)
+                : Optional.of(preferredAnchor.toImmutable());
+        String anchorSource = preferredAnchor == null ? "nearest" : "preferred";
         if (anchorPosOpt.isEmpty()) {
             PolicyDecision decision = new PolicyDecision(null, false, false, false, PolicyMode.NORMAL);
-            logResolvedPolicy(world, masonUuid, decision);
+            logResolvedPolicy(world, masonUuid, decision, anchorSource);
             return decision;
         }
 
@@ -44,18 +51,18 @@ public final class WallProjectPolicyResolver {
         }
 
         PolicyDecision decision = new PolicyDecision(anchorPos, projectActive, projectComplete, withinPerimeter, mode);
-        logResolvedPolicy(world, masonUuid, decision);
+        logResolvedPolicy(world, masonUuid, decision, anchorSource);
         return decision;
     }
 
-    private static void logResolvedPolicy(ServerWorld world, UUID masonUuid, PolicyDecision decision) {
+    private static void logResolvedPolicy(ServerWorld world, UUID masonUuid, PolicyDecision decision, String anchorSource) {
         String anchorId = decision.anchorPos() == null
                 ? world.getRegistryKey().getValue() + ":none"
                 : world.getRegistryKey().getValue() + ":" + decision.anchorPos().toShortString();
-        String signature = anchorId + "|" + decision.mode().name();
+        String signature = anchorId + "|" + decision.mode().name() + "|" + anchorSource;
         String previous = LAST_LOGGED_POLICY_BY_MASON.put(masonUuid, signature);
         if (!signature.equals(previous)) {
-            LOGGER.debug("WallProjectPolicy anchor={} mason={} mode={}", anchorId, masonUuid, decision.mode());
+            LOGGER.debug("WallProjectPolicy anchor={} mason={} mode={} source={}", anchorId, masonUuid, decision.mode(), anchorSource);
         }
     }
 

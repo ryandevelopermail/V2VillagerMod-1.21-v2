@@ -109,7 +109,7 @@ public class MasonCraftingGoal extends AbstractCraftingGoal<MasonCraftingGoal.Ma
         }
 
         List<MasonRecipe> recipes = new ArrayList<>();
-        WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, villager.getBlockPos(), villager.getUuid());
+        WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, villager.getBlockPos(), villager.getUuid(), chestPos);
         boolean onlyCobblestoneWall = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY;
         boolean suppressCobblestoneWall = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.BLOCK_WALLS;
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
