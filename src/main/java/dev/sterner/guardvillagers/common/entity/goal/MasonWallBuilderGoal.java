@@ -74,7 +74,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double REACH_SQ = 3.5D * 3.5D;
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
-    private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
+    private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 4;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
@@ -349,14 +349,15 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int totalConvertibleWalls = totalWalls + totalCobblestone;
-        if (totalConvertibleWalls < requiredWallSegments) {
-            LOGGER.info("MasonWallBuilder {}: insufficient wall material (walls={}, cobblestone={}, requiredWalls={})",
-                    guard.getUuidAsString(), totalWalls, totalCobblestone, requiredWallSegments);
+        int requiredToStartSession = Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
+        if (totalConvertibleWalls < requiredToStartSession) {
+            LOGGER.info("MasonWallBuilder {}: insufficient wall material to start session (walls={}, cobblestone={}, requiredToStart={}, requiredTotal={})",
+                    guard.getUuidAsString(), totalWalls, totalCobblestone, requiredToStartSession, requiredWallSegments);
             return false;
         }
-        int plannedConversions = Math.max(0, requiredWallSegments - totalWalls);
-        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredSegments={}, wallsAvailable={}, cobblestoneConvertible={}, plannedConversions={})",
-                guard.getUuidAsString(), requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
+        int plannedConversions = Math.max(0, requiredToStartSession - totalWalls);
+        LOGGER.info("MasonWallBuilder {}: readiness check passed (requiredToStart={}, requiredTotal={}, wallsAvailable={}, cobblestoneConvertible={}, plannedStartConversions={})",
+                guard.getUuidAsString(), requiredToStartSession, requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
         // 6. Elect builder — only masons with both chest + job pairing are eligible.
         List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
@@ -619,6 +620,10 @@ public class MasonWallBuilderGoal extends Goal {
         if (isStandable(world, below)) {
             candidates.add(below.toImmutable());
         }
+        BlockPos twoBelow = segmentPos.down(2);
+        if (isStandable(world, twoBelow) && !candidates.contains(twoBelow)) {
+            candidates.add(twoBelow.toImmutable());
+        }
         candidates.add(segmentPos.toImmutable());
         for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
             BlockPos offset = segmentPos.offset(direction);
@@ -636,14 +641,16 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos findNearestStandable(ServerWorld world, BlockPos center, int radius) {
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
-        for (int dx = -radius; dx <= radius; dx++) {
-            for (int dz = -radius; dz <= radius; dz++) {
-                BlockPos candidate = center.add(dx, 0, dz);
-                if (!isStandable(world, candidate)) continue;
-                double distSq = center.getSquaredDistance(candidate);
-                if (distSq < bestDistSq) {
-                    bestDistSq = distSq;
-                    best = candidate.toImmutable();
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos candidate = center.add(dx, dy, dz);
+                    if (!isStandable(world, candidate)) continue;
+                    double distSq = center.getSquaredDistance(candidate);
+                    if (distSq < bestDistSq) {
+                        bestDistSq = distSq;
+                        best = candidate.toImmutable();
+                    }
                 }
             }
         }
@@ -654,7 +661,10 @@ public class MasonWallBuilderGoal extends Goal {
         if (!world.getBlockState(pos).isSolidBlock(world, pos)) return false;
         BlockPos above = pos.up();
         BlockPos twoAbove = above.up();
-        return world.getBlockState(above).isAir() && world.getBlockState(twoAbove).isAir();
+        return world.getBlockState(above).getCollisionShape(world, above).isEmpty()
+                && world.getBlockState(twoAbove).getCollisionShape(world, twoAbove).isEmpty()
+                && world.getFluidState(above).isEmpty()
+                && world.getFluidState(twoAbove).isEmpty();
     }
 
     private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {

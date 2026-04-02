@@ -17,6 +17,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
+import net.minecraft.registry.tag.TagKey;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -1565,6 +1566,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return false;
         }
 
+        // Structure guard: avoid harvesting logs that are integrated into nearby village houses.
+        // In vanilla villages, structural logs are commonly adjacent to planks or other
+        // wood-construction blocks at trunk height / just above trunk height.
+        if (isAdjacentToStructureBlocks(world, pos)) {
+            return false;
+        }
+
         BlockState below = world.getBlockState(pos.down());
         if (below.isIn(BlockTags.LOGS)) {
             return false;
@@ -1586,6 +1594,28 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         return hasMinimumTreeStructureImpl(world, pos);
+    }
+
+    private static boolean isAdjacentToStructureBlocks(ServerWorld world, BlockPos root) {
+        for (BlockPos scanPos : BlockPos.iterate(root.add(-1, 0, -1), root.add(1, 1, 1))) {
+            if (scanPos.equals(root)) {
+                continue;
+            }
+            BlockState neighbor = world.getBlockState(scanPos);
+            if (isStructureTaggedBlock(neighbor, BlockTags.PLANKS)
+                    || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_STAIRS)
+                    || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_SLABS)
+                    || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_DOORS)
+                    || isStructureTaggedBlock(neighbor, BlockTags.FENCES)
+                    || isStructureTaggedBlock(neighbor, BlockTags.FENCE_GATES)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isStructureTaggedBlock(BlockState state, TagKey<net.minecraft.block.Block> tag) {
+        return !state.isAir() && !state.isIn(BlockTags.LOGS) && state.isIn(tag);
     }
 
     private static boolean isNaturalGroundBlock(BlockState state) {
