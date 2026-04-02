@@ -136,8 +136,11 @@ public class MasonWallBuilderGoal extends Goal {
     private String lastSweepLogSignature = null;
     private long lastSweepLogTick = Long.MIN_VALUE;
     private static final long SWEEP_LOG_RATE_LIMIT_TICKS = 200L;
+    private static final long PROGRESS_WATCHDOG_TIMEOUT_TICKS = 600L;
     private int suppressedSweepInfoLogCount = 0;
     private boolean sweepInfoSuppressionDebugEmitted = false;
+    private long lastPlacementTick = -1L;
+    private int placementsSinceCycleStart = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -237,6 +240,8 @@ public class MasonWallBuilderGoal extends Goal {
         lastSweepLogTick = Long.MIN_VALUE;
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
+        lastPlacementTick = world.getTime();
+        placementsSinceCycleStart = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -280,6 +285,8 @@ public class MasonWallBuilderGoal extends Goal {
         lastSweepLogTick = Long.MIN_VALUE;
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
+        lastPlacementTick = -1L;
+        placementsSinceCycleStart = 0;
         activeAnchorPos = null;
         plannedWallBaseY = 0;
         pendingSegments.clear();
@@ -617,6 +624,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickMoveToSegment(ServerWorld world) {
+        maybeRecoverStalledCycle(world, "move_tick");
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             logSortieSummaryIfActive();
@@ -846,6 +854,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         // Place the block
         world.setBlockState(target, placementMaterial.blockState());
+        recordPlacementProgress(world);
         LOGGER.debug("MasonWallBuilder {}: placed {} at {}",
                 guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
@@ -1104,6 +1113,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void runCompletionSweepAndFinish(ServerWorld world) {
+        maybeRecoverStalledCycle(world, "completion_sweep");
         logSortieSummaryIfActive();
         releaseLocalSortieClaims(world, "completion_sweep");
         SweepSummary summary = runCompletionSweep(world);
@@ -1268,6 +1278,7 @@ public class MasonWallBuilderGoal extends Goal {
                 }
 
                 world.setBlockState(segment, material.blockState());
+                recordPlacementProgress(world);
                 filled = true;
                 filledDuringSweep++;
                 break;
@@ -1393,6 +1404,88 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockProceedLogged = false;
         lastLoggedProceedWalls = -1;
         lastLoggedProceedThreshold = -1;
+    }
+
+    private void recordPlacementProgress(ServerWorld world) {
+        lastPlacementTick = world.getTime();
+        placementsSinceCycleStart++;
+    }
+
+    private void maybeRecoverStalledCycle(ServerWorld world, String context) {
+        if (!isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE) {
+            return;
+        }
+        if (placementsSinceCycleStart <= 0 || !hasAnyWallMaterial(world)) {
+            return;
+        }
+        if (lastPlacementTick < 0L || (world.getTime() - lastPlacementTick) < PROGRESS_WATCHDOG_TIMEOUT_TICKS) {
+            return;
+        }
+
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1) {
+            return;
+        }
+
+        int pendingLayerCount = 0;
+        int buildableLayerCount = 0;
+        int skippedLayerCount = 0;
+        for (BlockPos segment : pendingSegments) {
+            if (getSegmentLayer(segment) != activeLayer) continue;
+            if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment))) continue;
+            pendingLayerCount++;
+            if (skippedSegments.contains(segment)) {
+                skippedLayerCount++;
+                continue;
+            }
+            buildableLayerCount++;
+        }
+
+        skippedSegments.removeIf(segment -> getSegmentLayer(segment) == activeLayer);
+        hardUnreachableRetryQueue.clear();
+        releaseLocalSortieClaims(world, "progress_watchdog_recover");
+        localSortieQueue.clear();
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        resetPathFailureState();
+        sortiePlacements = MAX_SEGMENTS_PER_SORTIE;
+        currentSegmentIndex = findNearestPendingSegmentIndex(world, guard.getBlockPos(), activeLayer);
+        lastPlacementTick = world.getTime();
+
+        LOGGER.warn("MasonWallBuilder {}: progress_watchdog_recovery context={} stalledTicks={} placementsSinceCycleStart={} layer={} pending={} buildable={} skipped={} resetIndex={}",
+                guard.getUuidAsString(),
+                context,
+                PROGRESS_WATCHDOG_TIMEOUT_TICKS,
+                placementsSinceCycleStart,
+                activeLayer,
+                pendingLayerCount,
+                buildableLayerCount,
+                skippedLayerCount,
+                currentSegmentIndex);
+    }
+
+    private int findNearestPendingSegmentIndex(ServerWorld world, BlockPos from, int layer) {
+        int nearestIndex = 0;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            BlockPos candidate = pendingSegments.get(i);
+            if (getSegmentLayer(candidate) != layer) continue;
+            if (isGatePosition(candidate) || isPlacedWallBlock(world.getBlockState(candidate))) continue;
+            double distSq = from.getSquaredDistance(candidate);
+            if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                nearestIndex = i;
+            }
+        }
+        return nearestIndex;
+    }
+
+    private boolean hasAnyWallMaterial(ServerWorld world) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) return false;
+        return countItemInChest(world, chestPos, Items.COBBLESTONE_WALL) > 0
+                || countItemInChest(world, chestPos, Items.COBBLESTONE) > 0;
     }
 
     private boolean shouldEmitHardUnreachableInfo(ServerWorld world, BlockPos segmentTarget) {
