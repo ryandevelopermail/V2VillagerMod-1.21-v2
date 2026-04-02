@@ -100,6 +100,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double MEANINGFUL_PROGRESS_DELTA_DIST_SQ = 0.64D;
     private static final int WATCHDOG_REPEAT_SEGMENT_THRESHOLD = 2;
     private static final long WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS = 200L;
+    private static final int WATCHDOG_REPEAT_RECOVERY_TERMINAL_THRESHOLD = 3;
     private static final long SEGMENT_COOLDOWN_TICKS = 120L;
     private static final long NAV_TARGET_BACKOFF_TICKS = 100L;
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
@@ -193,6 +194,8 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos watchdogLastRecoverySegment = null;
     private int watchdogSameRecoverySegmentCount = 0;
     private int watchdogPlacementCountAtLastRecovery = 0;
+    private final Map<BlockPos, Integer> segmentRepeatRecoveryCounts = new HashMap<>();
+    private final Set<BlockPos> cycleExcludedSegments = new HashSet<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -345,6 +348,8 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
+        segmentRepeatRecoveryCounts.clear();
+        cycleExcludedSegments.clear();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -418,6 +423,8 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
+        segmentRepeatRecoveryCounts.clear();
+        cycleExcludedSegments.clear();
         activeAnchorPos = null;
         cycleWallRect = null;
         pendingSegments.clear();
@@ -835,7 +842,8 @@ public class MasonWallBuilderGoal extends Goal {
                         target,
                         "move_livelock_no_meaningful_progress",
                         SEGMENT_COOLDOWN_TICKS,
-                        "cooldown_requeue"
+                        "cooldown_requeue",
+                        -1
                 );
                 activeMoveTarget = null;
                 resetActiveMoveProgressTracking(world);
@@ -1140,7 +1148,7 @@ public class MasonWallBuilderGoal extends Goal {
         localSortieQueue.pollFirst();
         registerSegmentFailureMetadata(world, segmentTarget, attemptedNavTarget, "vegetation_deferred");
         registerNavTargetFailureBackoff(world, segmentTarget, attemptedNavTarget, "vegetation_deferred");
-        requeueSegmentWithCooldown(world, segmentTarget, "vegetation_deferred", VEGETATION_DEFER_COOLDOWN_TICKS, "cooldown_requeue");
+        requeueSegmentWithCooldown(world, segmentTarget, "vegetation_deferred", VEGETATION_DEFER_COOLDOWN_TICKS, "cooldown_requeue", -1);
         activeMoveTarget = null;
         resetActiveMoveProgressTracking(world);
         resetPathFailureState();
@@ -1193,6 +1201,9 @@ public class MasonWallBuilderGoal extends Goal {
             }
             if (deferred.requeueTick() > now) {
                 deferredSegmentRetryQueue.offerLast(deferred);
+                continue;
+            }
+            if (cycleExcludedSegments.contains(deferred.segment().toImmutable())) {
                 continue;
             }
             transitionSegmentState(world, deferred.segment(), SegmentState.AVAILABLE, "deferred_requeue");
@@ -1421,6 +1432,8 @@ public class MasonWallBuilderGoal extends Goal {
         skippedSegmentFailMetadata.remove(immutablePos);
         segmentCooldownUntilTick.remove(immutablePos);
         segmentNavTargetBackoffUntilTick.remove(immutablePos);
+        segmentRepeatRecoveryCounts.remove(immutablePos);
+        cycleExcludedSegments.remove(immutablePos);
     }
 
     private SegmentFailMetadata registerSegmentFailureMetadata(ServerWorld world, BlockPos segment, BlockPos attemptedNavTarget, String reason) {
@@ -1484,7 +1497,7 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private void requeueSegmentWithCooldown(ServerWorld world, BlockPos segment, String reason, long cooldownTicks, String reasonTag) {
+    private void requeueSegmentWithCooldown(ServerWorld world, BlockPos segment, String reason, long cooldownTicks, String reasonTag, int repeatRecoveryCount) {
         long requeueTick = world.getTime() + cooldownTicks;
         BlockPos immutableSegment = segment.toImmutable();
         segmentCooldownUntilTick.put(immutableSegment, requeueTick);
@@ -1492,13 +1505,48 @@ public class MasonWallBuilderGoal extends Goal {
         markSkippedSegment(world, immutableSegment, reason);
         transitionSegmentState(world, immutableSegment, SegmentState.DEFERRED, reasonTag);
         deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(immutableSegment, requeueTick));
-        LOGGER.info("MasonWallBuilder {}: {} segment={} reason={} requeueTick={} cooldownTicks={}",
+        LOGGER.info("MasonWallBuilder {}: {} segment={} reason={} requeueTick={} cooldownTicks={} repeatRecoveryCount={}",
                 guard.getUuidAsString(),
                 reasonTag,
                 immutableSegment.toShortString(),
                 reason,
                 requeueTick,
-                cooldownTicks);
+                cooldownTicks,
+                repeatRecoveryCount);
+    }
+
+    private int incrementRepeatRecoveryCount(BlockPos segment) {
+        BlockPos immutableSegment = segment.toImmutable();
+        int next = segmentRepeatRecoveryCounts.getOrDefault(immutableSegment, 0) + 1;
+        segmentRepeatRecoveryCounts.put(immutableSegment, next);
+        return next;
+    }
+
+    private long computeWatchdogRepeatRecoveryCooldownTicks(int repeatRecoveryCount) {
+        if (repeatRecoveryCount <= 1) {
+            return WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS;
+        }
+        if (repeatRecoveryCount == 2) {
+            return WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS * 3L;
+        }
+        return WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS * 6L;
+    }
+
+    private void markSegmentCycleExcluded(ServerWorld world, BlockPos segment, String reason, int repeatRecoveryCount) {
+        BlockPos immutableSegment = segment.toImmutable();
+        cycleExcludedSegments.add(immutableSegment);
+        segmentCooldownUntilTick.remove(immutableSegment);
+        deferredSegmentRetryQueue.removeIf(deferred -> deferred.segment().equals(immutableSegment));
+        hardUnreachableRetryQueue.remove(immutableSegment);
+        localSortieQueue.remove(immutableSegment);
+        releaseSegmentClaim(world, immutableSegment, "cycle_excluded");
+        markSkippedSegment(world, immutableSegment, reason);
+        transitionSegmentState(world, immutableSegment, SegmentState.HARD_UNREACHABLE, "cycle_excluded");
+        LOGGER.warn("MasonWallBuilder {}: watchdog_cycle_excluded segment={} reason={} repeatRecoveryCount={} requeueSuppressed=true",
+                guard.getUuidAsString(),
+                immutableSegment.toShortString(),
+                reason,
+                repeatRecoveryCount);
     }
 
     private boolean shouldPromoteRepeatedLivelockHardUnreachable(SegmentFailMetadata metadata) {
@@ -1554,6 +1602,9 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void queueHardUnreachableRetry(BlockPos pos) {
         BlockPos immutablePos = pos.toImmutable();
+        if (cycleExcludedSegments.contains(immutablePos)) {
+            return;
+        }
         hardUnreachableRetryQueue.remove(immutablePos);
         hardUnreachableRetryQueue.offerFirst(immutablePos);
     }
@@ -1578,6 +1629,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, segment) != activeLayer) continue;
             SegmentState state = segmentStates.getOrDefault(segment, SegmentState.AVAILABLE);
             if (state != SegmentState.SKIPPED_TEMP && state != SegmentState.HARD_UNREACHABLE) continue;
+            if (cycleExcludedSegments.contains(segment.toImmutable())) continue;
             if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment))) {
                 transitionSegmentState(world, segment, SegmentState.PLACED, "watchdog_resolved");
                 skippedSegmentFailMetadata.remove(segment);
@@ -1616,6 +1668,9 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos immutablePos = pos.toImmutable();
         if (!skippedSegments.contains(immutablePos)) {
             return true;
+        }
+        if (cycleExcludedSegments.contains(immutablePos)) {
+            return false;
         }
         if (isGatePosition(immutablePos) || isPlacedWallBlock(world.getBlockState(immutablePos))) {
             clearSegmentFailureState(immutablePos);
@@ -1929,6 +1984,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isBuildableCandidate(ServerWorld world, BlockPos pos) {
+        if (cycleExcludedSegments.contains(pos.toImmutable())) {
+            return false;
+        }
         if (isSegmentInCooldown(pos, world.getTime())) {
             return false;
         }
@@ -2248,6 +2306,8 @@ public class MasonWallBuilderGoal extends Goal {
         skippedSegmentFailMetadata.clear();
         segmentCooldownUntilTick.clear();
         segmentNavTargetBackoffUntilTick.clear();
+        segmentRepeatRecoveryCounts.clear();
+        cycleExcludedSegments.clear();
         segmentStates.clear();
         nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
@@ -2376,18 +2436,27 @@ public class MasonWallBuilderGoal extends Goal {
 
         if (recoverySegment != null && watchdogSameRecoverySegmentCount >= WATCHDOG_REPEAT_SEGMENT_THRESHOLD) {
             localSortieQueue.remove(recoverySegment);
+            int repeatRecoveryCount = incrementRepeatRecoveryCount(recoverySegment);
             registerSegmentFailureMetadata(world, recoverySegment, null, "watchdog_repeat_recovery_segment");
-            requeueSegmentWithCooldown(
-                    world,
-                    recoverySegment,
-                    "watchdog_repeat_recovery_segment",
-                    WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS,
-                    "cooldown_requeue"
-            );
-            LOGGER.info("MasonWallBuilder {}: watchdog promoted repeat segment {} to deferred cooldown after {} recoveries without placements",
-                    guard.getUuidAsString(),
-                    recoverySegment.toShortString(),
-                    watchdogSameRecoverySegmentCount);
+            if (repeatRecoveryCount >= WATCHDOG_REPEAT_RECOVERY_TERMINAL_THRESHOLD) {
+                markSegmentCycleExcluded(world, recoverySegment, "watchdog_repeat_recovery_terminal", repeatRecoveryCount);
+            } else {
+                long cooldownTicks = computeWatchdogRepeatRecoveryCooldownTicks(repeatRecoveryCount);
+                requeueSegmentWithCooldown(
+                        world,
+                        recoverySegment,
+                        "watchdog_repeat_recovery_segment",
+                        cooldownTicks,
+                        "cooldown_requeue",
+                        repeatRecoveryCount
+                );
+                LOGGER.info("MasonWallBuilder {}: watchdog_repeat_recovery_segment segment={} sameRecoveryHits={} repeatRecoveryCount={} cooldownTicks={}",
+                        guard.getUuidAsString(),
+                        recoverySegment.toShortString(),
+                        watchdogSameRecoverySegmentCount,
+                        repeatRecoveryCount,
+                        cooldownTicks);
+            }
         }
         lastPlacementTick = world.getTime();
 
