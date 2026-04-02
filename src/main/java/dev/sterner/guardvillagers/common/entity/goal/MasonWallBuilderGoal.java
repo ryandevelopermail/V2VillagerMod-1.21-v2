@@ -76,6 +76,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
     private static final int HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 100;
+    private static final int SEGMENT_CLAIM_DURATION_TICKS = 200;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
@@ -114,6 +115,7 @@ public class MasonWallBuilderGoal extends Goal {
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
+    private final Set<BlockPos> claimedSortieSegments = new HashSet<>();
     private boolean sortieActive = false;
     private int sortieActiveLayer = -1;
     private int sortieTransientRetriesAttempted = 0;
@@ -203,6 +205,7 @@ public class MasonWallBuilderGoal extends Goal {
         conversionWaitActive = false;
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         retryLogRateLimitTickBySignature.clear();
+        claimedSortieSegments.clear();
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -239,6 +242,8 @@ public class MasonWallBuilderGoal extends Goal {
         hardRetryPassStarted = false;
         conversionWaitActive = false;
         retryLogRateLimitTickBySignature.clear();
+        releaseAllSegmentClaims(worldOrNull());
+        claimedSortieSegments.clear();
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -620,6 +625,7 @@ public class MasonWallBuilderGoal extends Goal {
                 LOGGER.info("MasonWallBuilder {}: skipping stalled segment {} after {} ticks (distSq={})",
                         guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
                 localSortieQueue.pollFirst();
+                releaseSegmentClaim(world, target, "stalled");
                 skippedSegments.add(target);
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
@@ -724,6 +730,7 @@ public class MasonWallBuilderGoal extends Goal {
                     lastTriedNavTarget == null ? "none" : lastTriedNavTarget.toShortString());
         }
         localSortieQueue.pollFirst();
+        releaseSegmentClaim(world, segmentTarget, "hard_unreachable");
         skippedSegments.add(segmentTarget);
         if (!hardRetryPassStarted) {
             hardUnreachableRetryQueue.offerLast(segmentTarget.toImmutable());
@@ -750,6 +757,7 @@ public class MasonWallBuilderGoal extends Goal {
         // Verify still unbuilt
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
             localSortieQueue.pollFirst();
+            releaseSegmentClaim(world, target, "already_resolved");
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -781,6 +789,7 @@ public class MasonWallBuilderGoal extends Goal {
                 guard.getUuidAsString(), placementMaterial.item().toString(), target.toShortString());
 
         localSortieQueue.pollFirst();
+        releaseSegmentClaim(world, target, "placed");
         sortiePlacements++;
         placedSegments++;
         guard.setWallBuildPending(hasRemainingSegments(world), computeCurrentSortieThreshold(world));
@@ -804,7 +813,10 @@ public class MasonWallBuilderGoal extends Goal {
         while (!localSortieQueue.isEmpty()) {
             BlockPos head = localSortieQueue.peekFirst();
             if (head == null || isGatePosition(head) || isPlacedWallBlock(world.getBlockState(head))) {
-                localSortieQueue.pollFirst();
+                BlockPos removed = localSortieQueue.pollFirst();
+                if (removed != null) {
+                    releaseSegmentClaim(world, removed, "queue_prune");
+                }
             } else {
                 break;
             }
@@ -812,6 +824,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean startNextSortie(ServerWorld world) {
+        releaseLocalSortieClaims(world, "sortie_reset");
         localSortieQueue.clear();
         sortiePlacements = 0;
         sortieCandidatesConsidered = 0;
@@ -901,8 +914,28 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> accepted = new ArrayList<>(bounded.size());
         for (BlockPos segment : bounded) {
             sortieCandidatesConsidered++;
+            if (isSegmentClaimedByOther(world, segment)) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("MasonWallBuilder {}: claim_conflict_skip segment={} anchor={} holder=other_guard",
+                            guard.getUuidAsString(),
+                            segment.toShortString(),
+                            activeAnchorPos == null ? "none" : activeAnchorPos.toShortString());
+                }
+                sortieCandidatesPreflightSkipped++;
+                continue;
+            }
             if (!passesSortiePreflight(world, segment)) {
                 skippedSegments.add(segment.toImmutable());
+                sortieCandidatesPreflightSkipped++;
+                continue;
+            }
+            if (!tryClaimSegment(world, segment)) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("MasonWallBuilder {}: claim_conflict_enqueue segment={} anchor={} holder=other_guard",
+                            guard.getUuidAsString(),
+                            segment.toShortString(),
+                            activeAnchorPos == null ? "none" : activeAnchorPos.toShortString());
+                }
                 sortieCandidatesPreflightSkipped++;
                 continue;
             }
@@ -963,6 +996,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void runCompletionSweepAndFinish(ServerWorld world) {
         logSortieSummaryIfActive();
+        releaseLocalSortieClaims(world, "completion_sweep");
         SweepSummary summary = runCompletionSweep(world);
         if (summary.remainingAfterSweep == 0) {
             completeCycle(CycleEndReason.WALL_COMPLETE);
@@ -1079,6 +1113,7 @@ public class MasonWallBuilderGoal extends Goal {
                 && activeAnchorPos != null) {
             VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
         }
+        releaseAllSegmentClaims(worldOrNull());
         stage = Stage.DONE;
         guard.clearWallSegments();
         guard.setWallBuildPending(false, 0);
@@ -1130,6 +1165,83 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesConsidered = 0;
         sortieCandidatesAccepted = 0;
         sortieCandidatesPreflightSkipped = 0;
+    }
+
+    private boolean isSegmentClaimedByOther(ServerWorld world, BlockPos segment) {
+        if (activeAnchorPos == null) {
+            return false;
+        }
+        VillageWallProjectState state = VillageWallProjectState.get(world.getServer());
+        return state.isSegmentClaimedByOther(
+                world.getRegistryKey(),
+                activeAnchorPos,
+                segment,
+                guard.getUuid(),
+                world.getTime()
+        );
+    }
+
+    private boolean tryClaimSegment(ServerWorld world, BlockPos segment) {
+        if (activeAnchorPos == null) {
+            return true;
+        }
+        VillageWallProjectState state = VillageWallProjectState.get(world.getServer());
+        boolean claimed = state.claimSegment(
+                world.getRegistryKey(),
+                activeAnchorPos,
+                segment,
+                guard.getUuid(),
+                world.getTime(),
+                SEGMENT_CLAIM_DURATION_TICKS
+        );
+        if (claimed) {
+            claimedSortieSegments.add(segment.toImmutable());
+        }
+        return claimed;
+    }
+
+    private void releaseSegmentClaim(ServerWorld world, BlockPos segment, String reason) {
+        if (activeAnchorPos == null || segment == null) {
+            return;
+        }
+        if (!claimedSortieSegments.remove(segment)) {
+            return;
+        }
+        VillageWallProjectState.get(world.getServer()).releaseSegmentClaim(
+                world.getRegistryKey(),
+                activeAnchorPos,
+                segment,
+                guard.getUuid()
+        );
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("MasonWallBuilder {}: segment_claim_release segment={} reason={}",
+                    guard.getUuidAsString(), segment.toShortString(), reason);
+        }
+    }
+
+    private void releaseLocalSortieClaims(ServerWorld world, String reason) {
+        if (claimedSortieSegments.isEmpty()) {
+            return;
+        }
+        List<BlockPos> releaseTargets = new ArrayList<>(claimedSortieSegments);
+        for (BlockPos claimed : releaseTargets) {
+            releaseSegmentClaim(world, claimed, reason);
+        }
+    }
+
+    private void releaseAllSegmentClaims(ServerWorld world) {
+        if (world == null || activeAnchorPos == null) {
+            return;
+        }
+        VillageWallProjectState.get(world.getServer()).releaseClaimsForGuard(
+                world.getRegistryKey(),
+                activeAnchorPos,
+                guard.getUuid()
+        );
+    }
+
+    private ServerWorld worldOrNull() {
+        return guard.getWorld() instanceof ServerWorld serverWorld ? serverWorld : null;
     }
 
     // -------------------------------------------------------------------------
