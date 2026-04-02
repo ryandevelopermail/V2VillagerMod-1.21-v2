@@ -101,6 +101,14 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackVillageMinLargeVillage = 2;
     @Entry(min=1)
     public static int lumberjackVillageMinLargeVillagePopulation = 12;
+    @Entry(min=1)
+    public static int lumberjackNaturalLeafSearchRadius = 3;
+    @Entry(min=1)
+    public static int lumberjackNaturalRequiredLeafCount = 4;
+    @Entry(min=1)
+    public static int lumberjackStructureProximityRadius = 2;
+    @Entry(min=1)
+    public static int lumberjackHousePoiProtectionRadius = 8;
     @Entry
     public static int quartermasterScanRange = 128;
     @Entry
