@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
@@ -126,6 +127,11 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidatesPreflightSkipped = 0;
     private long nextCompletionSweepAllowedTick = 0L;
     private int consecutiveDeferredSweeps = 0;
+    private String lastSweepLogSignature = null;
+    private long lastSweepLogTick = Long.MIN_VALUE;
+    private static final long SWEEP_LOG_RATE_LIMIT_TICKS = 200L;
+    private int suppressedSweepInfoLogCount = 0;
+    private boolean sweepInfoSuppressionDebugEmitted = false;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -218,6 +224,10 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightSkipped = 0;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
+        lastSweepLogSignature = null;
+        lastSweepLogTick = Long.MIN_VALUE;
+        suppressedSweepInfoLogCount = 0;
+        sweepInfoSuppressionDebugEmitted = false;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -255,6 +265,10 @@ public class MasonWallBuilderGoal extends Goal {
         sortieHardUnreachableMarked = 0;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
+        lastSweepLogSignature = null;
+        lastSweepLogTick = Long.MIN_VALUE;
+        suppressedSweepInfoLogCount = 0;
+        sweepInfoSuppressionDebugEmitted = false;
         activeAnchorPos = null;
         plannedWallBaseY = 0;
         pendingSegments.clear();
@@ -1038,9 +1052,19 @@ public class MasonWallBuilderGoal extends Goal {
                         backoffTicks,
                         nextCompletionSweepAllowedTick);
             }
-            LOGGER.info("MasonWallBuilder {}: sweep deferred {} segments, resuming sorties",
-                    guard.getUuidAsString(),
-                    summary.remainingAfterSweep);
+            String sweepDeferredSignature = "deferred_resume|" + buildSweepLogSignature(
+                    summary.remainingAfterSweep,
+                    summary.filledDuringSweep,
+                    summary.deferredCount,
+                    summary.deferredReasons,
+                    summary.irrecoverableCount,
+                    summary.irrecoverableReasons
+            );
+            if (shouldEmitSweepInfoLog(world, sweepDeferredSignature)) {
+                LOGGER.info("MasonWallBuilder {}: sweep deferred {} segments, resuming sorties",
+                        guard.getUuidAsString(),
+                        summary.remainingAfterSweep);
+            }
             stage = canResumeMoveToSegmentFromSweep(world)
                     ? Stage.MOVE_TO_SEGMENT
                     : Stage.WAIT_FOR_WALL_STOCK;
@@ -1099,8 +1123,20 @@ public class MasonWallBuilderGoal extends Goal {
     private SweepSummary runCompletionSweep(ServerWorld world) {
         List<BlockPos> remainingUnbuilt = findRemainingUnbuiltSegments(world);
         if (remainingUnbuilt.isEmpty()) {
-            LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
-                    guard.getUuidAsString(), Map.of());
+            Map<String, Integer> noDeferredReasons = Map.of();
+            Map<String, Integer> noIrrecoverableReasons = Map.of();
+            String completionSignature = "completion_summary|" + buildSweepLogSignature(
+                    0,
+                    0,
+                    0,
+                    noDeferredReasons,
+                    0,
+                    noIrrecoverableReasons
+            );
+            if (shouldEmitSweepInfoLog(world, completionSignature)) {
+                LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
+                        guard.getUuidAsString(), Map.of());
+            }
             return new SweepSummary(0, 0, 0, Map.<String, Integer>of(), 0, Map.<String, Integer>of());
         }
 
@@ -1172,14 +1208,24 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
-        LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
-                guard.getUuidAsString(),
-                remainingUnbuilt.size(),
+        String completionSignature = "completion_summary|" + buildSweepLogSignature(
+                remainingAfterSweep,
                 filledDuringSweep,
                 deferredCount,
                 deferredReasons,
                 irrecoverableCount,
-                irrecoverableReasons);
+                irrecoverableReasons
+        );
+        if (shouldEmitSweepInfoLog(world, completionSignature)) {
+            LOGGER.info("MasonWallBuilder {}: completion sweep summary before={} filled={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
+                    guard.getUuidAsString(),
+                    remainingUnbuilt.size(),
+                    filledDuringSweep,
+                    deferredCount,
+                    deferredReasons,
+                    irrecoverableCount,
+                    irrecoverableReasons);
+        }
 
         return new SweepSummary(
                 remainingAfterSweep,
@@ -1203,6 +1249,49 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void incrementReason(Map<String, Integer> reasons, String reason) {
         reasons.merge(reason, 1, Integer::sum);
+    }
+
+    private String buildSweepLogSignature(
+            int remainingCount,
+            int filledCount,
+            int deferredCount,
+            Map<String, Integer> deferredReasons,
+            int irrecoverableCount,
+            Map<String, Integer> irrecoverableReasons
+    ) {
+        return "remaining=" + remainingCount
+                + "|filled=" + filledCount
+                + "|deferred=" + deferredCount
+                + "|deferredReasonsHash=" + new TreeMap<>(deferredReasons).hashCode()
+                + "|irrecoverable=" + irrecoverableCount
+                + "|irrecoverableReasonsHash=" + new TreeMap<>(irrecoverableReasons).hashCode();
+    }
+
+    private boolean shouldEmitSweepInfoLog(ServerWorld world, String signature) {
+        long now = world.getTime();
+        boolean signatureChanged = !signature.equals(lastSweepLogSignature);
+        boolean outsideRateLimitWindow = now - lastSweepLogTick >= SWEEP_LOG_RATE_LIMIT_TICKS;
+        if (signatureChanged || outsideRateLimitWindow) {
+            if (suppressedSweepInfoLogCount > 0) {
+                LOGGER.debug("MasonWallBuilder {}: suppressed {} sweep INFO logs during rate-limit window",
+                        guard.getUuidAsString(),
+                        suppressedSweepInfoLogCount);
+            }
+            suppressedSweepInfoLogCount = 0;
+            sweepInfoSuppressionDebugEmitted = false;
+            lastSweepLogSignature = signature;
+            lastSweepLogTick = now;
+            return true;
+        }
+
+        suppressedSweepInfoLogCount++;
+        if (!sweepInfoSuppressionDebugEmitted) {
+            LOGGER.debug("MasonWallBuilder {}: suppressing repetitive sweep INFO logs (rateLimit={} ticks)",
+                    guard.getUuidAsString(),
+                    SWEEP_LOG_RATE_LIMIT_TICKS);
+            sweepInfoSuppressionDebugEmitted = true;
+        }
+        return false;
     }
 
     private void completeCycle(CycleEndReason reason) {
