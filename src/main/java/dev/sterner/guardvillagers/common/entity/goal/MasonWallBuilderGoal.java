@@ -203,7 +203,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int watchdogSameRecoverySegmentCount = 0;
     private int watchdogPlacementCountAtLastRecovery = 0;
     private final Map<BlockPos, Integer> segmentRepeatRecoveryCounts = new HashMap<>();
-    private final Set<BlockPos> cycleExcludedSegments = new HashSet<>();
+    private final Map<BlockPos, String> terminalSegmentReasons = new HashMap<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -359,7 +359,7 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
         segmentRepeatRecoveryCounts.clear();
-        cycleExcludedSegments.clear();
+        terminalSegmentReasons.clear();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -436,7 +436,7 @@ public class MasonWallBuilderGoal extends Goal {
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
         segmentRepeatRecoveryCounts.clear();
-        cycleExcludedSegments.clear();
+        terminalSegmentReasons.clear();
         activeAnchorPos = null;
         cycleWallRect = null;
         pendingSegments.clear();
@@ -1218,7 +1218,7 @@ public class MasonWallBuilderGoal extends Goal {
                 deferredSegmentRetryQueue.offerLast(deferred);
                 continue;
             }
-            if (cycleExcludedSegments.contains(deferred.segment().toImmutable())) {
+            if (isTerminalSegment(deferred.segment())) {
                 continue;
             }
             transitionSegmentState(world, deferred.segment(), SegmentState.AVAILABLE, "deferred_requeue");
@@ -1502,7 +1502,7 @@ public class MasonWallBuilderGoal extends Goal {
         segmentCooldownUntilTick.remove(immutablePos);
         segmentNavTargetBackoffUntilTick.remove(immutablePos);
         segmentRepeatRecoveryCounts.remove(immutablePos);
-        cycleExcludedSegments.remove(immutablePos);
+        terminalSegmentReasons.remove(immutablePos);
     }
 
     private SegmentFailMetadata registerSegmentFailureMetadata(ServerWorld world, BlockPos segment, BlockPos attemptedNavTarget, String reason) {
@@ -1603,14 +1603,16 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void markSegmentCycleExcluded(ServerWorld world, BlockPos segment, String reason, int repeatRecoveryCount) {
         BlockPos immutableSegment = segment.toImmutable();
-        cycleExcludedSegments.add(immutableSegment);
+        terminalSegmentReasons.put(immutableSegment, reason);
         segmentCooldownUntilTick.remove(immutableSegment);
         deferredSegmentRetryQueue.removeIf(deferred -> deferred.segment().equals(immutableSegment));
         hardUnreachableRetryQueue.remove(immutableSegment);
         localSortieQueue.remove(immutableSegment);
         releaseSegmentClaim(world, immutableSegment, "cycle_excluded");
-        markSkippedSegment(world, immutableSegment, reason);
-        transitionSegmentState(world, immutableSegment, SegmentState.HARD_UNREACHABLE, "cycle_excluded");
+        skippedSegmentFailMetadata.remove(immutableSegment);
+        skippedSegments.remove(immutableSegment);
+        skippedSegmentReasons.remove(immutableSegment);
+        transitionSegmentState(world, immutableSegment, SegmentState.CYCLE_EXCLUDED, "cycle_excluded");
         LOGGER.warn("MasonWallBuilder {}: watchdog_cycle_excluded segment={} reason={} repeatRecoveryCount={} requeueSuppressed=true",
                 guard.getUuidAsString(),
                 immutableSegment.toShortString(),
@@ -1654,6 +1656,9 @@ public class MasonWallBuilderGoal extends Goal {
             skippedSegments.add(immutablePos);
             skippedSegmentReasons.put(immutablePos, reason);
         }
+        if (nextState != SegmentState.CYCLE_EXCLUDED && nextState != SegmentState.IRRECOVERABLE) {
+            terminalSegmentReasons.remove(immutablePos);
+        }
 
         if (nextState != SegmentState.CLAIMED) {
             claimedSortieSegments.remove(immutablePos);
@@ -1671,7 +1676,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void queueHardUnreachableRetry(BlockPos pos) {
         BlockPos immutablePos = pos.toImmutable();
-        if (cycleExcludedSegments.contains(immutablePos)) {
+        if (isTerminalSegment(immutablePos)) {
             return;
         }
         hardUnreachableRetryQueue.remove(immutablePos);
@@ -1698,7 +1703,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, segment) != activeLayer) continue;
             SegmentState state = segmentStates.getOrDefault(segment, SegmentState.AVAILABLE);
             if (state != SegmentState.SKIPPED_TEMP && state != SegmentState.HARD_UNREACHABLE) continue;
-            if (cycleExcludedSegments.contains(segment.toImmutable())) continue;
+            if (isTerminalSegment(segment)) continue;
             if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment))) {
                 transitionSegmentState(world, segment, SegmentState.PLACED, "watchdog_resolved");
                 skippedSegmentFailMetadata.remove(segment);
@@ -1738,7 +1743,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (!skippedSegments.contains(immutablePos)) {
             return true;
         }
-        if (cycleExcludedSegments.contains(immutablePos)) {
+        if (isTerminalSegment(immutablePos)) {
             return false;
         }
         if (isGatePosition(immutablePos) || isPlacedWallBlock(world.getBlockState(immutablePos))) {
@@ -2054,7 +2059,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isBuildableCandidate(ServerWorld world, BlockPos pos) {
-        if (cycleExcludedSegments.contains(pos.toImmutable())) {
+        if (isTerminalSegment(pos)) {
             return false;
         }
         if (isSegmentInCooldown(pos, world.getTime())) {
@@ -2165,22 +2170,25 @@ public class MasonWallBuilderGoal extends Goal {
 
     private SweepSummary runCompletionSweep(ServerWorld world) {
         List<BlockPos> remainingUnbuilt = findRemainingUnbuiltSegments(world);
+        Map<String, Integer> terminalReasons = summarizeTerminalSegmentReasons();
+        int terminalCount = terminalSegmentReasons.size();
         if (remainingUnbuilt.isEmpty()) {
             Map<String, Integer> noDeferredReasons = Map.of();
-            Map<String, Integer> noIrrecoverableReasons = Map.of();
             String completionSignature = "completion_summary|" + buildSweepLogSignature(
                     0,
                     0,
                     0,
                     noDeferredReasons,
-                    0,
-                    noIrrecoverableReasons
+                    terminalCount,
+                    terminalReasons
             );
             if (shouldEmitSweepInfoLog(world, completionSignature)) {
-                LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
-                        guard.getUuidAsString(), Map.of());
+                LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable={} reasons={}",
+                        guard.getUuidAsString(),
+                        terminalCount,
+                        terminalReasons);
             }
-            return new SweepSummary(0, 0, 0, Map.<String, Integer>of(), 0, Map.<String, Integer>of());
+            return new SweepSummary(0, 0, 0, Map.<String, Integer>of(), terminalCount, terminalReasons);
         }
 
         int filledDuringSweep = 0;
@@ -2263,7 +2271,16 @@ public class MasonWallBuilderGoal extends Goal {
             if (!filled) {
                 irrecoverableCount++;
                 incrementReason(irrecoverableReasons, failureReason);
+                terminalSegmentReasons.put(segment.toImmutable(), failureReason);
+                transitionSegmentState(world, segment, SegmentState.IRRECOVERABLE, "completion_sweep_irrecoverable");
             }
+        }
+
+        if (!terminalReasons.isEmpty()) {
+            for (Map.Entry<String, Integer> entry : terminalReasons.entrySet()) {
+                irrecoverableReasons.merge(entry.getKey(), entry.getValue(), Integer::sum);
+            }
+            irrecoverableCount += terminalCount;
         }
 
         int remainingAfterSweep = findRemainingUnbuiltSegments(world).size();
@@ -2302,9 +2319,26 @@ public class MasonWallBuilderGoal extends Goal {
         for (BlockPos pos : pendingSegments) {
             if (isGatePosition(pos)) continue;
             if (isPlacedWallBlock(world.getBlockState(pos))) continue;
+            if (isTerminalSegment(pos)) continue;
             remaining.add(pos);
         }
         return remaining;
+    }
+
+    private boolean isTerminalSegment(BlockPos pos) {
+        SegmentState state = segmentStates.getOrDefault(pos.toImmutable(), SegmentState.AVAILABLE);
+        return state == SegmentState.CYCLE_EXCLUDED || state == SegmentState.IRRECOVERABLE;
+    }
+
+    private Map<String, Integer> summarizeTerminalSegmentReasons() {
+        if (terminalSegmentReasons.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Integer> reasons = new HashMap<>();
+        for (String reason : terminalSegmentReasons.values()) {
+            incrementReason(reasons, reason == null ? "terminal_unspecified" : reason);
+        }
+        return Map.copyOf(reasons);
     }
 
     private void incrementReason(Map<String, Integer> reasons, String reason) {
@@ -2377,7 +2411,7 @@ public class MasonWallBuilderGoal extends Goal {
         segmentCooldownUntilTick.clear();
         segmentNavTargetBackoffUntilTick.clear();
         segmentRepeatRecoveryCounts.clear();
-        cycleExcludedSegments.clear();
+        terminalSegmentReasons.clear();
         segmentStates.clear();
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
@@ -2474,7 +2508,7 @@ public class MasonWallBuilderGoal extends Goal {
         int skippedLayerCount = 0;
         for (BlockPos segment : pendingSegments) {
             if (getSegmentLayer(world, segment) != activeLayer) continue;
-            if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment))) continue;
+            if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment)) || isTerminalSegment(segment)) continue;
             pendingLayerCount++;
             if (skippedSegments.contains(segment)) {
                 skippedLayerCount++;
@@ -2551,7 +2585,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos candidate = pendingSegments.get(i);
             if (getSegmentLayer(world, candidate) != layer) continue;
-            if (isGatePosition(candidate) || isPlacedWallBlock(world.getBlockState(candidate))) continue;
+            if (isGatePosition(candidate) || isPlacedWallBlock(world.getBlockState(candidate)) || isTerminalSegment(candidate)) continue;
             double distSq = from.getSquaredDistance(candidate);
             if (distSq < bestDistSq) {
                 bestDistSq = distSq;
@@ -3777,6 +3811,8 @@ public class MasonWallBuilderGoal extends Goal {
         DEFERRED,
         SKIPPED_TEMP,
         HARD_UNREACHABLE,
+        CYCLE_EXCLUDED,
+        IRRECOVERABLE,
         PLACED
     }
 
