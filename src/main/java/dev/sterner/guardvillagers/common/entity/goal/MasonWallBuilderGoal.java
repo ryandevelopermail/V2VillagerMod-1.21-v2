@@ -74,6 +74,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double REACH_SQ = 3.5D * 3.5D;
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
+    private static final int HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 100;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 2;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
@@ -111,6 +112,12 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean conversionWaitActive = false;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
+    private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
+    private boolean sortieActive = false;
+    private int sortieActiveLayer = -1;
+    private int sortieTransientRetriesAttempted = 0;
+    private int sortieFallbackTargetsTried = 0;
+    private int sortieHardUnreachableMarked = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -191,6 +198,12 @@ public class MasonWallBuilderGoal extends Goal {
         hardRetryPassStarted = false;
         conversionWaitActive = false;
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
+        retryLogRateLimitTickBySignature.clear();
+        sortieActive = false;
+        sortieActiveLayer = -1;
+        sortieTransientRetriesAttempted = 0;
+        sortieFallbackTargetsTried = 0;
+        sortieHardUnreachableMarked = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -218,6 +231,12 @@ public class MasonWallBuilderGoal extends Goal {
         hardUnreachableRetryQueue.clear();
         hardRetryPassStarted = false;
         conversionWaitActive = false;
+        retryLogRateLimitTickBySignature.clear();
+        sortieActive = false;
+        sortieActiveLayer = -1;
+        sortieTransientRetriesAttempted = 0;
+        sortieFallbackTargetsTried = 0;
+        sortieHardUnreachableMarked = 0;
         activeAnchorPos = null;
         plannedWallBaseY = 0;
         pendingSegments.clear();
@@ -543,6 +562,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void tickMoveToSegment(ServerWorld world) {
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
+            logSortieSummaryIfActive();
             if (!startNextSortie(world)) {
                 runCompletionSweepAndFinish(world);
                 return;
@@ -668,14 +688,16 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentTarget);
         if (failedPathAttempts < candidates.size()) {
             BlockPos fallback = candidates.get(failedPathAttempts);
-            LOGGER.info("MasonWallBuilder {}: fallback_target_used segment={} attempted={} fallback={}",
+            sortieFallbackTargetsTried++;
+            LOGGER.debug("MasonWallBuilder {}: fallback_target_used segment={} attempted={} fallback={}",
                     guard.getUuidAsString(), segmentTarget.toShortString(),
                     attemptedNavTarget.toShortString(), fallback.toShortString());
         }
 
         boolean allFallbackTargetsFailed = failedPathAttempts >= candidates.size();
         if (!(allFallbackTargetsFailed && shouldMarkHardUnreachable(failedPathAttempts, firstPathFailureTick, world.getTime()))) {
-            LOGGER.info("MasonWallBuilder {}: transient_path_fail_retrying segment={} attempt={} navTarget={} windowTicks={} allFallbacksFailed={}",
+            sortieTransientRetriesAttempted++;
+            LOGGER.debug("MasonWallBuilder {}: transient_path_fail_retrying segment={} attempt={} navTarget={} windowTicks={} allFallbacksFailed={}",
                     guard.getUuidAsString(),
                     segmentTarget.toShortString(),
                     failedPathAttempts,
@@ -685,12 +707,15 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
-        LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
-                guard.getUuidAsString(),
-                segmentTarget.toShortString(),
-                failedPathAttempts,
-                firstPathFailureTick,
-                lastTriedNavTarget == null ? "none" : lastTriedNavTarget.toShortString());
+        sortieHardUnreachableMarked++;
+        if (shouldEmitHardUnreachableInfo(world, segmentTarget)) {
+            LOGGER.info("MasonWallBuilder {}: hard_unreachable_after_retries segment={} attempts={} firstFailTick={} lastNavTarget={}",
+                    guard.getUuidAsString(),
+                    segmentTarget.toShortString(),
+                    failedPathAttempts,
+                    firstPathFailureTick,
+                    lastTriedNavTarget == null ? "none" : lastTriedNavTarget.toShortString());
+        }
         localSortieQueue.pollFirst();
         skippedSegments.add(segmentTarget);
         if (!hardRetryPassStarted) {
@@ -804,6 +829,11 @@ public class MasonWallBuilderGoal extends Goal {
             return hasRemainingSegments(world) && startNextSortie(world);
         }
         localSortieQueue.addAll(anchorBatch);
+        sortieActive = true;
+        sortieActiveLayer = activeLayer;
+        sortieTransientRetriesAttempted = 0;
+        sortieFallbackTargetsTried = 0;
+        sortieHardUnreachableMarked = 0;
         return true;
     }
 
@@ -898,6 +928,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void runCompletionSweepAndFinish(ServerWorld world) {
+        logSortieSummaryIfActive();
         SweepSummary summary = runCompletionSweep(world);
         if (summary.remainingAfterSweep == 0) {
             completeCycle(CycleEndReason.WALL_COMPLETE);
@@ -1007,6 +1038,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void completeCycle(CycleEndReason reason) {
+        logSortieSummaryIfActive();
         cycleEndReason = reason;
         if (reason == CycleEndReason.WALL_COMPLETE
                 && guard.getWorld() instanceof ServerWorld world
@@ -1021,6 +1053,39 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
+    }
+
+    private boolean shouldEmitHardUnreachableInfo(ServerWorld world, BlockPos segmentTarget) {
+        String key = buildRetryLogSignature(segmentTarget);
+        long now = world.getTime();
+        Long last = retryLogRateLimitTickBySignature.get(key);
+        if (last != null && (now - last) < HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS) {
+            return false;
+        }
+        retryLogRateLimitTickBySignature.put(key, now);
+        return true;
+    }
+
+    private String buildRetryLogSignature(BlockPos segmentPos) {
+        String anchor = activeAnchorPos == null ? "none" : activeAnchorPos.toShortString();
+        int layer = getSegmentLayer(segmentPos);
+        return guard.getUuidAsString() + "|" + anchor + "|layer=" + layer;
+    }
+
+    private void logSortieSummaryIfActive() {
+        if (!sortieActive) return;
+        LOGGER.info("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hardUnreachableMarked={}",
+                guard.getUuidAsString(),
+                activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
+                sortieActiveLayer,
+                sortieTransientRetriesAttempted,
+                sortieFallbackTargetsTried,
+                sortieHardUnreachableMarked);
+        sortieActive = false;
+        sortieActiveLayer = -1;
+        sortieTransientRetriesAttempted = 0;
+        sortieFallbackTargetsTried = 0;
+        sortieHardUnreachableMarked = 0;
     }
 
     // -------------------------------------------------------------------------
