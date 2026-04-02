@@ -1069,7 +1069,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (remainingUnbuilt.isEmpty()) {
             LOGGER.info("MasonWallBuilder {}: completion sweep summary before=0 filled=0 irrecoverable=0 reasons={}",
                     guard.getUuidAsString(), Map.of());
-            return new SweepSummary(0, 0, 0, Map.of());
+            return new SweepSummary(0, 0, 0, Map.<String, Integer>of(), 0, Map.<String, Integer>of());
         }
 
         int filledDuringSweep = 0;
