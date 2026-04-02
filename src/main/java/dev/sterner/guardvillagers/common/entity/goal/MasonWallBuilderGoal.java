@@ -7,7 +7,9 @@ import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.BedBlock;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.DoorBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.ai.pathing.Path;
@@ -86,6 +88,7 @@ public class MasonWallBuilderGoal extends Goal {
     static final boolean ALLOW_COBBLESTONE_PLACEMENT_FALLBACK = false;
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
+    private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final int STRUCTURE_SAMPLE_HORIZONTAL_RADIUS = 7;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
@@ -133,6 +136,11 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidatesPreflightPass = 0;
     private int sortieCandidatesPreflightRejected = 0;
     private int sortieCandidatesFallbackAccepted = 0;
+    private int obstaclesCleared = 0;
+    private int protectedObstaclesSkipped = 0;
+    private int unbreakableObstaclesSkipped = 0;
+    private long obstacleBreakTick = Long.MIN_VALUE;
+    private int obstacleBreaksThisTick = 0;
     private long nextCompletionSweepAllowedTick = 0L;
     private int consecutiveDeferredSweeps = 0;
     private String lastSweepLogSignature = null;
@@ -143,6 +151,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean sweepInfoSuppressionDebugEmitted = false;
     private long lastPlacementTick = -1L;
     private int placementsSinceCycleStart = 0;
+    private final Map<BlockPos, String> skippedSegmentReasons = new HashMap<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -218,6 +227,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastTriedNavTarget = null;
         localSortieQueue.clear();
         skippedSegments.clear();
+        skippedSegmentReasons.clear();
         hardUnreachableRetryQueue.clear();
         sortiePlacements = 0;
         placedSegments = 0;
@@ -238,6 +248,11 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        obstaclesCleared = 0;
+        protectedObstaclesSkipped = 0;
+        unbreakableObstaclesSkipped = 0;
+        obstacleBreakTick = Long.MIN_VALUE;
+        obstacleBreaksThisTick = 0;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
         lastSweepLogSignature = null;
@@ -247,6 +262,7 @@ public class MasonWallBuilderGoal extends Goal {
         ServerWorld world = worldOrNull();
         lastPlacementTick = world != null ? world.getTime() : 0L;
         placementsSinceCycleStart = 0;
+        skippedSegmentReasons.clear();
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -700,7 +716,7 @@ public class MasonWallBuilderGoal extends Goal {
                         guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
                 localSortieQueue.pollFirst();
                 releaseSegmentClaim(world, target, "stalled");
-                skippedSegments.add(target);
+                markSkippedSegment(target, "stalled_segment");
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
                 lastMoveDistSq = Double.MAX_VALUE;
@@ -814,7 +830,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         localSortieQueue.pollFirst();
         releaseSegmentClaim(world, segmentTarget, "hard_unreachable");
-        skippedSegments.add(segmentTarget);
+        markSkippedSegment(segmentTarget, "hard_unreachable");
         if (!hardRetryPassStarted) {
             hardUnreachableRetryQueue.offerLast(segmentTarget.toImmutable());
         }
@@ -841,6 +857,24 @@ public class MasonWallBuilderGoal extends Goal {
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
             localSortieQueue.pollFirst();
             releaseSegmentClaim(world, target, "already_resolved");
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
+        ObstacleClearanceResult clearance = prepareSegmentForPlacement(world, target);
+        if (clearance == ObstacleClearanceResult.CLEARED_THIS_TICK) {
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+        if (clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
+                || clearance == ObstacleClearanceResult.UNBREAKABLE_OBSTACLE) {
+            localSortieQueue.pollFirst();
+            releaseSegmentClaim(world, target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
+                    ? "protected_obstacle"
+                    : "unbreakable_obstacle");
+            markSkippedSegment(target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
+                    ? "protected_obstacle"
+                    : "unbreakable_obstacle");
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -893,6 +927,111 @@ public class MasonWallBuilderGoal extends Goal {
             LOGGER.info("MasonWallBuilder {}: placement progress {}/{} ({}%)",
                     guard.getUuidAsString(), placed, total, percent);
         }
+    }
+
+    private ObstacleClearanceResult prepareSegmentForPlacement(ServerWorld world, BlockPos target) {
+        int layer = getSegmentLayer(world, target);
+        if (layer <= 0) {
+            return ObstacleClearanceResult.UNBREAKABLE_OBSTACLE;
+        }
+
+        int topClearanceY = target.getY() + Math.max(0, 3 - layer);
+        for (int y = target.getY(); y <= topClearanceY; y++) {
+            BlockPos obstructionPos = new BlockPos(target.getX(), y, target.getZ());
+            if (isPlacedWallBlock(world.getBlockState(obstructionPos))) {
+                continue;
+            }
+            ObstacleClearanceResult result = clearObstacleAt(world, target, obstructionPos);
+            if (result != ObstacleClearanceResult.CLEAR) {
+                return result;
+            }
+        }
+        return ObstacleClearanceResult.CLEAR;
+    }
+
+    private ObstacleClearanceResult clearObstacleAt(ServerWorld world, BlockPos segmentPos, BlockPos obstaclePos) {
+        BlockState state = world.getBlockState(obstaclePos);
+        if (state.isAir()) {
+            return ObstacleClearanceResult.CLEAR;
+        }
+        if (state.getBlock() == Blocks.COBBLESTONE_WALL) {
+            return ObstacleClearanceResult.CLEAR;
+        }
+        if (isProtectedObstacle(world, obstaclePos, state)) {
+            protectedObstaclesSkipped++;
+            return ObstacleClearanceResult.PROTECTED_OBSTACLE;
+        }
+        if (!isBreakableWallObstacle(world, obstaclePos, state)) {
+            unbreakableObstaclesSkipped++;
+            return ObstacleClearanceResult.UNBREAKABLE_OBSTACLE;
+        }
+        if (!canBreakObstacleThisTick(world)) {
+            return ObstacleClearanceResult.CLEARED_THIS_TICK;
+        }
+
+        boolean broken = world.breakBlock(obstaclePos, true, guard);
+        if (!broken && !world.isAir(obstaclePos)) {
+            unbreakableObstaclesSkipped++;
+            return ObstacleClearanceResult.UNBREAKABLE_OBSTACLE;
+        }
+        obstaclesCleared++;
+        LOGGER.debug("MasonWallBuilder {}: cleared_obstacle segment={} obstacle={} block={}",
+                guard.getUuidAsString(),
+                segmentPos.toShortString(),
+                obstaclePos.toShortString(),
+                state.getBlock().getTranslationKey());
+        return ObstacleClearanceResult.CLEARED_THIS_TICK;
+    }
+
+    private boolean isProtectedObstacle(ServerWorld world, BlockPos pos, BlockState state) {
+        if (isBlacklistedObstacle(state)) {
+            return true;
+        }
+        if (state.isOf(Blocks.STRUCTURE_BLOCK) || state.isOf(Blocks.STRUCTURE_VOID) || state.isOf(Blocks.JIGSAW)) {
+            return true;
+        }
+        return cachedPoiFootprintSignature != null
+                && cachedPoiFootprintSignature.protectedStructureColumns().contains(packXZ(pos.getX(), pos.getZ()));
+    }
+
+    private boolean isBlacklistedObstacle(BlockState state) {
+        if (state.getBlock() instanceof ChestBlock) return true;
+        if (state.getBlock() instanceof BedBlock) return true;
+        if (state.getBlock() instanceof DoorBlock) return true;
+        return state.isOf(Blocks.BARREL)
+                || state.isOf(Blocks.LECTERN)
+                || state.isOf(Blocks.CARTOGRAPHY_TABLE)
+                || state.isOf(Blocks.SMITHING_TABLE)
+                || state.isOf(Blocks.FLETCHING_TABLE)
+                || state.isOf(Blocks.STONECUTTER)
+                || state.isOf(Blocks.BLAST_FURNACE)
+                || state.isOf(Blocks.SMOKER)
+                || state.isOf(Blocks.GRINDSTONE)
+                || state.isOf(Blocks.LOOM)
+                || state.isOf(Blocks.COMPOSTER);
+    }
+
+    private boolean isBreakableWallObstacle(ServerWorld world, BlockPos pos, BlockState state) {
+        if (!state.isIn(BlockTags.PICKAXE_MINEABLE)) return false;
+        return state.getHardness(world, pos) >= 0.0F;
+    }
+
+    private boolean canBreakObstacleThisTick(ServerWorld world) {
+        long now = world.getTime();
+        if (obstacleBreakTick != now) {
+            obstacleBreakTick = now;
+            obstacleBreaksThisTick = 0;
+        }
+        if (obstacleBreaksThisTick >= MAX_OBSTACLE_BREAKS_PER_TICK) {
+            return false;
+        }
+        obstacleBreaksThisTick++;
+        return true;
+    }
+
+    private void markSkippedSegment(BlockPos pos, String reason) {
+        skippedSegments.add(pos);
+        skippedSegmentReasons.put(pos.toImmutable(), reason);
     }
 
     private void pruneSortieQueue(ServerWorld world) {
@@ -948,7 +1087,7 @@ public class MasonWallBuilderGoal extends Goal {
                 selectedBatch = anchorBatch;
                 break;
             }
-            skippedSegments.add(anchor);
+            markSkippedSegment(anchor, "anchor_no_candidates");
             anchorAttempts++;
         }
         if (selectedBatch.isEmpty() || selectedAnchor == null) {
@@ -983,6 +1122,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
             if (retryCandidate == null) continue;
             skippedSegments.remove(retryCandidate);
+            skippedSegmentReasons.remove(retryCandidate);
             if (getSegmentLayer(world, retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
@@ -1255,6 +1395,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         for (BlockPos segment : remainingUnbuilt) {
             skippedSegments.remove(segment);
+            skippedSegmentReasons.remove(segment);
             hardUnreachableRetryQueue.remove(segment);
 
             if (isPlacedWallBlock(world.getBlockState(segment))) {
@@ -1289,6 +1430,22 @@ public class MasonWallBuilderGoal extends Goal {
                     deferredCount++;
                     incrementReason(deferredReasons, "out_of_reach");
                     deferred = true;
+                    break;
+                }
+
+                ObstacleClearanceResult clearance = prepareSegmentForPlacement(world, segment);
+                if (clearance == ObstacleClearanceResult.CLEARED_THIS_TICK) {
+                    deferredCount++;
+                    incrementReason(deferredReasons, "deferred_obstacle_clear");
+                    deferred = true;
+                    break;
+                }
+                if (clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE) {
+                    failureReason = "protected_obstacle";
+                    break;
+                }
+                if (clearance == ObstacleClearanceResult.UNBREAKABLE_OBSTACLE) {
+                    failureReason = "unbreakable_obstacle";
                     break;
                 }
 
@@ -1464,6 +1621,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         skippedSegments.removeIf(segment -> getSegmentLayer(world, segment) == activeLayer);
+        skippedSegmentReasons.entrySet().removeIf(entry -> getSegmentLayer(world, entry.getKey()) == activeLayer);
         hardUnreachableRetryQueue.clear();
         releaseLocalSortieClaims(world, "progress_watchdog_recover");
         localSortieQueue.clear();
@@ -1529,13 +1687,16 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void logSortieSummaryIfActive() {
         if (!sortieActive) return;
-        LOGGER.info("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={}",
+        LOGGER.info("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
                 sortieTransientRetriesAttempted,
                 sortieFallbackTargetsTried,
-                sortieHardUnreachableMarked);
+                sortieHardUnreachableMarked,
+                obstaclesCleared,
+                protectedObstaclesSkipped,
+                unbreakableObstaclesSkipped);
         LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflight_pass={} preflightRejected={} preflight_fail_fallback_accept={} hard_unreachable_marked={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
@@ -1556,6 +1717,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        obstaclesCleared = 0;
+        protectedObstaclesSkipped = 0;
+        unbreakableObstaclesSkipped = 0;
     }
 
     private boolean isSegmentClaimedByOther(ServerWorld world, BlockPos segment) {
@@ -2359,6 +2523,13 @@ public class MasonWallBuilderGoal extends Goal {
         MOVE_TO_SEGMENT,
         PLACE_BLOCK,
         DONE
+    }
+
+    private enum ObstacleClearanceResult {
+        CLEAR,
+        CLEARED_THIS_TICK,
+        PROTECTED_OBSTACLE,
+        UNBREAKABLE_OBSTACLE
     }
 
     private record WallRect(int minX, int minZ, int maxX, int maxZ, int y) {}
