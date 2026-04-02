@@ -111,7 +111,6 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortiePlacements = 0;
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
-    private int plannedWallBaseY = 0;
     private boolean hardRetryPassStarted = false;
     private boolean conversionWaitActive = false;
     private boolean waitForStockProceedLogged = false;
@@ -289,7 +288,6 @@ public class MasonWallBuilderGoal extends Goal {
         lastPlacementTick = -1L;
         placementsSinceCycleStart = 0;
         activeAnchorPos = null;
-        plannedWallBaseY = 0;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -517,7 +515,6 @@ public class MasonWallBuilderGoal extends Goal {
 
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
-        plannedWallBaseY = rect.y();
         activeAnchorPos = anchorPos.toImmutable();
         guard.setWallSegments(pendingSegments);
 
@@ -968,13 +965,13 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
             if (retryCandidate == null) continue;
             skippedSegments.remove(retryCandidate);
-            if (getSegmentLayer(retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
+            if (getSegmentLayer(world, retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
         }
         while (currentSegmentIndex < pendingSegments.size()) {
             BlockPos candidate = pendingSegments.get(currentSegmentIndex++);
-            if (getSegmentLayer(candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
+            if (getSegmentLayer(world, candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
                 return candidate;
             }
         }
@@ -985,7 +982,7 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos best = null;
         double bestDistSq = Double.MAX_VALUE;
         for (BlockPos pos : pendingSegments) {
-            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             double distSq = from.getSquaredDistance(pos);
             if (distSq < bestDistSq) {
@@ -1000,7 +997,7 @@ public class MasonWallBuilderGoal extends Goal {
         int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
         List<BlockPos> local = new ArrayList<>();
         for (BlockPos pos : pendingSegments) {
-            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (!isBuildableCandidate(world, pos)) continue;
             if (anchor.getSquaredDistance(pos) <= radiusSq) {
                 local.add(pos);
@@ -1081,23 +1078,28 @@ public class MasonWallBuilderGoal extends Goal {
         if (activeLayer < 1) return 1;
         int remaining = 0;
         for (BlockPos pos : pendingSegments) {
-            if (getSegmentLayer(pos) != activeLayer) continue;
+            if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isBuildableCandidate(world, pos)) remaining++;
         }
         return Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, remaining));
     }
 
     private int findLowestPendingLayer(ServerWorld world) {
+        int lowestLayer = Integer.MAX_VALUE;
         for (BlockPos pos : pendingSegments) {
             if (isBuildableCandidate(world, pos)) {
-                return getSegmentLayer(pos);
+                int layer = getSegmentLayer(world, pos);
+                if (layer > 0 && layer < lowestLayer) {
+                    lowestLayer = layer;
+                }
             }
         }
-        return -1;
+        return lowestLayer == Integer.MAX_VALUE ? -1 : lowestLayer;
     }
 
-    private int getSegmentLayer(BlockPos pos) {
-        return (pos.getY() - plannedWallBaseY) + 1;
+    private int getSegmentLayer(ServerWorld world, BlockPos pos) {
+        int groundY = getPerimeterColumnGroundY(world, pos.getX(), pos.getZ());
+        return pos.getY() - groundY;
     }
 
     private boolean hasRemainingSegments(ServerWorld world) {
@@ -1432,7 +1434,7 @@ public class MasonWallBuilderGoal extends Goal {
         int buildableLayerCount = 0;
         int skippedLayerCount = 0;
         for (BlockPos segment : pendingSegments) {
-            if (getSegmentLayer(segment) != activeLayer) continue;
+            if (getSegmentLayer(world, segment) != activeLayer) continue;
             if (isGatePosition(segment) || isPlacedWallBlock(world.getBlockState(segment))) continue;
             pendingLayerCount++;
             if (skippedSegments.contains(segment)) {
@@ -1442,7 +1444,7 @@ public class MasonWallBuilderGoal extends Goal {
             buildableLayerCount++;
         }
 
-        skippedSegments.removeIf(segment -> getSegmentLayer(segment) == activeLayer);
+        skippedSegments.removeIf(segment -> getSegmentLayer(world, segment) == activeLayer);
         hardUnreachableRetryQueue.clear();
         releaseLocalSortieClaims(world, "progress_watchdog_recover");
         localSortieQueue.clear();
@@ -1471,7 +1473,7 @@ public class MasonWallBuilderGoal extends Goal {
         double bestDistSq = Double.MAX_VALUE;
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos candidate = pendingSegments.get(i);
-            if (getSegmentLayer(candidate) != layer) continue;
+            if (getSegmentLayer(world, candidate) != layer) continue;
             if (isGatePosition(candidate) || isPlacedWallBlock(world.getBlockState(candidate))) continue;
             double distSq = from.getSquaredDistance(candidate);
             if (distSq < bestDistSq) {
@@ -1490,7 +1492,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean shouldEmitHardUnreachableInfo(ServerWorld world, BlockPos segmentTarget) {
-        String key = buildRetryLogSignature(segmentTarget);
+        String key = buildRetryLogSignature(world, segmentTarget);
         long now = world.getTime();
         Long last = retryLogRateLimitTickBySignature.get(key);
         if (last != null && (now - last) < HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS) {
@@ -1500,9 +1502,9 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private String buildRetryLogSignature(BlockPos segmentPos) {
+    private String buildRetryLogSignature(ServerWorld world, BlockPos segmentPos) {
         String anchor = activeAnchorPos == null ? "none" : activeAnchorPos.toShortString();
-        int layer = getSegmentLayer(segmentPos);
+        int layer = getSegmentLayer(world, segmentPos);
         return guard.getUuidAsString() + "|" + anchor + "|layer=" + layer;
     }
 
@@ -1685,22 +1687,31 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     /**
-     * Returns deterministic 3-layer wall placements around the rectangle perimeter:
-     * baseY, baseY+1, and baseY+2. Layers are appended in that order so planning
-     * is stable and layer-first.
+     * Returns deterministic 3-layer wall placements around the rectangle perimeter.
+     * Each perimeter X/Z column uses its own local terrain baseline:
+     * groundY+1, groundY+2, and groundY+3.
+     * Layers are appended in that order so planning remains layer-first.
      */
     private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
         List<BlockPos> segments = new ArrayList<>();
-        int baseY = rect.y();
+        List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
+        Map<BlockPos, Integer> groundByColumn = new HashMap<>(perimeterColumns.size());
 
-        for (int layer = 0; layer < 3; layer++) {
-            int layerY = baseY + layer;
-            for (BlockPos perimeterPos : computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ(), layerY)) {
-                if (world.getBlockState(perimeterPos).isOf(Blocks.DIRT_PATH)) continue;
-                if (world.getBlockState(perimeterPos).isOf(Blocks.COBBLESTONE)) continue;
-                segments.add(perimeterPos.toImmutable());
+        for (BlockPos column : perimeterColumns) {
+            groundByColumn.put(column, getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+        }
+
+        for (int layer = 1; layer <= 3; layer++) {
+            for (BlockPos perimeterColumn : perimeterColumns) {
+                int groundY = groundByColumn.get(perimeterColumn);
+                BlockPos targetPos = new BlockPos(perimeterColumn.getX(), groundY + layer, perimeterColumn.getZ());
+                if (world.getBlockState(targetPos).isOf(Blocks.DIRT_PATH)) continue;
+                if (world.getBlockState(targetPos).isOf(Blocks.COBBLESTONE)) continue;
+                segments.add(targetPos.toImmutable());
             }
         }
+
+        logPerimeterSampleColumns(world, perimeterColumns, groundByColumn);
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
@@ -1713,27 +1724,47 @@ public class MasonWallBuilderGoal extends Goal {
         return segments;
     }
 
-    static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ, int y) {
+    private int getPerimeterColumnGroundY(ServerWorld world, int x, int z) {
+        return world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
+    }
+
+    private void logPerimeterSampleColumns(ServerWorld world, List<BlockPos> perimeterColumns, Map<BlockPos, Integer> groundByColumn) {
+        if (!LOGGER.isDebugEnabled() || perimeterColumns.isEmpty()) return;
+        int sampleCount = Math.min(5, perimeterColumns.size());
+        for (int i = 0; i < sampleCount; i++) {
+            BlockPos column = perimeterColumns.get(i);
+            int groundY = groundByColumn.getOrDefault(column, getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+            LOGGER.debug("MasonWallBuilder {}: terrain_relative_column_sample column={} groundY={} targets=[{},{},{}]",
+                    guard.getUuidAsString(),
+                    column.toShortString(),
+                    groundY,
+                    groundY + 1,
+                    groundY + 2,
+                    groundY + 3);
+        }
+    }
+
+    static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ) {
         List<BlockPos> perimeter = new ArrayList<>();
 
         // North face: minX -> maxX at minZ
         for (int x = minX; x <= maxX; x++) {
-            perimeter.add(new BlockPos(x, y, minZ));
+            perimeter.add(new BlockPos(x, 0, minZ));
         }
 
         // East face: minZ+1 -> maxZ-1 at maxX (corners already included)
         for (int z = minZ + 1; z < maxZ; z++) {
-            perimeter.add(new BlockPos(maxX, y, z));
+            perimeter.add(new BlockPos(maxX, 0, z));
         }
 
         // South face: maxX -> minX at maxZ
         for (int x = maxX; x >= minX; x--) {
-            perimeter.add(new BlockPos(x, y, maxZ));
+            perimeter.add(new BlockPos(x, 0, maxZ));
         }
 
         // West face: maxZ-1 -> minZ+1 at minX (corners already included)
         for (int z = maxZ - 1; z > minZ; z--) {
-            perimeter.add(new BlockPos(minX, y, z));
+            perimeter.add(new BlockPos(minX, 0, z));
         }
 
         return perimeter;
