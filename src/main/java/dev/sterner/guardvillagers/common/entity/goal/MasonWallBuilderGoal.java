@@ -1012,6 +1012,16 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        if (!hasTerminalIrrecoverableReasons(summary.irrecoverableReasons)) {
+            LOGGER.info("MasonWallBuilder {}: sweep deferred {} segments, resuming sorties",
+                    guard.getUuidAsString(),
+                    summary.remainingAfterSweep);
+            stage = canResumeMoveToSegmentFromSweep(world)
+                    ? Stage.MOVE_TO_SEGMENT
+                    : Stage.WAIT_FOR_WALL_STOCK;
+            return;
+        }
+
         LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
                 guard.getUuidAsString(),
                 summary.remainingAfterSweep,
@@ -1020,6 +1030,38 @@ public class MasonWallBuilderGoal extends Goal {
                 summary.irrecoverableCount,
                 summary.irrecoverableReasons);
         completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
+    }
+
+    private boolean canResumeMoveToSegmentFromSweep(ServerWorld world) {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos == null) {
+            return false;
+        }
+        int threshold = computeCurrentSortieThreshold(world);
+        int availableWalls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
+        int availableCobblestone = countItemInChest(world, chestPos, Items.COBBLESTONE);
+        WaitForStockDecision decision = decideWaitForStockTransition(
+                availableWalls,
+                availableCobblestone,
+                threshold
+        );
+        return decision == WaitForStockDecision.MOVE_TO_SEGMENT;
+    }
+
+    private boolean hasTerminalIrrecoverableReasons(Map<String, Integer> irrecoverableReasons) {
+        if (irrecoverableReasons.isEmpty()) {
+            return false;
+        }
+        for (String reason : irrecoverableReasons.keySet()) {
+            if (!isDeferredReason(reason)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isDeferredReason(String reason) {
+        return "out_of_reach".equals(reason) || "deferred_out_of_reach".equals(reason);
     }
 
     private SweepSummary runCompletionSweep(ServerWorld world) {
