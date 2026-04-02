@@ -45,7 +45,7 @@ import java.util.stream.Stream;
  * <ol>
  *   <li>Scan configured POI set (job sites only, jobs+beds, or all POIs) within
  *       BELL_EFFECT_RANGE of the nearest QM chest
- *       → compute axis-aligned bounding rectangle → expand 10 blocks outward.</li>
+ *       → compute axis-aligned bounding rectangle → expand outward per config.</li>
  *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
  *       stone into the elected mason's paired chest, then resume normal goals.</li>
  *   <li>The elected builder must have enough cobblestone for ALL planned perimeter placements
@@ -65,8 +65,6 @@ public class MasonWallBuilderGoal extends Goal {
     // Gameplay cadence: attempt a fresh build cycle every ~20 seconds (400 ticks),
     // if election/planning/material preconditions pass.
     private static final int SCAN_INTERVAL_TICKS = 400;
-    // Blocks to expand the village bounding box outward to form the wall rectangle
-    private static final int WALL_EXPAND = 10;
     // Minimum stone needed before the elected builder starts placing
     // (required total is per planned block placement, including anti-gap vertical fill columns).
     private static final int STONE_PER_SEGMENT = 1;
@@ -161,6 +159,8 @@ public class MasonWallBuilderGoal extends Goal {
     private PoiFootprintSignature cachedPoiFootprintSignature = null;
     /** Last mode logged for wall footprint scans; avoids repeating the same info line every cycle. */
     private GuardVillagersConfig.MasonWallPoiMode lastLoggedPoiMode = null;
+    /** Rectangle selected for the currently staged cycle; logged once at cycle start. */
+    private WallRect cycleWallRect = null;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -252,8 +252,18 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (isElectedBuilder) {
             String firstTarget = pendingSegments.isEmpty() ? "none" : pendingSegments.get(0).toShortString();
-            LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={})",
-                    guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size(), firstTarget);
+            if (cycleWallRect != null) {
+                LOGGER.info(
+                        "MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={}, rect=[x:{}..{} z:{}..{} y:{}], width={}, depth={})",
+                        guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size(), firstTarget,
+                        cycleWallRect.minX(), cycleWallRect.maxX(), cycleWallRect.minZ(), cycleWallRect.maxZ(), cycleWallRect.y(),
+                        cycleWallRect.maxX() - cycleWallRect.minX() + 1,
+                        cycleWallRect.maxZ() - cycleWallRect.minZ() + 1
+                );
+            } else {
+                LOGGER.info("MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={})",
+                        guard.getUuidAsString(), pendingSegments.size(), pendingTransfers.size(), firstTarget);
+            }
         }
     }
 
@@ -288,6 +298,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastPlacementTick = -1L;
         placementsSinceCycleStart = 0;
         activeAnchorPos = null;
+        cycleWallRect = null;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -322,6 +333,7 @@ public class MasonWallBuilderGoal extends Goal {
      * @param anchorPos the QM chest position — used as the geographic village center
      */
     private boolean tryInitiateBuildCycle(ServerWorld world, BlockPos anchorPos) {
+        cycleWallRect = null;
         GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
         if (poiMode != lastLoggedPoiMode) {
             LOGGER.info("MasonWallBuilder {}: wall POI scan mode={}", guard.getUuidAsString(), poiMode);
@@ -516,6 +528,7 @@ public class MasonWallBuilderGoal extends Goal {
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(unbuilt);
         activeAnchorPos = anchorPos.toImmutable();
+        cycleWallRect = rect;
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
@@ -1400,6 +1413,7 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
+        cycleWallRect = null;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
     }
 
@@ -1622,7 +1636,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     /**
      * Scans the configured POI subset within BELL_EFFECT_RANGE of the QM chest anchor,
-     * computes their bounding box, expands by WALL_EXPAND, and returns a rectangle.
+     * computes their bounding box, applies configurable expansion/caps, and returns a rectangle.
      */
     private Optional<PoiFootprintSignature> computePoiFootprintSignature(ServerWorld world, BlockPos anchorPos) {
         int range = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -1669,16 +1683,44 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
-        // Expand by WALL_EXPAND and snap to a rectangle
+        int footprintWidth = signature.maxX() - signature.minX() + 1;
+        int footprintDepth = signature.maxZ() - signature.minZ() + 1;
+        int configuredExpand = Math.max(0, GuardVillagersConfig.masonWallExpandBlocks);
+        int expandX = adjustedAxisExpansion(configuredExpand, footprintWidth);
+        int expandZ = adjustedAxisExpansion(configuredExpand, footprintDepth);
+        expandX = clampExpansionForMaxSize(footprintWidth, expandX, GuardVillagersConfig.masonWallMaxWidth);
+        expandZ = clampExpansionForMaxSize(footprintDepth, expandZ, GuardVillagersConfig.masonWallMaxDepth);
+
         int wallY = anchorPos.getY(); // wall is at anchor Y level
 
         return new WallRect(
-                signature.minX() - WALL_EXPAND,
-                signature.minZ() - WALL_EXPAND,
-                signature.maxX() + WALL_EXPAND,
-                signature.maxZ() + WALL_EXPAND,
+                signature.minX() - expandX,
+                signature.minZ() - expandZ,
+                signature.maxX() + expandX,
+                signature.maxZ() + expandZ,
                 wallY
         );
+    }
+
+    private int adjustedAxisExpansion(int configuredExpand, int footprintAxisSize) {
+        if (configuredExpand <= 0) {
+            return 0;
+        }
+        if (footprintAxisSize <= 12) {
+            return Math.max(1, configuredExpand - 2);
+        }
+        if (footprintAxisSize <= 24) {
+            return Math.max(1, configuredExpand - 1);
+        }
+        return configuredExpand;
+    }
+
+    private int clampExpansionForMaxSize(int footprintAxisSize, int expansion, int maxAxisSize) {
+        if (maxAxisSize <= 0) {
+            return expansion;
+        }
+        int maxExpansion = Math.max(0, (maxAxisSize - footprintAxisSize) / 2);
+        return Math.max(0, Math.min(expansion, maxExpansion));
     }
 
     private GuardVillagersConfig.MasonWallPoiMode resolveWallPoiMode() {
