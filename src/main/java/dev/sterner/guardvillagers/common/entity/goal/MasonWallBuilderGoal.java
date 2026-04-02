@@ -10,6 +10,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -118,6 +119,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieTransientRetriesAttempted = 0;
     private int sortieFallbackTargetsTried = 0;
     private int sortieHardUnreachableMarked = 0;
+    private int sortieCandidatesConsidered = 0;
+    private int sortieCandidatesAccepted = 0;
+    private int sortieCandidatesPreflightSkipped = 0;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -204,6 +208,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        sortieCandidatesConsidered = 0;
+        sortieCandidatesAccepted = 0;
+        sortieCandidatesPreflightSkipped = 0;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -807,6 +814,9 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean startNextSortie(ServerWorld world) {
         localSortieQueue.clear();
         sortiePlacements = 0;
+        sortieCandidatesConsidered = 0;
+        sortieCandidatesAccepted = 0;
+        sortieCandidatesPreflightSkipped = 0;
         int activeLayer = findLowestPendingLayer(world);
         if (activeLayer < 1) {
             return false;
@@ -884,10 +894,34 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        List<BlockPos> bounded = local;
         if (local.size() > MAX_SEGMENTS_PER_SORTIE) {
-            return new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
+            bounded = new ArrayList<>(local.subList(0, MAX_SEGMENTS_PER_SORTIE));
         }
-        return local;
+        List<BlockPos> accepted = new ArrayList<>(bounded.size());
+        for (BlockPos segment : bounded) {
+            sortieCandidatesConsidered++;
+            if (!passesSortiePreflight(world, segment)) {
+                skippedSegments.add(segment.toImmutable());
+                sortieCandidatesPreflightSkipped++;
+                continue;
+            }
+            accepted.add(segment);
+            sortieCandidatesAccepted++;
+        }
+        return accepted;
+    }
+
+    private boolean passesSortiePreflight(ServerWorld world, BlockPos segment) {
+        BlockPos navigationTarget = resolveSegmentNavigationTarget(world, segment);
+        if (navigationTarget == null) {
+            return false;
+        }
+        if (!isStandable(world, navigationTarget)) {
+            return false;
+        }
+        Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
+        return preflightPath != null && preflightPath.reachesTarget();
     }
 
     private int computeCurrentSortieThreshold(ServerWorld world) {
@@ -1081,11 +1115,21 @@ public class MasonWallBuilderGoal extends Goal {
                 sortieTransientRetriesAttempted,
                 sortieFallbackTargetsTried,
                 sortieHardUnreachableMarked);
+        LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflightSkipped={}",
+                guard.getUuidAsString(),
+                activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
+                sortieActiveLayer,
+                sortieCandidatesConsidered,
+                sortieCandidatesAccepted,
+                sortieCandidatesPreflightSkipped);
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        sortieCandidatesConsidered = 0;
+        sortieCandidatesAccepted = 0;
+        sortieCandidatesPreflightSkipped = 0;
     }
 
     // -------------------------------------------------------------------------
