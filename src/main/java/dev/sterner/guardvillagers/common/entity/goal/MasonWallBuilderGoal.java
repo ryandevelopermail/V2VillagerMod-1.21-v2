@@ -114,7 +114,6 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
-    private static final int POST_EXPANSION_BUFFER_MAX_FOOTPRINT = 96;
     private static final int POI_CLUSTER_LINK_DISTANCE = 16;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -2846,14 +2845,12 @@ public class MasonWallBuilderGoal extends Goal {
         int baseMargin = Math.max(STRUCTURE_MIN_ENCLOSURE_MARGIN, configuredExpand);
         int expandX = adjustedAxisExpansion(baseMargin, footprintWidth);
         int expandZ = adjustedAxisExpansion(baseMargin, footprintDepth);
-        int postExpansionBuffer = Math.max(0, GuardVillagersConfig.masonWallPostExpansionBuffer);
-        boolean postBufferApplied = postExpansionBuffer > 0
-                && footprintWidth <= POST_EXPANSION_BUFFER_MAX_FOOTPRINT
-                && footprintDepth <= POST_EXPANSION_BUFFER_MAX_FOOTPRINT;
-        if (postBufferApplied) {
-            expandX += postExpansionBuffer;
-            expandZ += postExpansionBuffer;
-        }
+
+        double footprintComplexityMetric = computeFootprintComplexityMetric(signature, footprintWidth, footprintDepth);
+        int finalPadding = deriveAdaptivePadding(footprintComplexityMetric);
+        expandX += finalPadding;
+        expandZ += finalPadding;
+
         expandX = clampExpansionForMaxSize(footprintWidth, expandX, GuardVillagersConfig.masonWallMaxWidth);
         expandZ = clampExpansionForMaxSize(footprintDepth, expandZ, GuardVillagersConfig.masonWallMaxDepth);
 
@@ -2913,14 +2910,14 @@ public class MasonWallBuilderGoal extends Goal {
 
         int wallY = anchorPos.getY(); // wall is at anchor Y level
         logDetailed(
-                "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}], dims(occupancy={}x{}, wall={}x{}), post_buffer(applied={}, value={}, footprint_cap={})",
+                "MasonWallBuilder {}: wall rectangle finalized [x:{}..{} z:{}..{} y:{}], side_expansions(north={}, south={}, west={}, east={}), occupancy_bounds=[x:{}..{} z:{}..{}], dims(occupancy={}x{}, wall={}x{}), adaptive_padding(final={}, complexity_metric={})",
                 guard.getUuidAsString(),
                 minX, maxX, minZ, maxZ, wallY,
                 expandNorth, expandSouth, expandWest, expandEast,
                 occupancyMinX, occupancyMaxX, occupancyMinZ, occupancyMaxZ,
                 footprintWidth, footprintDepth,
                 maxX - minX + 1, maxZ - minZ + 1,
-                postBufferApplied, postExpansionBuffer, POST_EXPANSION_BUFFER_MAX_FOOTPRINT
+                finalPadding, footprintComplexityMetric
         );
 
         return new WallRect(
@@ -3008,6 +3005,38 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         return state.blocksMovement();
+    }
+
+    private double computeFootprintComplexityMetric(PoiFootprintSignature signature, int footprintWidth, int footprintDepth) {
+        Set<Long> occupiedColumns = signature.protectedStructureColumns();
+        int footprintArea = Math.max(1, footprintWidth * footprintDepth);
+        if (occupiedColumns.isEmpty()) {
+            return (2.0 * (footprintWidth + footprintDepth)) / footprintArea;
+        }
+
+        int exposedEdgeCount = 0;
+        for (long packed : occupiedColumns) {
+            int x = (int) (packed >> 32);
+            int z = (int) packed;
+            if (!occupiedColumns.contains(packXZ(x + 1, z))) exposedEdgeCount++;
+            if (!occupiedColumns.contains(packXZ(x - 1, z))) exposedEdgeCount++;
+            if (!occupiedColumns.contains(packXZ(x, z + 1))) exposedEdgeCount++;
+            if (!occupiedColumns.contains(packXZ(x, z - 1))) exposedEdgeCount++;
+        }
+
+        double perimeterToArea = (double) exposedEdgeCount / Math.max(1, occupiedColumns.size());
+        double fillRatio = Math.min(1.0, (double) occupiedColumns.size() / footprintArea);
+        return perimeterToArea + (1.0 - fillRatio);
+    }
+
+    private int deriveAdaptivePadding(double footprintComplexityMetric) {
+        if (footprintComplexityMetric >= 3.25D) {
+            return 3;
+        }
+        if (footprintComplexityMetric >= 2.35D) {
+            return 2;
+        }
+        return 1;
     }
 
     private int adjustedAxisExpansion(int configuredExpand, int footprintAxisSize) {
