@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.CartographerMapChestUtil;
 import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
@@ -17,14 +18,17 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.BlockTags;
-import net.minecraft.registry.tag.TagKey;
 import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.registry.tag.PointOfInterestTypeTags;
+import net.minecraft.registry.tag.TagKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3i;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.poi.PointOfInterestStorage;
+import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,6 +70,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int ROOT_CANOPY_SEARCH_RADIUS = 3;
     private static final int ROOT_CANOPY_SEARCH_HEIGHT = 8;
     private static final int CARTOGRAPHER_INFLUENCE_RADIUS = 300;
+    private static final int MAX_REJECT_REASON_DEBUG_PER_SCAN = 200;
+    private static final String REJECTED_NOT_LOG = "rejected_not_log";
+    private static final String REJECTED_STRUCTURE_PROXIMITY = "rejected_structure_proximity";
+    private static final String REJECTED_BAD_SOIL = "rejected_bad_soil";
+    private static final String REJECTED_STILTED_LOG = "rejected_stilted_log";
+    private static final String REJECTED_BELL_RADIUS = "rejected_bell_radius";
+    private static final String REJECTED_HOUSE_POI_RADIUS = "rejected_house_poi_radius";
+    private static final String REJECTED_NO_LEAVES = "rejected_no_leaves";
+    private static final String REJECTED_DUPLICATE_ROOT = "rejected_duplicate_root";
 
     /**
      * Logs within this horizontal radius of a bell block are considered part of a village
@@ -987,12 +1000,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         // Search a tight box around the crown for non-persistent leaves.
-        BlockPos min = crown.add(-ROOT_CANOPY_SEARCH_RADIUS, -1, -ROOT_CANOPY_SEARCH_RADIUS);
-        BlockPos max = crown.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_RADIUS + 1, ROOT_CANOPY_SEARCH_RADIUS);
+        int leafRadius = getConfiguredLeafSearchRadius();
+        int requiredLeafCount = getConfiguredRequiredLeafCount();
+        BlockPos min = crown.add(-leafRadius, -1, -leafRadius);
+        BlockPos max = crown.add(leafRadius, leafRadius + 1, leafRadius);
+        int naturalLeaves = 0;
         for (BlockPos cursor : BlockPos.iterate(min, max)) {
             BlockState state = world.getBlockState(cursor);
             if (state.getBlock() instanceof LeavesBlock && !state.get(LeavesBlock.PERSISTENT)) {
-                return true;
+                naturalLeaves++;
+                if (naturalLeaves >= requiredLeafCount) {
+                    return true;
+                }
             }
         }
         return false;
@@ -1033,7 +1052,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 scanMode,
                 uniqueBoundsCount,
                 center.toShortString());
-        return new TreeTargetScanSession(center,
+        return new TreeTargetScanSession(this.guard.getUuidAsString(),
+                center,
                 effectiveTreeSearchRadius,
                 hasMappedBounds,
                 mappedContext == null ? 0 : mappedContext.cartographerCount(),
@@ -1061,7 +1081,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     continue;
                 }
                 candidateLogs++;
-                if (tryAddQualifiedRoot(world, pos, null, uniqueRoots)) {
+                if (tryAddQualifiedRoot(world, pos, null, uniqueRoots).accepted()) {
                     acceptedRoots++;
                 }
             }
@@ -1094,7 +1114,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 continue;
             }
             candidateLogs++;
-            if (tryAddQualifiedRoot(world, pos, nearbyBells, uniqueRoots)) {
+            if (tryAddQualifiedRoot(world, pos, nearbyBells, uniqueRoots).accepted()) {
                 acceptedRoots++;
             }
         }
@@ -1107,15 +1127,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return uniqueRoots;
     }
 
-    private boolean tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
+    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
         BlockPos root = normalizeRoot(world, candidateLog);
-        if (!isEligibleRootImpl(world, root, cachedBells)) {
-            return false;
+        RootQualificationResult qualification = qualifyRoot(world, root, cachedBells);
+        if (!qualification.accepted()) {
+            return qualification;
         }
-        if (!hasMinimumTreeStructure(world, root)) {
-            return false;
+        if (!uniqueRoots.add(root)) {
+            return new RootQualificationResult(false, REJECTED_DUPLICATE_ROOT);
         }
-        return uniqueRoots.add(root);
+        return new RootQualificationResult(true, "");
     }
 
     private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
@@ -1270,8 +1291,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     @FunctionalInterface
     private interface RootCollector {
-        boolean tryAdd(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots);
+        RootQualificationResult evaluate(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots);
     }
+
+    private record RootQualificationResult(boolean accepted, String rejectReason) {}
 
     private static final class ScanMetrics {
         private final long startNanos = System.nanoTime();
@@ -1305,6 +1328,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private static final List<Integer> INITIAL_LAYER_OFFSETS = List.of(0, 1, -1, 2, -2, 3);
         private static final List<Integer> SECONDARY_LAYER_OFFSETS = List.of(4, -3, 5, -4, 6, -5, 7, -6, 8, -7, 9, -8, 10, -9, -10);
 
+        private final String guardId;
         private final BlockPos center;
         private final int localSearchRadius;
         private final boolean hasMappedBounds;
@@ -1324,14 +1348,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private int z;
         private int passIndex;
         private int localAcceptedRoots;
+        private int debugRejectLogs;
         private boolean complete;
 
-        private TreeTargetScanSession(BlockPos center,
+        private TreeTargetScanSession(String guardId,
+                                      BlockPos center,
                                       int localSearchRadius,
                                       boolean hasMappedBounds,
                                       int cartographerCount,
                                       List<ScanBounds> regions,
                                       @Nullable Set<BlockPos> nearbyBells) {
+            this.guardId = guardId;
             this.center = center;
             this.localSearchRadius = localSearchRadius;
             this.hasMappedBounds = hasMappedBounds;
@@ -1377,7 +1404,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 } else {
                     this.metrics.candidate();
                     Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
-                    if (collector.tryAdd(world, pos, bellExclusion, this.uniqueRoots)) {
+                    RootQualificationResult qualificationResult = collector.evaluate(world, pos, bellExclusion, this.uniqueRoots);
+                    if (qualificationResult.accepted()) {
                         this.metrics.accepted();
                         if (region.usesLocalBellExclusion()) {
                             this.localAcceptedRoots++;
@@ -1388,7 +1416,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                             break;
                         }
                     } else {
-                        this.metrics.skipped("rejected_root");
+                        this.metrics.skipped(qualificationResult.rejectReason());
+                        if (this.debugRejectLogs < MAX_REJECT_REASON_DEBUG_PER_SCAN) {
+                            LOGGER.debug("Lumberjack Guard {} rejected_root candidate={} reason={}",
+                                    this.guardId,
+                                    pos.toShortString(),
+                                    qualificationResult.rejectReason());
+                            this.debugRejectLogs++;
+                        }
                     }
                 }
 
@@ -1561,43 +1596,55 @@ public class LumberjackGuardChopTreesGoal extends Goal {
      *                    scan the world on demand (slower — only use for one-off checks)
      */
     private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
+        return qualifyRoot(world, pos, cachedBells).accepted();
+    }
+
+    private static RootQualificationResult qualifyRoot(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
-            return false;
+            return new RootQualificationResult(false, REJECTED_NOT_LOG);
         }
 
         // Structure guard: avoid harvesting logs that are integrated into nearby village houses.
         // In vanilla villages, structural logs are commonly adjacent to planks or other
         // wood-construction blocks at trunk height / just above trunk height.
-        if (isAdjacentToStructureBlocks(world, pos)) {
-            return false;
+        if (isAdjacentToStructureLikeBlocks(world, pos, getConfiguredStructureProximityRadius())) {
+            return new RootQualificationResult(false, REJECTED_STRUCTURE_PROXIMITY);
         }
 
         BlockState below = world.getBlockState(pos.down());
         if (below.isIn(BlockTags.LOGS)) {
-            return false;
+            return new RootQualificationResult(false, REJECTED_STILTED_LOG);
         }
         if (!isNaturalGroundBlock(below)) {
-            return false;
+            return new RootQualificationResult(false, REJECTED_BAD_SOIL);
         }
 
         // Stilted structure guard: if the block two below is also a log, this is not a tree root
         // (e.g. a log cabin whose bottom row sits on dirt but continues below as another log layer).
         if (world.getBlockState(pos.down(2)).isIn(BlockTags.LOGS)) {
-            return false;
+            return new RootQualificationResult(false, REJECTED_STILTED_LOG);
         }
 
         // Bell-proximity guard: skip logs that are decorative village-center trees.
         // Use pre-cached bell set when available to avoid repeated world scans.
         if (isNearBell(world, pos, cachedBells)) {
-            return false;
+            return new RootQualificationResult(false, REJECTED_BELL_RADIUS);
         }
 
-        return hasMinimumTreeStructureImpl(world, pos);
+        if (isNearProtectedVillagePoi(world, pos, getConfiguredHousePoiProtectionRadius())) {
+            return new RootQualificationResult(false, REJECTED_HOUSE_POI_RADIUS);
+        }
+
+        if (!isNaturalTreeLogCandidate(world, pos)) {
+            return new RootQualificationResult(false, REJECTED_NO_LEAVES);
+        }
+
+        return new RootQualificationResult(true, "");
     }
 
-    private static boolean isAdjacentToStructureBlocks(ServerWorld world, BlockPos root) {
-        for (BlockPos scanPos : BlockPos.iterate(root.add(-1, 0, -1), root.add(1, 1, 1))) {
+    private static boolean isAdjacentToStructureLikeBlocks(ServerWorld world, BlockPos root, int radius) {
+        for (BlockPos scanPos : BlockPos.iterate(root.add(-radius, -1, -radius), root.add(radius, 2, radius))) {
             if (scanPos.equals(root)) {
                 continue;
             }
@@ -1606,8 +1653,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_STAIRS)
                     || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_SLABS)
                     || isStructureTaggedBlock(neighbor, BlockTags.WOODEN_DOORS)
+                    || isStructureTaggedBlock(neighbor, BlockTags.BEDS)
                     || isStructureTaggedBlock(neighbor, BlockTags.FENCES)
-                    || isStructureTaggedBlock(neighbor, BlockTags.FENCE_GATES)) {
+                    || isStructureTaggedBlock(neighbor, BlockTags.FENCE_GATES)
+                    || neighbor.isOf(Blocks.GLASS)
+                    || neighbor.isOf(Blocks.GLASS_PANE)
+                    || neighbor.isOf(Blocks.TORCH)
+                    || neighbor.isOf(Blocks.WALL_TORCH)
+                    || neighbor.isOf(Blocks.SOUL_TORCH)
+                    || neighbor.isOf(Blocks.SOUL_WALL_TORCH)
+                    || neighbor.isOf(Blocks.LANTERN)
+                    || neighbor.isOf(Blocks.SOUL_LANTERN)) {
                 return true;
             }
         }
@@ -1658,22 +1714,48 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return false;
     }
 
-    private boolean hasMinimumTreeStructure(ServerWorld world, BlockPos root) {
-        return hasMinimumTreeStructureImpl(world, root);
+    private static int getConfiguredLeafSearchRadius() {
+        return Math.max(1, GuardVillagersConfig.lumberjackNaturalLeafSearchRadius);
     }
 
-    private boolean hasNearbyNaturalLeaves(ServerWorld world, BlockPos root) {
-        BlockPos min = root.add(-ROOT_CANOPY_SEARCH_RADIUS, 1, -ROOT_CANOPY_SEARCH_RADIUS);
-        BlockPos max = root.add(ROOT_CANOPY_SEARCH_RADIUS, ROOT_CANOPY_SEARCH_HEIGHT, ROOT_CANOPY_SEARCH_RADIUS);
-        for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            BlockState state = world.getBlockState(cursor);
-            if (!(state.getBlock() instanceof LeavesBlock) || state.get(LeavesBlock.PERSISTENT)) {
-                continue;
-            }
+    private static int getConfiguredRequiredLeafCount() {
+        return Math.max(1, GuardVillagersConfig.lumberjackNaturalRequiredLeafCount);
+    }
+
+    private static int getConfiguredStructureProximityRadius() {
+        return Math.max(1, GuardVillagersConfig.lumberjackStructureProximityRadius);
+    }
+
+    private static int getConfiguredHousePoiProtectionRadius() {
+        return Math.max(1, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
+    }
+
+    private static boolean isNearProtectedVillagePoi(ServerWorld world, BlockPos root, int radius) {
+        PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+        boolean nearBedOrJob = poiStorage.getInSquare(
+                        type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
+                        root,
+                        radius,
+                        PointOfInterestStorage.OccupationStatus.ANY)
+                .findAny()
+                .isPresent();
+        if (nearBedOrJob) {
             return true;
         }
 
+        BlockPos min = root.add(-radius, -2, -radius);
+        BlockPos max = root.add(radius, 2, radius);
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockState state = world.getBlockState(cursor);
+            if (state.isIn(BlockTags.WOODEN_DOORS) || state.isOf(Blocks.IRON_DOOR)) {
+                return true;
+            }
+        }
         return false;
+    }
+
+    private static boolean isNaturalTreeLogCandidate(ServerWorld world, BlockPos root) {
+        return hasMinimumTreeStructureImpl(world, root);
     }
 
     private boolean isEligibleLog(ServerWorld world, BlockPos pos) {
