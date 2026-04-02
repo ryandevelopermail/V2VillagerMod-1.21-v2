@@ -38,6 +38,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Stream;
@@ -123,6 +124,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
     private static final int POI_CLUSTER_LINK_DISTANCE = 16;
+    private static final long WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS = 200L;
+    private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -232,6 +235,14 @@ public class MasonWallBuilderGoal extends Goal {
     private GuardVillagersConfig.MasonWallPoiMode lastLoggedPoiMode = null;
     /** Rectangle selected for the currently staged cycle; logged once at cycle start. */
     private WallRect cycleWallRect = null;
+    /** Identity for the currently active cycle. */
+    private CycleIdentity activeCycleIdentity = null;
+    /** Debounce timer used to avoid repeatedly replanning while waiting for stock on the same cycle identity. */
+    private long waitForStockReplanCooldownUntilTick = 0L;
+    /** Next tick at which WAIT_FOR_WALL_STOCK cycle validity should be re-validated. */
+    private long nextWaitForStockCycleValidationTick = 0L;
+    /** Cached WAIT_FOR_WALL_STOCK cycle validity status between validation ticks. */
+    private boolean waitForStockCycleStillValid = true;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -294,7 +305,16 @@ public class MasonWallBuilderGoal extends Goal {
     @Override
     public boolean canStop() {
         // Keep the elected builder focused until the current build cycle finishes.
-        return !isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE || conversionWaitActive;
+        if (!isElectedBuilder || stage == Stage.DONE || stage == Stage.IDLE) {
+            return true;
+        }
+        if (stage != Stage.WAIT_FOR_WALL_STOCK) {
+            return false;
+        }
+        if (!(guard.getWorld() instanceof ServerWorld world)) {
+            return true;
+        }
+        return !isWaitForStockCycleStillValid(world);
     }
 
     @Override
@@ -321,6 +341,9 @@ public class MasonWallBuilderGoal extends Goal {
         conversionWaitActive = false;
         resetWaitForStockProceedLogState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
+        waitForStockReplanCooldownUntilTick = 0L;
+        nextWaitForStockCycleValidationTick = 0L;
+        waitForStockCycleStillValid = true;
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
         deferredSegmentRetryQueue.clear();
@@ -452,6 +475,10 @@ public class MasonWallBuilderGoal extends Goal {
         terminalSegmentReasons.clear();
         activeAnchorPos = null;
         cycleWallRect = null;
+        activeCycleIdentity = null;
+        waitForStockReplanCooldownUntilTick = 0L;
+        nextWaitForStockCycleValidationTick = 0L;
+        waitForStockCycleStillValid = true;
         pendingSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
@@ -510,6 +537,15 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         PoiFootprintSignature currentSignature = signatureOpt.get();
+        int perimeterSignatureHash = computePerimeterSignatureHash(currentSignature);
+        CycleIdentity candidateCycleIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, world.getTime());
+        if (shouldDebounceReplanForSameCycleIdentity(world, anchorPos, perimeterSignatureHash)) {
+            LOGGER.debug("MasonWallBuilder {}: replan_skipped_same_cycle_identity identity={} cooldownRemainingTicks={}",
+                    guard.getUuidAsString(),
+                    activeCycleIdentity,
+                    waitForStockReplanCooldownUntilTick - world.getTime());
+            return false;
+        }
 
         // 2. Compute (or reuse cached) wall rectangle.
         WallRect rect;
@@ -686,6 +722,10 @@ public class MasonWallBuilderGoal extends Goal {
         pendingSegments = new ArrayList<>(unbuilt);
         activeAnchorPos = anchorPos.toImmutable();
         cycleWallRect = rect;
+        activeCycleIdentity = candidateCycleIdentity;
+        waitForStockReplanCooldownUntilTick = 0L;
+        waitForStockCycleStillValid = true;
+        nextWaitForStockCycleValidationTick = 0L;
         guard.setWallSegments(pendingSegments);
 
         // 9. Store gate reservation positions (1 per face) on the guard
@@ -769,6 +809,7 @@ public class MasonWallBuilderGoal extends Goal {
                 lastLoggedProceedThreshold = threshold;
             }
             stage = Stage.MOVE_TO_SEGMENT;
+            waitForStockReplanCooldownUntilTick = 0L;
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
@@ -783,6 +824,10 @@ public class MasonWallBuilderGoal extends Goal {
                         guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
             }
             conversionWaitActive = true;
+            waitForStockReplanCooldownUntilTick = Math.max(
+                    waitForStockReplanCooldownUntilTick,
+                    world.getTime() + WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS
+            );
             resetWaitForStockProceedLogState();
             guard.getNavigation().stop();
             LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
@@ -2479,6 +2524,10 @@ public class MasonWallBuilderGoal extends Goal {
         nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
+        activeCycleIdentity = null;
+        waitForStockReplanCooldownUntilTick = 0L;
+        nextWaitForStockCycleValidationTick = 0L;
+        waitForStockCycleStillValid = true;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} retries={} hard_unreachable={} deferred_or_skipped={}",
                 guard.getUuidAsString(),
                 cycleEndReason.logValue,
@@ -2492,6 +2541,78 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockProceedLogged = false;
         lastLoggedProceedWalls = -1;
         lastLoggedProceedThreshold = -1;
+    }
+
+    private boolean shouldDebounceReplanForSameCycleIdentity(ServerWorld world, BlockPos anchorPos, int perimeterSignatureHash) {
+        if (activeCycleIdentity == null) {
+            return false;
+        }
+        if (world.getTime() >= waitForStockReplanCooldownUntilTick) {
+            return false;
+        }
+        if (stage != Stage.WAIT_FOR_WALL_STOCK) {
+            return false;
+        }
+        return activeCycleIdentity.anchorPos().equals(anchorPos)
+                && activeCycleIdentity.perimeterSignatureHash() == perimeterSignatureHash;
+    }
+
+    private boolean isWaitForStockCycleStillValid(ServerWorld world) {
+        if (stage != Stage.WAIT_FOR_WALL_STOCK || activeAnchorPos == null || activeCycleIdentity == null) {
+            return true;
+        }
+        long now = world.getTime();
+        if (now < nextWaitForStockCycleValidationTick) {
+            return waitForStockCycleStillValid;
+        }
+
+        waitForStockCycleStillValid = false;
+        nextWaitForStockCycleValidationTick = now + WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS;
+
+        Optional<PoiFootprintSignature> signatureOpt = computePoiFootprintSignature(world, activeAnchorPos);
+        if (signatureOpt.isEmpty()) {
+            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; no footprint for active anchor {}",
+                    guard.getUuidAsString(), activeAnchorPos.toShortString());
+            waitForStockReplanCooldownUntilTick = 0L;
+            return false;
+        }
+
+        int currentPerimeterSignatureHash = computePerimeterSignatureHash(signatureOpt.get());
+        if (currentPerimeterSignatureHash != activeCycleIdentity.perimeterSignatureHash()) {
+            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; signature changed old={} new={} anchor={}",
+                    guard.getUuidAsString(),
+                    activeCycleIdentity.perimeterSignatureHash(),
+                    currentPerimeterSignatureHash,
+                    activeAnchorPos.toShortString());
+            waitForStockReplanCooldownUntilTick = 0L;
+            return false;
+        }
+
+        BlockPos origin = resolveAnchorOrigin();
+        Optional<BlockPos> latestAnchorOpt = VillageAnchorState.get(world.getServer())
+                .getNearestQmChest(world, origin, (int) PEER_SCAN_RANGE);
+        if (latestAnchorOpt.isPresent() && !latestAnchorOpt.get().equals(activeCycleIdentity.anchorPos())) {
+            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; anchor changed old={} new={}",
+                    guard.getUuidAsString(),
+                    activeCycleIdentity.anchorPos().toShortString(),
+                    latestAnchorOpt.get().toShortString());
+            waitForStockReplanCooldownUntilTick = 0L;
+            return false;
+        }
+
+        waitForStockCycleStillValid = true;
+        return true;
+    }
+
+    private int computePerimeterSignatureHash(PoiFootprintSignature signature) {
+        return Objects.hash(
+                signature.minX(),
+                signature.minZ(),
+                signature.maxX(),
+                signature.maxZ(),
+                signature.poiCount(),
+                signature.poiHash()
+        );
     }
 
     private boolean verboseMasonWallLogging() {
@@ -3946,6 +4067,8 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
+
+    private record CycleIdentity(BlockPos anchorPos, int perimeterSignatureHash, long cycleStartTick) {}
 
     private enum WallPlacementMaterial {
         COBBLESTONE_WALL(Items.COBBLESTONE_WALL, Blocks.COBBLESTONE_WALL.getDefaultState());
