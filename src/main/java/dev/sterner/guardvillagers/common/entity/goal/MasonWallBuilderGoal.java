@@ -77,6 +77,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double REACH_SQ = 3.5D * 3.5D;
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
+    private static final int BAND_FAILURE_WINDOW_TICKS = 80;
+    private static final int BAND_FAILURE_REPEAT_THRESHOLD = 3;
+    private static final int VEGETATION_DEFER_COOLDOWN_TICKS = 60;
+    private static final int VEGETATION_CLEAR_PASS_BUDGET_PER_TICK = 2;
     private static final long SEGMENT_CLAIM_DURATION_TICKS = 160L;
     private static final long HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 200L;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 4;
@@ -125,6 +129,9 @@ public class MasonWallBuilderGoal extends Goal {
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
+    private final Map<String, FailureBandWindow> failureBandWindows = new HashMap<>();
+    private final Deque<DeferredSegmentRetry> deferredSegmentRetryQueue = new ArrayDeque<>();
+    private boolean vegetationDeferredThenRequeuedLogged = false;
     private final Set<BlockPos> claimedSortieSegments = new HashSet<>();
     private boolean sortieActive = false;
     private int sortieActiveLayer = -1;
@@ -237,6 +244,9 @@ public class MasonWallBuilderGoal extends Goal {
         resetWaitForStockProceedLogState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         retryLogRateLimitTickBySignature.clear();
+        failureBandWindows.clear();
+        deferredSegmentRetryQueue.clear();
+        vegetationDeferredThenRequeuedLogged = false;
         claimedSortieSegments.clear();
         sortieActive = false;
         sortieActiveLayer = -1;
@@ -303,6 +313,9 @@ public class MasonWallBuilderGoal extends Goal {
         conversionWaitActive = false;
         resetWaitForStockProceedLogState();
         retryLogRateLimitTickBySignature.clear();
+        failureBandWindows.clear();
+        deferredSegmentRetryQueue.clear();
+        vegetationDeferredThenRequeuedLogged = false;
         releaseAllSegmentClaims(worldOrNull());
         claimedSortieSegments.clear();
         sortieActive = false;
@@ -657,6 +670,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void tickMoveToSegment(ServerWorld world) {
         maybeRecoverStalledCycle(world, "move_tick");
+        requeueDeferredSegmentsIfReady(world);
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             logSortieSummaryIfActive();
@@ -846,6 +860,8 @@ public class MasonWallBuilderGoal extends Goal {
         }
         failedPathAttempts++;
         lastTriedNavTarget = attemptedNavTarget.toImmutable();
+        String bandSignature = segmentBandSignature(world, segmentTarget);
+        int bandFailures = registerFailureBandAttempt(world, bandSignature);
 
         List<BlockPos> candidates = buildNavigationTargetCandidates(world, segmentTarget);
         if (failedPathAttempts < candidates.size()) {
@@ -878,6 +894,12 @@ public class MasonWallBuilderGoal extends Goal {
             activeMoveTargetTicks = 0;
             lastMoveDistSq = Double.MAX_VALUE;
             resetPathFailureState();
+            return;
+        }
+
+        if (bandFailures >= BAND_FAILURE_REPEAT_THRESHOLD
+                && isVegetationDenseAroundSegment(world, segmentTarget)
+                && deferSegmentForVegetationPass(world, segmentTarget, attemptedNavTarget)) {
             return;
         }
 
@@ -929,6 +951,121 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private int registerFailureBandAttempt(ServerWorld world, String bandSignature) {
+        long now = world.getTime();
+        FailureBandWindow state = failureBandWindows.get(bandSignature);
+        if (state == null || (now - state.firstFailureTick()) > BAND_FAILURE_WINDOW_TICKS) {
+            failureBandWindows.put(bandSignature, new FailureBandWindow(1, now));
+            return 1;
+        }
+        FailureBandWindow updated = new FailureBandWindow(state.count() + 1, state.firstFailureTick());
+        failureBandWindows.put(bandSignature, updated);
+        return updated.count();
+    }
+
+    private String segmentBandSignature(ServerWorld world, BlockPos segmentTarget) {
+        return segmentTarget.getX() + "|" + segmentTarget.getZ() + "|" + getSegmentLayer(world, segmentTarget);
+    }
+
+    private boolean isVegetationDenseAroundSegment(ServerWorld world, BlockPos segmentTarget) {
+        int blocked = 0;
+        int vegetation = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int dy = 0; dy <= 2; dy++) {
+                    BlockPos sample = segmentTarget.add(dx, dy, dz);
+                    BlockState state = world.getBlockState(sample);
+                    if (state.isAir()) {
+                        continue;
+                    }
+                    blocked++;
+                    if (state.isIn(BlockTags.LEAVES) || state.isIn(BlockTags.LOGS)) {
+                        vegetation++;
+                    }
+                }
+            }
+        }
+        if (blocked < 4) {
+            return false;
+        }
+        return vegetation * 10 >= blocked * 6;
+    }
+
+    private boolean deferSegmentForVegetationPass(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        int before = obstaclesCleared;
+        performVegetationClearPass(world, segmentTarget, attemptedNavTarget);
+        long requeueTick = world.getTime() + VEGETATION_DEFER_COOLDOWN_TICKS;
+        localSortieQueue.pollFirst();
+        releaseSegmentClaim(world, segmentTarget, "vegetation_deferred");
+        markSkippedSegment(segmentTarget, "vegetation_deferred");
+        deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(segmentTarget.toImmutable(), requeueTick));
+        activeMoveTarget = null;
+        activeMoveTargetTicks = 0;
+        lastMoveDistSq = Double.MAX_VALUE;
+        resetPathFailureState();
+        LOGGER.debug("MasonWallBuilder {}: vegetation_path_defer segment={} navTarget={} clearedNow={} retryAt={}",
+                guard.getUuidAsString(),
+                segmentTarget.toShortString(),
+                attemptedNavTarget.toShortString(),
+                Math.max(0, obstaclesCleared - before),
+                requeueTick);
+        return true;
+    }
+
+    private void performVegetationClearPass(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dy = 0; dy <= 2; dy++) {
+            candidates.add(segmentTarget.up(dy).toImmutable());
+            candidates.add(attemptedNavTarget.up(dy).toImmutable());
+        }
+        for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
+            BlockPos near = segmentTarget.offset(direction);
+            candidates.add(near.toImmutable());
+            candidates.add(near.up().toImmutable());
+        }
+        int clearedThisPass = 0;
+        for (BlockPos candidate : candidates) {
+            if (clearedThisPass >= VEGETATION_CLEAR_PASS_BUDGET_PER_TICK) {
+                break;
+            }
+            BlockState state = world.getBlockState(candidate);
+            if (!(state.isIn(BlockTags.LEAVES) || state.isIn(BlockTags.LOGS))) {
+                continue;
+            }
+            ObstacleClearanceResult result = clearObstacleAt(world, segmentTarget, candidate);
+            if (result == ObstacleClearanceResult.CLEARED_THIS_TICK) {
+                clearedThisPass++;
+            }
+        }
+    }
+
+    private void requeueDeferredSegmentsIfReady(ServerWorld world) {
+        if (deferredSegmentRetryQueue.isEmpty()) {
+            return;
+        }
+        long now = world.getTime();
+        int queueSize = deferredSegmentRetryQueue.size();
+        for (int i = 0; i < queueSize; i++) {
+            DeferredSegmentRetry deferred = deferredSegmentRetryQueue.pollFirst();
+            if (deferred == null) {
+                continue;
+            }
+            if (deferred.requeueTick() > now) {
+                deferredSegmentRetryQueue.offerLast(deferred);
+                continue;
+            }
+            skippedSegments.remove(deferred.segment());
+            skippedSegmentReasons.remove(deferred.segment());
+            hardUnreachableRetryQueue.offerFirst(deferred.segment());
+            if (!vegetationDeferredThenRequeuedLogged) {
+                LOGGER.debug("MasonWallBuilder {}: vegetation_deferred_then_requeued segment={}",
+                        guard.getUuidAsString(),
+                        deferred.segment().toShortString());
+                vegetationDeferredThenRequeuedLogged = true;
+            }
+        }
     }
 
     private void resetPathFailureState() {
@@ -1668,6 +1805,9 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
+        failureBandWindows.clear();
+        deferredSegmentRetryQueue.clear();
+        vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
     }
@@ -1716,6 +1856,7 @@ public class MasonWallBuilderGoal extends Goal {
         skippedSegments.removeIf(segment -> getSegmentLayer(world, segment) == activeLayer);
         skippedSegmentReasons.entrySet().removeIf(entry -> getSegmentLayer(world, entry.getKey()) == activeLayer);
         hardUnreachableRetryQueue.clear();
+        deferredSegmentRetryQueue.removeIf(deferred -> getSegmentLayer(world, deferred.segment()) == activeLayer);
         releaseLocalSortieClaims(world, "progress_watchdog_recover");
         localSortieQueue.clear();
         activeMoveTarget = null;
@@ -2671,6 +2812,10 @@ public class MasonWallBuilderGoal extends Goal {
     record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
 
     record PathRetrySimulationResult(boolean skippedAsHardUnreachable, int decisionTick, int failedAttempts) {}
+
+    private record FailureBandWindow(int count, long firstFailureTick) {}
+
+    private record DeferredSegmentRetry(BlockPos segment, long requeueTick) {}
 
     record ElectionCandidateSnapshot(String candidateId, boolean hasPairedChest, boolean hasPairedJob, int stoneCount) {}
 
