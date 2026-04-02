@@ -75,6 +75,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double REACH_SQ = 3.5D * 3.5D;
     private static final int PATH_RETRY_MAX_ATTEMPTS = 4;
     private static final int PATH_RETRY_WINDOW_TICKS = 40;
+    private static final long HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 200L;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 4;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
