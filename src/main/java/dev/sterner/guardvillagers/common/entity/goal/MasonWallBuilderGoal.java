@@ -93,6 +93,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
+    private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
     private static final int STRUCTURE_SAMPLE_HORIZONTAL_RADIUS = 7;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
@@ -159,6 +160,8 @@ public class MasonWallBuilderGoal extends Goal {
     private long lastPlacementTick = -1L;
     private int placementsSinceCycleStart = 0;
     private final Map<BlockPos, String> skippedSegmentReasons = new HashMap<>();
+    private final Map<BlockPos, SegmentFailMetadata> skippedSegmentFailMetadata = new HashMap<>();
+    private long nextSkippedSegmentReconciliationTick = 0L;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -235,6 +238,7 @@ public class MasonWallBuilderGoal extends Goal {
         localSortieQueue.clear();
         skippedSegments.clear();
         skippedSegmentReasons.clear();
+        skippedSegmentFailMetadata.clear();
         hardUnreachableRetryQueue.clear();
         sortiePlacements = 0;
         placedSegments = 0;
@@ -272,7 +276,7 @@ public class MasonWallBuilderGoal extends Goal {
         ServerWorld world = worldOrNull();
         lastPlacementTick = world != null ? world.getTime() : 0L;
         placementsSinceCycleStart = 0;
-        skippedSegmentReasons.clear();
+        nextSkippedSegmentReconciliationTick = world != null ? world.getTime() : 0L;
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
         } else if (isElectedBuilder && !pendingSegments.isEmpty()) {
@@ -331,6 +335,8 @@ public class MasonWallBuilderGoal extends Goal {
         sweepInfoSuppressionDebugEmitted = false;
         lastPlacementTick = -1L;
         placementsSinceCycleStart = 0;
+        skippedSegmentFailMetadata.clear();
+        nextSkippedSegmentReconciliationTick = 0L;
         activeAnchorPos = null;
         cycleWallRect = null;
         pendingSegments.clear();
@@ -671,6 +677,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void tickMoveToSegment(ServerWorld world) {
         maybeRecoverStalledCycle(world, "move_tick");
         requeueDeferredSegmentsIfReady(world);
+        maybeReconcileSkippedSegments(world);
         pruneSortieQueue(world);
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             logSortieSummaryIfActive();
@@ -730,7 +737,7 @@ public class MasonWallBuilderGoal extends Goal {
                         guard.getUuidAsString(), target.toShortString(), activeMoveTargetTicks, String.format("%.2f", distSq));
                 localSortieQueue.pollFirst();
                 releaseSegmentClaim(world, target, "stalled");
-                markSkippedSegment(target, "stalled_segment");
+                markSkippedSegment(world, target, "stalled_segment");
                 activeMoveTarget = null;
                 activeMoveTargetTicks = 0;
                 lastMoveDistSq = Double.MAX_VALUE;
@@ -914,7 +921,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         localSortieQueue.pollFirst();
         releaseSegmentClaim(world, segmentTarget, "hard_unreachable");
-        markSkippedSegment(segmentTarget, "hard_unreachable");
+        markSkippedSegment(world, segmentTarget, "hard_unreachable");
         if (!hardRetryPassStarted) {
             hardUnreachableRetryQueue.offerLast(segmentTarget.toImmutable());
         }
@@ -999,7 +1006,7 @@ public class MasonWallBuilderGoal extends Goal {
         long requeueTick = world.getTime() + VEGETATION_DEFER_COOLDOWN_TICKS;
         localSortieQueue.pollFirst();
         releaseSegmentClaim(world, segmentTarget, "vegetation_deferred");
-        markSkippedSegment(segmentTarget, "vegetation_deferred");
+        markSkippedSegment(world, segmentTarget, "vegetation_deferred");
         deferredSegmentRetryQueue.offerLast(new DeferredSegmentRetry(segmentTarget.toImmutable(), requeueTick));
         activeMoveTarget = null;
         activeMoveTargetTicks = 0;
@@ -1058,6 +1065,8 @@ public class MasonWallBuilderGoal extends Goal {
             }
             skippedSegments.remove(deferred.segment());
             skippedSegmentReasons.remove(deferred.segment());
+            skippedSegmentFailMetadata.remove(deferred.segment());
+            hardUnreachableRetryQueue.remove(deferred.segment());
             hardUnreachableRetryQueue.offerFirst(deferred.segment());
             if (!vegetationDeferredThenRequeuedLogged) {
                 LOGGER.debug("MasonWallBuilder {}: vegetation_deferred_then_requeued segment={}",
@@ -1085,6 +1094,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
             localSortieQueue.pollFirst();
             releaseSegmentClaim(world, target, "already_resolved");
+            clearSegmentFailureState(target);
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
@@ -1100,7 +1110,7 @@ public class MasonWallBuilderGoal extends Goal {
             releaseSegmentClaim(world, target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
                     ? "protected_obstacle"
                     : "unbreakable_obstacle");
-            markSkippedSegment(target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
+            markSkippedSegment(world, target, clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
                     ? "protected_obstacle"
                     : "unbreakable_obstacle");
             stage = Stage.MOVE_TO_SEGMENT;
@@ -1138,6 +1148,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         localSortieQueue.pollFirst();
         releaseSegmentClaim(world, target, "placed");
+        clearSegmentFailureState(target);
         sortiePlacements++;
         placedSegments++;
         guard.setWallBuildPending(hasRemainingSegments(world), computeCurrentSortieThreshold(world));
@@ -1259,9 +1270,86 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private void markSkippedSegment(BlockPos pos, String reason) {
-        skippedSegments.add(pos);
-        skippedSegmentReasons.put(pos.toImmutable(), reason);
+    private void markSkippedSegment(ServerWorld world, BlockPos pos, String reason) {
+        BlockPos immutablePos = pos.toImmutable();
+        skippedSegments.add(immutablePos);
+        skippedSegmentReasons.put(immutablePos, reason);
+        long failTick = world == null ? -1L : world.getTime();
+        SegmentFailMetadata previous = skippedSegmentFailMetadata.get(immutablePos);
+        int failCount = previous == null ? 1 : previous.failCount() + 1;
+        skippedSegmentFailMetadata.put(immutablePos, new SegmentFailMetadata(failTick, reason, failCount));
+    }
+
+    private void clearSegmentFailureState(BlockPos pos) {
+        BlockPos immutablePos = pos.toImmutable();
+        skippedSegments.remove(immutablePos);
+        skippedSegmentReasons.remove(immutablePos);
+        skippedSegmentFailMetadata.remove(immutablePos);
+        hardUnreachableRetryQueue.remove(immutablePos);
+    }
+
+    private boolean tryRecoverSkippedSegmentIfEligible(ServerWorld world, BlockPos pos, String source) {
+        BlockPos immutablePos = pos.toImmutable();
+        if (!skippedSegments.contains(immutablePos)) {
+            return true;
+        }
+        if (isGatePosition(immutablePos) || isPlacedWallBlock(world.getBlockState(immutablePos))) {
+            clearSegmentFailureState(immutablePos);
+            return false;
+        }
+        if (!hasPathCandidateForSegment(world, immutablePos)) {
+            return false;
+        }
+        SegmentFailMetadata failMetadata = skippedSegmentFailMetadata.get(immutablePos);
+        skippedSegments.remove(immutablePos);
+        skippedSegmentReasons.remove(immutablePos);
+        skippedSegmentFailMetadata.remove(immutablePos);
+        hardUnreachableRetryQueue.remove(immutablePos);
+        hardUnreachableRetryQueue.offerFirst(immutablePos);
+        LOGGER.debug("MasonWallBuilder {}: recovered_skipped_segment segment={} source={} failMeta={}",
+                guard.getUuidAsString(),
+                immutablePos.toShortString(),
+                source,
+                failMetadata);
+        return true;
+    }
+
+    private boolean hasPathCandidateForSegment(ServerWorld world, BlockPos segment) {
+        List<BlockPos> candidates = buildNavigationTargetCandidates(world, segment);
+        for (BlockPos navigationTarget : candidates) {
+            if (!isStandable(world, navigationTarget)) {
+                continue;
+            }
+            Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
+            if (preflightPath != null && preflightPath.reachesTarget()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void maybeReconcileSkippedSegments(ServerWorld world) {
+        if (world.getTime() < nextSkippedSegmentReconciliationTick) {
+            return;
+        }
+        nextSkippedSegmentReconciliationTick = world.getTime() + SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS;
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer < 1 || skippedSegments.isEmpty()) {
+            return;
+        }
+        reconcileSkippedSegmentsForLayer(world, activeLayer, "periodic_reconcile");
+    }
+
+    private void reconcileSkippedSegmentsForLayer(ServerWorld world, int activeLayer, String source) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (BlockPos segment : skippedSegments) {
+            if (getSegmentLayer(world, segment) == activeLayer) {
+                candidates.add(segment);
+            }
+        }
+        for (BlockPos segment : candidates) {
+            tryRecoverSkippedSegmentIfEligible(world, segment, source);
+        }
     }
 
     private void pruneSortieQueue(ServerWorld world) {
@@ -1291,6 +1379,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (activeLayer < 1) {
             return false;
         }
+        reconcileSkippedSegmentsForLayer(world, activeLayer, "sortie_start");
 
         int anchorAttempts = 0;
         BlockPos selectedAnchor = null;
@@ -1317,7 +1406,7 @@ public class MasonWallBuilderGoal extends Goal {
                 selectedBatch = anchorBatch;
                 break;
             }
-            markSkippedSegment(anchor, "anchor_no_candidates");
+            markSkippedSegment(world, anchor, "anchor_no_candidates");
             anchorAttempts++;
         }
         if (selectedBatch.isEmpty() || selectedAnchor == null) {
@@ -1351,9 +1440,11 @@ public class MasonWallBuilderGoal extends Goal {
         while (!hardUnreachableRetryQueue.isEmpty()) {
             BlockPos retryCandidate = hardUnreachableRetryQueue.pollFirst();
             if (retryCandidate == null) continue;
-            skippedSegments.remove(retryCandidate);
-            skippedSegmentReasons.remove(retryCandidate);
-            if (getSegmentLayer(world, retryCandidate) == activeLayer && isBuildableCandidate(world, retryCandidate)) {
+            if (getSegmentLayer(world, retryCandidate) != activeLayer) {
+                continue;
+            }
+            if (tryRecoverSkippedSegmentIfEligible(world, retryCandidate, "hard_queue_retry")
+                    && isBuildableCandidate(world, retryCandidate)) {
                 return retryCandidate;
             }
         }
@@ -1498,9 +1589,14 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isBuildableCandidate(ServerWorld world, BlockPos pos) {
-        return !isGatePosition(pos)
-                && !isPlacedWallBlock(world.getBlockState(pos))
-                && !skippedSegments.contains(pos);
+        if (isGatePosition(pos) || isPlacedWallBlock(world.getBlockState(pos))) {
+            clearSegmentFailureState(pos);
+            return false;
+        }
+        if (skippedSegments.contains(pos)) {
+            return tryRecoverSkippedSegmentIfEligible(world, pos, "buildable_check");
+        }
+        return true;
     }
 
     private void runCompletionSweepAndFinish(ServerWorld world) {
@@ -1624,9 +1720,7 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos chestPos = guard.getPairedChestPos();
 
         for (BlockPos segment : remainingUnbuilt) {
-            skippedSegments.remove(segment);
-            skippedSegmentReasons.remove(segment);
-            hardUnreachableRetryQueue.remove(segment);
+            clearSegmentFailureState(segment);
 
             if (isPlacedWallBlock(world.getBlockState(segment))) {
                 continue;
@@ -1807,6 +1901,8 @@ public class MasonWallBuilderGoal extends Goal {
         cachedPoiFootprintSignature = null;
         failureBandWindows.clear();
         deferredSegmentRetryQueue.clear();
+        skippedSegmentFailMetadata.clear();
+        nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={}", guard.getUuidAsString(), cycleEndReason.logValue);
@@ -1855,6 +1951,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         skippedSegments.removeIf(segment -> getSegmentLayer(world, segment) == activeLayer);
         skippedSegmentReasons.entrySet().removeIf(entry -> getSegmentLayer(world, entry.getKey()) == activeLayer);
+        skippedSegmentFailMetadata.entrySet().removeIf(entry -> getSegmentLayer(world, entry.getKey()) == activeLayer);
         hardUnreachableRetryQueue.clear();
         deferredSegmentRetryQueue.removeIf(deferred -> getSegmentLayer(world, deferred.segment()) == activeLayer);
         releaseLocalSortieClaims(world, "progress_watchdog_recover");
@@ -2816,6 +2913,8 @@ public class MasonWallBuilderGoal extends Goal {
     private record FailureBandWindow(int count, long firstFailureTick) {}
 
     private record DeferredSegmentRetry(BlockPos segment, long requeueTick) {}
+
+    private record SegmentFailMetadata(long lastFailTick, String failReason, int failCount) {}
 
     record ElectionCandidateSnapshot(String candidateId, boolean hasPairedChest, boolean hasPairedJob, int stoneCount) {}
 
