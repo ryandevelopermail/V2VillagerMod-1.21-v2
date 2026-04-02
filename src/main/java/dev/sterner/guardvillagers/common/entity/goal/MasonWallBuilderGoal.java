@@ -112,6 +112,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STRUCTURE_ENVELOPE_INTERIOR_STRIDE = 3;
     private static final int STRUCTURE_ENVELOPE_VERTICAL_STEP = 2;
     private static final int STRUCTURE_ENVELOPE_ANCHOR_DISTANCE_CAP = 72;
+    private static final int STRUCTURE_TRACE_MAX_COLUMNS_VISITED = 2048;
+    private static final int STRUCTURE_TRACE_MAX_BLOCK_CHECKS = 16384;
+    private static final int STRUCTURE_TRACE_ANCHOR_RADIUS_CAP = 88;
+    private static final int STRUCTURE_TRACE_STOP_AFTER_EMPTY_LAYERS = 2;
     private static final int STRUCTURE_PROTECTION_EXPANSION_CAP = 12;
     private static final int STRUCTURE_MIN_ENCLOSURE_MARGIN = 2;
     private static final int MASON_WALL_FOOTPRINT_HARD_MAX_SPAN = 256;
@@ -2750,7 +2754,7 @@ public class MasonWallBuilderGoal extends Goal {
                 ? String.format("[minX=%d, minZ=%d, maxX=%d, maxZ=%d]", structureEnvelope.minX(), structureEnvelope.minZ(), structureEnvelope.maxX(), structureEnvelope.maxZ())
                 : "none";
         LOGGER.info(
-                "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_size={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
+                "MasonWallBuilderGoal: wall footprint planning anchor={} total_pois_scanned={} cluster_count={} selected_cluster_size={} poi_bounds=[minX={}, minZ={}, maxX={}, maxZ={}] sampled_structure_columns={} traced_structure_columns={} structure_bounds={} merged_bounds=[minX={}, minZ={}, maxX={}, maxZ={}]",
                 anchorPos,
                 candidatePois.size(),
                 clusters.size(),
@@ -2759,6 +2763,8 @@ public class MasonWallBuilderGoal extends Goal {
                 selectedMinZ,
                 selectedMaxX,
                 selectedMaxZ,
+                structureEnvelope.sampledColumnCount(),
+                structureEnvelope.tracedColumnCount(),
                 structureBoundsLog,
                 mergedMinX,
                 mergedMinZ,
@@ -2832,9 +2838,7 @@ public class MasonWallBuilderGoal extends Goal {
         int maxY = anchorPos.getY() + Math.max(range, STRUCTURE_SAMPLE_VERTICAL_RADIUS);
         int columnsScanned = 0;
         int blockChecks = 0;
-        int foundMinX = Integer.MAX_VALUE, foundMinZ = Integer.MAX_VALUE;
-        int foundMaxX = Integer.MIN_VALUE, foundMaxZ = Integer.MIN_VALUE;
-        Set<Long> protectedColumns = new HashSet<>();
+        Set<Long> sampledColumns = new HashSet<>();
 
         for (int x = scanMinX; x <= scanMaxX && columnsScanned < STRUCTURE_ENVELOPE_MAX_COLUMNS && blockChecks < STRUCTURE_ENVELOPE_MAX_BLOCK_CHECKS; x++) {
             for (int z = scanMinZ; z <= scanMaxZ && columnsScanned < STRUCTURE_ENVELOPE_MAX_COLUMNS && blockChecks < STRUCTURE_ENVELOPE_MAX_BLOCK_CHECKS; z++) {
@@ -2853,17 +2857,122 @@ public class MasonWallBuilderGoal extends Goal {
                     if (!isVillageStructureBlock(world.getBlockState(samplePos))) {
                         continue;
                     }
-                    long packedColumn = packXZ(x, z);
-                    protectedColumns.add(packedColumn);
-                    if (x < foundMinX) foundMinX = x;
-                    if (x > foundMaxX) foundMaxX = x;
-                    if (z < foundMinZ) foundMinZ = z;
-                    if (z > foundMaxZ) foundMaxZ = z;
+                    sampledColumns.add(packXZ(x, z));
                     break;
                 }
             }
         }
-        return new StructureEnvelopeScanResult(foundMinX, foundMinZ, foundMaxX, foundMaxZ, protectedColumns);
+
+        return traceStructureEnvelope(
+                world,
+                anchorPos,
+                minY,
+                maxY,
+                sampledColumns
+        );
+    }
+
+    private StructureEnvelopeScanResult traceStructureEnvelope(
+            ServerWorld world,
+            BlockPos anchorPos,
+            int minY,
+            int maxY,
+            Set<Long> sampledColumns
+    ) {
+        if (sampledColumns.isEmpty()) {
+            return StructureEnvelopeScanResult.empty();
+        }
+
+        Set<Long> tracedColumns = new HashSet<>(sampledColumns);
+        Set<Long> visitedColumns = new HashSet<>(sampledColumns);
+        ArrayDeque<Long> frontier = new ArrayDeque<>(sampledColumns);
+        int[] blockChecks = new int[]{0};
+        int anchorRadiusSq = STRUCTURE_TRACE_ANCHOR_RADIUS_CAP * STRUCTURE_TRACE_ANCHOR_RADIUS_CAP;
+        int visitedCount = visitedColumns.size();
+        int emptyLayerCount = 0;
+
+        while (!frontier.isEmpty()
+                && visitedCount < STRUCTURE_TRACE_MAX_COLUMNS_VISITED
+                && blockChecks[0] < STRUCTURE_TRACE_MAX_BLOCK_CHECKS) {
+            int layerSize = frontier.size();
+            int layerNewColumns = 0;
+            for (int i = 0; i < layerSize
+                    && visitedCount < STRUCTURE_TRACE_MAX_COLUMNS_VISITED
+                    && blockChecks[0] < STRUCTURE_TRACE_MAX_BLOCK_CHECKS; i++) {
+                long packed = frontier.removeFirst();
+                int x = unpackX(packed);
+                int z = unpackZ(packed);
+                for (Direction direction : List.of(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)) {
+                    int nx = x + direction.getOffsetX();
+                    int nz = z + direction.getOffsetZ();
+                    long neighborPacked = packXZ(nx, nz);
+                    if (!visitedColumns.add(neighborPacked)) {
+                        continue;
+                    }
+                    visitedCount++;
+                    int dxAnchor = nx - anchorPos.getX();
+                    int dzAnchor = nz - anchorPos.getZ();
+                    if ((dxAnchor * dxAnchor) + (dzAnchor * dzAnchor) > anchorRadiusSq) {
+                        continue;
+                    }
+                    if (!columnHasVillageStructure(world, nx, nz, minY, maxY, blockChecks, STRUCTURE_TRACE_MAX_BLOCK_CHECKS)) {
+                        continue;
+                    }
+                    tracedColumns.add(neighborPacked);
+                    frontier.addLast(neighborPacked);
+                    layerNewColumns++;
+                }
+            }
+            if (layerNewColumns == 0) {
+                emptyLayerCount++;
+                if (emptyLayerCount >= STRUCTURE_TRACE_STOP_AFTER_EMPTY_LAYERS) {
+                    break;
+                }
+            } else {
+                emptyLayerCount = 0;
+            }
+        }
+        return buildStructureEnvelopeScanResult(sampledColumns, tracedColumns);
+    }
+
+    private boolean columnHasVillageStructure(
+            ServerWorld world,
+            int x,
+            int z,
+            int minY,
+            int maxY,
+            int[] blockChecks,
+            int maxBlockChecks
+    ) {
+        for (int y = minY; y <= maxY && blockChecks[0] < maxBlockChecks; y += STRUCTURE_ENVELOPE_VERTICAL_STEP) {
+            blockChecks[0]++;
+            if (isVillageStructureBlock(world.getBlockState(new BlockPos(x, y, z)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private StructureEnvelopeScanResult buildStructureEnvelopeScanResult(Set<Long> sampledColumns, Set<Long> tracedColumns) {
+        int foundMinX = Integer.MAX_VALUE, foundMinZ = Integer.MAX_VALUE;
+        int foundMaxX = Integer.MIN_VALUE, foundMaxZ = Integer.MIN_VALUE;
+        for (long packedColumn : tracedColumns) {
+            int x = unpackX(packedColumn);
+            int z = unpackZ(packedColumn);
+            if (x < foundMinX) foundMinX = x;
+            if (x > foundMaxX) foundMaxX = x;
+            if (z < foundMinZ) foundMinZ = z;
+            if (z > foundMaxZ) foundMaxZ = z;
+        }
+        return new StructureEnvelopeScanResult(
+                foundMinX,
+                foundMinZ,
+                foundMaxX,
+                foundMaxZ,
+                Set.copyOf(tracedColumns),
+                sampledColumns.size(),
+                tracedColumns.size()
+        );
     }
 
     private boolean shouldSampleEnvelopeColumn(int x, int z, int minX, int minZ, int maxX, int maxZ) {
@@ -3029,6 +3138,14 @@ public class MasonWallBuilderGoal extends Goal {
 
     private long packXZ(int x, int z) {
         return ((long) x << 32) ^ (z & 0xFFFFFFFFL);
+    }
+
+    private int unpackX(long packed) {
+        return (int) (packed >> 32);
+    }
+
+    private int unpackZ(long packed) {
+        return (int) packed;
     }
 
     private boolean isVillageStructureBlock(BlockState state) {
@@ -3621,10 +3738,24 @@ public class MasonWallBuilderGoal extends Goal {
             int minZ,
             int maxX,
             int maxZ,
-            Set<Long> protectedColumns
+            Set<Long> protectedColumns,
+            int sampledColumnCount,
+            int tracedColumnCount
     ) {
         boolean foundAny() {
             return !protectedColumns.isEmpty();
+        }
+
+        static StructureEnvelopeScanResult empty() {
+            return new StructureEnvelopeScanResult(
+                    Integer.MAX_VALUE,
+                    Integer.MAX_VALUE,
+                    Integer.MIN_VALUE,
+                    Integer.MIN_VALUE,
+                    Set.of(),
+                    0,
+                    0
+            );
         }
     }
 
