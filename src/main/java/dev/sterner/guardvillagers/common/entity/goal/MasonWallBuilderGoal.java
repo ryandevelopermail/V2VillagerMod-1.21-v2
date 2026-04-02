@@ -97,6 +97,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
     private static final long MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS = 200L;
+    private static final long SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS = 240L;
+    private static final int SORTIE_NO_NET_PROGRESS_MIN_PLACEMENT_DELTA = 1;
     private static final double MEANINGFUL_PROGRESS_DELTA_DIST_SQ = 0.64D;
     private static final int WATCHDOG_REPEAT_SEGMENT_THRESHOLD = 2;
     private static final long WATCHDOG_REPEAT_SEGMENT_DEFER_COOLDOWN_TICKS = 200L;
@@ -144,6 +146,8 @@ public class MasonWallBuilderGoal extends Goal {
     private final Set<BlockPos> skippedSegments = new HashSet<>();
     private final Deque<BlockPos> hardUnreachableRetryQueue = new ArrayDeque<>();
     private int sortiePlacements = 0;
+    private int sortiePlacementsAtStart = 0;
+    private long sortieStartTick = -1L;
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
     private boolean hardRetryPassStarted = false;
@@ -328,6 +332,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        sortiePlacementsAtStart = 0;
+        sortieStartTick = -1L;
         obstaclesCleared = 0;
         protectedObstaclesSkipped = 0;
         unbreakableObstaclesSkipped = 0;
@@ -406,6 +412,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        sortiePlacementsAtStart = 0;
+        sortieStartTick = -1L;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
         lastSweepLogSignature = null;
@@ -775,6 +783,9 @@ public class MasonWallBuilderGoal extends Goal {
         requeueDeferredSegmentsIfReady(world);
         maybeReconcileSkippedSegments(world);
         pruneSortieQueue(world);
+        if (maybeAbortSortieForNoNetProgress(world, Stage.MOVE_TO_SEGMENT)) {
+            return;
+        }
         if (localSortieQueue.isEmpty() || sortiePlacements >= MAX_SEGMENTS_PER_SORTIE) {
             logSortieSummaryIfActive();
             if (!startNextSortie(world)) {
@@ -1229,6 +1240,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickPlaceBlock(ServerWorld world) {
+        if (maybeAbortSortieForNoNetProgress(world, Stage.PLACE_BLOCK)) {
+            return;
+        }
         BlockPos target = localSortieQueue.peekFirst();
         if (target == null) {
             stage = Stage.MOVE_TO_SEGMENT;
@@ -1304,9 +1318,60 @@ public class MasonWallBuilderGoal extends Goal {
         clearSegmentFailureState(target);
         sortiePlacements++;
         placedSegments++;
+        resetSortieNoNetProgressGuard(world);
         guard.setWallBuildPending(hasRemainingSegments(world), computeCurrentSortieThreshold(world));
         maybeLogPlacementProgress();
         stage = Stage.MOVE_TO_SEGMENT;
+    }
+
+    private boolean maybeAbortSortieForNoNetProgress(ServerWorld world, Stage activeStage) {
+        if (!sortieActive || sortieStartTick < 0L) {
+            return false;
+        }
+        long elapsedTicks = Math.max(0L, world.getTime() - sortieStartTick);
+        if (elapsedTicks <= SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS) {
+            return false;
+        }
+
+        int placementDelta = placedSegments - sortiePlacementsAtStart;
+        if (placementDelta >= SORTIE_NO_NET_PROGRESS_MIN_PLACEMENT_DELTA) {
+            return false;
+        }
+
+        LOGGER.info("MasonWallBuilder {}: sortie_abort_no_net_progress stage={} elapsedTicks={} placementDelta={} queueSize={}",
+                guard.getUuidAsString(),
+                activeStage,
+                elapsedTicks,
+                placementDelta,
+                localSortieQueue.size());
+
+        List<BlockPos> cooldownTargets = new ArrayList<>(localSortieQueue);
+        releaseLocalSortieClaims(world, "sortie_abort_no_net_progress");
+        localSortieQueue.clear();
+        for (BlockPos segment : cooldownTargets) {
+            requeueSegmentWithCooldown(
+                    world,
+                    segment,
+                    "sortie_abort_no_net_progress",
+                    SEGMENT_COOLDOWN_TICKS,
+                    "sortie_abort_cooldown_requeue",
+                    -1
+            );
+        }
+
+        activeMoveTarget = null;
+        resetActiveMoveProgressTracking(world);
+        resetPathFailureState();
+        logSortieSummaryIfActive();
+        if (!startNextSortie(world)) {
+            stage = Stage.WAIT_FOR_WALL_STOCK;
+        }
+        return true;
+    }
+
+    private void resetSortieNoNetProgressGuard(ServerWorld world) {
+        sortiePlacementsAtStart = placedSegments;
+        sortieStartTick = world == null ? -1L : world.getTime();
     }
 
     private void maybeLogPlacementProgress() {
@@ -1810,6 +1875,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        resetSortieNoNetProgressGuard(world);
         consecutiveDeferredSweeps = 0;
         debugLogSegmentStateSanity(world, "sortie_selected");
         return true;
@@ -2313,6 +2379,8 @@ public class MasonWallBuilderGoal extends Goal {
         segmentRepeatRecoveryCounts.clear();
         cycleExcludedSegments.clear();
         segmentStates.clear();
+        sortiePlacementsAtStart = 0;
+        sortieStartTick = -1L;
         nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
