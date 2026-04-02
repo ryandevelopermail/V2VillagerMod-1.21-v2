@@ -212,14 +212,40 @@ public class MasonWallBuilderGoal extends Goal {
         if (guard.getPairedChestPos() == null) return false;
         if (world.getTime() < nextScanTick) return false;
 
-        // Resolve village anchor from nearest QM chest — no bell required
-        Optional<BlockPos> anchorOpt = VillageAnchorState.get(world.getServer())
-                .getNearestQmChest(world, guard.getBlockPos(), (int) PEER_SCAN_RANGE);
-        if (anchorOpt.isEmpty()) return false;
+        BlockPos origin = resolveAnchorOrigin();
+        Optional<BlockPos> anchorOpt;
+        boolean hasActiveWallCycle = activeAnchorPos != null && stage != Stage.IDLE && stage != Stage.DONE;
+        if (hasActiveWallCycle) {
+            anchorOpt = Optional.of(activeAnchorPos);
+            LOGGER.debug("MasonWallBuilderGoal: reusing active anchor; origin={} anchor={}", origin, activeAnchorPos);
+        } else {
+            // Resolve village anchor from nearest QM chest — no bell required
+            anchorOpt = VillageAnchorState.get(world.getServer())
+                    .getNearestQmChest(world, origin, (int) PEER_SCAN_RANGE);
+            if (anchorOpt.isEmpty()) {
+                LOGGER.debug("MasonWallBuilderGoal: failed to resolve nearest QM chest anchor; origin={}", origin);
+                return false;
+            }
+            LOGGER.debug("MasonWallBuilderGoal: resolved anchor; origin={} anchor={}", origin, anchorOpt.get());
+        }
 
         nextScanTick = world.getTime() + SCAN_INTERVAL_TICKS;
 
         return tryInitiateBuildCycle(world, anchorOpt.get());
+    }
+
+    private BlockPos resolveAnchorOrigin() {
+        BlockPos pairedJobPos = guard.getPairedJobPos();
+        if (pairedJobPos != null) {
+            return pairedJobPos;
+        }
+
+        BlockPos pairedChestPos = guard.getPairedChestPos();
+        if (pairedChestPos != null) {
+            return pairedChestPos;
+        }
+
+        return guard.getBlockPos();
     }
 
     @Override
