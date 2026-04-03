@@ -103,6 +103,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonWallMaxDepth = 0;
     @Entry(min=32)
     public static int masonWallFootprintRadius = 80;
+    @Entry(min=0)
+    public static int masonWallStagingMaxBelowSurfaceDelta = 3;
     @Entry
     public static boolean masonWallVerboseLogging = false;
     @Entry(min=1)
@@ -138,6 +140,7 @@ public class GuardVillagersConfig extends MidnightConfig {
         overflowRecipientScanRange = clamp(overflowRecipientScanRange, MIN_OVERFLOW_RECIPIENT_SCAN_RANGE, MAX_OVERFLOW_RECIPIENT_SCAN_RANGE);
         overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
+        masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
     }
 
     private static int clamp(int value, int min, int max) {

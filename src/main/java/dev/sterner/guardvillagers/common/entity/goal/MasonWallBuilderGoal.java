@@ -184,6 +184,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS = 200L;
     private static final long WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS = 40L;
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
+    private static final long WALL_STAGING_TIMEOUT_TICKS = 120L;
+    private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
@@ -227,6 +229,8 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean waitForStockProceedLogged = false;
     private int lastLoggedProceedWalls = -1;
     private int lastLoggedProceedThreshold = -1;
+    private long wallStagingStartedTick = -1L;
+    private BlockPos wallStagingTarget = null;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
@@ -485,6 +489,7 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
+        clearWallStagingState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
@@ -619,6 +624,7 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
+        clearWallStagingState();
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
@@ -723,6 +729,7 @@ public class MasonWallBuilderGoal extends Goal {
         switch (stage) {
             case TRANSFER_FROM_PEERS -> tickTransfer(world);
             case WAIT_FOR_WALL_STOCK -> tickWaitForWallStock(world);
+            case MOVE_TO_STAGING -> tickMoveToStaging(world);
             case MOVE_TO_SEGMENT -> tickMoveToSegment(world);
             case PLACE_BLOCK -> tickPlaceBlock(world);
             case DONE -> stage = Stage.IDLE;
@@ -1061,9 +1068,10 @@ public class MasonWallBuilderGoal extends Goal {
                 lastLoggedProceedWalls = availableWalls;
                 lastLoggedProceedThreshold = threshold;
             }
-            stage = Stage.MOVE_TO_SEGMENT;
+            stage = Stage.MOVE_TO_STAGING;
             waitForStockReplanCooldownUntilTick = 0L;
             clearWaitForStockState();
+            beginWallStaging(world, "wait_for_wall_stock_ready");
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
@@ -1089,6 +1097,51 @@ public class MasonWallBuilderGoal extends Goal {
                     guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
             return;
         }
+    }
+
+    private void tickMoveToStaging(ServerWorld world) {
+        BlockPos stagingTarget = resolveWallStagingTarget(world);
+        if (stagingTarget == null) {
+            logWallStagingTimeout(world, "missing_anchor");
+            clearWallStagingState();
+            stage = Stage.WAIT_FOR_WALL_STOCK;
+            return;
+        }
+        if (wallStagingStartedTick < 0L) {
+            beginWallStaging(world, "stage_entry");
+        }
+
+        if (isWallStagingReady(world, stagingTarget)) {
+            LOGGER.info("MasonWallBuilder {}: wall_staging_complete target={} elapsedTicks={}",
+                    guard.getUuidAsString(),
+                    stagingTarget.toShortString(),
+                    Math.max(0L, world.getTime() - wallStagingStartedTick));
+            clearWallStagingState();
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
+        long now = world.getTime();
+        if (wallStagingStartedTick >= 0L && now - wallStagingStartedTick > WALL_STAGING_TIMEOUT_TICKS) {
+            logWallStagingTimeout(world, "readiness_timeout");
+            guard.getNavigation().stop();
+            clearWallStagingState();
+            stage = Stage.WAIT_FOR_WALL_STOCK;
+            return;
+        }
+
+        if (!isNearWallStagingAnchor()) {
+            int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, stagingTarget.getX(), stagingTarget.getZ()) - 1;
+            guard.getNavigation().startMovingTo(
+                    stagingTarget.getX() + 0.5D,
+                    surfaceY + 1.0D,
+                    stagingTarget.getZ() + 0.5D,
+                    MOVE_SPEED
+            );
+            return;
+        }
+
+        guard.getNavigation().stop();
     }
 
     private void tickMoveToSegment(ServerWorld world) {
@@ -6425,6 +6478,117 @@ public class MasonWallBuilderGoal extends Goal {
         return state.isOf(Blocks.COBBLESTONE) || state.isOf(Blocks.COBBLESTONE_WALL);
     }
 
+    private void beginWallStaging(ServerWorld world, String reason) {
+        if (wallStagingStartedTick >= 0L) {
+            return;
+        }
+        wallStagingStartedTick = world.getTime();
+        wallStagingTarget = resolveWallStagingTarget(world);
+        LOGGER.info("MasonWallBuilder {}: wall_staging_start reason={} target={} chest={} job={}",
+                guard.getUuidAsString(),
+                reason,
+                wallStagingTarget == null ? "none" : wallStagingTarget.toShortString(),
+                guard.getPairedChestPos() == null ? "none" : guard.getPairedChestPos().toShortString(),
+                guard.getPairedJobPos() == null ? "none" : guard.getPairedJobPos().toShortString());
+    }
+
+    private void logWallStagingTimeout(ServerWorld world, String reason) {
+        LOGGER.info("MasonWallBuilder {}: wall_staging_timeout reason={} target={} elapsedTicks={} stage={}",
+                guard.getUuidAsString(),
+                reason,
+                wallStagingTarget == null ? "none" : wallStagingTarget.toShortString(),
+                wallStagingStartedTick < 0L ? 0L : Math.max(0L, world.getTime() - wallStagingStartedTick),
+                stage);
+    }
+
+    private void clearWallStagingState() {
+        wallStagingStartedTick = -1L;
+        wallStagingTarget = null;
+    }
+
+    private BlockPos resolveWallStagingTarget(ServerWorld world) {
+        if (wallStagingTarget != null) {
+            return wallStagingTarget;
+        }
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos != null) {
+            wallStagingTarget = new BlockPos(
+                    chestPos.getX(),
+                    world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, chestPos.getX(), chestPos.getZ()) - 1,
+                    chestPos.getZ()
+            );
+            return wallStagingTarget;
+        }
+        BlockPos jobPos = guard.getPairedJobPos();
+        if (jobPos != null) {
+            wallStagingTarget = new BlockPos(
+                    jobPos.getX(),
+                    world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, jobPos.getX(), jobPos.getZ()) - 1,
+                    jobPos.getZ()
+            );
+            return wallStagingTarget;
+        }
+        return null;
+    }
+
+    private boolean isWallStagingReady(ServerWorld world, BlockPos stagingTarget) {
+        if (!isNearWallStagingAnchor()) {
+            return false;
+        }
+        int maxBelowSurfaceDelta = Math.max(0, GuardVillagersConfig.masonWallStagingMaxBelowSurfaceDelta);
+        int localTopSurfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, guard.getBlockX(), guard.getBlockZ()) - 1;
+        if (guard.getBlockY() < localTopSurfaceY - maxBelowSurfaceDelta) {
+            return false;
+        }
+        return !isNavigationInMiningRecoveryOrCooldownPathState(stagingTarget);
+    }
+
+    private boolean isNearWallStagingAnchor() {
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (chestPos != null) {
+            double chestDistSq = guard.squaredDistanceTo(chestPos.getX() + 0.5D, chestPos.getY() + 0.5D, chestPos.getZ() + 0.5D);
+            if (chestDistSq <= WALL_STAGING_REACH_SQ) {
+                return true;
+            }
+        }
+        BlockPos jobPos = guard.getPairedJobPos();
+        if (jobPos == null) {
+            return false;
+        }
+        double jobDistSq = guard.squaredDistanceTo(jobPos.getX() + 0.5D, jobPos.getY() + 0.5D, jobPos.getZ() + 0.5D);
+        return jobDistSq <= WALL_STAGING_REACH_SQ;
+    }
+
+    private boolean isNavigationInMiningRecoveryOrCooldownPathState(BlockPos stagingTarget) {
+        if (guard.isMiningSessionActive()) {
+            return true;
+        }
+        if (!(guard.getWorld() instanceof ServerWorld world)) {
+            return false;
+        }
+        if (world.getTime() >= guard.getNextMiningStartTick()) {
+            return false;
+        }
+        Path activePath = guard.getNavigation().getCurrentPath();
+        if (activePath == null) {
+            return false;
+        }
+        BlockPos pathTarget = activePath.getTarget();
+        if (pathTarget == null) {
+            return false;
+        }
+        if (stagingTarget != null && pathTarget.getSquaredDistance(stagingTarget) <= WALL_STAGING_REACH_SQ) {
+            return false;
+        }
+        return isNearMiningPathAnchor(pathTarget, guard.getMiningStartPos())
+                || isNearMiningPathAnchor(pathTarget, guard.getMiningLastMinedPos())
+                || isNearMiningPathAnchor(pathTarget, guard.getMiningOrigin());
+    }
+
+    private boolean isNearMiningPathAnchor(BlockPos target, BlockPos miningAnchor) {
+        return miningAnchor != null && target.getSquaredDistance(miningAnchor) <= 36.0D;
+    }
+
     private boolean isWallMaterialItem(net.minecraft.item.Item item) {
         return item == Items.COBBLESTONE || item == Items.COBBLESTONE_WALL;
     }
@@ -6472,6 +6636,7 @@ public class MasonWallBuilderGoal extends Goal {
         IDLE,
         TRANSFER_FROM_PEERS,
         WAIT_FOR_WALL_STOCK,
+        MOVE_TO_STAGING,
         MOVE_TO_SEGMENT,
         PLACE_BLOCK,
         DONE
