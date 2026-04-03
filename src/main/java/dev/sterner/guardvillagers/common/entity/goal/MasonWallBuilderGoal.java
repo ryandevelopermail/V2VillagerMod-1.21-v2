@@ -87,6 +87,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long HARD_UNREACHABLE_LOG_RATE_LIMIT_TICKS = 200L;
     private static final long PERIODIC_INFO_INTERVAL_TICKS = 200L;
     private static final int NEAREST_STANDABLE_SEARCH_RADIUS = 4;
+    private static final int PATH_PROBE_BUDGET_PER_TICK = 12;
+    private static final int PATH_PROBE_BUDGET_PER_SORTIE = 48;
+    private static final long PREFLIGHT_CACHE_BUCKET_TICKS = 20L;
+    private static final long PREFLIGHT_CACHE_TTL_TICKS = 80L;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
@@ -226,6 +230,8 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean vegetationDeferredThenRequeuedLogged = false;
     private final Set<BlockPos> claimedSortieSegments = new HashSet<>();
     private final Map<BlockPos, SegmentState> segmentStates = new HashMap<>();
+    private final Map<PreflightCacheKey, PreflightCacheEntry> sortiePreflightCache = new HashMap<>();
+    private final Set<BlockPos> deferredPreflightSegmentsThisSortie = new HashSet<>();
     private boolean sortieActive = false;
     private int sortieActiveLayer = -1;
     private int sortieTransientRetriesAttempted = 0;
@@ -237,6 +243,14 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidatesPreflightRejected = 0;
     private int sortieCandidatesFallbackAccepted = 0;
     private boolean sortieNearestFallbackSuppressedByLayerOneLap = false;
+    private boolean lastPreflightDeferredByBudget = false;
+    private long pathProbeBudgetTick = Long.MIN_VALUE;
+    private int pathProbeBudgetRemainingThisTick = PATH_PROBE_BUDGET_PER_TICK;
+    private int pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
+    private int pathBudgetUsedSinceLastPeriodic = 0;
+    private int pathBudgetDeferredSinceLastPeriodic = 0;
+    private int sortieCandidateCountSamples = 0;
+    private int sortieCandidateCountSum = 0;
     private int obstaclesCleared = 0;
     private int protectedObstaclesSkipped = 0;
     private int unbreakableObstaclesSkipped = 0;
@@ -473,6 +487,8 @@ public class MasonWallBuilderGoal extends Goal {
         vegetationDeferredThenRequeuedLogged = false;
         claimedSortieSegments.clear();
         segmentStates.clear();
+        sortiePreflightCache.clear();
+        deferredPreflightSegmentsThisSortie.clear();
         for (int i = 0; i < pendingSegments.size(); i++) {
             segmentCandidateIndexByPos.put(pendingSegments.get(i).toImmutable(), i);
         }
@@ -487,6 +503,14 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
         sortieNearestFallbackSuppressedByLayerOneLap = false;
+        lastPreflightDeferredByBudget = false;
+        pathProbeBudgetTick = Long.MIN_VALUE;
+        pathProbeBudgetRemainingThisTick = PATH_PROBE_BUDGET_PER_TICK;
+        pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
+        pathBudgetUsedSinceLastPeriodic = 0;
+        pathBudgetDeferredSinceLastPeriodic = 0;
+        sortieCandidateCountSamples = 0;
+        sortieCandidateCountSum = 0;
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
         sortieActivationTick = -1L;
@@ -589,6 +613,8 @@ public class MasonWallBuilderGoal extends Goal {
         releaseAllSegmentClaims(worldOrNull());
         claimedSortieSegments.clear();
         segmentStates.clear();
+        sortiePreflightCache.clear();
+        deferredPreflightSegmentsThisSortie.clear();
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -598,6 +624,14 @@ public class MasonWallBuilderGoal extends Goal {
         sortieStartTick = -1L;
         sortieActivationTick = -1L;
         cycleStartTick = -1L;
+        lastPreflightDeferredByBudget = false;
+        pathProbeBudgetTick = Long.MIN_VALUE;
+        pathProbeBudgetRemainingThisTick = PATH_PROBE_BUDGET_PER_TICK;
+        pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
+        pathBudgetUsedSinceLastPeriodic = 0;
+        pathBudgetDeferredSinceLastPeriodic = 0;
+        sortieCandidateCountSamples = 0;
+        sortieCandidateCountSum = 0;
         sortieNoNetProgressGraceSuppressedLogged = false;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
@@ -657,6 +691,8 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        refreshPathProbeBudgetForTick(world);
+        pruneExpiredSortiePreflightCache(world);
         maybeEmitPeriodicInfo(world);
         maybeTriggerRetryDensityFallback(world);
         maybeActivateStagnationPivot(world);
@@ -1140,28 +1176,122 @@ public class MasonWallBuilderGoal extends Goal {
         return candidates.get(index);
     }
 
+    private void refreshPathProbeBudgetForTick(ServerWorld world) {
+        long now = world.getTime();
+        if (pathProbeBudgetTick == now) {
+            return;
+        }
+        pathProbeBudgetTick = now;
+        pathProbeBudgetRemainingThisTick = PATH_PROBE_BUDGET_PER_TICK;
+    }
+
+    private boolean tryConsumePathProbeBudget(ServerWorld world) {
+        refreshPathProbeBudgetForTick(world);
+        if (pathProbeBudgetRemainingThisTick <= 0 || pathProbeBudgetRemainingThisSortie <= 0) {
+            return false;
+        }
+        pathProbeBudgetRemainingThisTick--;
+        pathProbeBudgetRemainingThisSortie--;
+        pathBudgetUsedSinceLastPeriodic++;
+        return true;
+    }
+
+    private void noteDeferredPathProbe() {
+        pathBudgetDeferredSinceLastPeriodic++;
+    }
+
+    private long coarseTickBucket(long tick) {
+        return Math.max(0L, tick / Math.max(1L, PREFLIGHT_CACHE_BUCKET_TICKS));
+    }
+
+    private void pruneExpiredSortiePreflightCache(ServerWorld world) {
+        long now = world.getTime();
+        sortiePreflightCache.entrySet().removeIf(entry -> entry.getValue().expiresAtTick() <= now);
+    }
+
+    private PreflightCacheEntry findCachedPreflightResult(BlockPos segment, BlockPos navTarget, long now) {
+        long currentBucket = coarseTickBucket(now);
+        int maxBucketsBack = Math.max(1, (int) Math.ceil((double) PREFLIGHT_CACHE_TTL_TICKS / (double) Math.max(1L, PREFLIGHT_CACHE_BUCKET_TICKS)));
+        for (int offset = 0; offset <= maxBucketsBack; offset++) {
+            long bucket = currentBucket - offset;
+            if (bucket < 0L) {
+                break;
+            }
+            PreflightCacheEntry cached = sortiePreflightCache.get(new PreflightCacheKey(segment, navTarget, bucket));
+            if (cached != null && cached.expiresAtTick() > now) {
+                return cached;
+            }
+        }
+        return null;
+    }
+
+    private boolean isSegmentInCooldownOrQuarantine(ServerWorld world, BlockPos segment, long now) {
+        return isSegmentInCooldown(segment, now) || isSegmentBandQuarantined(world, segment, now);
+    }
+
+    private PreflightProbeResult evaluatePreflightPath(ServerWorld world, BlockPos segment, BlockPos navigationTarget) {
+        long now = world.getTime();
+        BlockPos segmentKey = segment.toImmutable();
+        BlockPos navKey = navigationTarget.toImmutable();
+        PreflightCacheEntry cached = findCachedPreflightResult(segmentKey, navKey, now);
+        if (cached != null) {
+            return cached.reachesTarget() ? PreflightProbeResult.PASS : PreflightProbeResult.FAIL;
+        }
+        if (isSegmentInCooldownOrQuarantine(world, segmentKey, now)) {
+            return PreflightProbeResult.FAIL;
+        }
+        if (!tryConsumePathProbeBudget(world)) {
+            noteDeferredPathProbe();
+            return PreflightProbeResult.DEFERRED;
+        }
+        Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
+        boolean reaches = preflightPath != null && preflightPath.reachesTarget();
+        long expiresAt = now + PREFLIGHT_CACHE_TTL_TICKS;
+        sortiePreflightCache.put(
+                new PreflightCacheKey(segmentKey, navKey, coarseTickBucket(now)),
+                new PreflightCacheEntry(reaches, expiresAt)
+        );
+        return reaches ? PreflightProbeResult.PASS : PreflightProbeResult.FAIL;
+    }
+
     private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos, boolean applyBackoff) {
         Map<BlockPos, NavigationCandidate> deduped = new HashMap<>();
 
-        addNavigationCandidate(world, segmentPos, segmentPos.down(), deduped);
-        addNavigationCandidate(world, segmentPos, segmentPos.down(2), deduped);
-        addNavigationCandidate(world, segmentPos, segmentPos, deduped);
+        boolean budgetExhausted = false;
+        budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.down(), deduped);
+        budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.down(2), deduped);
+        budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos, deduped);
 
         for (Direction direction : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST}) {
-            addNavigationCandidate(world, segmentPos, segmentPos.offset(direction), deduped);
-            addNavigationCandidate(world, segmentPos, segmentPos.down().offset(direction), deduped);
-            addNavigationCandidate(world, segmentPos, segmentPos.offset(direction).down(), deduped);
+            if (budgetExhausted) {
+                break;
+            }
+            budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.offset(direction), deduped);
+            budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.down().offset(direction), deduped);
+            budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.offset(direction).down(), deduped);
         }
 
         for (int radius = 1; radius <= NEAREST_STANDABLE_SEARCH_RADIUS; radius++) {
+            if (budgetExhausted) {
+                break;
+            }
             for (int dy = -2; dy <= 2; dy++) {
+                if (budgetExhausted) {
+                    break;
+                }
                 for (int dx = -radius; dx <= radius; dx++) {
+                    if (budgetExhausted) {
+                        break;
+                    }
                     for (int dz = -radius; dz <= radius; dz++) {
                         if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
                             continue;
                         }
                         BlockPos candidate = segmentPos.add(dx, dy, dz);
-                        addNavigationCandidate(world, segmentPos, candidate, deduped);
+                        budgetExhausted |= addNavigationCandidate(world, segmentPos, candidate, deduped);
+                        if (budgetExhausted) {
+                            break;
+                        }
                     }
                 }
             }
@@ -1204,13 +1334,16 @@ public class MasonWallBuilderGoal extends Goal {
         return candidates;
     }
 
-    private void addNavigationCandidate(ServerWorld world, BlockPos segmentPos, BlockPos candidatePos, Map<BlockPos, NavigationCandidate> deduped) {
+    private boolean addNavigationCandidate(ServerWorld world, BlockPos segmentPos, BlockPos candidatePos, Map<BlockPos, NavigationCandidate> deduped) {
         StandabilityAssessment standability = assessStandabilityForNavigation(world, candidatePos);
         if (!standability.standable()) {
-            return;
+            return false;
         }
-        Path preflightPath = guard.getNavigation().findPathTo(candidatePos, 0);
-        boolean pathAvailable = preflightPath != null && preflightPath.reachesTarget();
+        PreflightProbeResult preflight = evaluatePreflightPath(world, segmentPos, candidatePos);
+        if (preflight == PreflightProbeResult.DEFERRED) {
+            return true;
+        }
+        boolean pathAvailable = preflight == PreflightProbeResult.PASS;
         NavigationCandidate candidate = new NavigationCandidate(
                 candidatePos.toImmutable(),
                 pathAvailable,
@@ -1221,6 +1354,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (existing == null || isBetterNavigationCandidate(candidate, existing)) {
             deduped.put(candidate.pos(), candidate);
         }
+        return false;
     }
 
     private boolean isBetterNavigationCandidate(NavigationCandidate candidate, NavigationCandidate existing) {
@@ -2503,6 +2637,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
         sortieNearestFallbackSuppressedByLayerOneLap = false;
+        deferredPreflightSegmentsThisSortie.clear();
+        pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
         int activeLayer = findLowestPendingLayer(world);
         if (activeLayer < 1) {
             return false;
@@ -2580,6 +2716,8 @@ public class MasonWallBuilderGoal extends Goal {
                     sortieCandidatesFallbackAccepted,
                     sortieNearestFallbackSuppressedByLayerOneLap);
         }
+        sortieCandidateCountSamples++;
+        sortieCandidateCountSum += sortieCandidatesConsidered;
         sortieActive = true;
         sortieActiveLayer = activeLayer;
         sortieTransientRetriesAttempted = 0;
@@ -2993,7 +3131,8 @@ public class MasonWallBuilderGoal extends Goal {
         }
         List<BlockPos> accepted = new ArrayList<>(bounded.size());
         List<BlockPos> preflightFailed = new ArrayList<>(bounded.size());
-        for (BlockPos segment : bounded) {
+        for (int idx = 0; idx < bounded.size(); idx++) {
+            BlockPos segment = bounded.get(idx);
             sortieCandidatesConsidered++;
             if (isSegmentClaimedByOther(world, segment)) {
                 if (LOGGER.isDebugEnabled()) {
@@ -3005,6 +3144,17 @@ public class MasonWallBuilderGoal extends Goal {
                 continue;
             }
             if (!passesSortiePreflight(world, segment)) {
+                if (lastPreflightDeferredByBudget) {
+                    deferredPreflightSegmentsThisSortie.add(segment.toImmutable());
+                    int remaining = bounded.size() - (idx + 1);
+                    if (remaining > 0) {
+                        pathBudgetDeferredSinceLastPeriodic += remaining;
+                        for (int tail = idx + 1; tail < bounded.size(); tail++) {
+                            deferredPreflightSegmentsThisSortie.add(bounded.get(tail).toImmutable());
+                        }
+                    }
+                    break;
+                }
                 sortieCandidatesPreflightRejected++;
                 preflightFailed.add(segment);
                 continue;
@@ -3223,6 +3373,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean passesSortiePreflight(ServerWorld world, BlockPos segment) {
+        lastPreflightDeferredByBudget = false;
         BlockPos navigationTarget = resolveSegmentNavigationTarget(world, segment);
         if (navigationTarget == null) {
             return false;
@@ -3230,10 +3381,14 @@ public class MasonWallBuilderGoal extends Goal {
         if (!isStandable(world, navigationTarget)) {
             return false;
         }
-        Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
+        PreflightProbeResult preflight = evaluatePreflightPath(world, segment, navigationTarget);
+        if (preflight == PreflightProbeResult.DEFERRED) {
+            lastPreflightDeferredByBudget = true;
+            return false;
+        }
         // Path miss is a soft signal: fallback sortie admission and runtime retries
         // determine actual reachability while moving.
-        return preflightPath != null && preflightPath.reachesTarget();
+        return preflight == PreflightProbeResult.PASS;
     }
 
     private int computeCurrentSortieThreshold(ServerWorld world) {
@@ -3858,6 +4013,9 @@ public class MasonWallBuilderGoal extends Goal {
         int suppressedRegionCount = countActiveSuppressedRegions(now);
         long oldestSuppressionAge = oldestSuppressionAgeTicks(now);
         int placementsSinceLastSuppression = placementsSinceCycleStart - placementsAtLastSuppression;
+        double averageCandidatesPerSortie = sortieCandidateCountSamples <= 0
+                ? 0.0D
+                : (double) sortieCandidateCountSum / (double) sortieCandidateCountSamples;
         if (stage == Stage.PLACE_BLOCK && placementDeltaSinceLastSummary <= 0) {
             String stalledTarget = placeBlockFailureTarget == null ? "none" : placeBlockFailureTarget.toShortString();
             String stalledReason = placeBlockLastNonPlacementReason == null ? "none" : placeBlockLastNonPlacementReason;
@@ -3865,7 +4023,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={}",
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     pathRetriesSinceCycleStart,
@@ -3876,14 +4034,17 @@ public class MasonWallBuilderGoal extends Goal {
                     stalledReason,
                     suppressedRegionCount,
                     oldestSuppressionAge,
-                    Math.max(0, placementsSinceLastSuppression)
+                    Math.max(0, placementsSinceLastSuppression),
+                    pathBudgetUsedSinceLastPeriodic,
+                    pathBudgetDeferredSinceLastPeriodic,
+                    String.format("%.2f", averageCandidatesPerSortie)
             );
         } else {
             logInfoRateLimited(
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={}",
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     pathRetriesSinceCycleStart,
@@ -3892,11 +4053,16 @@ public class MasonWallBuilderGoal extends Goal {
                     stage,
                     suppressedRegionCount,
                     oldestSuppressionAge,
-                    Math.max(0, placementsSinceLastSuppression)
+                    Math.max(0, placementsSinceLastSuppression),
+                    pathBudgetUsedSinceLastPeriodic,
+                    pathBudgetDeferredSinceLastPeriodic,
+                    String.format("%.2f", averageCandidatesPerSortie)
             );
         }
         maybeEmitLayerOneFaceCoverageInfo(world);
         lastPeriodicSummaryPlacementCount = placedSegments;
+        pathBudgetUsedSinceLastPeriodic = 0;
+        pathBudgetDeferredSinceLastPeriodic = 0;
     }
 
     private void maybeEmitLayerOneFaceCoverageInfo(ServerWorld world) {
@@ -6210,6 +6376,16 @@ public class MasonWallBuilderGoal extends Goal {
     private record LayerOneRegion(String key, String face, int segmentRangeStart, int segmentRangeEnd) {}
 
     private record DominantAnchorSelection(BlockPos anchor, String forcedFromRegion) {}
+
+    private enum PreflightProbeResult {
+        PASS,
+        FAIL,
+        DEFERRED
+    }
+
+    private record PreflightCacheKey(BlockPos segment, BlockPos navTarget, long coarseTickBucket) {}
+
+    private record PreflightCacheEntry(boolean reachesTarget, long expiresAtTick) {}
 
     record EarlyCycleAbortPolicyDecision(long cooldownTicks, boolean shouldQuarantineBand) {}
 
