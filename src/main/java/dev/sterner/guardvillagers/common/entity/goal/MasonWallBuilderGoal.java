@@ -199,6 +199,16 @@ public class MasonWallBuilderGoal extends Goal {
 
     // The computed wall segments for this run (only on the elected builder)
     private List<BlockPos> pendingSegments = new ArrayList<>();
+    /** Full cycle plan retained for metadata/progressive bootstrap expansion. */
+    private List<BlockPos> cyclePlannedSegments = new ArrayList<>();
+    /** Active rectangle currently enqueued into {@link #pendingSegments}. */
+    private WallRect cycleActiveRect = null;
+    /** Full planned rectangle for this cycle (never shrunk by bootstrap). */
+    private WallRect cyclePlannedRect = null;
+    /** Signature used to compute bootstrap clamping around POI occupancy bounds. */
+    private PoiFootprintSignature cyclePoiSignature = null;
+    /** Bootstrap expansion stage: 0=initial clamp, 1=expanded once, 2+=full rect active. */
+    private int bootstrapExpansionStage = 0;
     private int currentSegmentIndex = 0;
     private int lastProgressLoggedSegmentCount = 0;
     private BlockPos activeMoveTarget = null;
@@ -486,6 +496,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortiePlacements = 0;
         placedSegments = 0;
         plannedPlacementCount = (int) pendingSegments.stream().filter(pos -> !isGatePosition(pos)).count();
+        if (!cyclePlannedSegments.isEmpty()) {
+            plannedPlacementCount = (int) cyclePlannedSegments.stream().filter(pos -> !isGatePosition(pos)).count();
+        }
         hardRetryPassStarted = false;
         conversionWaitActive = false;
         waitForStockStartedTick = -1L;
@@ -709,12 +722,18 @@ public class MasonWallBuilderGoal extends Goal {
         resetLayerOneLapState();
         activeAnchorPos = null;
         cycleWallRect = null;
+        cycleActiveRect = null;
+        cyclePlannedRect = null;
+        cyclePoiSignature = null;
+        cyclePlannedSegments.clear();
+        bootstrapExpansionStage = 0;
         activeCycleIdentity = null;
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
         nextWaitForStockReplanAttemptTick = 0L;
         pendingSegments.clear();
+        cyclePlannedSegments.clear();
         pendingTransfers.clear();
         guard.setWallBuildPending(false, 0);
     }
@@ -815,7 +834,7 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
-        // 3. Compute all wall segment positions for the rectangle
+        // 3. Compute full wall segment plan, then derive an active bootstrap subset for startup.
         List<BlockPos> allSegments = computeWallSegments(world, rect);
         if (allSegments.isEmpty()) {
             return false;
@@ -829,6 +848,19 @@ public class MasonWallBuilderGoal extends Goal {
             LOGGER.debug("MasonWallBuilder {}: wall already complete", guard.getUuidAsString());
             wallProjectState.markAllLayersComplete(world.getRegistryKey(), anchorPos);
             return false;
+        }
+        WallRect bootstrapRect = computeBootstrapActiveRect(rect, currentSignature, 0);
+        List<BlockPos> activeUnbuilt = filterSegmentsForRect(unbuilt, bootstrapRect);
+        if (activeUnbuilt.isEmpty()) {
+            bootstrapRect = rect;
+            activeUnbuilt = unbuilt;
+        }
+        if (!sameWallRect(rect, bootstrapRect)) {
+            LOGGER.info("MasonWallBuilder {}: bootstrap_rect_applied before=[x:{}..{} z:{}..{} y:{}] after=[x:{}..{} z:{}..{} y:{}] segmentsBefore={} segmentsAfter={} stage={}",
+                    guard.getUuidAsString(),
+                    rect.minX(), rect.maxX(), rect.minZ(), rect.maxZ(), rect.y(),
+                    bootstrapRect.minX(), bootstrapRect.maxX(), bootstrapRect.minZ(), bootstrapRect.maxZ(), bootstrapRect.y(),
+                    unbuilt.size(), activeUnbuilt.size(), 0);
         }
 
         // Determine gate reservations before computing required stone so gate exclusions
@@ -974,9 +1006,14 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         // 8. Store segments on guard for NBT persistence
-        pendingSegments = new ArrayList<>(unbuilt);
+        pendingSegments = new ArrayList<>(activeUnbuilt);
+        cyclePlannedSegments = new ArrayList<>(unbuilt);
         activeAnchorPos = anchorPos.toImmutable();
         cycleWallRect = rect;
+        cyclePlannedRect = rect;
+        cycleActiveRect = bootstrapRect;
+        cyclePoiSignature = currentSignature;
+        bootstrapExpansionStage = sameWallRect(rect, bootstrapRect) ? 2 : 0;
         activeCycleIdentity = candidateCycleIdentity;
         waitForStockReplanCooldownUntilTick = 0L;
         waitForStockCycleStillValid = true;
@@ -3218,6 +3255,7 @@ public class MasonWallBuilderGoal extends Goal {
                 layerOneLapStartIndex,
                 layerOneLapConsideredSegments.size(),
                 countVisitedLayerOneFaces());
+        maybeExpandBootstrapRect(world, "layer_one_lap_complete");
     }
 
     private int countLayerOneLapEligibleSegments(ServerWorld world) {
@@ -4518,6 +4556,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        maybeExpandBootstrapRect(world, "confirmed_placement");
         clearSameCycleRestartSuppression("placement_progress");
         recordLayerOneFacePlacement(world, placedSegment);
         if (retryDensityFallbackModeActive) {
@@ -5853,6 +5892,109 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return affinity;
+    }
+
+    private void maybeExpandBootstrapRect(ServerWorld world, String reason) {
+        if (cyclePlannedRect == null || cyclePoiSignature == null || cyclePlannedSegments.isEmpty()) {
+            return;
+        }
+        if (bootstrapExpansionStage >= 2) {
+            return;
+        }
+
+        int nextStage = bootstrapExpansionStage + 1;
+        WallRect nextRect = computeBootstrapActiveRect(cyclePlannedRect, cyclePoiSignature, nextStage);
+        if (sameWallRect(cycleActiveRect, nextRect)) {
+            bootstrapExpansionStage = nextStage;
+            return;
+        }
+
+        int beforeCount = pendingSegments.size();
+        WallRect beforeRect = cycleActiveRect == null ? cyclePlannedRect : cycleActiveRect;
+        List<BlockPos> expandedSegments = filterSegmentsForRect(cyclePlannedSegments, nextRect);
+        if (expandedSegments.isEmpty()) {
+            return;
+        }
+
+        pendingSegments = new ArrayList<>(expandedSegments);
+        guard.setWallSegments(pendingSegments);
+        segmentCandidateIndexByPos.clear();
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            segmentCandidateIndexByPos.put(pendingSegments.get(i).toImmutable(), i);
+        }
+        currentSegmentIndex = Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1));
+        cycleActiveRect = nextRect;
+        bootstrapExpansionStage = nextStage;
+
+        LOGGER.info("MasonWallBuilder {}: bootstrap_rect_expand reason={} stage={} before=[x:{}..{} z:{}..{} y:{}] after=[x:{}..{} z:{}..{} y:{}] segmentsBefore={} segmentsAfter={}",
+                guard.getUuidAsString(),
+                reason,
+                nextStage,
+                beforeRect.minX(), beforeRect.maxX(), beforeRect.minZ(), beforeRect.maxZ(), beforeRect.y(),
+                nextRect.minX(), nextRect.maxX(), nextRect.minZ(), nextRect.maxZ(), nextRect.y(),
+                beforeCount,
+                pendingSegments.size());
+    }
+
+    private WallRect computeBootstrapActiveRect(WallRect fullRect, PoiFootprintSignature signature, int stage) {
+        if (fullRect == null || signature == null) {
+            return fullRect;
+        }
+        int configuredCap = Math.max(0, GuardVillagersConfig.masonWallBootstrapMaxSpan);
+        if (configuredCap <= 0 || stage >= 2) {
+            return fullRect;
+        }
+
+        int baseCap = configuredCap;
+        int effectiveCap = stage <= 0
+                ? baseCap
+                : Math.max(baseCap, Math.min(Math.max(spanX(fullRect), spanZ(fullRect)), baseCap * 2));
+        int minX = clampAxisMin(signature.minX(), signature.maxX(), effectiveCap, fullRect.minX());
+        int maxX = clampAxisMax(signature.minX(), signature.maxX(), effectiveCap, fullRect.maxX());
+        int minZ = clampAxisMin(signature.minZ(), signature.maxZ(), effectiveCap, fullRect.minZ());
+        int maxZ = clampAxisMax(signature.minZ(), signature.maxZ(), effectiveCap, fullRect.maxZ());
+        return new WallRect(minX, minZ, maxX, maxZ, fullRect.y());
+    }
+
+    private int clampAxisMin(int occupancyMin, int occupancyMax, int maxSpan, int fullMin) {
+        int occupancySpan = occupancyMax - occupancyMin + 1;
+        int allowedExtra = Math.max(0, (Math.max(maxSpan, occupancySpan) - occupancySpan) / 2);
+        return Math.max(fullMin, occupancyMin - allowedExtra);
+    }
+
+    private int clampAxisMax(int occupancyMin, int occupancyMax, int maxSpan, int fullMax) {
+        int occupancySpan = occupancyMax - occupancyMin + 1;
+        int allowedExtra = Math.max(0, (Math.max(maxSpan, occupancySpan) - occupancySpan) / 2);
+        return Math.min(fullMax, occupancyMax + allowedExtra);
+    }
+
+    private int spanX(WallRect rect) {
+        return rect.maxX() - rect.minX() + 1;
+    }
+
+    private int spanZ(WallRect rect) {
+        return rect.maxZ() - rect.minZ() + 1;
+    }
+
+    private boolean sameWallRect(WallRect left, WallRect right) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        return left.minX() == right.minX()
+                && left.maxX() == right.maxX()
+                && left.minZ() == right.minZ()
+                && left.maxZ() == right.maxZ()
+                && left.y() == right.y();
+    }
+
+    private List<BlockPos> filterSegmentsForRect(List<BlockPos> segments, WallRect rect) {
+        if (segments.isEmpty() || rect == null) {
+            return segments;
+        }
+        return segments.stream()
+                .filter(pos -> pos.getX() >= rect.minX() && pos.getX() <= rect.maxX()
+                        && pos.getZ() >= rect.minZ() && pos.getZ() <= rect.maxZ())
+                .toList();
     }
 
     private WallRect computeWallRect(BlockPos anchorPos, PoiFootprintSignature signature) {
