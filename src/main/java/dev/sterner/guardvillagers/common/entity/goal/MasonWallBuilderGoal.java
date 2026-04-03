@@ -1606,6 +1606,9 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
         long now = world.getTime();
+        boolean enforceLayerOneFirstLap = isLayerOneFirstLapEnforced(world);
+        List<DeferredSegmentRetry> readyLayerOne = enforceLayerOneFirstLap ? new ArrayList<>() : null;
+        List<DeferredSegmentRetry> readyOtherLayers = enforceLayerOneFirstLap ? new ArrayList<>() : null;
         int queueSize = deferredSegmentRetryQueue.size();
         for (int i = 0; i < queueSize; i++) {
             DeferredSegmentRetry deferred = deferredSegmentRetryQueue.pollFirst();
@@ -1619,6 +1622,35 @@ public class MasonWallBuilderGoal extends Goal {
             if (isTerminalSegment(deferred.segment())) {
                 continue;
             }
+            if (enforceLayerOneFirstLap) {
+                if (getSegmentLayer(world, deferred.segment()) == 1) {
+                    readyLayerOne.add(deferred);
+                } else {
+                    readyOtherLayers.add(deferred);
+                }
+                continue;
+            }
+            transitionSegmentState(world, deferred.segment(), SegmentState.AVAILABLE, "deferred_requeue");
+            segmentCooldownUntilTick.remove(deferred.segment());
+            queueHardUnreachableRetry(deferred.segment());
+            if (!vegetationDeferredThenRequeuedLogged) {
+                LOGGER.debug("MasonWallBuilder {}: vegetation_deferred_then_requeued segment={}",
+                        guard.getUuidAsString(),
+                        deferred.segment().toShortString());
+                vegetationDeferredThenRequeuedLogged = true;
+            }
+        }
+        if (enforceLayerOneFirstLap) {
+            applyDeferredRequeuesInOrder(world, readyLayerOne);
+            applyDeferredRequeuesInOrder(world, readyOtherLayers);
+        }
+    }
+
+    private void applyDeferredRequeuesInOrder(ServerWorld world, List<DeferredSegmentRetry> deferredRetries) {
+        if (deferredRetries == null || deferredRetries.isEmpty()) {
+            return;
+        }
+        for (DeferredSegmentRetry deferred : deferredRetries) {
             transitionSegmentState(world, deferred.segment(), SegmentState.AVAILABLE, "deferred_requeue");
             segmentCooldownUntilTick.remove(deferred.segment());
             queueHardUnreachableRetry(deferred.segment());
@@ -2468,8 +2500,9 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> selectedBatch = List.of();
         String forcedRotationFromRegion = null;
         while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
+            boolean enforceLayerOneFirstLap = isLayerOneFirstLapEnforced(world);
             DominantAnchorSelection dominantSelection = null;
-            if (layerOneDominance.active()) {
+            if (layerOneDominance.active() && !enforceLayerOneFirstLap) {
                 dominantSelection = findDominantLayerOneAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands, layerOneDominance);
             }
             BlockPos anchor = dominantSelection != null
@@ -2484,7 +2517,7 @@ public class MasonWallBuilderGoal extends Goal {
 
             List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                boolean suppressNearestFallbackForFirstLap = activeLayer == 1 && !isLayerOneAggressiveHeuristicsEnabled(activeLayer);
+                boolean suppressNearestFallbackForFirstLap = enforceLayerOneFirstLap || (activeLayer == 1 && !isLayerOneAggressiveHeuristicsEnabled(activeLayer));
                 if (suppressNearestFallbackForFirstLap) {
                     sortieNearestFallbackSuppressedByLayerOneLap = true;
                 } else {
@@ -2539,6 +2572,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
+        if (isLayerOneFirstLapEnforced(world)) {
+            return findNextLayerOneLapAnchor(world, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+        }
         if (!hardUnreachableRetryQueue.isEmpty()) {
             hardRetryPassStarted = true;
         }
@@ -2803,6 +2839,16 @@ public class MasonWallBuilderGoal extends Goal {
             return true;
         }
         return layerOneLapCompleted && hasVisitedAllLayerOneFaces();
+    }
+
+    private boolean isLayerOneFirstLapEnforced(ServerWorld world) {
+        if (world == null || layerOneLapCompleted) {
+            return false;
+        }
+        if (findLowestPendingLayer(world) != 1) {
+            return false;
+        }
+        return countBuildableSegmentsForLayer(world, 1, false, false) > 0;
     }
 
     private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
@@ -3874,6 +3920,9 @@ public class MasonWallBuilderGoal extends Goal {
         if (!isElectedBuilder || stage == Stage.IDLE || stage == Stage.DONE || pendingSegments.isEmpty()) {
             return;
         }
+        if (isLayerOneFirstLapEnforced(world)) {
+            return;
+        }
         if (retryDensityFallbackModeActive) {
             return;
         }
@@ -3947,6 +3996,9 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void maybeActivateStagnationPivot(ServerWorld world) {
         if (!isElectedBuilder || stage == Stage.IDLE || stage == Stage.DONE || pendingSegments.isEmpty()) {
+            return;
+        }
+        if (isLayerOneFirstLapEnforced(world)) {
             return;
         }
         long now = world.getTime();
@@ -5482,6 +5534,21 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return new TraversalSimulationResult(travel / Math.max(1, placed), sortiesMeetingMin, sortiesWithMinCandidates);
+    }
+
+    static List<BlockPos> simulateLayerOneFirstLapAnchorOrder(List<BlockPos> orderedSegments, int startIndex, int selections) {
+        List<BlockPos> selected = new ArrayList<>();
+        if (orderedSegments.isEmpty() || selections <= 0) {
+            return selected;
+        }
+        int size = orderedSegments.size();
+        int cursor = Math.floorMod(startIndex, size);
+        int maxSelections = Math.min(selections, size);
+        for (int i = 0; i < maxSelections; i++) {
+            selected.add(orderedSegments.get(cursor));
+            cursor = (cursor + 1) % size;
+        }
+        return selected;
     }
 
     static PathRetrySimulationResult simulatePathRetryPolicy(List<Boolean> pathStartSuccessPerTick,

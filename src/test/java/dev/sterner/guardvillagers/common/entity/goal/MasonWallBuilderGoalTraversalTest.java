@@ -71,4 +71,22 @@ class MasonWallBuilderGoalTraversalTest {
         assertEquals(batched.sortiesWithMinCandidates(), batched.sortiesMeetingMinPlacements(),
                 "Every sortie with >=3 nearby candidates should place at least 3 segments");
     }
+
+    @Test
+    void layerOneFirstLapSelectionPolicy_wrapsMonotonicallyBeforeLapCompletion() {
+        List<BlockPos> perimeter = MasonWallBuilderGoal.computePerimeterTraversal(0, 0, 4, 3, 64);
+        int startIndex = perimeter.size() - 2;
+        int selections = perimeter.size() - 1;
+
+        List<BlockPos> selected = MasonWallBuilderGoal.simulateLayerOneFirstLapAnchorOrder(perimeter, startIndex, selections);
+
+        assertEquals(selections, selected.size(), "Should select each requested layer-one anchor before lap completion");
+        for (int i = 1; i < selected.size(); i++) {
+            int previousIndex = perimeter.indexOf(selected.get(i - 1));
+            int expectedIndex = (previousIndex + 1) % perimeter.size();
+            int actualIndex = perimeter.indexOf(selected.get(i));
+            assertEquals(expectedIndex, actualIndex,
+                    "Layer-one first-lap policy should advance by exactly one perimeter index (with wraparound)");
+        }
+    }
 }
