@@ -134,6 +134,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
     private static final long STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS = 20L;
     private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
+    private static final double LAYER_ONE_REGION_DOMINANCE_COMPLETION_THRESHOLD = 0.95D;
+    private static final int MAX_CONSECUTIVE_SORTIES_PER_REGION = 2;
+    private static final int MAX_RETRY_ATTEMPTS_PER_REGION_BEFORE_ROTATION = 3;
+    private static final int LAYER_ONE_FACE_ARC_BUCKETS = 4;
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
     private static final int EARLY_HARD_UNREACHABLE_DISTINCT_TARGET_THRESHOLD = 2;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
@@ -275,6 +279,9 @@ public class MasonWallBuilderGoal extends Goal {
     private long stagnationPivotActivatedAtTick = 0L;
     private long stagnationPivotCooldownUntilTick = 0L;
     private long nextPivotLifecycleLogTick = 0L;
+    private String lastSortieRegionKey = null;
+    private int consecutiveSortiesSameRegion = 0;
+    private final Map<String, Integer> sortieRetryAttemptsByRegion = new HashMap<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -488,6 +495,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
+        lastSortieRegionKey = null;
+        consecutiveSortiesSameRegion = 0;
+        sortieRetryAttemptsByRegion.clear();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -585,6 +595,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
+        lastSortieRegionKey = null;
+        consecutiveSortiesSameRegion = 0;
+        sortieRetryAttemptsByRegion.clear();
         activeAnchorPos = null;
         cycleWallRect = null;
         activeCycleIdentity = null;
@@ -2407,14 +2420,25 @@ public class MasonWallBuilderGoal extends Goal {
         }
         reconcileSkippedSegmentsForLayer(world, activeLayer, "sortie_start");
         debugLogSegmentStateSanity(world, "sortie_start");
+        LayerOneDominanceContext layerOneDominance = buildLayerOneDominanceContext(world, activeLayer);
 
         int anchorAttempts = 0;
         BlockPos selectedAnchor = null;
         List<BlockPos> selectedBatch = List.of();
+        String forcedRotationFromRegion = null;
         while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
-            BlockPos anchor = findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+            DominantAnchorSelection dominantSelection = null;
+            if (layerOneDominance.active()) {
+                dominantSelection = findDominantLayerOneAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands, layerOneDominance);
+            }
+            BlockPos anchor = dominantSelection != null
+                    ? dominantSelection.anchor()
+                    : findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchor == null) {
                 break;
+            }
+            if (dominantSelection != null && dominantSelection.forcedFromRegion() != null) {
+                forcedRotationFromRegion = dominantSelection.forcedFromRegion();
             }
 
             List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
@@ -2438,6 +2462,9 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (selectedBatch.isEmpty() || selectedAnchor == null) {
             return false;
+        }
+        if (layerOneDominance.active()) {
+            recordLayerOneSortieRegionSelection(world, selectedAnchor, layerOneDominance.regionProgressByKey(), forcedRotationFromRegion);
         }
         localSortieQueue.addAll(selectedBatch);
         if (LOGGER.isDebugEnabled()) {
@@ -2623,7 +2650,10 @@ public class MasonWallBuilderGoal extends Goal {
                 local.add(pos);
             }
         }
-        local.sort(Comparator.comparingDouble(anchor::getSquaredDistance));
+        LayerOneDominanceContext dominance = buildLayerOneDominanceContext(world, activeLayer);
+        local.sort(Comparator
+                .comparingDouble((BlockPos pos) -> computeSortieCandidateScore(world, anchor, pos, dominance))
+                .thenComparingDouble(anchor::getSquaredDistance));
         List<BlockPos> bounded = preferDistinctBands(local, world);
         if (bounded.size() > MAX_SEGMENTS_PER_SORTIE) {
             bounded = new ArrayList<>(bounded.subList(0, MAX_SEGMENTS_PER_SORTIE));
@@ -2677,6 +2707,183 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return accepted;
+    }
+
+    private double computeSortieCandidateScore(ServerWorld world, BlockPos anchor, BlockPos candidate, LayerOneDominanceContext dominance) {
+        double distanceScore = anchor.getSquaredDistance(candidate);
+        if (!dominance.active()) {
+            return distanceScore;
+        }
+        LayerOneRegionProgress progress = dominance.regionProgressByKey().get(resolveLayerOneRegion(candidate).key());
+        double completionRatio = progress == null ? 1.0D : progress.completionRatio();
+        double dominancePenalty = completionRatio * 1000.0D;
+        return dominancePenalty + distanceScore;
+    }
+
+    private LayerOneDominanceContext buildLayerOneDominanceContext(ServerWorld world, int activeLayer) {
+        if (activeLayer != 1) {
+            return LayerOneDominanceContext.inactive();
+        }
+        Map<String, LayerOneRegionProgress> progressByKey = computeLayerOneRegionProgress(world);
+        if (progressByKey.isEmpty()) {
+            return LayerOneDominanceContext.inactive();
+        }
+        int total = 0;
+        int placed = 0;
+        for (LayerOneRegionProgress progress : progressByKey.values()) {
+            total += progress.total();
+            placed += progress.placed();
+        }
+        if (total <= 0) {
+            return LayerOneDominanceContext.inactive();
+        }
+        double completionRatio = (double) placed / (double) total;
+        return new LayerOneDominanceContext(completionRatio < LAYER_ONE_REGION_DOMINANCE_COMPLETION_THRESHOLD, completionRatio, progressByKey);
+    }
+
+    private Map<String, LayerOneRegionProgress> computeLayerOneRegionProgress(ServerWorld world) {
+        Map<String, MutableLayerOneProgress> mutable = new HashMap<>();
+        for (BlockPos segment : pendingSegments) {
+            if (getSegmentLayer(world, segment) != 1) continue;
+            if (isGatePosition(segment) || isTerminalSegment(segment)) continue;
+            LayerOneRegion region = resolveLayerOneRegion(segment);
+            MutableLayerOneProgress state = mutable.computeIfAbsent(region.key(),
+                    ignored -> new MutableLayerOneProgress(region.face(), region.segmentRangeStart(), region.segmentRangeEnd()));
+            state.total++;
+            if (isPlacedWallBlock(world.getBlockState(segment))) {
+                state.placed++;
+            }
+        }
+        Map<String, LayerOneRegionProgress> result = new HashMap<>();
+        for (Map.Entry<String, MutableLayerOneProgress> entry : mutable.entrySet()) {
+            MutableLayerOneProgress state = entry.getValue();
+            int remaining = Math.max(0, state.total - state.placed);
+            result.put(entry.getKey(), new LayerOneRegionProgress(
+                    entry.getKey(),
+                    state.face,
+                    state.segmentRangeStart,
+                    state.segmentRangeEnd,
+                    state.placed,
+                    remaining,
+                    state.total
+            ));
+        }
+        return result;
+    }
+
+    private DominantAnchorSelection findDominantLayerOneAnchor(ServerWorld world,
+                                                               int activeLayer,
+                                                               boolean preferNonQuarantinedBands,
+                                                               boolean preferNonCycleExcludedBands,
+                                                               LayerOneDominanceContext dominance) {
+        List<BlockPos> candidates = new ArrayList<>();
+        long now = world.getTime();
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            BlockPos candidate = pendingSegments.get(i);
+            if (getSegmentLayer(world, candidate) != activeLayer) continue;
+            if (isPivotExcludedSegment(world, i, candidate)) continue;
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, activeLayer)) continue;
+            if (segmentStates.getOrDefault(candidate, SegmentState.AVAILABLE) != SegmentState.AVAILABLE) continue;
+            if (!isBuildableCandidate(world, candidate)) continue;
+            candidates.add(candidate);
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+
+        String forcedFromRegion = null;
+        String avoidedRegion = null;
+        if (lastSortieRegionKey != null) {
+            int retries = sortieRetryAttemptsByRegion.getOrDefault(lastSortieRegionKey, 0);
+            boolean consecutiveCapHit = consecutiveSortiesSameRegion >= MAX_CONSECUTIVE_SORTIES_PER_REGION;
+            boolean retryCapHit = retries >= MAX_RETRY_ATTEMPTS_PER_REGION_BEFORE_ROTATION;
+            if (consecutiveCapHit || retryCapHit) {
+                boolean hasAlternativeRegion = candidates.stream()
+                        .map(this::resolveLayerOneRegion)
+                        .map(LayerOneRegion::key)
+                        .anyMatch(key -> !lastSortieRegionKey.equals(key));
+                if (hasAlternativeRegion) {
+                    avoidedRegion = lastSortieRegionKey;
+                    forcedFromRegion = lastSortieRegionKey;
+                }
+            }
+        }
+
+        candidates.sort(Comparator
+                .comparingDouble((BlockPos pos) -> {
+                    LayerOneRegionProgress progress = dominance.regionProgressByKey().get(resolveLayerOneRegion(pos).key());
+                    double completion = progress == null ? 1.0D : progress.completionRatio();
+                    int retries = sortieRetryAttemptsByRegion.getOrDefault(resolveLayerOneRegion(pos).key(), 0);
+                    return (completion * 1000.0D) + (retries * 10.0D) + guard.getBlockPos().getSquaredDistance(pos);
+                }));
+        if (avoidedRegion != null) {
+            for (BlockPos candidate : candidates) {
+                if (!avoidedRegion.equals(resolveLayerOneRegion(candidate).key())) {
+                    return new DominantAnchorSelection(candidate, forcedFromRegion);
+                }
+            }
+        }
+        return new DominantAnchorSelection(candidates.get(0), null);
+    }
+
+    private void recordLayerOneSortieRegionSelection(ServerWorld world,
+                                                     BlockPos selectedAnchor,
+                                                     Map<String, LayerOneRegionProgress> progressByKey,
+                                                     String forcedRotationFromRegion) {
+        LayerOneRegion selectedRegion = resolveLayerOneRegion(selectedAnchor);
+        String selectedRegionKey = selectedRegion.key();
+        sortieRetryAttemptsByRegion.merge(selectedRegionKey, 1, Integer::sum);
+        if (selectedRegionKey.equals(lastSortieRegionKey)) {
+            consecutiveSortiesSameRegion++;
+        } else {
+            consecutiveSortiesSameRegion = 1;
+        }
+        if (forcedRotationFromRegion != null && !forcedRotationFromRegion.equals(selectedRegionKey)) {
+            LayerOneRegionProgress fromProgress = progressByKey.get(forcedRotationFromRegion);
+            LayerOneRegionProgress toProgress = progressByKey.get(selectedRegionKey);
+            double fromRatio = fromProgress == null ? 1.0D : fromProgress.completionRatio();
+            double toRatio = toProgress == null ? 1.0D : toProgress.completionRatio();
+            LOGGER.info("MasonWallBuilder {}: forced_region_rotation from={} to={} fromCompletion={} toCompletion={}",
+                    guard.getUuidAsString(),
+                    forcedRotationFromRegion,
+                    selectedRegionKey,
+                    String.format("%.3f", fromRatio),
+                    String.format("%.3f", toRatio));
+        }
+        lastSortieRegionKey = selectedRegionKey;
+    }
+
+    private LayerOneRegion resolveLayerOneRegion(BlockPos segment) {
+        if (cycleWallRect == null) {
+            String fallback = "fallback|" + segment.getX() + "|" + segment.getZ();
+            return new LayerOneRegion(fallback, "fallback", 0, 0);
+        }
+        int minX = cycleWallRect.minX();
+        int maxX = cycleWallRect.maxX();
+        int minZ = cycleWallRect.minZ();
+        int maxZ = cycleWallRect.maxZ();
+        if (segment.getZ() == minZ) {
+            return buildLayerOneFaceRegion("north", segment.getX() - minX, maxX - minX + 1);
+        }
+        if (segment.getX() == maxX) {
+            return buildLayerOneFaceRegion("east", segment.getZ() - minZ - 1, Math.max(1, maxZ - minZ - 1));
+        }
+        if (segment.getZ() == maxZ) {
+            return buildLayerOneFaceRegion("south", maxX - segment.getX(), maxX - minX + 1);
+        }
+        return buildLayerOneFaceRegion("west", maxZ - segment.getZ() - 1, Math.max(1, maxZ - minZ - 1));
+    }
+
+    private LayerOneRegion buildLayerOneFaceRegion(String face, int rawFaceIndex, int faceLength) {
+        int clampedFaceLength = Math.max(1, faceLength);
+        int faceIndex = Math.max(0, Math.min(rawFaceIndex, clampedFaceLength - 1));
+        int arcCount = Math.max(1, Math.min(LAYER_ONE_FACE_ARC_BUCKETS, clampedFaceLength));
+        int arcIndex = Math.min(arcCount - 1, (faceIndex * arcCount) / clampedFaceLength);
+        int rangeStart = (arcIndex * clampedFaceLength) / arcCount;
+        int rangeEnd = Math.max(rangeStart, (((arcIndex + 1) * clampedFaceLength) / arcCount) - 1);
+        String key = face + "#" + arcIndex;
+        return new LayerOneRegion(key, face, rangeStart, rangeEnd);
     }
 
     private boolean passesSortiePreflight(ServerWorld world, BlockPos segment) {
@@ -5185,6 +5392,51 @@ public class MasonWallBuilderGoal extends Goal {
     private record ProgressSnapshot(long tick, int placements, int pathRetries, int hardUnreachable) {}
 
     private record FailureBandWindow(int count, long firstFailureTick) {}
+
+    private record LayerOneDominanceContext(
+            boolean active,
+            double overallCompletionRatio,
+            Map<String, LayerOneRegionProgress> regionProgressByKey
+    ) {
+        private static LayerOneDominanceContext inactive() {
+            return new LayerOneDominanceContext(false, 1.0D, Map.of());
+        }
+    }
+
+    private record LayerOneRegionProgress(
+            String key,
+            String face,
+            int segmentRangeStart,
+            int segmentRangeEnd,
+            int placed,
+            int remaining,
+            int total
+    ) {
+        private double completionRatio() {
+            if (total <= 0) {
+                return 1.0D;
+            }
+            return (double) placed / (double) total;
+        }
+    }
+
+    private static final class MutableLayerOneProgress {
+        private final String face;
+        private final int segmentRangeStart;
+        private final int segmentRangeEnd;
+        private int placed = 0;
+        private int total = 0;
+
+        private MutableLayerOneProgress(String face, int segmentRangeStart, int segmentRangeEnd) {
+            this.face = face;
+            this.segmentRangeStart = segmentRangeStart;
+            this.segmentRangeEnd = segmentRangeEnd;
+        }
+    }
+
+    private record LayerOneRegion(String key, String face, int segmentRangeStart, int segmentRangeEnd) {}
+
+    private record DominantAnchorSelection(BlockPos anchor, String forcedFromRegion) {}
 
     record EarlyCycleAbortPolicyDecision(long cooldownTicks, boolean shouldQuarantineBand) {}
 
