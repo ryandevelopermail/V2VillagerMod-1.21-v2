@@ -149,6 +149,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int RETRY_DENSITY_LOW_PLACEMENT_DELTA_THRESHOLD = 1;
     private static final int RETRY_DENSITY_HARD_UNREACHABLE_TRIGGER_DELTA = 2;
     private static final int RETRY_DENSITY_EXIT_PLACEMENT_STREAK = 3;
+    private static final int ZERO_PLACEMENT_RETRY_WARNING_THRESHOLD = 8;
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
     private static final int STAGNATION_REGION_BAND_BUCKETS = 4;
     private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
@@ -294,6 +295,8 @@ public class MasonWallBuilderGoal extends Goal {
     private int placementWriteSuccess = 0;
     private int placementPostVerifySuccess = 0;
     private int placementRejectedByStatePolicy = 0;
+    private final Map<SortieFailureCategory, Integer> sortieFailureCategoryCounts = new EnumMap<>(SortieFailureCategory.class);
+    private long lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
     private BlockPos placeBlockFailureTarget = null;
     private int placeBlockConsecutiveNonPlacementTicks = 0;
     private String placeBlockLastNonPlacementReason = null;
@@ -559,6 +562,8 @@ public class MasonWallBuilderGoal extends Goal {
         placementWriteSuccess = 0;
         placementPostVerifySuccess = 0;
         placementRejectedByStatePolicy = 0;
+        resetSortieFailureCounters();
+        lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
         placeBlockLastNonPlacementReason = null;
@@ -678,6 +683,8 @@ public class MasonWallBuilderGoal extends Goal {
         placementWriteSuccess = 0;
         placementPostVerifySuccess = 0;
         placementRejectedByStatePolicy = 0;
+        resetSortieFailureCounters();
+        lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
         placeBlockLastNonPlacementReason = null;
@@ -1226,6 +1233,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         long elapsedNoMeaningfulProgress = Math.max(0L, world.getTime() - targetLastMeaningfulProgressTick);
         if (elapsedNoMeaningfulProgress > MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS) {
+            incrementSortieFailureCounter(SortieFailureCategory.MOVE_LIVELOCK_TIMEOUT);
             LOGGER.info("MasonWallBuilder {}: move_livelock_guard segment={} bestDistSq={} elapsedTicksNoMeaningfulProgress={}",
                     guard.getUuidAsString(),
                     target.toShortString(),
@@ -1405,6 +1413,13 @@ public class MasonWallBuilderGoal extends Goal {
 
     private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos, boolean applyBackoff) {
         Map<BlockPos, NavigationCandidate> deduped = new HashMap<>();
+        SortieFailureCategory dominantFailure = dominantFailureCategory();
+        int verticalSearchMin = -2;
+        int verticalSearchMax = 2;
+        if (dominantFailure == SortieFailureCategory.STANDABILITY_REJECTED) {
+            verticalSearchMin = -3;
+            verticalSearchMax = 3;
+        }
 
         boolean budgetExhausted = false;
         budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.down(), deduped);
@@ -1424,7 +1439,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (budgetExhausted) {
                 break;
             }
-            for (int dy = -2; dy <= 2; dy++) {
+            for (int dy = verticalSearchMin; dy <= verticalSearchMax; dy++) {
                 if (budgetExhausted) {
                     break;
                 }
@@ -1453,6 +1468,7 @@ public class MasonWallBuilderGoal extends Goal {
             int filteredCount = 0;
             for (NavigationCandidate candidate : ranked) {
                 if (isNavTargetInBackoff(segmentPos, candidate.pos(), now)) {
+                    incrementSortieFailureCounter(SortieFailureCategory.NAV_TARGET_BACKOFF_FILTERED);
                     filteredCount++;
                     continue;
                 }
@@ -1486,6 +1502,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean addNavigationCandidate(ServerWorld world, BlockPos segmentPos, BlockPos candidatePos, Map<BlockPos, NavigationCandidate> deduped) {
         StandabilityAssessment standability = assessStandabilityForNavigation(world, candidatePos);
         if (!standability.standable()) {
+            incrementSortieFailureCounter(SortieFailureCategory.STANDABILITY_REJECTED);
             return false;
         }
         PreflightProbeResult preflight = evaluatePreflightPath(world, segmentPos, candidatePos);
@@ -1551,6 +1568,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        incrementSortieFailureCounter(SortieFailureCategory.PATH_START_FAILED);
         noteRetryDensityNonPlacementProgress();
         SegmentFailMetadata failMetadata = registerSegmentFailureMetadata(world, segmentTarget, attemptedNavTarget, "path_start_failed");
         if (firstPathFailureTick < 0L) {
@@ -3501,7 +3519,10 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private double computeSortieCandidateScore(ServerWorld world, BlockPos anchor, BlockPos candidate, LayerOneDominanceContext dominance) {
-        double distanceScore = anchor.getSquaredDistance(candidate);
+        SortieFailureCategory dominantFailure = dominantFailureCategory();
+        double distanceScore = dominantFailure == SortieFailureCategory.PATH_START_FAILED
+                ? guard.getBlockPos().getSquaredDistance(candidate)
+                : anchor.getSquaredDistance(candidate);
         if (!dominance.active()) {
             return distanceScore;
         }
@@ -3690,6 +3711,9 @@ public class MasonWallBuilderGoal extends Goal {
         if (preflight == PreflightProbeResult.DEFERRED) {
             lastPreflightDeferredByBudget = true;
             return false;
+        }
+        if (preflight == PreflightProbeResult.FAIL) {
+            incrementSortieFailureCounter(SortieFailureCategory.PREFLIGHT_NO_PATH);
         }
         // Path miss is a soft signal: fallback sortie admission and runtime retries
         // determine actual reachability while moving.
@@ -4333,6 +4357,62 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.info(message, args);
     }
 
+    private void resetSortieFailureCounters() {
+        sortieFailureCategoryCounts.clear();
+        for (SortieFailureCategory category : SortieFailureCategory.values()) {
+            sortieFailureCategoryCounts.put(category, 0);
+        }
+    }
+
+    private void incrementSortieFailureCounter(SortieFailureCategory category) {
+        sortieFailureCategoryCounts.put(category, sortieFailureCategoryCounts.getOrDefault(category, 0) + 1);
+    }
+
+    private String formatTopFailureCategories(int limit) {
+        if (sortieFailureCategoryCounts.isEmpty()) {
+            return "none";
+        }
+        List<Map.Entry<SortieFailureCategory, Integer>> ranked = sortieFailureCategoryCounts.entrySet().stream()
+                .filter(entry -> entry.getValue() != null && entry.getValue() > 0)
+                .sorted((left, right) -> Integer.compare(right.getValue(), left.getValue()))
+                .toList();
+        if (ranked.isEmpty()) {
+            return "none";
+        }
+        int boundedLimit = Math.max(1, limit);
+        List<String> top = new ArrayList<>(Math.min(boundedLimit, ranked.size()));
+        for (int i = 0; i < ranked.size() && i < boundedLimit; i++) {
+            Map.Entry<SortieFailureCategory, Integer> entry = ranked.get(i);
+            top.add(entry.getKey().logKey + "=" + entry.getValue());
+        }
+        return String.join(",", top);
+    }
+
+    private SortieFailureCategory dominantFailureCategory() {
+        return sortieFailureCategoryCounts.entrySet().stream()
+                .max(Comparator.comparingInt(Map.Entry::getValue))
+                .filter(entry -> entry.getValue() != null && entry.getValue() > 0)
+                .map(Map.Entry::getKey)
+                .orElse(SortieFailureCategory.NONE);
+    }
+
+    private void maybeEmitZeroPlacementRetryWarning(ServerWorld world) {
+        if (placementAttempts > 0 || pathRetriesSinceCycleStart < ZERO_PLACEMENT_RETRY_WARNING_THRESHOLD) {
+            return;
+        }
+        if (lastZeroPlacementRetryWarningTick != Long.MIN_VALUE
+                && (world.getTime() - lastZeroPlacementRetryWarningTick) < PERIODIC_INFO_INTERVAL_TICKS) {
+            return;
+        }
+        lastZeroPlacementRetryWarningTick = world.getTime();
+        LOGGER.warn("MasonWallBuilder {}: zero_placement_retry_warning retries={} threshold={} dominantFailures={} topFailures={}",
+                guard.getUuidAsString(),
+                pathRetriesSinceCycleStart,
+                ZERO_PLACEMENT_RETRY_WARNING_THRESHOLD,
+                dominantFailureCategory().logKey,
+                formatTopFailureCategories(3));
+    }
+
     private void maybeEmitPeriodicInfo(ServerWorld world) {
         if (!isElectedBuilder || stage == Stage.IDLE || stage == Stage.DONE) {
             return;
@@ -4349,6 +4429,8 @@ public class MasonWallBuilderGoal extends Goal {
         double averageCandidatesPerSortie = sortieCandidateCountSamples <= 0
                 ? 0.0D
                 : (double) sortieCandidateCountSum / (double) sortieCandidateCountSamples;
+        String topFailureReasons = formatTopFailureCategories(2);
+        maybeEmitZeroPlacementRetryWarning(world);
         if (stage == Stage.PLACE_BLOCK && placementDeltaSinceLastSummary <= 0) {
             String stalledTarget = placeBlockFailureTarget == null ? "none" : placeBlockFailureTarget.toShortString();
             String stalledReason = placeBlockLastNonPlacementReason == null ? "none" : placeBlockLastNonPlacementReason;
@@ -4356,7 +4438,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4374,14 +4456,15 @@ public class MasonWallBuilderGoal extends Goal {
                     Math.max(0, placementsSinceLastSuppression),
                     pathBudgetUsedSinceLastPeriodic,
                     pathBudgetDeferredSinceLastPeriodic,
-                    String.format("%.2f", averageCandidatesPerSortie)
+                    String.format("%.2f", averageCandidatesPerSortie),
+                    topFailureReasons
             );
         } else {
             logInfoRateLimited(
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4397,7 +4480,8 @@ public class MasonWallBuilderGoal extends Goal {
                     Math.max(0, placementsSinceLastSuppression),
                     pathBudgetUsedSinceLastPeriodic,
                     pathBudgetDeferredSinceLastPeriodic,
-                    String.format("%.2f", averageCandidatesPerSortie)
+                    String.format("%.2f", averageCandidatesPerSortie),
+                    topFailureReasons
             );
         }
         maybeEmitLayerOneFaceCoverageInfo(world);
@@ -6834,6 +6918,21 @@ public class MasonWallBuilderGoal extends Goal {
         PASS,
         FAIL,
         DEFERRED
+    }
+
+    private enum SortieFailureCategory {
+        NONE("none"),
+        PREFLIGHT_NO_PATH("preflightNoPath"),
+        NAV_TARGET_BACKOFF_FILTERED("navTargetBackoffFiltered"),
+        STANDABILITY_REJECTED("standabilityRejected"),
+        PATH_START_FAILED("pathStartFailed"),
+        MOVE_LIVELOCK_TIMEOUT("moveLivelockTimeout");
+
+        private final String logKey;
+
+        SortieFailureCategory(String logKey) {
+            this.logKey = logKey;
+        }
     }
 
     private record PreflightCacheKey(BlockPos segment, BlockPos navTarget, long coarseTickBucket) {}
