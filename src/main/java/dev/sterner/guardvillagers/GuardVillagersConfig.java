@@ -101,6 +101,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonWallMaxWidth = 0;
     @Entry(min=0)
     public static int masonWallMaxDepth = 0;
+    @Entry(min=0)
+    public static int masonWallBootstrapMaxSpan = 48;
     @Entry(min=32)
     public static int masonWallFootprintRadius = 80;
     @Entry(min=0)
