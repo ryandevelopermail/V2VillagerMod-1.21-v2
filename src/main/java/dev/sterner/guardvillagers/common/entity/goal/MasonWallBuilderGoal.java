@@ -106,6 +106,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long SKIPPED_SEGMENT_RECONCILIATION_INTERVAL_TICKS = 80L;
     private static final long MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS = 200L;
     private static final long SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS = 240L;
+    private static final long SORTIE_NO_NET_PROGRESS_STARTUP_GRACE_TICKS = 60L;
     private static final int SORTIE_NO_NET_PROGRESS_MIN_PLACEMENT_DELTA = 1;
     private static final double MEANINGFUL_PROGRESS_DELTA_DIST_SQ = 0.64D;
     private static final int WATCHDOG_REPEAT_SEGMENT_THRESHOLD = 2;
@@ -179,6 +180,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortiePlacements = 0;
     private int sortiePlacementsAtStart = 0;
     private long sortieStartTick = -1L;
+    private long sortieActivationTick = -1L;
+    private long cycleStartTick = -1L;
+    private boolean sortieNoNetProgressGraceSuppressedLogged = false;
     private int placedSegments = 0;
     private int plannedPlacementCount = 0;
     private boolean hardRetryPassStarted = false;
@@ -433,6 +437,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesFallbackAccepted = 0;
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
+        sortieActivationTick = -1L;
+        sortieNoNetProgressGraceSuppressedLogged = false;
         obstaclesCleared = 0;
         protectedObstaclesSkipped = 0;
         unbreakableObstaclesSkipped = 0;
@@ -445,6 +451,7 @@ public class MasonWallBuilderGoal extends Goal {
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
         ServerWorld world = worldOrNull();
+        cycleStartTick = world != null ? world.getTime() : -1L;
         lastPlacementTick = world != null ? world.getTime() : 0L;
         placementsSinceCycleStart = 0;
         nextSkippedSegmentReconciliationTick = world != null ? world.getTime() : 0L;
@@ -528,6 +535,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieHardUnreachableMarked = 0;
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
+        sortieActivationTick = -1L;
+        cycleStartTick = -1L;
+        sortieNoNetProgressGraceSuppressedLogged = false;
         nextCompletionSweepAllowedTick = 0L;
         consecutiveDeferredSweeps = 0;
         lastSweepLogSignature = null;
@@ -1699,7 +1709,8 @@ public class MasonWallBuilderGoal extends Goal {
         if (!sortieActive || sortieStartTick < 0L) {
             return false;
         }
-        long elapsedTicks = Math.max(0L, world.getTime() - sortieStartTick);
+        long now = world.getTime();
+        long elapsedTicks = Math.max(0L, now - sortieStartTick);
         if (elapsedTicks <= SORTIE_NO_NET_PROGRESS_TIMEOUT_TICKS) {
             return false;
         }
@@ -1708,6 +1719,23 @@ public class MasonWallBuilderGoal extends Goal {
         if (placementDelta >= SORTIE_NO_NET_PROGRESS_MIN_PLACEMENT_DELTA) {
             return false;
         }
+        if (isNoNetProgressAbortSuppressedByStartupGrace(world)) {
+            if (!sortieNoNetProgressGraceSuppressedLogged) {
+                long cycleElapsedTicks = cycleStartTick < 0L ? -1L : Math.max(0L, now - cycleStartTick);
+                long sortieElapsedTicks = sortieActivationTick < 0L ? -1L : Math.max(0L, now - sortieActivationTick);
+                LOGGER.info("MasonWallBuilder {}: sortie_abort_no_net_progress_suppressed stage={} elapsedTicks={} placementDelta={} queueSize={} cycleElapsedTicks={} sortieElapsedTicks={} abortSuppressedByStartupGrace=true",
+                        guard.getUuidAsString(),
+                        activeStage,
+                        elapsedTicks,
+                        placementDelta,
+                        localSortieQueue.size(),
+                        cycleElapsedTicks,
+                        sortieElapsedTicks);
+                sortieNoNetProgressGraceSuppressedLogged = true;
+            }
+            return false;
+        }
+        sortieNoNetProgressGraceSuppressedLogged = false;
 
         LOGGER.info("MasonWallBuilder {}: sortie_abort_no_net_progress stage={} elapsedTicks={} placementDelta={} queueSize={}",
                 guard.getUuidAsString(),
@@ -1719,7 +1747,6 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> cooldownTargets = new ArrayList<>(localSortieQueue);
         releaseLocalSortieClaims(world, "sortie_abort_no_net_progress");
         localSortieQueue.clear();
-        long now = world.getTime();
         Map<String, Integer> bandRepeatCounts = new HashMap<>();
         for (BlockPos segment : cooldownTargets) {
             String bandKey = segmentBandSignature(world, segment);
@@ -1754,6 +1781,17 @@ public class MasonWallBuilderGoal extends Goal {
             stage = Stage.WAIT_FOR_WALL_STOCK;
         }
         return true;
+    }
+
+    private boolean isNoNetProgressAbortSuppressedByStartupGrace(ServerWorld world) {
+        if (placementsSinceCycleStart > 0) {
+            return false;
+        }
+        long now = world.getTime();
+        long cycleElapsedTicks = cycleStartTick < 0L ? Long.MAX_VALUE : Math.max(0L, now - cycleStartTick);
+        long sortieElapsedTicks = sortieActivationTick < 0L ? Long.MAX_VALUE : Math.max(0L, now - sortieActivationTick);
+        return cycleElapsedTicks < SORTIE_NO_NET_PROGRESS_STARTUP_GRACE_TICKS
+                || sortieElapsedTicks < SORTIE_NO_NET_PROGRESS_STARTUP_GRACE_TICKS;
     }
 
     private void resetSortieNoNetProgressGuard(ServerWorld world) {
@@ -2360,6 +2398,8 @@ public class MasonWallBuilderGoal extends Goal {
         sortieTransientRetriesAttempted = 0;
         sortieFallbackTargetsTried = 0;
         sortieHardUnreachableMarked = 0;
+        sortieActivationTick = world.getTime();
+        sortieNoNetProgressGraceSuppressedLogged = false;
         resetSortieNoNetProgressGuard(world);
         consecutiveDeferredSweeps = 0;
         debugLogSegmentStateSanity(world, "sortie_selected");
@@ -3013,6 +3053,9 @@ public class MasonWallBuilderGoal extends Goal {
         clearStagnationPivotState();
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
+        sortieActivationTick = -1L;
+        cycleStartTick = -1L;
+        sortieNoNetProgressGraceSuppressedLogged = false;
         nextSkippedSegmentReconciliationTick = 0L;
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
