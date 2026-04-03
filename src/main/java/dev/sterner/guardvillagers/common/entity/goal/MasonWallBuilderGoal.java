@@ -118,17 +118,20 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
     private static final int BAND_NO_PROGRESS_ABORT_WINDOW_TICKS = 240;
     private static final long NAV_TARGET_BACKOFF_TICKS = 100L;
-    private static final int STAGNATION_PROGRESS_WINDOW_TICKS = 120;
-    private static final int STAGNATION_RETRY_DELTA_THRESHOLD = 4;
+    private static final int STAGNATION_PROGRESS_WINDOW_TICKS = 200;
+    private static final int STAGNATION_RETRY_DELTA_THRESHOLD = 7;
+    private static final int STAGNATION_HARD_UNREACHABLE_DELTA_THRESHOLD = 3;
     private static final int STAGNATION_PIVOT_RANGE_WIDTH = 8;
     private static final long STAGNATION_PIVOT_INTERVAL_TICKS = 200L;
     private static final long STAGNATION_PIVOT_MIN_ACTIVE_TICKS = 60L;
+    private static final long STAGNATION_PIVOT_MAX_ACTIVE_TICKS = 320L;
     private static final long STAGNATION_PIVOT_REACTIVATION_COOLDOWN_TICKS = 80L;
     private static final int STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK = 3;
     private static final int STAGNATION_PIVOT_CLEAR_RETRY_RECOVERY_DELTA = 2;
     private static final int STAGNATION_PIVOT_CLEAR_HARD_RECOVERY_DELTA = 1;
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
     private static final long STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS = 20L;
+    private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
     private static final int EARLY_HARD_UNREACHABLE_DISTINCT_TARGET_THRESHOLD = 2;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
@@ -261,6 +264,8 @@ public class MasonWallBuilderGoal extends Goal {
     private int stagnationPivotSuppressIndexEnd = -1;
     private long stagnationPivotSuppressUntilTick = 0L;
     private int stagnationPivotPlacementStreak = 0;
+    private int stagnationPivotPlacementsAtActivation = 0;
+    private String stagnationPivotExcludedBandSignature = null;
     private int lastPivotActivationRetryDelta = 0;
     private int lastPivotActivationHardDelta = 0;
     private long stagnationPivotActivatedAtTick = 0L;
@@ -1346,7 +1351,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (isPivotExcludedSegment(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isBuildableCandidate(world, pos)) {
@@ -2444,7 +2449,7 @@ public class MasonWallBuilderGoal extends Goal {
         while (currentSegmentIndex < pendingSegments.size()) {
             int candidateIndex = currentSegmentIndex++;
             BlockPos candidate = pendingSegments.get(candidateIndex);
-            if (isPivotSuppressedIndex(world, candidateIndex, candidate)) {
+            if (isPivotExcludedSegment(world, candidateIndex, candidate)) {
                 continue;
             }
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, world.getTime())) {
@@ -2465,7 +2470,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos candidate = pendingSegments.get(i);
             if (getSegmentLayer(world, candidate) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, candidate)) continue;
+            if (isPivotExcludedSegment(world, i, candidate)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, activeLayer)) continue;
             if (segmentStates.getOrDefault(candidate, SegmentState.AVAILABLE) != SegmentState.AVAILABLE) continue;
@@ -2483,7 +2488,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (isPivotExcludedSegment(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
@@ -2501,7 +2506,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (isPivotExcludedSegment(world, i, pos)) continue;
             if (isSegmentBandQuarantined(world, pos, now)) continue;
             if (isBuildableCandidate(world, pos)) {
                 return true;
@@ -2516,7 +2521,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (isPivotExcludedSegment(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (requireNonCycleExcludedBand && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isBuildableCandidate(world, pos)) {
@@ -2556,7 +2561,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
-            if (isPivotSuppressedIndex(world, i, pos)) continue;
+            if (isPivotExcludedSegment(world, i, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isSegmentInCooldown(pos, now)) continue;
@@ -3314,6 +3319,10 @@ public class MasonWallBuilderGoal extends Goal {
                 clearStagnationPivot(world, strongPlacementStreak ? "placement_streak" : "recovered_window", activeDuration, cooldownRemaining, clearConditionMet);
                 return;
             }
+            maybeEscalatePivotStall(world, activeDuration);
+            if (!stagnationPivotActive) {
+                return;
+            }
             if (now >= stagnationPivotSuppressUntilTick) {
                 maybeRefreshStagnationPivotSuppressionRange(world);
                 stagnationPivotSuppressUntilTick = now + STAGNATION_PIVOT_INTERVAL_TICKS;
@@ -3324,7 +3333,10 @@ public class MasonWallBuilderGoal extends Goal {
             maybeLogPivotLifecycle(world, 0L, (int) (stagnationPivotCooldownUntilTick - now), false, retryDelta, hardDelta);
             return;
         }
-        if (placementDelta > 0 || (retryDelta + hardDelta) < STAGNATION_RETRY_DELTA_THRESHOLD) {
+        if (placementDelta > 0) {
+            return;
+        }
+        if (retryDelta < STAGNATION_RETRY_DELTA_THRESHOLD && hardDelta < STAGNATION_HARD_UNREACHABLE_DELTA_THRESHOLD) {
             return;
         }
         activateStagnationPivot(world, retryDelta, hardDelta);
@@ -3338,6 +3350,8 @@ public class MasonWallBuilderGoal extends Goal {
         applyPivotSuppressionRange(suppressionStart, suppressionEnd);
         stagnationPivotSuppressUntilTick = world.getTime() + STAGNATION_PIVOT_INTERVAL_TICKS;
         stagnationPivotPlacementStreak = 0;
+        stagnationPivotPlacementsAtActivation = placementsSinceCycleStart;
+        stagnationPivotExcludedBandSignature = resolvePivotExcludedBandSignature(world);
         stagnationPivotActive = true;
         stagnationPivotActivatedAtTick = world.getTime();
         nextPivotLifecycleLogTick = world.getTime();
@@ -3349,12 +3363,13 @@ public class MasonWallBuilderGoal extends Goal {
         resetActiveMoveProgressTracking(world);
         resetPathFailureState();
         currentSegmentIndex = Math.min(pendingSegments.size(), stagnationPivotSuppressIndexEnd + 1);
-        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_activated placementsDelta=0 retryDelta={} hardUnreachableDelta={} suppressedRange={}..{} until={}",
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_activated placementsDelta=0 retryDelta={} hardUnreachableDelta={} suppressedRange={}..{} excludedBand={} until={}",
                 guard.getUuidAsString(),
                 retryDelta,
                 hardDelta,
                 stagnationPivotSuppressIndexStart,
                 stagnationPivotSuppressIndexEnd,
+                stagnationPivotExcludedBandSignature == null ? "none" : stagnationPivotExcludedBandSignature,
                 stagnationPivotSuppressUntilTick);
     }
 
@@ -3362,15 +3377,18 @@ public class MasonWallBuilderGoal extends Goal {
         if (!stagnationPivotActive) {
             return;
         }
-        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_cleared reason={} placementStreak={} retryDelta={} hardUnreachableDelta={} activeDuration={} cooldownRemaining={} clearConditionMet={}",
+        int placementsGained = Math.max(0, placementsSinceCycleStart - stagnationPivotPlacementsAtActivation);
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_summary reason={} placementsGained={} placementStreak={} retryDelta={} hardUnreachableDelta={} activeDuration={} cooldownRemaining={} clearConditionMet={} excludedBand={}",
                 guard.getUuidAsString(),
                 reason,
+                placementsGained,
                 stagnationPivotPlacementStreak,
                 lastPivotActivationRetryDelta,
                 lastPivotActivationHardDelta,
                 activeDuration,
                 cooldownRemaining,
-                clearConditionMet);
+                clearConditionMet,
+                stagnationPivotExcludedBandSignature == null ? "none" : stagnationPivotExcludedBandSignature);
         long now = world == null ? 0L : world.getTime();
         stagnationPivotCooldownUntilTick = now + STAGNATION_PIVOT_REACTIVATION_COOLDOWN_TICKS;
         clearStagnationPivotState();
@@ -3384,6 +3402,8 @@ public class MasonWallBuilderGoal extends Goal {
         stagnationPivotSuppressIndexEnd = -1;
         stagnationPivotSuppressUntilTick = 0L;
         stagnationPivotPlacementStreak = 0;
+        stagnationPivotPlacementsAtActivation = 0;
+        stagnationPivotExcludedBandSignature = null;
         lastPivotActivationRetryDelta = 0;
         lastPivotActivationHardDelta = 0;
         stagnationPivotActivatedAtTick = 0L;
@@ -3457,11 +3477,58 @@ public class MasonWallBuilderGoal extends Goal {
         return resolvedIndex >= stagnationPivotSuppressIndexStart && resolvedIndex <= stagnationPivotSuppressIndexEnd;
     }
 
+    private boolean isPivotHardExcludedBand(ServerWorld world, BlockPos segment) {
+        if (!stagnationPivotActive || stagnationPivotExcludedBandSignature == null || segment == null) {
+            return false;
+        }
+        return stagnationPivotExcludedBandSignature.equals(segmentBandSignature(world, segment));
+    }
+
+    private boolean isPivotExcludedSegment(ServerWorld world, int index, BlockPos segment) {
+        return isPivotSuppressedIndex(world, index, segment) || isPivotHardExcludedBand(world, segment);
+    }
+
+    private String resolvePivotExcludedBandSignature(ServerWorld world) {
+        BlockPos localHead = localSortieQueue.peekFirst();
+        if (localHead != null) {
+            return segmentBandSignature(world, localHead);
+        }
+        if (activeMoveTarget != null) {
+            return segmentBandSignature(world, activeMoveTarget);
+        }
+        int candidateIndex = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
+        if (!pendingSegments.isEmpty() && candidateIndex < pendingSegments.size()) {
+            return segmentBandSignature(world, pendingSegments.get(candidateIndex));
+        }
+        return null;
+    }
+
+    private void maybeEscalatePivotStall(ServerWorld world, long activeDuration) {
+        if (!stagnationPivotActive || activeDuration < STAGNATION_PIVOT_MAX_ACTIVE_TICKS) {
+            return;
+        }
+        int placementsGained = Math.max(0, placementsSinceCycleStart - stagnationPivotPlacementsAtActivation);
+        if (placementsGained > 0) {
+            return;
+        }
+        if (stagnationPivotExcludedBandSignature != null) {
+            long cooldownUntil = world.getTime() + STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS;
+            quarantinedBandUntilTick.put(stagnationPivotExcludedBandSignature, cooldownUntil);
+            LOGGER.warn("MasonWallBuilder {}: stagnation_pivot_section_cooldown band={} cooldownTicks={} cooldownUntilTick={}",
+                    guard.getUuidAsString(),
+                    stagnationPivotExcludedBandSignature,
+                    STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS,
+                    cooldownUntil);
+        }
+        currentSegmentIndex = Math.min(pendingSegments.size(), Math.max(stagnationPivotSuppressIndexEnd + 1, currentSegmentIndex + STAGNATION_PIVOT_RANGE_WIDTH));
+        clearStagnationPivot(world, "max_duration_no_placements", activeDuration, 0, false);
+    }
+
     private BlockPos findPivotAnchorCandidate(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
         long now = world.getTime();
         for (int i = 0; i < pendingSegments.size(); i++) {
             BlockPos candidate = pendingSegments.get(i);
-            if (isPivotSuppressedIndex(world, i, candidate)) continue;
+            if (isPivotExcludedSegment(world, i, candidate)) continue;
             if (getSegmentLayer(world, candidate) != activeLayer) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
             if (isBuildableCandidate(world, candidate)) {
@@ -3471,7 +3538,7 @@ public class MasonWallBuilderGoal extends Goal {
         for (int layer = activeLayer + 1; layer <= 3; layer++) {
             for (int i = 0; i < pendingSegments.size(); i++) {
                 BlockPos candidate = pendingSegments.get(i);
-                if (isPivotSuppressedIndex(world, i, candidate)) continue;
+                if (isPivotExcludedSegment(world, i, candidate)) continue;
                 if (getSegmentLayer(world, candidate) != layer) continue;
                 if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
                 if (isBuildableCandidate(world, candidate)) {
