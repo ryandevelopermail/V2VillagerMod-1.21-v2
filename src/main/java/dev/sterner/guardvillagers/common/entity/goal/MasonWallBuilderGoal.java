@@ -171,6 +171,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WAIT_FOR_STOCK_REPLAN_COOLDOWN_TICKS = 200L;
     private static final long WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS = 40L;
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
+    private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -340,6 +341,14 @@ public class MasonWallBuilderGoal extends Goal {
     private CycleIdentity lastFootprintPlanningLogIdentity = null;
     /** Last tick footprint-planning DEBUG suppression summary was emitted. */
     private long lastFootprintPlanningDebugLogTick = Long.MIN_VALUE;
+    /** Last non-complete cycle identity used for same-cycle restart suppression. */
+    private CycleIdentity lastFailedCycleIdentity = null;
+    /** In-flight lock expiration for same-cycle restart suppression when no placement happened. */
+    private long sameCycleInFlightSuppressUntilTick = 0L;
+    /** Material availability signature captured when same-cycle suppression was armed. */
+    private int sameCycleSuppressionMaterialSignature = 0;
+    /** Tick after which suppression may clear due to retry cooldown eligibility changes. */
+    private long sameCycleSuppressionRetryCooldownUntilTick = 0L;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -781,6 +790,19 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         int totalConvertibleWalls = totalWalls + totalCobblestone;
+        int materialAvailabilitySignature = computeMaterialAvailabilitySignature(totalWalls, totalCobblestone);
+        if (shouldSuppressSameCycleRestart(world, candidateCycleIdentity, materialAvailabilitySignature)) {
+            logInfoRateLimited(
+                    world,
+                    "cycle_restart_suppressed_same_identity",
+                    PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: cycle_restart_suppressed_same_identity identity={} stage={} suppressionRemainingTicks={}",
+                    guard.getUuidAsString(),
+                    candidateCycleIdentity,
+                    stage,
+                    Math.max(0L, sameCycleInFlightSuppressUntilTick - world.getTime()));
+            return false;
+        }
         int requiredToStartSession = Math.max(1, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
         if (totalConvertibleWalls < requiredToStartSession) {
             logInfoRateLimited(world, "material_exhaustion_precheck", PERIODIC_INFO_INTERVAL_TICKS,
@@ -3601,8 +3623,12 @@ public class MasonWallBuilderGoal extends Goal {
     private void completeCycle(CycleEndReason reason) {
         logSortieSummaryIfActive();
         cycleEndReason = reason;
+        ServerWorld world = worldOrNull();
+        if (reason != CycleEndReason.WALL_COMPLETE && activeCycleIdentity != null && placementsSinceCycleStart <= 0) {
+            armSameCycleRestartSuppression(world, activeCycleIdentity);
+        }
         if (reason == CycleEndReason.WALL_COMPLETE
-                && guard.getWorld() instanceof ServerWorld world
+                && world != null
                 && activeAnchorPos != null) {
             VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
         }
@@ -3643,7 +3669,7 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
-        nextWaitForStockReplanAttemptTick = worldOrNull() instanceof ServerWorld world
+        nextWaitForStockReplanAttemptTick = world != null
                 ? world.getTime() + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS
                 : 0L;
         LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} retries={} hard_unreachable={} deferred_or_skipped={}",
@@ -3787,6 +3813,10 @@ public class MasonWallBuilderGoal extends Goal {
     private void markWaitForStockReplanInvalidated(long now) {
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockReplanAttemptTick = Math.max(nextWaitForStockReplanAttemptTick, now + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS);
+        sameCycleSuppressionRetryCooldownUntilTick = Math.max(
+                sameCycleSuppressionRetryCooldownUntilTick,
+                nextWaitForStockReplanAttemptTick
+        );
     }
 
     private boolean verboseMasonWallLogging() {
@@ -3897,6 +3927,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        clearSameCycleRestartSuppression("placement_progress");
         recordLayerOneFacePlacement(world, placedSegment);
         if (retryDensityFallbackModeActive) {
             retryDensityFallbackPlacementStreak++;
@@ -3914,6 +3945,73 @@ public class MasonWallBuilderGoal extends Goal {
         if (retryDensityFallbackModeActive) {
             retryDensityFallbackPlacementStreak = 0;
         }
+    }
+
+    private int computeMaterialAvailabilitySignature(int totalWalls, int totalCobblestone) {
+        return Objects.hash(totalWalls, totalCobblestone);
+    }
+
+    private boolean shouldSuppressSameCycleRestart(ServerWorld world, CycleIdentity candidateIdentity, int materialAvailabilitySignature) {
+        long now = world.getTime();
+        if (now >= sameCycleInFlightSuppressUntilTick) {
+            clearSameCycleRestartSuppression("lock_expired");
+            return false;
+        }
+
+        boolean matchesActive = activeCycleIdentity != null
+                && sameCycleIdentity(activeCycleIdentity, candidateIdentity);
+        boolean matchesLastFailed = lastFailedCycleIdentity != null
+                && sameCycleIdentity(lastFailedCycleIdentity, candidateIdentity);
+        if (!matchesActive && !matchesLastFailed) {
+            return false;
+        }
+
+        if (materialAvailabilitySignature != sameCycleSuppressionMaterialSignature) {
+            clearSameCycleRestartSuppression("material_changed");
+            return false;
+        }
+
+        if (now >= sameCycleSuppressionRetryCooldownUntilTick) {
+            clearSameCycleRestartSuppression("retry_cooldown_expired");
+            return false;
+        }
+
+        return true;
+    }
+
+    private boolean sameCycleIdentity(CycleIdentity left, CycleIdentity right) {
+        return left.anchorPos().equals(right.anchorPos())
+                && left.perimeterSignatureHash() == right.perimeterSignatureHash()
+                && left.boundsHash() == right.boundsHash();
+    }
+
+    private void armSameCycleRestartSuppression(ServerWorld world, CycleIdentity identity) {
+        long now = world == null ? 0L : world.getTime();
+        lastFailedCycleIdentity = identity;
+        sameCycleInFlightSuppressUntilTick = now + SAME_CYCLE_IN_FLIGHT_LOCK_TICKS;
+        int walls = 0;
+        int cobble = 0;
+        BlockPos chestPos = guard.getPairedChestPos();
+        if (world != null && chestPos != null) {
+            walls = countItemInChest(world, chestPos, Items.COBBLESTONE_WALL);
+            cobble = countItemInChest(world, chestPos, Items.COBBLESTONE);
+        }
+        sameCycleSuppressionMaterialSignature = computeMaterialAvailabilitySignature(walls, cobble);
+        sameCycleSuppressionRetryCooldownUntilTick = Math.max(
+                now + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS,
+                nextWaitForStockReplanAttemptTick
+        );
+    }
+
+    private void clearSameCycleRestartSuppression(String reason) {
+        if (verboseMasonWallLogging() && sameCycleInFlightSuppressUntilTick > 0L) {
+            LOGGER.debug("MasonWallBuilder {}: clearing same-cycle restart suppression reason={}",
+                    guard.getUuidAsString(), reason);
+        }
+        sameCycleInFlightSuppressUntilTick = 0L;
+        sameCycleSuppressionMaterialSignature = 0;
+        sameCycleSuppressionRetryCooldownUntilTick = 0L;
+        lastFailedCycleIdentity = null;
     }
 
     private void maybeTriggerRetryDensityFallback(ServerWorld world) {
