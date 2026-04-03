@@ -115,6 +115,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long SEGMENT_COOLDOWN_TICKS = 120L;
     private static final long SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS = 960L;
     private static final long BAND_QUARANTINE_COOLDOWN_TICKS = 600L;
+    private static final int EARLY_CYCLE_CANDIDATE_INDEX_BAND_SIZE = MAX_SEGMENTS_PER_SORTIE;
+    private static final long EARLY_CYCLE_ABORT_COOLDOWN_TICKS = 360L;
     private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
     private static final int BAND_NO_PROGRESS_ABORT_WINDOW_TICKS = 240;
     private static final long NAV_TARGET_BACKOFF_TICKS = 100L;
@@ -202,6 +204,8 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<String, FailureBandWindow> failureBandWindows = new HashMap<>();
     private final Map<String, FailureBandWindow> noProgressAbortBandWindows = new HashMap<>();
     private final Map<String, Long> quarantinedBandUntilTick = new HashMap<>();
+    private final Map<String, Integer> reinsertionPlacementGateByBand = new HashMap<>();
+    private final Map<BlockPos, Integer> segmentCandidateIndexByPos = new HashMap<>();
     private final Map<String, FailureBandWindow> unbreakableEscalationBandWindows = new HashMap<>();
     private final Map<Integer, Set<String>> cycleExcludedBandsByLayer = new HashMap<>();
     private final Deque<DeferredSegmentRetry> deferredSegmentRetryQueue = new ArrayDeque<>();
@@ -424,12 +428,17 @@ public class MasonWallBuilderGoal extends Goal {
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
+        reinsertionPlacementGateByBand.clear();
+        segmentCandidateIndexByPos.clear();
         unbreakableEscalationBandWindows.clear();
         cycleExcludedBandsByLayer.clear();
         deferredSegmentRetryQueue.clear();
         vegetationDeferredThenRequeuedLogged = false;
         claimedSortieSegments.clear();
         segmentStates.clear();
+        for (int i = 0; i < pendingSegments.size(); i++) {
+            segmentCandidateIndexByPos.put(pendingSegments.get(i).toImmutable(), i);
+        }
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -526,6 +535,8 @@ public class MasonWallBuilderGoal extends Goal {
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
+        reinsertionPlacementGateByBand.clear();
+        segmentCandidateIndexByPos.clear();
         unbreakableEscalationBandWindows.clear();
         cycleExcludedBandsByLayer.clear();
         deferredSegmentRetryQueue.clear();
@@ -1408,19 +1419,37 @@ public class MasonWallBuilderGoal extends Goal {
                 removedFromQueue);
     }
 
-    private void maybeQuarantineBandForNoProgress(ServerWorld world, String bandSignature, int bandAbortHits) {
+    private void maybeQuarantineBandForNoProgress(ServerWorld world, String bandSignature, int bandAbortHits, boolean forceEarlyCycle) {
         long now = world.getTime();
-        if (bandAbortHits < BAND_NO_PROGRESS_ABORT_THRESHOLD || isBandQuarantined(bandSignature, now)) {
+        if (isBandQuarantined(bandSignature, now)) {
             return;
         }
-        long quarantineUntil = now + BAND_QUARANTINE_COOLDOWN_TICKS;
+        if (!forceEarlyCycle && bandAbortHits < BAND_NO_PROGRESS_ABORT_THRESHOLD) {
+            return;
+        }
+        long cooldownTicks = forceEarlyCycle
+                ? Math.max(BAND_QUARANTINE_COOLDOWN_TICKS, EARLY_CYCLE_ABORT_COOLDOWN_TICKS)
+                : BAND_QUARANTINE_COOLDOWN_TICKS;
+        long quarantineUntil = now + cooldownTicks;
         quarantinedBandUntilTick.put(bandSignature, quarantineUntil);
-        LOGGER.warn("MasonWallBuilder {}: band_quarantined band={} hits={} cooldownTicks={} quarantineUntilTick={}",
-                guard.getUuidAsString(),
-                bandSignature,
-                bandAbortHits,
-                BAND_QUARANTINE_COOLDOWN_TICKS,
-                quarantineUntil);
+        if (forceEarlyCycle) {
+            int requiredPlacements = placementsSinceCycleStart + 1;
+            reinsertionPlacementGateByBand.put(bandSignature, requiredPlacements);
+            LOGGER.warn("MasonWallBuilder {}: early_cycle_band_quarantine band={} hits={} cooldownTicks={} quarantineUntilTick={} placementGate={}",
+                    guard.getUuidAsString(),
+                    bandSignature,
+                    bandAbortHits,
+                    cooldownTicks,
+                    quarantineUntil,
+                    requiredPlacements);
+        } else {
+            LOGGER.warn("MasonWallBuilder {}: band_quarantined band={} hits={} cooldownTicks={} quarantineUntilTick={}",
+                    guard.getUuidAsString(),
+                    bandSignature,
+                    bandAbortHits,
+                    cooldownTicks,
+                    quarantineUntil);
+        }
     }
 
     private boolean isBandQuarantined(String bandSignature, long now) {
@@ -1430,9 +1459,18 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (until <= now) {
             quarantinedBandUntilTick.remove(bandSignature);
-            return false;
+            Integer placementGate = reinsertionPlacementGateByBand.get(bandSignature);
+            if (placementGate == null || placementsSinceCycleStart >= placementGate) {
+                reinsertionPlacementGateByBand.remove(bandSignature);
+                return false;
+            }
         }
-        return true;
+        Integer placementGate = reinsertionPlacementGateByBand.get(bandSignature);
+        if (placementGate != null && placementsSinceCycleStart < placementGate) {
+            return true;
+        }
+        reinsertionPlacementGateByBand.remove(bandSignature);
+        return until > now;
     }
 
     private boolean isSegmentBandQuarantined(ServerWorld world, BlockPos segment, long now) {
@@ -1753,10 +1791,15 @@ public class MasonWallBuilderGoal extends Goal {
         releaseLocalSortieClaims(world, "sortie_abort_no_net_progress");
         localSortieQueue.clear();
         Map<String, Integer> bandRepeatCounts = new HashMap<>();
+        Set<String> earlyCycleBands = new HashSet<>();
         for (BlockPos segment : cooldownTargets) {
             String bandKey = segmentBandSignature(world, segment);
             int bandAbortHits = registerNoProgressBandAbort(world, bandKey);
-            maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits);
+            boolean earlyCycleBand = isEarlyCycleAbortBand(segment);
+            if (earlyCycleBand) {
+                earlyCycleBands.add(bandKey);
+            }
+            maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits, earlyCycleBand);
             bandRepeatCounts.computeIfAbsent(bandKey, ignored -> incrementSortieAbortBandRepeatCount(bandKey));
         }
         for (BlockPos segment : cooldownTargets) {
@@ -1765,9 +1808,13 @@ public class MasonWallBuilderGoal extends Goal {
             int segmentRepeatCount = incrementSortieAbortSegmentRepeatCount(segment, bandKey);
             int bandRepeatCount = bandRepeatCounts.getOrDefault(bandKey, 1);
             int repeatCount = Math.max(segmentRepeatCount, bandRepeatCount);
+            long adaptiveCooldown = computeSortieAbortAdaptiveCooldownTicks(repeatCount);
             long cooldown = quarantined
                     ? BAND_QUARANTINE_COOLDOWN_TICKS
-                    : computeSortieAbortAdaptiveCooldownTicks(repeatCount);
+                    : adaptiveCooldown;
+            if (earlyCycleBands.contains(bandKey)) {
+                cooldown = Math.max(cooldown, EARLY_CYCLE_ABORT_COOLDOWN_TICKS);
+            }
             requeueSegmentWithCooldown(
                     world,
                     segment,
@@ -1786,6 +1833,17 @@ public class MasonWallBuilderGoal extends Goal {
             stage = Stage.WAIT_FOR_WALL_STOCK;
         }
         return true;
+    }
+
+    private boolean isEarlyCycleAbortBand(BlockPos segment) {
+        if (placementsSinceCycleStart > 0) {
+            return false;
+        }
+        Integer candidateIndex = segmentCandidateIndexByPos.get(segment.toImmutable());
+        if (candidateIndex == null) {
+            return false;
+        }
+        return candidateIndex < EARLY_CYCLE_CANDIDATE_INDEX_BAND_SIZE;
     }
 
     private boolean isNoNetProgressAbortSuppressedByStartupGrace(ServerWorld world) {
@@ -1985,12 +2043,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private long computeSortieAbortAdaptiveCooldownTicks(int repeatCount) {
-        long cooldownTicks = SEGMENT_COOLDOWN_TICKS;
-        int growthSteps = Math.max(0, repeatCount - 1);
-        for (int i = 0; i < growthSteps && cooldownTicks < SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS; i++) {
-            cooldownTicks = Math.min(SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS, cooldownTicks * 2L);
-        }
-        return cooldownTicks;
+        return computeAdaptiveCooldown(repeatCount, SEGMENT_COOLDOWN_TICKS, SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS);
     }
 
     private void resetSortieAbortBackoffAfterBandPlacement(ServerWorld world, BlockPos placedSegment) {
@@ -4693,6 +4746,16 @@ public class MasonWallBuilderGoal extends Goal {
         return new PathRetrySimulationResult(false, pathStartSuccessPerTick.size(), failedAttempts);
     }
 
+    static EarlyCycleAbortPolicyDecision simulateEarlyCycleAbortPolicy(boolean earlyCycleBand, int repeatCount, boolean quarantined) {
+        long adaptiveCooldown = computeAdaptiveCooldown(repeatCount, SEGMENT_COOLDOWN_TICKS, SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS);
+        long cooldown = quarantined ? BAND_QUARANTINE_COOLDOWN_TICKS : adaptiveCooldown;
+        if (earlyCycleBand) {
+            cooldown = Math.max(cooldown, EARLY_CYCLE_ABORT_COOLDOWN_TICKS);
+        }
+        boolean shouldQuarantine = earlyCycleBand || repeatCount >= BAND_NO_PROGRESS_ABORT_THRESHOLD;
+        return new EarlyCycleAbortPolicyDecision(cooldown, shouldQuarantine);
+    }
+
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
                                                             int availableCobblestone,
                                                             int threshold,
@@ -4758,6 +4821,15 @@ public class MasonWallBuilderGoal extends Goal {
 
     private static int manhattan2d(BlockPos a, BlockPos b) {
         return Math.abs(a.getX() - b.getX()) + Math.abs(a.getZ() - b.getZ());
+    }
+
+    private static long computeAdaptiveCooldown(int repeatCount, long baseCooldown, long maxCooldown) {
+        long cooldownTicks = baseCooldown;
+        int growthSteps = Math.max(0, repeatCount - 1);
+        for (int i = 0; i < growthSteps && cooldownTicks < maxCooldown; i++) {
+            cooldownTicks = Math.min(maxCooldown, cooldownTicks * 2L);
+        }
+        return cooldownTicks;
     }
 
     static net.minecraft.item.Item selectPlacementItemForCounts(int wallCount, int cobblestoneCount) {
@@ -5113,6 +5185,8 @@ public class MasonWallBuilderGoal extends Goal {
     private record ProgressSnapshot(long tick, int placements, int pathRetries, int hardUnreachable) {}
 
     private record FailureBandWindow(int count, long firstFailureTick) {}
+
+    record EarlyCycleAbortPolicyDecision(long cooldownTicks, boolean shouldQuarantineBand) {}
 
     private record DeferredSegmentRetry(BlockPos segment, long requeueTick) {}
 
