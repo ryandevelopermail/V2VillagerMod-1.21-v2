@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.util.VillageWallProjectState;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.BedBlock;
@@ -275,6 +276,10 @@ public class MasonWallBuilderGoal extends Goal {
     private int pathRetriesSinceCycleStart = 0;
     private int hardUnreachableSinceCycleStart = 0;
     private int deferredOrSkippedSinceCycleStart = 0;
+    private int placementAttempts = 0;
+    private int placementWriteSuccess = 0;
+    private int placementPostVerifySuccess = 0;
+    private int placementRejectedByStatePolicy = 0;
     private BlockPos placeBlockFailureTarget = null;
     private int placeBlockConsecutiveNonPlacementTicks = 0;
     private String placeBlockLastNonPlacementReason = null;
@@ -535,6 +540,10 @@ public class MasonWallBuilderGoal extends Goal {
         pathRetriesSinceCycleStart = 0;
         hardUnreachableSinceCycleStart = 0;
         deferredOrSkippedSinceCycleStart = 0;
+        placementAttempts = 0;
+        placementWriteSuccess = 0;
+        placementPostVerifySuccess = 0;
+        placementRejectedByStatePolicy = 0;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
         placeBlockLastNonPlacementReason = null;
@@ -649,6 +658,10 @@ public class MasonWallBuilderGoal extends Goal {
         pathRetriesSinceCycleStart = 0;
         hardUnreachableSinceCycleStart = 0;
         deferredOrSkippedSinceCycleStart = 0;
+        placementAttempts = 0;
+        placementWriteSuccess = 0;
+        placementPostVerifySuccess = 0;
+        placementRejectedByStatePolicy = 0;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
         placeBlockLastNonPlacementReason = null;
@@ -1902,6 +1915,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         // Verify still unbuilt
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
+            placementRejectedByStatePolicy++;
             localSortieQueue.pollFirst();
             releaseSegmentClaim(world, target, "already_resolved");
             transitionSegmentState(world, target, SegmentState.PLACED, "already_resolved");
@@ -1928,6 +1942,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
                 || clearance == ObstacleClearanceResult.UNBREAKABLE_OBSTACLE) {
+            placementRejectedByStatePolicy++;
             String reasonCode = clearance == ObstacleClearanceResult.PROTECTED_OBSTACLE
                     ? "protected_obstacle_repeat"
                     : "unbreakable_obstacle_repeat";
@@ -1963,7 +1978,45 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         // Place the block
-        world.setBlockState(target, placementMaterial.blockState());
+        BlockState previousState = world.getBlockState(target);
+        placementAttempts++;
+        boolean writeSuccess = world.setBlockState(target, placementMaterial.blockState());
+        if (writeSuccess) {
+            placementWriteSuccess++;
+        }
+        BlockState stateAfterWrite = world.getBlockState(target);
+        boolean postVerifySuccess = stateAfterWrite.isOf(placementMaterial.blockState().getBlock());
+        if (postVerifySuccess) {
+            placementPostVerifySuccess++;
+        }
+        LOGGER.debug(
+                "MasonWallBuilder {}: placement_attempt target={} material={} prevStateId={} writeSuccess={} postVerifySuccess={} postStateId={}",
+                guard.getUuidAsString(),
+                target.toShortString(),
+                placementMaterial.item(),
+                Block.getRawIdFromState(previousState),
+                writeSuccess,
+                postVerifySuccess,
+                Block.getRawIdFromState(stateAfterWrite)
+        );
+        if (!writeSuccess || !postVerifySuccess) {
+            logInfoRateLimited(
+                    world,
+                    "placement_write_or_verify_failure",
+                    PERIODIC_INFO_INTERVAL_TICKS,
+                    "MasonWallBuilder {}: placement write/verify failed target={} material={} prevStateId={} writeSuccess={} postVerifySuccess={} postStateId={}",
+                    guard.getUuidAsString(),
+                    target.toShortString(),
+                    placementMaterial.item(),
+                    Block.getRawIdFromState(previousState),
+                    writeSuccess,
+                    postVerifySuccess,
+                    Block.getRawIdFromState(stateAfterWrite)
+            );
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
         recordPlacementProgress(world, target);
         clearPlaceBlockFailureTracking();
         clearLastPlantClearedTracking();
@@ -3645,7 +3698,31 @@ public class MasonWallBuilderGoal extends Goal {
                     break;
                 }
 
-                world.setBlockState(segment, material.blockState());
+                BlockState previousState = world.getBlockState(segment);
+                placementAttempts++;
+                boolean writeSuccess = world.setBlockState(segment, material.blockState());
+                if (writeSuccess) {
+                    placementWriteSuccess++;
+                }
+                BlockState stateAfterWrite = world.getBlockState(segment);
+                boolean postVerifySuccess = stateAfterWrite.isOf(material.blockState().getBlock());
+                if (postVerifySuccess) {
+                    placementPostVerifySuccess++;
+                }
+                LOGGER.debug(
+                        "MasonWallBuilder {}: completion_sweep placement_attempt target={} material={} prevStateId={} writeSuccess={} postVerifySuccess={} postStateId={}",
+                        guard.getUuidAsString(),
+                        segment.toShortString(),
+                        material.item(),
+                        Block.getRawIdFromState(previousState),
+                        writeSuccess,
+                        postVerifySuccess,
+                        Block.getRawIdFromState(stateAfterWrite)
+                );
+                if (!writeSuccess || !postVerifySuccess) {
+                    failureReason = !writeSuccess ? "set_block_state_failed" : "post_verify_failed";
+                    continue;
+                }
                 recordPlacementProgress(world, segment);
                 resetSortieAbortBackoffAfterBandPlacement(world, segment);
                 filled = true;
@@ -3827,10 +3904,14 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockReplanAttemptTick = world != null
                 ? world.getTime() + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS
                 : 0L;
-        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} retries={} hard_unreachable={} deferred_or_skipped={}",
+        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={}",
                 guard.getUuidAsString(),
                 cycleEndReason.logValue,
                 placedSegments,
+                placementAttempts,
+                placementWriteSuccess,
+                placementPostVerifySuccess,
+                placementRejectedByStatePolicy,
                 pathRetriesSinceCycleStart,
                 hardUnreachableSinceCycleStart,
                 deferredOrSkippedSinceCycleStart);
@@ -4023,9 +4104,13 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
                     guard.getUuidAsString(),
                     placedSegments,
+                    placementAttempts,
+                    placementWriteSuccess,
+                    placementPostVerifySuccess,
+                    placementRejectedByStatePolicy,
                     pathRetriesSinceCycleStart,
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
@@ -4044,9 +4129,13 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={}",
                     guard.getUuidAsString(),
                     placedSegments,
+                    placementAttempts,
+                    placementWriteSuccess,
+                    placementPostVerifySuccess,
+                    placementRejectedByStatePolicy,
                     pathRetriesSinceCycleStart,
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
