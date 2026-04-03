@@ -138,10 +138,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int RETRY_DENSITY_EXIT_PLACEMENT_STREAK = 3;
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
     private static final int STAGNATION_REGION_BAND_BUCKETS = 4;
+    private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
     private static final long STAGNATION_REGION_SUPPRESSION_BASE_COOLDOWN_TICKS = STAGNATION_PIVOT_INTERVAL_TICKS;
     private static final long STAGNATION_REGION_SUPPRESSION_MAX_COOLDOWN_TICKS = STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS;
     private static final long STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS = 20L;
-    private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
     private static final double LAYER_ONE_REGION_DOMINANCE_COMPLETION_THRESHOLD = 0.95D;
     private static final int MAX_CONSECUTIVE_SORTIES_PER_REGION = 2;
     private static final int MAX_RETRY_ATTEMPTS_PER_REGION_BEFORE_ROTATION = 3;
