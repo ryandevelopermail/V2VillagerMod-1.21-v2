@@ -234,6 +234,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidatesPreflightPass = 0;
     private int sortieCandidatesPreflightRejected = 0;
     private int sortieCandidatesFallbackAccepted = 0;
+    private boolean sortieNearestFallbackSuppressedByLayerOneLap = false;
     private int obstaclesCleared = 0;
     private int protectedObstaclesSkipped = 0;
     private int unbreakableObstaclesSkipped = 0;
@@ -474,6 +475,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        sortieNearestFallbackSuppressedByLayerOneLap = false;
         sortiePlacementsAtStart = 0;
         sortieStartTick = -1L;
         sortieActivationTick = -1L;
@@ -2444,6 +2446,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        sortieNearestFallbackSuppressedByLayerOneLap = false;
         int activeLayer = findLowestPendingLayer(world);
         if (activeLayer < 1) {
             return false;
@@ -2479,12 +2482,17 @@ public class MasonWallBuilderGoal extends Goal {
 
             List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
-                if (nearest != null && !nearest.equals(anchor)) {
-                    List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
-                    if (!nearestBatch.isEmpty()) {
-                        anchor = nearest;
-                        anchorBatch = nearestBatch;
+                boolean suppressNearestFallbackForFirstLap = activeLayer == 1 && !layerOneLapCompleted;
+                if (suppressNearestFallbackForFirstLap) {
+                    sortieNearestFallbackSuppressedByLayerOneLap = true;
+                } else {
+                    BlockPos nearest = findNearestUnbuiltSegment(world, guard.getBlockPos(), activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+                    if (nearest != null && !nearest.equals(anchor)) {
+                        List<BlockPos> nearestBatch = buildLocalSortieCandidates(world, nearest, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+                        if (!nearestBatch.isEmpty()) {
+                            anchor = nearest;
+                            anchorBatch = nearestBatch;
+                        }
                     }
                 }
             }
@@ -2504,7 +2512,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         localSortieQueue.addAll(selectedBatch);
         if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug("MasonWallBuilder {}: sortie_start_preflight_summary anchor={} layer={} considered={} accepted={} preflight_pass={} preflightRejected={} preflight_fail_fallback_accept={}",
+            LOGGER.debug("MasonWallBuilder {}: sortie_start_preflight_summary anchor={} layer={} considered={} accepted={} preflight_pass={} preflightRejected={} preflight_fail_fallback_accept={} nearestFallbackSuppressedByLayerOneLap={}",
                     guard.getUuidAsString(),
                     selectedAnchor.toShortString(),
                     activeLayer,
@@ -2512,7 +2520,8 @@ public class MasonWallBuilderGoal extends Goal {
                     sortieCandidatesAccepted,
                     sortieCandidatesPreflightPass,
                     sortieCandidatesPreflightRejected,
-                    sortieCandidatesFallbackAccepted);
+                    sortieCandidatesFallbackAccepted,
+                    sortieNearestFallbackSuppressedByLayerOneLap);
         }
         sortieActive = true;
         sortieActiveLayer = activeLayer;
@@ -4371,7 +4380,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void logSortieSummaryIfActive() {
         if (!sortieActive) return;
-        logDetailed("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={}",
+        logDetailed("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={} nearestFallbackSuppressedByLayerOneLap={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
@@ -4380,8 +4389,9 @@ public class MasonWallBuilderGoal extends Goal {
                 sortieHardUnreachableMarked,
                 obstaclesCleared,
                 protectedObstaclesSkipped,
-                unbreakableObstaclesSkipped);
-        LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflight_pass={} preflightRejected={} preflight_fail_fallback_accept={} hard_unreachable_marked={}",
+                unbreakableObstaclesSkipped,
+                sortieNearestFallbackSuppressedByLayerOneLap);
+        LOGGER.debug("MasonWallBuilder {}: sortie_preflight_summary anchor={} layer={} candidatesConsidered={} accepted={} preflight_pass={} preflightRejected={} preflight_fail_fallback_accept={} hard_unreachable_marked={} nearestFallbackSuppressedByLayerOneLap={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
@@ -4390,7 +4400,8 @@ public class MasonWallBuilderGoal extends Goal {
                 sortieCandidatesPreflightPass,
                 sortieCandidatesPreflightRejected,
                 sortieCandidatesFallbackAccepted,
-                sortieHardUnreachableMarked);
+                sortieHardUnreachableMarked,
+                sortieNearestFallbackSuppressedByLayerOneLap);
         sortieActive = false;
         sortieActiveLayer = -1;
         sortieTransientRetriesAttempted = 0;
@@ -4401,6 +4412,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesPreflightPass = 0;
         sortieCandidatesPreflightRejected = 0;
         sortieCandidatesFallbackAccepted = 0;
+        sortieNearestFallbackSuppressedByLayerOneLap = false;
         obstaclesCleared = 0;
         protectedObstaclesSkipped = 0;
         unbreakableObstaclesSkipped = 0;
