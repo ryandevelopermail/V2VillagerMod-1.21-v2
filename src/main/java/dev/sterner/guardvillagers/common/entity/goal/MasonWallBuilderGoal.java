@@ -22,7 +22,11 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.registry.tag.PointOfInterestTypeTags;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 import net.minecraft.world.poi.PointOfInterestStorage;
 import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
@@ -126,6 +130,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
     private static final int BAND_NO_PROGRESS_ABORT_WINDOW_TICKS = 240;
     private static final long NAV_TARGET_BACKOFF_TICKS = 100L;
+    private static final int NAV_ARRIVAL_FORCED_PLACEMENT_DELAY_TICKS = 20;
+    private static final double NAV_TARGET_ARRIVAL_SQ = 1.0D;
+    private static final double INTERACTION_VERTICAL_TOLERANCE = 2.5D;
     private static final int STAGNATION_PROGRESS_WINDOW_TICKS = 200;
     private static final int STAGNATION_RETRY_DELTA_THRESHOLD = 7;
     private static final int STAGNATION_HARD_UNREACHABLE_DELTA_THRESHOLD = 3;
@@ -193,6 +200,8 @@ public class MasonWallBuilderGoal extends Goal {
     private int lastProgressLoggedSegmentCount = 0;
     private BlockPos activeMoveTarget = null;
     private int activeMoveTargetTicks = 0;
+    private int activeMoveNavArrivalTicks = 0;
+    private boolean activeMoveForcedPlacementAttempted = false;
     private double lastMoveDistSq = Double.MAX_VALUE;
     private double targetBestDistSq = Double.MAX_VALUE;
     private long targetLastMeaningfulProgressTick = -1L;
@@ -1118,64 +1127,137 @@ public class MasonWallBuilderGoal extends Goal {
         double distSq = guard.squaredDistanceTo(target.getX() + 0.5, target.getY() + 0.5, target.getZ() + 0.5);
 
         if (distSq <= REACH_SQ) {
+            transitionToPlaceBlock(world, target, "exact");
+            return;
+        }
+
+        boolean canPlaceFromInteractionRange = isWithinSegmentInteractionReach(target) && hasAcceptablePlacementLine(world, target);
+        if (canPlaceFromInteractionRange) {
+            transitionToPlaceBlock(world, target, "interaction");
+            return;
+        }
+
+        if (hasArrivedAtNavigationTarget(navigationTarget)) {
+            activeMoveNavArrivalTicks++;
+            if (!activeMoveForcedPlacementAttempted && activeMoveNavArrivalTicks >= NAV_ARRIVAL_FORCED_PLACEMENT_DELAY_TICKS) {
+                activeMoveForcedPlacementAttempted = true;
+                transitionToPlaceBlock(world, target, "forced_after_nav_arrival");
+                return;
+            }
+        } else {
+            activeMoveNavArrivalTicks = 0;
+        }
+
+        boolean pathStarted = guard.getNavigation().startMovingTo(
+                navigationTarget.getX() + 0.5,
+                navigationTarget.getY() + 0.5,
+                navigationTarget.getZ() + 0.5,
+                MOVE_SPEED
+        );
+        if (!pathStarted) {
+            registerPathFailure(world, target, navigationTarget);
+            return;
+        }
+        if (failedPathAttempts > 0) {
+            resetPathFailureState();
+        }
+
+        activeMoveTargetTicks++;
+        if (distSq + MEANINGFUL_PROGRESS_DELTA_DIST_SQ <= targetBestDistSq) {
+            targetBestDistSq = distSq;
+            targetLastMeaningfulProgressTick = world.getTime();
+        }
+        if (distSq < lastMoveDistSq - 0.01D) {
+            lastMoveDistSq = distSq;
+        }
+
+        long elapsedNoMeaningfulProgress = Math.max(0L, world.getTime() - targetLastMeaningfulProgressTick);
+        if (elapsedNoMeaningfulProgress > MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS) {
+            LOGGER.info("MasonWallBuilder {}: move_livelock_guard segment={} bestDistSq={} elapsedTicksNoMeaningfulProgress={}",
+                    guard.getUuidAsString(),
+                    target.toShortString(),
+                    String.format("%.2f", targetBestDistSq),
+                    elapsedNoMeaningfulProgress);
+            registerSegmentFailureMetadata(world, target, navigationTarget, "move_livelock_no_meaningful_progress");
+            registerNavTargetFailureBackoff(world, target, navigationTarget, "move_livelock_no_meaningful_progress");
+            localSortieQueue.pollFirst();
+            requeueSegmentWithCooldown(
+                    world,
+                    target,
+                    "move_livelock_no_meaningful_progress",
+                    SEGMENT_COOLDOWN_TICKS,
+                    "cooldown_requeue",
+                    -1
+            );
             activeMoveTarget = null;
             resetActiveMoveProgressTracking(world);
             resetPathFailureState();
-            stage = Stage.PLACE_BLOCK;
-        } else {
-            boolean pathStarted = guard.getNavigation().startMovingTo(
-                    navigationTarget.getX() + 0.5,
-                    navigationTarget.getY() + 0.5,
-                    navigationTarget.getZ() + 0.5,
-                    MOVE_SPEED
-            );
-            if (!pathStarted) {
-                registerPathFailure(world, target, navigationTarget);
-                return;
-            }
-            if (failedPathAttempts > 0) {
-                resetPathFailureState();
-            }
-
-            activeMoveTargetTicks++;
-            if (distSq + MEANINGFUL_PROGRESS_DELTA_DIST_SQ <= targetBestDistSq) {
-                targetBestDistSq = distSq;
-                targetLastMeaningfulProgressTick = world.getTime();
-            }
-            if (distSq < lastMoveDistSq - 0.01D) {
-                lastMoveDistSq = distSq;
-            }
-
-            long elapsedNoMeaningfulProgress = Math.max(0L, world.getTime() - targetLastMeaningfulProgressTick);
-            if (elapsedNoMeaningfulProgress > MOVE_MEANINGFUL_PROGRESS_TIMEOUT_TICKS) {
-                LOGGER.info("MasonWallBuilder {}: move_livelock_guard segment={} bestDistSq={} elapsedTicksNoMeaningfulProgress={}",
-                        guard.getUuidAsString(),
-                        target.toShortString(),
-                        String.format("%.2f", targetBestDistSq),
-                        elapsedNoMeaningfulProgress);
-                registerSegmentFailureMetadata(world, target, navigationTarget, "move_livelock_no_meaningful_progress");
-                registerNavTargetFailureBackoff(world, target, navigationTarget, "move_livelock_no_meaningful_progress");
-                localSortieQueue.pollFirst();
-                requeueSegmentWithCooldown(
-                        world,
-                        target,
-                        "move_livelock_no_meaningful_progress",
-                        SEGMENT_COOLDOWN_TICKS,
-                        "cooldown_requeue",
-                        -1
-                );
-                activeMoveTarget = null;
-                resetActiveMoveProgressTracking(world);
-                resetPathFailureState();
-            }
         }
     }
 
     private void resetActiveMoveProgressTracking(ServerWorld world) {
         activeMoveTargetTicks = 0;
+        activeMoveNavArrivalTicks = 0;
+        activeMoveForcedPlacementAttempted = false;
         lastMoveDistSq = Double.MAX_VALUE;
         targetBestDistSq = Double.MAX_VALUE;
         targetLastMeaningfulProgressTick = world == null ? -1L : world.getTime();
+    }
+
+    private void transitionToPlaceBlock(ServerWorld world, BlockPos target, String transitionMode) {
+        LOGGER.debug("MasonWallBuilder {}: move_to_place_transition_mode={} segment={}",
+                guard.getUuidAsString(),
+                transitionMode,
+                target.toShortString());
+        activeMoveTarget = null;
+        resetActiveMoveProgressTracking(world);
+        resetPathFailureState();
+        stage = Stage.PLACE_BLOCK;
+    }
+
+    private boolean hasArrivedAtNavigationTarget(BlockPos navigationTarget) {
+        return guard.squaredDistanceTo(
+                navigationTarget.getX() + 0.5,
+                navigationTarget.getY() + 0.5,
+                navigationTarget.getZ() + 0.5
+        ) <= NAV_TARGET_ARRIVAL_SQ;
+    }
+
+    private boolean isWithinSegmentInteractionReach(BlockPos target) {
+        double dx = guard.getX() - (target.getX() + 0.5D);
+        double dz = guard.getZ() - (target.getZ() + 0.5D);
+        double horizontalDistSq = dx * dx + dz * dz;
+        if (horizontalDistSq > REACH_SQ) {
+            return false;
+        }
+        double verticalDelta = Math.abs(guard.getEyeY() - (target.getY() + 0.5D));
+        return verticalDelta <= INTERACTION_VERTICAL_TOLERANCE;
+    }
+
+    private boolean hasAcceptablePlacementLine(ServerWorld world, BlockPos target) {
+        Vec3d eyePos = guard.getEyePos();
+        Vec3d[] rayTargets = new Vec3d[]{
+                Vec3d.ofCenter(target),
+                Vec3d.ofCenter(target.up()),
+                new Vec3d(target.getX() + 0.5D, target.getY() + 0.1D, target.getZ() + 0.5D)
+        };
+        for (Vec3d rayTarget : rayTargets) {
+            BlockHitResult hit = world.raycast(new RaycastContext(
+                    eyePos,
+                    rayTarget,
+                    RaycastContext.ShapeType.COLLIDER,
+                    RaycastContext.FluidHandling.NONE,
+                    guard
+            ));
+            if (hit.getType() == HitResult.Type.MISS) {
+                return true;
+            }
+            BlockPos hitPos = hit.getBlockPos();
+            if (hitPos.equals(target) || hitPos.equals(target.up())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
