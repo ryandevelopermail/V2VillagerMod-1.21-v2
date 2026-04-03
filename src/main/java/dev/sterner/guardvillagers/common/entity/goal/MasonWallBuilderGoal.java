@@ -120,6 +120,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long SEGMENT_COOLDOWN_TICKS = 120L;
     private static final long SORTIE_ABORT_BACKOFF_MAX_COOLDOWN_TICKS = 960L;
     private static final long BAND_QUARANTINE_COOLDOWN_TICKS = 600L;
+    private static final long BOOTSTRAP_SOFT_ABORT_COOLDOWN_TICKS = 140L;
     private static final int EARLY_CYCLE_CANDIDATE_INDEX_BAND_SIZE = MAX_SEGMENTS_PER_SORTIE;
     private static final long EARLY_CYCLE_ABORT_COOLDOWN_TICKS = 360L;
     private static final int BAND_NO_PROGRESS_ABORT_THRESHOLD = 3;
@@ -2086,6 +2087,8 @@ public class MasonWallBuilderGoal extends Goal {
         localSortieQueue.clear();
         Map<String, Integer> bandRepeatCounts = new HashMap<>();
         Set<String> earlyCycleBands = new HashSet<>();
+        boolean bootstrapQuarantineSoftened = isBootstrapQuarantineSoftenedForLayerOne(world);
+        boolean bootstrapSoftenedLogged = false;
         for (BlockPos segment : cooldownTargets) {
             String bandKey = segmentBandSignature(world, segment);
             int bandAbortHits = registerNoProgressBandAbort(world, bandKey);
@@ -2093,7 +2096,21 @@ public class MasonWallBuilderGoal extends Goal {
             if (earlyCycleBand) {
                 earlyCycleBands.add(bandKey);
             }
-            maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits, earlyCycleBand);
+            boolean allowFullEarlyCycleQuarantine = shouldEnableFullEarlyCycleQuarantinePolicy(world);
+            boolean softenBandQuarantine = bootstrapQuarantineSoftened && earlyCycleBand && !allowFullEarlyCycleQuarantine;
+            if (softenBandQuarantine) {
+                if (!bootstrapSoftenedLogged) {
+                    LOGGER.info("MasonWallBuilder {}: bootstrap_quarantine_softened stage={} placementsSinceCycleStart={} facesPlaced={} lapComplete={} reason=layer_one_first_lap_bootstrap",
+                            guard.getUuidAsString(),
+                            activeStage,
+                            placementsSinceCycleStart,
+                            countPlacedLayerOneFaces(),
+                            layerOneLapCompleted);
+                    bootstrapSoftenedLogged = true;
+                }
+            } else {
+                maybeQuarantineBandForNoProgress(world, bandKey, bandAbortHits, earlyCycleBand);
+            }
             bandRepeatCounts.computeIfAbsent(bandKey, ignored -> incrementSortieAbortBandRepeatCount(bandKey));
         }
         for (BlockPos segment : cooldownTargets) {
@@ -2106,7 +2123,10 @@ public class MasonWallBuilderGoal extends Goal {
             long cooldown = quarantined
                     ? BAND_QUARANTINE_COOLDOWN_TICKS
                     : adaptiveCooldown;
-            if (earlyCycleBands.contains(bandKey)) {
+            boolean softBootstrapBand = bootstrapQuarantineSoftened && earlyCycleBands.contains(bandKey) && !shouldEnableFullEarlyCycleQuarantinePolicy(world);
+            if (softBootstrapBand) {
+                cooldown = Math.min(cooldown, BOOTSTRAP_SOFT_ABORT_COOLDOWN_TICKS);
+            } else if (earlyCycleBands.contains(bandKey)) {
                 cooldown = Math.max(cooldown, EARLY_CYCLE_ABORT_COOLDOWN_TICKS);
             }
             requeueSegmentWithCooldown(
@@ -2118,6 +2138,9 @@ public class MasonWallBuilderGoal extends Goal {
                     repeatCount
             );
         }
+        if (bootstrapQuarantineSoftened) {
+            applyBootstrapAlternateAnchorFallback(world, cooldownTargets);
+        }
 
         activeMoveTarget = null;
         resetActiveMoveProgressTracking(world);
@@ -2127,6 +2150,100 @@ public class MasonWallBuilderGoal extends Goal {
             stage = Stage.WAIT_FOR_WALL_STOCK;
         }
         return true;
+    }
+
+    private boolean isBootstrapQuarantineSoftenedForLayerOne(ServerWorld world) {
+        if (world == null || findLowestPendingLayer(world) != 1 || layerOneLapCompleted) {
+            return false;
+        }
+        return placementsSinceCycleStart == 0 || countPlacedLayerOneFaces() == 0;
+    }
+
+    private boolean shouldEnableFullEarlyCycleQuarantinePolicy(ServerWorld world) {
+        if (world == null || findLowestPendingLayer(world) != 1) {
+            return true;
+        }
+        return countPlacedLayerOneFaces() > 0;
+    }
+
+    private void applyBootstrapAlternateAnchorFallback(ServerWorld world, List<BlockPos> cooldownTargets) {
+        if (world == null || cooldownTargets.isEmpty() || findLowestPendingLayer(world) != 1) {
+            return;
+        }
+        BlockPos source = cooldownTargets.get(0);
+        BlockPos sameFaceAnchor = findBootstrapFallbackAnchorOnSameFace(world, source);
+        if (sameFaceAnchor != null) {
+            setBootstrapFallbackAnchorIndex(sameFaceAnchor, "same_face_next_index");
+            return;
+        }
+        BlockPos adjacentFaceAnchor = findBootstrapFallbackAnchorOnAdjacentFace(world, source);
+        if (adjacentFaceAnchor != null) {
+            setBootstrapFallbackAnchorIndex(adjacentFaceAnchor, "adjacent_face");
+        }
+    }
+
+    private BlockPos findBootstrapFallbackAnchorOnSameFace(ServerWorld world, BlockPos source) {
+        LayerOneRegion sourceRegion = resolveLayerOneRegion(source);
+        int startIndex = segmentCandidateIndexByPos.getOrDefault(source.toImmutable(), Math.max(0, currentSegmentIndex));
+        for (int offset = 1; offset < pendingSegments.size(); offset++) {
+            int idx = (startIndex + offset) % pendingSegments.size();
+            BlockPos candidate = pendingSegments.get(idx);
+            if (!isBootstrapFallbackCandidate(world, candidate)) {
+                continue;
+            }
+            if (sourceRegion.face().equals(resolveLayerOneRegion(candidate).face())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private BlockPos findBootstrapFallbackAnchorOnAdjacentFace(ServerWorld world, BlockPos source) {
+        String sourceFace = resolveLayerOneRegion(source).face();
+        int faceIndex = LAYER_ONE_CLOCKWISE_FACES.indexOf(sourceFace);
+        if (faceIndex < 0) {
+            return null;
+        }
+        String clockwiseAdjacent = LAYER_ONE_CLOCKWISE_FACES.get((faceIndex + 1) % LAYER_ONE_CLOCKWISE_FACES.size());
+        String counterClockwiseAdjacent = LAYER_ONE_CLOCKWISE_FACES.get((faceIndex + LAYER_ONE_CLOCKWISE_FACES.size() - 1) % LAYER_ONE_CLOCKWISE_FACES.size());
+        return findBootstrapFallbackAnchorByFaces(world, clockwiseAdjacent, counterClockwiseAdjacent);
+    }
+
+    private BlockPos findBootstrapFallbackAnchorByFaces(ServerWorld world, String primaryFace, String secondaryFace) {
+        for (BlockPos candidate : pendingSegments) {
+            if (!isBootstrapFallbackCandidate(world, candidate)) {
+                continue;
+            }
+            String candidateFace = resolveLayerOneRegion(candidate).face();
+            if (candidateFace.equals(primaryFace) || candidateFace.equals(secondaryFace)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private boolean isBootstrapFallbackCandidate(ServerWorld world, BlockPos candidate) {
+        return getSegmentLayer(world, candidate) == 1
+                && !isGatePosition(candidate)
+                && !isTerminalSegment(candidate)
+                && !isRetryDensitySuppressedSegment(world, candidate)
+                && isBuildableCandidate(world, candidate);
+    }
+
+    private void setBootstrapFallbackAnchorIndex(BlockPos anchor, String strategy) {
+        Integer anchorIndex = segmentCandidateIndexByPos.get(anchor.toImmutable());
+        if (anchorIndex == null) {
+            return;
+        }
+        currentSegmentIndex = Math.max(0, Math.min(anchorIndex, pendingSegments.size()));
+        if (layerOneLapStartIndex >= 0) {
+            layerOneCursorIndex = Math.max(0, Math.min(anchorIndex, Math.max(0, pendingSegments.size() - 1)));
+        }
+        LOGGER.info("MasonWallBuilder {}: bootstrap_quarantine_softened fallbackStrategy={} anchor={} anchorIndex={}",
+                guard.getUuidAsString(),
+                strategy,
+                anchor.toShortString(),
+                anchorIndex);
     }
 
     private boolean isEarlyCycleAbortBand(BlockPos segment) {
