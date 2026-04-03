@@ -146,6 +146,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int MAX_CONSECUTIVE_SORTIES_PER_REGION = 2;
     private static final int MAX_RETRY_ATTEMPTS_PER_REGION_BEFORE_ROTATION = 3;
     private static final int LAYER_ONE_FACE_ARC_BUCKETS = 4;
+    private static final List<String> LAYER_ONE_CLOCKWISE_FACES = List.of("north", "east", "south", "west");
     private static final int EARLY_HARD_UNREACHABLE_FAIL_THRESHOLD = 4;
     private static final int EARLY_HARD_UNREACHABLE_DISTINCT_TARGET_THRESHOLD = 2;
     private static final int STRUCTURE_SAMPLE_VERTICAL_RADIUS = 3;
@@ -301,6 +302,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean layerOneLapCompleted = false;
     private boolean layerOneLapWrapped = false;
     private final Set<BlockPos> layerOneLapConsideredSegments = new HashSet<>();
+    private final Map<String, LayerOneFaceCoverageState> layerOneFaceCoverageByFace = new HashMap<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -2482,7 +2484,7 @@ public class MasonWallBuilderGoal extends Goal {
 
             List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                boolean suppressNearestFallbackForFirstLap = activeLayer == 1 && !layerOneLapCompleted;
+                boolean suppressNearestFallbackForFirstLap = activeLayer == 1 && !isLayerOneAggressiveHeuristicsEnabled(activeLayer);
                 if (suppressNearestFallbackForFirstLap) {
                     sortieNearestFallbackSuppressedByLayerOneLap = true;
                 } else {
@@ -2638,6 +2640,7 @@ public class MasonWallBuilderGoal extends Goal {
             if (isGatePosition(candidate) || isTerminalSegment(candidate)) {
                 continue;
             }
+            recordLayerOneFaceCandidateVisited(candidateIndex, candidate);
             layerOneLapConsideredSegments.add(candidate.toImmutable());
 
             if (isPivotExcludedSegment(world, candidateIndex, candidate)) {
@@ -2672,6 +2675,10 @@ public class MasonWallBuilderGoal extends Goal {
         layerOneLapCompleted = false;
         layerOneLapWrapped = false;
         layerOneLapConsideredSegments.clear();
+        layerOneFaceCoverageByFace.clear();
+        for (String face : LAYER_ONE_CLOCKWISE_FACES) {
+            layerOneFaceCoverageByFace.put(face, new LayerOneFaceCoverageState());
+        }
         LOGGER.info("MasonWallBuilder {}: layer_one_lap_start start={} cursor={} pending={}",
                 guard.getUuidAsString(),
                 layerOneLapStartIndex,
@@ -2683,16 +2690,15 @@ public class MasonWallBuilderGoal extends Goal {
         if (layerOneLapCompleted || !layerOneLapWrapped || layerOneLapStartIndex < 0) {
             return;
         }
-        int requiredConsidered = countLayerOneLapEligibleSegments(world);
-        if (layerOneLapConsideredSegments.size() < requiredConsidered) {
+        if (!hasVisitedAllLayerOneFaces()) {
             return;
         }
         layerOneLapCompleted = true;
-        LOGGER.info("MasonWallBuilder {}: layer_one_lap_complete start={} considered={} required={}",
+        LOGGER.info("MasonWallBuilder {}: layer_one_lap_complete start={} considered={} facesVisited={}/4",
                 guard.getUuidAsString(),
                 layerOneLapStartIndex,
                 layerOneLapConsideredSegments.size(),
-                requiredConsidered);
+                countVisitedLayerOneFaces());
     }
 
     private int countLayerOneLapEligibleSegments(ServerWorld world) {
@@ -2715,6 +2721,88 @@ public class MasonWallBuilderGoal extends Goal {
         layerOneLapCompleted = false;
         layerOneLapWrapped = false;
         layerOneLapConsideredSegments.clear();
+        layerOneFaceCoverageByFace.clear();
+    }
+
+    private void recordLayerOneFaceCandidateVisited(int candidateIndex, BlockPos candidate) {
+        String face = resolveLayerOneRegion(candidate).face();
+        LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.computeIfAbsent(face, ignored -> new LayerOneFaceCoverageState());
+        if (!state.firstCandidateVisited) {
+            state.firstCandidateVisited = true;
+            state.firstCandidateIndex = candidateIndex;
+        }
+    }
+
+    private void recordLayerOneFacePlacement(ServerWorld world, BlockPos placedSegment) {
+        if (getSegmentLayer(world, placedSegment) != 1 || isGatePosition(placedSegment) || isTerminalSegment(placedSegment)) {
+            return;
+        }
+        String face = resolveLayerOneRegion(placedSegment).face();
+        LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.computeIfAbsent(face, ignored -> new LayerOneFaceCoverageState());
+        if (!state.firstSuccessfulPlacement) {
+            state.firstSuccessfulPlacement = true;
+            state.firstPlacementPos = placedSegment.toImmutable();
+        }
+        state.faceFullyBuilt = isLayerOneFaceFullyBuilt(world, face);
+    }
+
+    private boolean isLayerOneFaceFullyBuilt(ServerWorld world, String face) {
+        for (BlockPos segment : pendingSegments) {
+            if (getSegmentLayer(world, segment) != 1 || isGatePosition(segment) || isTerminalSegment(segment)) {
+                continue;
+            }
+            if (!face.equals(resolveLayerOneRegion(segment).face())) {
+                continue;
+            }
+            if (!isPlacedWallBlock(world.getBlockState(segment))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int countVisitedLayerOneFaces() {
+        int count = 0;
+        for (String face : LAYER_ONE_CLOCKWISE_FACES) {
+            LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.get(face);
+            if (state != null && state.firstCandidateVisited) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countPlacedLayerOneFaces() {
+        int count = 0;
+        for (String face : LAYER_ONE_CLOCKWISE_FACES) {
+            LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.get(face);
+            if (state != null && state.firstSuccessfulPlacement) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int countFullyBuiltLayerOneFaces() {
+        int count = 0;
+        for (String face : LAYER_ONE_CLOCKWISE_FACES) {
+            LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.get(face);
+            if (state != null && state.faceFullyBuilt) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean hasVisitedAllLayerOneFaces() {
+        return countVisitedLayerOneFaces() >= LAYER_ONE_CLOCKWISE_FACES.size();
+    }
+
+    private boolean isLayerOneAggressiveHeuristicsEnabled(int activeLayer) {
+        if (activeLayer != 1) {
+            return true;
+        }
+        return layerOneLapCompleted && hasVisitedAllLayerOneFaces();
     }
 
     private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
@@ -3731,12 +3819,39 @@ public class MasonWallBuilderGoal extends Goal {
                     Math.max(0, placementsSinceLastSuppression)
             );
         }
+        maybeEmitLayerOneFaceCoverageInfo(world);
         lastPeriodicSummaryPlacementCount = placedSegments;
+    }
+
+    private void maybeEmitLayerOneFaceCoverageInfo(ServerWorld world) {
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer != 1 || layerOneFaceCoverageByFace.isEmpty()) {
+            return;
+        }
+        for (String face : LAYER_ONE_CLOCKWISE_FACES) {
+            LayerOneFaceCoverageState state = layerOneFaceCoverageByFace.get(face);
+            if (state != null) {
+                state.faceFullyBuilt = isLayerOneFaceFullyBuilt(world, face);
+            }
+        }
+        logInfoRateLimited(
+                world,
+                "periodic_layer_one_face_coverage",
+                PERIODIC_INFO_INTERVAL_TICKS,
+                "MasonWallBuilder {}: layer_one_face_coverage facesVisited={}/4 facesPlaced={}/4 facesBuilt={}/4 lapWrapped={} lapComplete={} aggressiveHeuristicsEnabled={}",
+                guard.getUuidAsString(),
+                countVisitedLayerOneFaces(),
+                countPlacedLayerOneFaces(),
+                countFullyBuiltLayerOneFaces(),
+                layerOneLapWrapped,
+                layerOneLapCompleted,
+                isLayerOneAggressiveHeuristicsEnabled(1));
     }
 
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        recordLayerOneFacePlacement(world, placedSegment);
         if (retryDensityFallbackModeActive) {
             retryDensityFallbackPlacementStreak++;
             if (retryDensityFallbackPlacementStreak >= RETRY_DENSITY_EXIT_PLACEMENT_STREAK) {
@@ -4021,6 +4136,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isPivotExcludedSegment(ServerWorld world, int index, BlockPos segment) {
+        if (segment != null && !isLayerOneAggressiveHeuristicsEnabled(getSegmentLayer(world, segment))) {
+            return false;
+        }
         return isRegionSuppressed(world, segment)
                 || isPivotSuppressedIndex(world, index, segment)
                 || isPivotHardExcludedBand(world, segment);
@@ -5722,6 +5840,14 @@ public class MasonWallBuilderGoal extends Goal {
     // -------------------------------------------------------------------------
     // Records / enums
     // -------------------------------------------------------------------------
+
+    private static final class LayerOneFaceCoverageState {
+        private boolean firstCandidateVisited = false;
+        private boolean firstSuccessfulPlacement = false;
+        private boolean faceFullyBuilt = false;
+        private int firstCandidateIndex = -1;
+        private BlockPos firstPlacementPos = null;
+    }
 
     private enum Stage {
         IDLE,
