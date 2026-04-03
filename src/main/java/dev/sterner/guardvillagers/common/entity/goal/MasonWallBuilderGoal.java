@@ -1157,6 +1157,9 @@ public class MasonWallBuilderGoal extends Goal {
             if (headState.getCollisionShape(world, headPos).isEmpty()) {
                 continue;
             }
+            if (isLowCostClearableWallObstacle(headState) && isBreakableWallObstacle(world, headPos, headState)) {
+                continue;
+            }
             if (headState.isIn(BlockTags.LEAVES)
                     && clearableLeafObstructions < 1
                     && isBreakableWallObstacle(world, headPos, headState)) {
@@ -1743,6 +1746,18 @@ public class MasonWallBuilderGoal extends Goal {
         int topClearanceY = target.getY() + Math.max(0, 3 - layer);
         for (int y = target.getY(); y <= topClearanceY; y++) {
             BlockPos obstructionPos = new BlockPos(target.getX(), y, target.getZ());
+            BlockState obstructionState = world.getBlockState(obstructionPos);
+            if (!isLowCostClearableWallObstacle(obstructionState)) {
+                continue;
+            }
+            ObstacleClearanceResult result = clearObstacleAt(world, target, obstructionPos);
+            if (result != ObstacleClearanceResult.CLEAR && result != ObstacleClearanceResult.CLEARED_THIS_TICK) {
+                return result;
+            }
+        }
+
+        for (int y = target.getY(); y <= topClearanceY; y++) {
+            BlockPos obstructionPos = new BlockPos(target.getX(), y, target.getZ());
             if (isPlacedWallBlock(world.getBlockState(obstructionPos))) {
                 continue;
             }
@@ -1780,15 +1795,23 @@ public class MasonWallBuilderGoal extends Goal {
             return ObstacleClearanceResult.UNBREAKABLE_OBSTACLE;
         }
         obstaclesCleared++;
-        LOGGER.debug("MasonWallBuilder {}: cleared_obstacle segment={} obstacle={} block={}",
+        String reasonCode = "cleared_obstacle";
+        if (isLowCostClearableWallObstacle(state) && obstaclePos.getY() == segmentPos.getY()) {
+            reasonCode = "cleared_ground_plant";
+        }
+        LOGGER.debug("MasonWallBuilder {}: cleared_obstacle segment={} obstacle={} block={} reason={}",
                 guard.getUuidAsString(),
                 segmentPos.toShortString(),
                 obstaclePos.toShortString(),
-                state.getBlock().getTranslationKey());
+                state.getBlock().getTranslationKey(),
+                reasonCode);
         return ObstacleClearanceResult.CLEARED_THIS_TICK;
     }
 
     private boolean isProtectedObstacle(ServerWorld world, BlockPos pos, BlockState state) {
+        if (isLowCostClearableWallObstacle(state)) {
+            return false;
+        }
         if (isBlacklistedObstacle(state)) {
             return true;
         }
@@ -1817,10 +1840,25 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isBreakableWallObstacle(ServerWorld world, BlockPos pos, BlockState state) {
+        if (isLowCostClearableWallObstacle(state)) {
+            return state.getHardness(world, pos) >= 0.0F;
+        }
         boolean isLeafOrLog = state.isIn(BlockTags.LEAVES) || state.isIn(BlockTags.LOGS);
         boolean isPickaxeBreakable = state.isIn(BlockTags.PICKAXE_MINEABLE);
         if (!isLeafOrLog && !isPickaxeBreakable) return false;
         return state.getHardness(world, pos) >= 0.0F;
+    }
+
+    private boolean isLowCostClearableWallObstacle(BlockState state) {
+        return state.isReplaceable()
+                || state.isIn(BlockTags.FLOWERS)
+                || state.isIn(BlockTags.SMALL_FLOWERS)
+                || state.isIn(BlockTags.SAPLINGS)
+                || state.isOf(Blocks.SHORT_GRASS)
+                || state.isOf(Blocks.TALL_GRASS)
+                || state.isOf(Blocks.FERN)
+                || state.isOf(Blocks.LARGE_FERN)
+                || state.isOf(Blocks.DEAD_BUSH);
     }
 
     private boolean canBreakObstacleThisTick(ServerWorld world) {
