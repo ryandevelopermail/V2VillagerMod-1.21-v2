@@ -295,6 +295,11 @@ public class MasonWallBuilderGoal extends Goal {
     private String lastSortieRegionKey = null;
     private int consecutiveSortiesSameRegion = 0;
     private final Map<String, Integer> sortieRetryAttemptsByRegion = new HashMap<>();
+    private int layerOneLapStartIndex = -1;
+    private int layerOneCursorIndex = -1;
+    private boolean layerOneLapCompleted = false;
+    private boolean layerOneLapWrapped = false;
+    private final Set<BlockPos> layerOneLapConsideredSegments = new HashSet<>();
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -514,6 +519,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastSortieRegionKey = null;
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
+        resetLayerOneLapState();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -617,6 +623,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastSortieRegionKey = null;
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
+        resetLayerOneLapState();
         activeAnchorPos = null;
         cycleWallRect = null;
         activeCycleIdentity = null;
@@ -2544,9 +2551,20 @@ public class MasonWallBuilderGoal extends Goal {
                 return retryCandidate;
             }
         }
-        BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
-        if (rescannedAvailable != null) {
-            return rescannedAvailable;
+        if (activeLayer == 1) {
+            BlockPos layerOneLapCandidate = findNextLayerOneLapAnchor(world, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+            if (layerOneLapCandidate != null) {
+                return layerOneLapCandidate;
+            }
+            BlockPos rescannedLayerOne = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+            if (rescannedLayerOne != null) {
+                return rescannedLayerOne;
+            }
+        } else {
+            BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
+            if (rescannedAvailable != null) {
+                return rescannedAvailable;
+            }
         }
         if (stagnationPivotActive) {
             BlockPos pivotCandidate = findPivotAnchorCandidate(world, activeLayer, preferNonQuarantinedBands);
@@ -2578,6 +2596,116 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return null;
+    }
+
+    private BlockPos findNextLayerOneLapAnchor(ServerWorld world, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
+        if (pendingSegments.isEmpty()) {
+            return null;
+        }
+        initializeLayerOneLapStateIfNeeded();
+        if (layerOneCursorIndex < 0 || layerOneCursorIndex >= pendingSegments.size()) {
+            layerOneCursorIndex = 0;
+        }
+
+        int visited = 0;
+        long now = world.getTime();
+        while (visited < pendingSegments.size()) {
+            int candidateIndex = layerOneCursorIndex;
+            BlockPos candidate = pendingSegments.get(candidateIndex);
+            layerOneCursorIndex = (layerOneCursorIndex + 1) % pendingSegments.size();
+            if (layerOneCursorIndex == layerOneLapStartIndex) {
+                layerOneLapWrapped = true;
+                LOGGER.info("MasonWallBuilder {}: layer_one_lap_wrap start={} cursor={} considered={}",
+                        guard.getUuidAsString(),
+                        layerOneLapStartIndex,
+                        layerOneCursorIndex,
+                        layerOneLapConsideredSegments.size());
+            }
+            visited++;
+
+            if (getSegmentLayer(world, candidate) != 1) {
+                continue;
+            }
+            if (isGatePosition(candidate) || isTerminalSegment(candidate)) {
+                continue;
+            }
+            layerOneLapConsideredSegments.add(candidate.toImmutable());
+
+            if (isPivotExcludedSegment(world, candidateIndex, candidate)) {
+                continue;
+            }
+            if (isRetryDensitySuppressedSegment(world, candidate)) {
+                continue;
+            }
+            if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) {
+                continue;
+            }
+            if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, 1)) {
+                continue;
+            }
+            if (isBuildableCandidate(world, candidate)) {
+                maybeMarkLayerOneLapComplete(world);
+                return candidate;
+            }
+        }
+
+        maybeMarkLayerOneLapComplete(world);
+        return null;
+    }
+
+    private void initializeLayerOneLapStateIfNeeded() {
+        if (layerOneLapStartIndex >= 0 && layerOneCursorIndex >= 0 && layerOneCursorIndex < pendingSegments.size()) {
+            return;
+        }
+        int normalizedIndex = pendingSegments.isEmpty() ? -1 : Math.max(0, Math.min(currentSegmentIndex, pendingSegments.size() - 1));
+        layerOneLapStartIndex = normalizedIndex;
+        layerOneCursorIndex = normalizedIndex;
+        layerOneLapCompleted = false;
+        layerOneLapWrapped = false;
+        layerOneLapConsideredSegments.clear();
+        LOGGER.info("MasonWallBuilder {}: layer_one_lap_start start={} cursor={} pending={}",
+                guard.getUuidAsString(),
+                layerOneLapStartIndex,
+                layerOneCursorIndex,
+                pendingSegments.size());
+    }
+
+    private void maybeMarkLayerOneLapComplete(ServerWorld world) {
+        if (layerOneLapCompleted || !layerOneLapWrapped || layerOneLapStartIndex < 0) {
+            return;
+        }
+        int requiredConsidered = countLayerOneLapEligibleSegments(world);
+        if (layerOneLapConsideredSegments.size() < requiredConsidered) {
+            return;
+        }
+        layerOneLapCompleted = true;
+        LOGGER.info("MasonWallBuilder {}: layer_one_lap_complete start={} considered={} required={}",
+                guard.getUuidAsString(),
+                layerOneLapStartIndex,
+                layerOneLapConsideredSegments.size(),
+                requiredConsidered);
+    }
+
+    private int countLayerOneLapEligibleSegments(ServerWorld world) {
+        int count = 0;
+        for (BlockPos candidate : pendingSegments) {
+            if (getSegmentLayer(world, candidate) != 1) {
+                continue;
+            }
+            if (isGatePosition(candidate) || isTerminalSegment(candidate)) {
+                continue;
+            }
+            count++;
+        }
+        return count;
+    }
+
+    private void resetLayerOneLapState() {
+        layerOneLapStartIndex = -1;
+        layerOneCursorIndex = -1;
+        layerOneLapCompleted = false;
+        layerOneLapWrapped = false;
+        layerOneLapConsideredSegments.clear();
     }
 
     private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
@@ -3368,6 +3496,7 @@ public class MasonWallBuilderGoal extends Goal {
         vegetationDeferredThenRequeuedLogged = false;
         cycleWallRect = null;
         activeCycleIdentity = null;
+        resetLayerOneLapState();
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
