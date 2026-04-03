@@ -132,6 +132,9 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STAGNATION_PIVOT_CLEAR_RETRY_RECOVERY_DELTA = 2;
     private static final int STAGNATION_PIVOT_CLEAR_HARD_RECOVERY_DELTA = 1;
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
+    private static final int STAGNATION_REGION_BAND_BUCKETS = 4;
+    private static final long STAGNATION_REGION_SUPPRESSION_BASE_COOLDOWN_TICKS = STAGNATION_PIVOT_INTERVAL_TICKS;
+    private static final long STAGNATION_REGION_SUPPRESSION_MAX_COOLDOWN_TICKS = STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS;
     private static final long STAGNATION_PIVOT_LIFECYCLE_LOG_INTERVAL_TICKS = 20L;
     private static final long STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS = 600L;
     private static final double LAYER_ONE_REGION_DOMINANCE_COMPLETION_THRESHOLD = 0.95D;
@@ -268,8 +271,7 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<BlockPos, String> terminalSegmentReasons = new HashMap<>();
     private final Deque<ProgressSnapshot> progressSnapshots = new ArrayDeque<>();
     private boolean stagnationPivotActive = false;
-    private int stagnationPivotSuppressIndexStart = -1;
-    private int stagnationPivotSuppressIndexEnd = -1;
+    private SuppressionRegionKey stagnationPivotActiveSuppressedRegionKey = null;
     private long stagnationPivotSuppressUntilTick = 0L;
     private int stagnationPivotPlacementStreak = 0;
     private int stagnationPivotPlacementsAtActivation = 0;
@@ -279,6 +281,9 @@ public class MasonWallBuilderGoal extends Goal {
     private long stagnationPivotActivatedAtTick = 0L;
     private long stagnationPivotCooldownUntilTick = 0L;
     private long nextPivotLifecycleLogTick = 0L;
+    private final Map<SuppressionRegionKey, StagnationRegionSuppressionState> stagnationSuppressionByRegion = new HashMap<>();
+    private long lastSuppressionAppliedTick = -1L;
+    private int placementsAtLastSuppression = 0;
     private String lastSortieRegionKey = null;
     private int consecutiveSortiesSameRegion = 0;
     private final Map<String, Integer> sortieRetryAttemptsByRegion = new HashMap<>();
@@ -495,6 +500,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
+        stagnationSuppressionByRegion.clear();
+        lastSuppressionAppliedTick = -1L;
+        placementsAtLastSuppression = 0;
         lastSortieRegionKey = null;
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
@@ -595,6 +603,9 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
         clearStagnationPivotState();
+        stagnationSuppressionByRegion.clear();
+        lastSuppressionAppliedTick = -1L;
+        placementsAtLastSuppression = 0;
         lastSortieRegionKey = null;
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
@@ -1736,7 +1747,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         // Place the block
         world.setBlockState(target, placementMaterial.blockState());
-        recordPlacementProgress(world);
+        recordPlacementProgress(world, target);
         clearPlaceBlockFailureTracking();
         clearLastPlantClearedTracking();
         if (!firstPlacementLoggedThisCycle) {
@@ -3155,7 +3166,7 @@ public class MasonWallBuilderGoal extends Goal {
                 }
 
                 world.setBlockState(segment, material.blockState());
-                recordPlacementProgress(world);
+                recordPlacementProgress(world, segment);
                 resetSortieAbortBackoffAfterBandPlacement(world, segment);
                 filled = true;
                 filledDuringSweep++;
@@ -3510,6 +3521,9 @@ public class MasonWallBuilderGoal extends Goal {
         }
         nextPeriodicInfoTick = now + PERIODIC_INFO_INTERVAL_TICKS;
         int placementDeltaSinceLastSummary = placedSegments - lastPeriodicSummaryPlacementCount;
+        int suppressedRegionCount = countActiveSuppressedRegions(now);
+        long oldestSuppressionAge = oldestSuppressionAgeTicks(now);
+        int placementsSinceLastSuppression = placementsSinceCycleStart - placementsAtLastSuppression;
         if (stage == Stage.PLACE_BLOCK && placementDeltaSinceLastSummary <= 0) {
             String stalledTarget = placeBlockFailureTarget == null ? "none" : placeBlockFailureTarget.toShortString();
             String stalledReason = placeBlockLastNonPlacementReason == null ? "none" : placeBlockLastNonPlacementReason;
@@ -3517,7 +3531,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={}",
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     pathRetriesSinceCycleStart,
@@ -3525,28 +3539,35 @@ public class MasonWallBuilderGoal extends Goal {
                     deferredOrSkippedSinceCycleStart,
                     stage,
                     stalledTarget,
-                    stalledReason
+                    stalledReason,
+                    suppressedRegionCount,
+                    oldestSuppressionAge,
+                    Math.max(0, placementsSinceLastSuppression)
             );
         } else {
             logInfoRateLimited(
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={}",
+                    "MasonWallBuilder {}: periodic summary placements={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     pathRetriesSinceCycleStart,
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
-                    stage
+                    stage,
+                    suppressedRegionCount,
+                    oldestSuppressionAge,
+                    Math.max(0, placementsSinceLastSuppression)
             );
         }
         lastPeriodicSummaryPlacementCount = placedSegments;
     }
 
-    private void recordPlacementProgress(ServerWorld world) {
+    private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        maybeClearSuppressedRegionsAfterProgress(world, placedSegment);
         if (stagnationPivotActive) {
             stagnationPivotPlacementStreak++;
         }
@@ -3573,7 +3594,9 @@ public class MasonWallBuilderGoal extends Goal {
             long activeDuration = Math.max(0L, now - stagnationPivotActivatedAtTick);
             int cooldownRemaining = (int) Math.max(0L, stagnationPivotCooldownUntilTick - now);
             boolean strongPlacementStreak = stagnationPivotPlacementStreak >= STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK;
-            boolean clearConditionMet = strongPlacementStreak || (activeDuration >= STAGNATION_PIVOT_MIN_ACTIVE_TICKS && hasMeaningfulPivotRecovery(retryDelta, hardDelta));
+            boolean progressInOtherRegions = hasConfirmedProgressInOtherRegions(world);
+            boolean clearConditionMet = progressInOtherRegions
+                    && (strongPlacementStreak || (activeDuration >= STAGNATION_PIVOT_MIN_ACTIVE_TICKS && hasMeaningfulPivotRecovery(retryDelta, hardDelta)));
             maybeLogPivotLifecycle(world, activeDuration, cooldownRemaining, clearConditionMet, retryDelta, hardDelta);
             if (clearConditionMet) {
                 clearStagnationPivot(world, strongPlacementStreak ? "placement_streak" : "recovered_window", activeDuration, cooldownRemaining, clearConditionMet);
@@ -3603,12 +3626,10 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void activateStagnationPivot(ServerWorld world, int retryDelta, int hardDelta) {
-        int rangeCenter = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
-        int rangeRadius = Math.max(1, STAGNATION_PIVOT_RANGE_WIDTH / 2);
-        int suppressionStart = Math.max(0, rangeCenter - rangeRadius);
-        int suppressionEnd = Math.min(Math.max(0, pendingSegments.size() - 1), rangeCenter + rangeRadius);
-        applyPivotSuppressionRange(suppressionStart, suppressionEnd);
-        stagnationPivotSuppressUntilTick = world.getTime() + STAGNATION_PIVOT_INTERVAL_TICKS;
+        SuppressionRegionKey suppressedRegionKey = resolveSuppressionRegionKey(world, resolveCurrentPivotSegment(world));
+        long suppressionUntilTick = applyRegionSuppression(world, suppressedRegionKey);
+        stagnationPivotActiveSuppressedRegionKey = suppressedRegionKey;
+        stagnationPivotSuppressUntilTick = suppressionUntilTick;
         stagnationPivotPlacementStreak = 0;
         stagnationPivotPlacementsAtActivation = placementsSinceCycleStart;
         stagnationPivotExcludedBandSignature = resolvePivotExcludedBandSignature(world);
@@ -3622,13 +3643,12 @@ public class MasonWallBuilderGoal extends Goal {
         activeMoveTarget = null;
         resetActiveMoveProgressTracking(world);
         resetPathFailureState();
-        currentSegmentIndex = Math.min(pendingSegments.size(), stagnationPivotSuppressIndexEnd + 1);
-        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_activated placementsDelta=0 retryDelta={} hardUnreachableDelta={} suppressedRange={}..{} excludedBand={} until={}",
+        maybeAdvanceCurrentIndexPastSuppressedRegion(world);
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_activated placementsDelta=0 retryDelta={} hardUnreachableDelta={} suppressedRegion={} excludedBand={} until={}",
                 guard.getUuidAsString(),
                 retryDelta,
                 hardDelta,
-                stagnationPivotSuppressIndexStart,
-                stagnationPivotSuppressIndexEnd,
+                stagnationPivotActiveSuppressedRegionKey == null ? "none" : stagnationPivotActiveSuppressedRegionKey.asKey(),
                 stagnationPivotExcludedBandSignature == null ? "none" : stagnationPivotExcludedBandSignature,
                 stagnationPivotSuppressUntilTick);
     }
@@ -3658,8 +3678,7 @@ public class MasonWallBuilderGoal extends Goal {
     private void clearStagnationPivotState() {
         progressSnapshots.clear();
         stagnationPivotActive = false;
-        stagnationPivotSuppressIndexStart = -1;
-        stagnationPivotSuppressIndexEnd = -1;
+        stagnationPivotActiveSuppressedRegionKey = null;
         stagnationPivotSuppressUntilTick = 0L;
         stagnationPivotPlacementStreak = 0;
         stagnationPivotPlacementsAtActivation = 0;
@@ -3671,32 +3690,25 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void maybeRefreshStagnationPivotSuppressionRange(ServerWorld world) {
-        int rangeCenter = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
-        int rangeRadius = Math.max(1, STAGNATION_PIVOT_RANGE_WIDTH / 2);
-        int suppressionStart = Math.max(0, rangeCenter - rangeRadius);
-        int suppressionEnd = Math.min(Math.max(0, pendingSegments.size() - 1), rangeCenter + rangeRadius);
-        if (!isMaterialPivotSuppressionShift(suppressionStart, suppressionEnd)) {
+        SuppressionRegionKey refreshedRegion = resolveSuppressionRegionKey(world, resolveCurrentPivotSegment(world));
+        if (!isMaterialPivotSuppressionShift(refreshedRegion)) {
             return;
         }
-        applyPivotSuppressionRange(suppressionStart, suppressionEnd);
-        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_suppression_updated suppressedRange={}..{}",
+        long suppressionUntilTick = applyRegionSuppression(world, refreshedRegion);
+        stagnationPivotActiveSuppressedRegionKey = refreshedRegion;
+        stagnationPivotSuppressUntilTick = suppressionUntilTick;
+        maybeAdvanceCurrentIndexPastSuppressedRegion(world);
+        LOGGER.info("MasonWallBuilder {}: stagnation_pivot_suppression_updated suppressedRegion={} until={}",
                 guard.getUuidAsString(),
-                stagnationPivotSuppressIndexStart,
-                stagnationPivotSuppressIndexEnd);
+                stagnationPivotActiveSuppressedRegionKey == null ? "none" : stagnationPivotActiveSuppressedRegionKey.asKey(),
+                stagnationPivotSuppressUntilTick);
     }
 
-    private void applyPivotSuppressionRange(int suppressionStart, int suppressionEnd) {
-        stagnationPivotSuppressIndexStart = suppressionStart;
-        stagnationPivotSuppressIndexEnd = suppressionEnd;
-    }
-
-    private boolean isMaterialPivotSuppressionShift(int suppressionStart, int suppressionEnd) {
-        if (stagnationPivotSuppressIndexStart < 0 || stagnationPivotSuppressIndexEnd < 0) {
+    private boolean isMaterialPivotSuppressionShift(SuppressionRegionKey refreshedRegion) {
+        if (stagnationPivotActiveSuppressedRegionKey == null) {
             return true;
         }
-        int previousCenter = (stagnationPivotSuppressIndexStart + stagnationPivotSuppressIndexEnd) / 2;
-        int newCenter = (suppressionStart + suppressionEnd) / 2;
-        return Math.abs(newCenter - previousCenter) >= STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT;
+        return !stagnationPivotActiveSuppressedRegionKey.equals(refreshedRegion);
     }
 
     private boolean hasMeaningfulPivotRecovery(int retryDelta, int hardDelta) {
@@ -3730,11 +3742,15 @@ public class MasonWallBuilderGoal extends Goal {
         if (!stagnationPivotActive || world.getTime() >= stagnationPivotSuppressUntilTick) {
             return false;
         }
-        if (index >= 0 && index < pendingSegments.size()) {
-            return index >= stagnationPivotSuppressIndexStart && index <= stagnationPivotSuppressIndexEnd;
+        BlockPos target = segment;
+        if (target == null && index >= 0 && index < pendingSegments.size()) {
+            target = pendingSegments.get(index);
         }
-        int resolvedIndex = pendingSegments.indexOf(segment);
-        return resolvedIndex >= stagnationPivotSuppressIndexStart && resolvedIndex <= stagnationPivotSuppressIndexEnd;
+        SuppressionRegionKey activeRegion = stagnationPivotActiveSuppressedRegionKey;
+        if (activeRegion == null || target == null) {
+            return false;
+        }
+        return activeRegion.equals(resolveSuppressionRegionKey(world, target));
     }
 
     private boolean isPivotHardExcludedBand(ServerWorld world, BlockPos segment) {
@@ -3745,7 +3761,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean isPivotExcludedSegment(ServerWorld world, int index, BlockPos segment) {
-        return isPivotSuppressedIndex(world, index, segment) || isPivotHardExcludedBand(world, segment);
+        return isRegionSuppressed(world, segment)
+                || isPivotSuppressedIndex(world, index, segment)
+                || isPivotHardExcludedBand(world, segment);
     }
 
     private String resolvePivotExcludedBandSignature(ServerWorld world) {
@@ -3780,8 +3798,160 @@ public class MasonWallBuilderGoal extends Goal {
                     STAGNATION_PIVOT_SECTION_COOLDOWN_TICKS,
                     cooldownUntil);
         }
-        currentSegmentIndex = Math.min(pendingSegments.size(), Math.max(stagnationPivotSuppressIndexEnd + 1, currentSegmentIndex + STAGNATION_PIVOT_RANGE_WIDTH));
+        maybeAdvanceCurrentIndexPastSuppressedRegion(world);
         clearStagnationPivot(world, "max_duration_no_placements", activeDuration, 0, false);
+    }
+
+    private BlockPos resolveCurrentPivotSegment(ServerWorld world) {
+        BlockPos localHead = localSortieQueue.peekFirst();
+        if (localHead != null) {
+            return localHead;
+        }
+        if (activeMoveTarget != null) {
+            return activeMoveTarget;
+        }
+        int candidateIndex = Math.max(0, Math.min(currentSegmentIndex, Math.max(0, pendingSegments.size() - 1)));
+        if (!pendingSegments.isEmpty() && candidateIndex < pendingSegments.size()) {
+            return pendingSegments.get(candidateIndex);
+        }
+        return guard.getBlockPos();
+    }
+
+    private long applyRegionSuppression(ServerWorld world, SuppressionRegionKey regionKey) {
+        long now = world.getTime();
+        StagnationRegionSuppressionState existing = stagnationSuppressionByRegion.get(regionKey);
+        int nextHitCount = existing == null ? 1 : existing.hitCount() + 1;
+        long cooldown = Math.min(
+                STAGNATION_REGION_SUPPRESSION_MAX_COOLDOWN_TICKS,
+                STAGNATION_REGION_SUPPRESSION_BASE_COOLDOWN_TICKS * (1L << Math.min(4, Math.max(0, nextHitCount - 1))));
+        long untilTick = now + cooldown;
+        long firstSuppressedAt = existing == null ? now : existing.firstSuppressedAtTick();
+        stagnationSuppressionByRegion.put(regionKey, new StagnationRegionSuppressionState(firstSuppressedAt, now, untilTick, nextHitCount));
+        lastSuppressionAppliedTick = now;
+        placementsAtLastSuppression = placementsSinceCycleStart;
+        return untilTick;
+    }
+
+    private boolean isRegionSuppressed(ServerWorld world, BlockPos segment) {
+        if (segment == null) {
+            return false;
+        }
+        long now = world.getTime();
+        SuppressionRegionKey key = resolveSuppressionRegionKey(world, segment);
+        StagnationRegionSuppressionState state = stagnationSuppressionByRegion.get(key);
+        if (state == null) {
+            return false;
+        }
+        if (state.suppressedUntilTick() <= now) {
+            stagnationSuppressionByRegion.remove(key);
+            return false;
+        }
+        return true;
+    }
+
+    private SuppressionRegionKey resolveSuppressionRegionKey(ServerWorld world, BlockPos segment) {
+        int layer = Math.max(1, getSegmentLayer(world, segment));
+        if (cycleWallRect == null) {
+            return new SuppressionRegionKey("fallback", 0, layer);
+        }
+        int minX = cycleWallRect.minX();
+        int maxX = cycleWallRect.maxX();
+        int minZ = cycleWallRect.minZ();
+        int maxZ = cycleWallRect.maxZ();
+        String face;
+        int faceIndex;
+        int faceLength;
+        if (segment.getZ() <= minZ) {
+            face = "north";
+            faceIndex = segment.getX() - minX;
+            faceLength = Math.max(1, maxX - minX + 1);
+        } else if (segment.getX() >= maxX) {
+            face = "east";
+            faceIndex = segment.getZ() - minZ;
+            faceLength = Math.max(1, maxZ - minZ + 1);
+        } else if (segment.getZ() >= maxZ) {
+            face = "south";
+            faceIndex = maxX - segment.getX();
+            faceLength = Math.max(1, maxX - minX + 1);
+        } else {
+            face = "west";
+            faceIndex = maxZ - segment.getZ();
+            faceLength = Math.max(1, maxZ - minZ + 1);
+        }
+        int clampedIndex = Math.max(0, Math.min(faceIndex, faceLength - 1));
+        int bucketCount = Math.max(1, Math.min(STAGNATION_REGION_BAND_BUCKETS, faceLength));
+        int bandIndex = Math.min(bucketCount - 1, (clampedIndex * bucketCount) / faceLength);
+        return new SuppressionRegionKey(face, bandIndex, layer);
+    }
+
+    private void maybeAdvanceCurrentIndexPastSuppressedRegion(ServerWorld world) {
+        if (pendingSegments.isEmpty()) {
+            return;
+        }
+        int nextCandidate = Math.max(0, currentSegmentIndex);
+        while (nextCandidate < pendingSegments.size() && isRegionSuppressed(world, pendingSegments.get(nextCandidate))) {
+            nextCandidate++;
+        }
+        currentSegmentIndex = Math.min(pendingSegments.size(), nextCandidate);
+    }
+
+    private int countActiveSuppressedRegions(long now) {
+        int active = 0;
+        for (Map.Entry<SuppressionRegionKey, StagnationRegionSuppressionState> entry : stagnationSuppressionByRegion.entrySet()) {
+            if (entry.getValue().suppressedUntilTick() > now) {
+                active++;
+            }
+        }
+        return active;
+    }
+
+    private long oldestSuppressionAgeTicks(long now) {
+        long oldestTick = Long.MAX_VALUE;
+        for (StagnationRegionSuppressionState state : stagnationSuppressionByRegion.values()) {
+            if (state.suppressedUntilTick() <= now) {
+                continue;
+            }
+            oldestTick = Math.min(oldestTick, state.firstSuppressedAtTick());
+        }
+        if (oldestTick == Long.MAX_VALUE) {
+            return 0L;
+        }
+        return Math.max(0L, now - oldestTick);
+    }
+
+    private boolean hasConfirmedProgressInOtherRegions(ServerWorld world) {
+        if (stagnationPivotActiveSuppressedRegionKey == null) {
+            return true;
+        }
+        if (activeMoveTarget == null) {
+            return false;
+        }
+        SuppressionRegionKey activeRegion = resolveSuppressionRegionKey(world, activeMoveTarget);
+        return !stagnationPivotActiveSuppressedRegionKey.equals(activeRegion);
+    }
+
+    private void maybeClearSuppressedRegionsAfterProgress(ServerWorld world, BlockPos placedSegment) {
+        if (placedSegment == null || stagnationSuppressionByRegion.isEmpty()) {
+            return;
+        }
+        SuppressionRegionKey progressedRegion = resolveSuppressionRegionKey(world, placedSegment);
+        List<SuppressionRegionKey> cleared = new ArrayList<>();
+        for (Map.Entry<SuppressionRegionKey, StagnationRegionSuppressionState> entry : stagnationSuppressionByRegion.entrySet()) {
+            SuppressionRegionKey key = entry.getKey();
+            if (key.equals(progressedRegion)) {
+                continue;
+            }
+            cleared.add(key);
+        }
+        for (SuppressionRegionKey key : cleared) {
+            stagnationSuppressionByRegion.remove(key);
+        }
+        if (!cleared.isEmpty()) {
+            LOGGER.debug("MasonWallBuilder {}: cleared_suppressed_regions_after_progress count={} progressedRegion={}",
+                    guard.getUuidAsString(),
+                    cleared.size(),
+                    progressedRegion.asKey());
+        }
     }
 
     private BlockPos findPivotAnchorCandidate(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands) {
@@ -5392,6 +5562,19 @@ public class MasonWallBuilderGoal extends Goal {
     private record ProgressSnapshot(long tick, int placements, int pathRetries, int hardUnreachable) {}
 
     private record FailureBandWindow(int count, long firstFailureTick) {}
+
+    private record SuppressionRegionKey(String face, int bandIndex, int layer) {
+        private String asKey() {
+            return face + "#" + bandIndex + "|L" + layer;
+        }
+    }
+
+    private record StagnationRegionSuppressionState(
+            long firstSuppressedAtTick,
+            long lastSuppressedAtTick,
+            long suppressedUntilTick,
+            int hitCount
+    ) {}
 
     private record LayerOneDominanceContext(
             boolean active,
