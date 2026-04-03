@@ -99,6 +99,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final int PLACE_BLOCK_NON_PLACEMENT_ESCALATION_THRESHOLD = 4;
+    private static final long PLANT_CLEAR_RETRY_WINDOW_TICKS = 6L;
     private static final int UNBREAKABLE_ESCALATION_BAND_WINDOW_TICKS = 200;
     private static final int UNBREAKABLE_ESCALATION_BAND_REPEAT_THRESHOLD = 3;
     private static final int CRITICAL_BUILDABLE_POOL_SIZE = 2;
@@ -237,6 +238,8 @@ public class MasonWallBuilderGoal extends Goal {
     private BlockPos placeBlockFailureTarget = null;
     private int placeBlockConsecutiveNonPlacementTicks = 0;
     private String placeBlockLastNonPlacementReason = null;
+    private BlockPos lastPlantClearedTarget = null;
+    private long lastPlantClearedTick = -1L;
     private int lastPeriodicSummaryPlacementCount = 0;
     private boolean firstPlacementLoggedThisCycle = false;
     private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
@@ -1537,6 +1540,25 @@ public class MasonWallBuilderGoal extends Goal {
         placeBlockLastNonPlacementReason = null;
     }
 
+    private void clearLastPlantClearedTracking() {
+        lastPlantClearedTarget = null;
+        lastPlantClearedTick = -1L;
+    }
+
+    private boolean shouldPrioritizePlantClearRetry(ServerWorld world, BlockPos target) {
+        if (lastPlantClearedTarget == null || !lastPlantClearedTarget.equals(target)) {
+            return false;
+        }
+        long now = world.getTime();
+        long delta = now - lastPlantClearedTick;
+        return delta > 0L && delta <= PLANT_CLEAR_RETRY_WINDOW_TICKS;
+    }
+
+    private void markPlantClearedForRetry(ServerWorld world, BlockPos target) {
+        lastPlantClearedTarget = target.toImmutable();
+        lastPlantClearedTick = world.getTime();
+    }
+
     private boolean recordPlaceBlockNonPlacementAndMaybeEscalate(ServerWorld world, BlockPos target, String reasonCode) {
         BlockPos immutableTarget = target.toImmutable();
         if (!immutableTarget.equals(placeBlockFailureTarget)) {
@@ -1574,9 +1596,16 @@ public class MasonWallBuilderGoal extends Goal {
         BlockPos target = localSortieQueue.peekFirst();
         if (target == null) {
             clearPlaceBlockFailureTracking();
+            clearLastPlantClearedTracking();
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
+
+        if (lastPlantClearedTarget != null && !lastPlantClearedTarget.equals(target)) {
+            clearLastPlantClearedTracking();
+        }
+
+        boolean prioritizePlantClearRetry = shouldPrioritizePlantClearRetry(world, target);
 
         // Verify still unbuilt
         if (isPlacedWallBlock(world.getBlockState(target)) || isGatePosition(target)) {
@@ -1585,12 +1614,18 @@ public class MasonWallBuilderGoal extends Goal {
             transitionSegmentState(world, target, SegmentState.PLACED, "already_resolved");
             clearSegmentFailureState(target);
             clearPlaceBlockFailureTracking();
+            clearLastPlantClearedTracking();
             stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
 
         ObstacleClearanceResult clearance = prepareSegmentForPlacement(world, target);
         if (clearance == ObstacleClearanceResult.CLEARED_THIS_TICK) {
+            if (prioritizePlantClearRetry) {
+                clearLastPlantClearedTracking();
+                stage = Stage.MOVE_TO_SEGMENT;
+                return;
+            }
             if (recordPlaceBlockNonPlacementAndMaybeEscalate(world, target, "clearance_retry")) {
                 stage = Stage.MOVE_TO_SEGMENT;
                 return;
@@ -1637,6 +1672,7 @@ public class MasonWallBuilderGoal extends Goal {
         world.setBlockState(target, placementMaterial.blockState());
         recordPlacementProgress(world);
         clearPlaceBlockFailureTracking();
+        clearLastPlantClearedTracking();
         if (!firstPlacementLoggedThisCycle) {
             logInfoRateLimited(world, "first_placement", PERIODIC_INFO_INTERVAL_TICKS,
                     "MasonWallBuilder {}: first placement in cycle at {}",
@@ -1798,6 +1834,7 @@ public class MasonWallBuilderGoal extends Goal {
         String reasonCode = "cleared_obstacle";
         if (isLowCostClearableWallObstacle(state) && obstaclePos.getY() == segmentPos.getY()) {
             reasonCode = "cleared_ground_plant";
+            markPlantClearedForRetry(world, segmentPos);
         }
         LOGGER.debug("MasonWallBuilder {}: cleared_obstacle segment={} obstacle={} block={} reason={}",
                 guard.getUuidAsString(),
