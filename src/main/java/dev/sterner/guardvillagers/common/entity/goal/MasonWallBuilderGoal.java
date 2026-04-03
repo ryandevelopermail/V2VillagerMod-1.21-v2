@@ -131,6 +131,11 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int STAGNATION_PIVOT_CLEAR_PLACEMENT_STREAK = 3;
     private static final int STAGNATION_PIVOT_CLEAR_RETRY_RECOVERY_DELTA = 2;
     private static final int STAGNATION_PIVOT_CLEAR_HARD_RECOVERY_DELTA = 1;
+    private static final int RETRY_DENSITY_WINDOW_TICKS = 200;
+    private static final double RETRY_DENSITY_TRIGGER_THRESHOLD = 2.0D;
+    private static final int RETRY_DENSITY_LOW_PLACEMENT_DELTA_THRESHOLD = 1;
+    private static final int RETRY_DENSITY_HARD_UNREACHABLE_TRIGGER_DELTA = 2;
+    private static final int RETRY_DENSITY_EXIT_PLACEMENT_STREAK = 3;
     private static final int STAGNATION_PIVOT_SUPPRESSION_MIN_SHIFT = 2;
     private static final int STAGNATION_REGION_BAND_BUCKETS = 4;
     private static final long STAGNATION_REGION_SUPPRESSION_BASE_COOLDOWN_TICKS = STAGNATION_PIVOT_INTERVAL_TICKS;
@@ -270,6 +275,9 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<BlockPos, String> sortieAbortSegmentBandKeys = new HashMap<>();
     private final Map<BlockPos, String> terminalSegmentReasons = new HashMap<>();
     private final Deque<ProgressSnapshot> progressSnapshots = new ArrayDeque<>();
+    private final Deque<ProgressSnapshot> retryDensitySnapshots = new ArrayDeque<>();
+    private boolean retryDensityFallbackModeActive = false;
+    private int retryDensityFallbackPlacementStreak = 0;
     private boolean stagnationPivotActive = false;
     private SuppressionRegionKey stagnationPivotActiveSuppressedRegionKey = null;
     private long stagnationPivotSuppressUntilTick = 0L;
@@ -630,6 +638,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         maybeEmitPeriodicInfo(world);
+        maybeTriggerRetryDensityFallback(world);
         maybeActivateStagnationPivot(world);
 
         switch (stage) {
@@ -1226,6 +1235,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
+        noteRetryDensityNonPlacementProgress();
         SegmentFailMetadata failMetadata = registerSegmentFailureMetadata(world, segmentTarget, attemptedNavTarget, "path_start_failed");
         if (firstPathFailureTick < 0L) {
             firstPathFailureTick = world.getTime();
@@ -1387,6 +1397,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, pos)) continue;
+            if (isRetryDensitySuppressedSegment(world, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isBuildableCandidate(world, pos)) {
@@ -1394,6 +1405,10 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private boolean isRetryDensitySuppressedSegment(ServerWorld world, BlockPos segment) {
+        return retryDensityFallbackModeActive && isRegionSuppressed(world, segment);
     }
 
     private void maybeExcludeBandForUnbreakableEscalation(ServerWorld world, BlockPos triggerSegment, int repeatEscalationsInWindow) {
@@ -1637,6 +1652,7 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean recordPlaceBlockNonPlacementAndMaybeEscalate(ServerWorld world, BlockPos target, String reasonCode) {
+        noteRetryDensityNonPlacementProgress();
         BlockPos immutableTarget = target.toImmutable();
         if (!immutableTarget.equals(placeBlockFailureTarget)) {
             placeBlockFailureTarget = immutableTarget;
@@ -1672,6 +1688,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         BlockPos target = localSortieQueue.peekFirst();
         if (target == null) {
+            noteRetryDensityNonPlacementProgress();
             clearPlaceBlockFailureTracking();
             clearLastPlantClearedTracking();
             stage = Stage.MOVE_TO_SEGMENT;
@@ -1733,6 +1750,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         int availablePlacementUnits = countWallMaterialUnitsInChest(world, chestPos);
         if (availablePlacementUnits < 1) {
+            noteRetryDensityNonPlacementProgress();
             stage = Stage.WAIT_FOR_WALL_STOCK;
             return;
         }
@@ -2512,6 +2530,9 @@ public class MasonWallBuilderGoal extends Goal {
             if (getSegmentLayer(world, retryCandidate) != activeLayer) {
                 continue;
             }
+            if (isRetryDensitySuppressedSegment(world, retryCandidate)) {
+                continue;
+            }
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, retryCandidate, world.getTime())) {
                 continue;
             }
@@ -2543,6 +2564,9 @@ public class MasonWallBuilderGoal extends Goal {
             if (isPivotExcludedSegment(world, candidateIndex, candidate)) {
                 continue;
             }
+            if (isRetryDensitySuppressedSegment(world, candidate)) {
+                continue;
+            }
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, world.getTime())) {
                 continue;
             }
@@ -2562,6 +2586,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos candidate = pendingSegments.get(i);
             if (getSegmentLayer(world, candidate) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, candidate)) continue;
+            if (isRetryDensitySuppressedSegment(world, candidate)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, activeLayer)) continue;
             if (segmentStates.getOrDefault(candidate, SegmentState.AVAILABLE) != SegmentState.AVAILABLE) continue;
@@ -2580,6 +2605,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, pos)) continue;
+            if (isRetryDensitySuppressedSegment(world, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
@@ -2598,6 +2624,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, pos)) continue;
+            if (isRetryDensitySuppressedSegment(world, pos)) continue;
             if (isSegmentBandQuarantined(world, pos, now)) continue;
             if (isBuildableCandidate(world, pos)) {
                 return true;
@@ -2613,6 +2640,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, pos)) continue;
+            if (isRetryDensitySuppressedSegment(world, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (requireNonCycleExcludedBand && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isBuildableCandidate(world, pos)) {
@@ -2653,6 +2681,7 @@ public class MasonWallBuilderGoal extends Goal {
             BlockPos pos = pendingSegments.get(i);
             if (getSegmentLayer(world, pos) != activeLayer) continue;
             if (isPivotExcludedSegment(world, i, pos)) continue;
+            if (isRetryDensitySuppressedSegment(world, pos)) continue;
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, pos, now)) continue;
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isSegmentInCooldown(pos, now)) continue;
@@ -2701,6 +2730,9 @@ public class MasonWallBuilderGoal extends Goal {
             sortieCandidatesAccepted++;
         }
         if (accepted.isEmpty() && !preflightFailed.isEmpty()) {
+            if (retryDensityFallbackModeActive) {
+                return accepted;
+            }
             int fallbackLimit = Math.min(MAX_SEGMENTS_PER_SORTIE, preflightFailed.size());
             for (BlockPos candidate : preflightFailed) {
                 if (accepted.size() >= fallbackLimit) {
@@ -3567,10 +3599,97 @@ public class MasonWallBuilderGoal extends Goal {
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        if (retryDensityFallbackModeActive) {
+            retryDensityFallbackPlacementStreak++;
+            if (retryDensityFallbackPlacementStreak >= RETRY_DENSITY_EXIT_PLACEMENT_STREAK) {
+                exitRetryDensityFallbackMode(world, "placement_streak");
+            }
+        }
         maybeClearSuppressedRegionsAfterProgress(world, placedSegment);
         if (stagnationPivotActive) {
             stagnationPivotPlacementStreak++;
         }
+    }
+
+    private void noteRetryDensityNonPlacementProgress() {
+        if (retryDensityFallbackModeActive) {
+            retryDensityFallbackPlacementStreak = 0;
+        }
+    }
+
+    private void maybeTriggerRetryDensityFallback(ServerWorld world) {
+        if (!isElectedBuilder || stage == Stage.IDLE || stage == Stage.DONE || pendingSegments.isEmpty()) {
+            return;
+        }
+        if (retryDensityFallbackModeActive) {
+            return;
+        }
+        long now = world.getTime();
+        retryDensitySnapshots.addLast(new ProgressSnapshot(now, placementsSinceCycleStart, pathRetriesSinceCycleStart, hardUnreachableSinceCycleStart));
+        while (!retryDensitySnapshots.isEmpty() && (now - retryDensitySnapshots.peekFirst().tick()) > RETRY_DENSITY_WINDOW_TICKS) {
+            retryDensitySnapshots.pollFirst();
+        }
+        ProgressSnapshot baseline = retryDensitySnapshots.peekFirst();
+        if (baseline == null) {
+            return;
+        }
+        int placementDelta = placementsSinceCycleStart - baseline.placements();
+        int retryDelta = pathRetriesSinceCycleStart - baseline.pathRetries();
+        int hardDelta = hardUnreachableSinceCycleStart - baseline.hardUnreachable();
+        double retryDensity = retryDelta / (double) Math.max(1, placementDelta);
+        boolean lowPlacementDelta = placementDelta <= RETRY_DENSITY_LOW_PLACEMENT_DELTA_THRESHOLD;
+        if (!lowPlacementDelta) {
+            return;
+        }
+        if (retryDensity < RETRY_DENSITY_TRIGGER_THRESHOLD && hardDelta < RETRY_DENSITY_HARD_UNREACHABLE_TRIGGER_DELTA) {
+            return;
+        }
+        enterRetryDensityFallbackMode(world, placementDelta, retryDelta, hardDelta, retryDensity);
+    }
+
+    private void enterRetryDensityFallbackMode(ServerWorld world,
+                                               int placementDelta,
+                                               int retryDelta,
+                                               int hardDelta,
+                                               double retryDensity) {
+        retryDensityFallbackModeActive = true;
+        retryDensityFallbackPlacementStreak = 0;
+        releaseLocalSortieClaims(world, "retry_density_fallback_enter");
+        localSortieQueue.clear();
+        activeMoveTarget = null;
+        resetActiveMoveProgressTracking(world);
+        resetPathFailureState();
+        maybeAdvanceCurrentIndexPastSuppressedRegion(world);
+        int activeLayer = findLowestPendingLayer(world);
+        if (activeLayer > 0) {
+            reconcileSkippedSegmentsForLayer(world, activeLayer, "retry_density_fallback_enter");
+        }
+        if (stage == Stage.PLACE_BLOCK) {
+            stage = Stage.MOVE_TO_SEGMENT;
+        }
+        LOGGER.info("MasonWallBuilder {}: fallback_mode_enter placementDelta={} retryDelta={} hardUnreachableDelta={} retryDensity={} stage={} suppressedRegions={}",
+                guard.getUuidAsString(),
+                placementDelta,
+                retryDelta,
+                hardDelta,
+                String.format("%.2f", retryDensity),
+                stage,
+                countActiveSuppressedRegions(world.getTime()));
+    }
+
+    private void exitRetryDensityFallbackMode(ServerWorld world, String reason) {
+        if (!retryDensityFallbackModeActive) {
+            return;
+        }
+        retryDensityFallbackModeActive = false;
+        retryDensityFallbackPlacementStreak = 0;
+        retryDensitySnapshots.clear();
+        LOGGER.info("MasonWallBuilder {}: fallback_mode_exit reason={} placements={} retries={} hard_unreachable={}",
+                guard.getUuidAsString(),
+                reason,
+                placementsSinceCycleStart,
+                pathRetriesSinceCycleStart,
+                hardUnreachableSinceCycleStart);
     }
 
     private void maybeActivateStagnationPivot(ServerWorld world) {
@@ -3677,6 +3796,9 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void clearStagnationPivotState() {
         progressSnapshots.clear();
+        retryDensitySnapshots.clear();
+        retryDensityFallbackModeActive = false;
+        retryDensityFallbackPlacementStreak = 0;
         stagnationPivotActive = false;
         stagnationPivotActiveSuppressedRegionKey = null;
         stagnationPivotSuppressUntilTick = 0L;
@@ -5133,6 +5255,35 @@ public class MasonWallBuilderGoal extends Goal {
         return new EarlyCycleAbortPolicyDecision(cooldown, shouldQuarantine);
     }
 
+    static RetryDensityFallbackDecision simulateRetryDensityFallbackPolicy(List<Integer> placements,
+                                                                           List<Integer> retries,
+                                                                           List<Integer> hardUnreachable,
+                                                                           int windowTicks) {
+        int ticks = Math.min(placements.size(), Math.min(retries.size(), hardUnreachable.size()));
+        Deque<ProgressSnapshot> snapshots = new ArrayDeque<>();
+        for (int tick = 0; tick < ticks; tick++) {
+            snapshots.addLast(new ProgressSnapshot(tick, placements.get(tick), retries.get(tick), hardUnreachable.get(tick)));
+            while (!snapshots.isEmpty() && (tick - snapshots.peekFirst().tick()) > windowTicks) {
+                snapshots.pollFirst();
+            }
+            ProgressSnapshot baseline = snapshots.peekFirst();
+            if (baseline == null) {
+                continue;
+            }
+            int placementDelta = placements.get(tick) - baseline.placements();
+            int retryDelta = retries.get(tick) - baseline.pathRetries();
+            int hardDelta = hardUnreachable.get(tick) - baseline.hardUnreachable();
+            double density = retryDelta / (double) Math.max(1, placementDelta);
+            boolean lowPlacementDelta = placementDelta <= RETRY_DENSITY_LOW_PLACEMENT_DELTA_THRESHOLD;
+            if (lowPlacementDelta
+                    && (density >= RETRY_DENSITY_TRIGGER_THRESHOLD
+                    || hardDelta >= RETRY_DENSITY_HARD_UNREACHABLE_TRIGGER_DELTA)) {
+                return new RetryDensityFallbackDecision(true, tick + 1, placementDelta, retryDelta, hardDelta, density);
+            }
+        }
+        return new RetryDensityFallbackDecision(false, ticks, 0, 0, 0, 0.0D);
+    }
+
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
                                                             int availableCobblestone,
                                                             int threshold,
@@ -5558,6 +5709,13 @@ public class MasonWallBuilderGoal extends Goal {
     record TraversalSimulationResult(double averageTravelPerPlacement, int sortiesMeetingMinPlacements, int sortiesWithMinCandidates) {}
 
     record PathRetrySimulationResult(boolean skippedAsHardUnreachable, int decisionTick, int failedAttempts) {}
+
+    record RetryDensityFallbackDecision(boolean fallbackTriggered,
+                                        int decisionTick,
+                                        int placementDelta,
+                                        int retryDelta,
+                                        int hardUnreachableDelta,
+                                        double retryDensity) {}
 
     private record ProgressSnapshot(long tick, int placements, int pathRetries, int hardUnreachable) {}
 
