@@ -91,6 +91,33 @@ class MasonWallBuilderGoalTraversalTest {
     }
 
     @Test
+    void layerOneFirstLapSelectionPolicy_skipsIntermittentBlockedSegmentsWithoutRegionPingPong() {
+        List<BlockPos> perimeter = MasonWallBuilderGoal.computePerimeterTraversal(0, 0, 5, 4, 64);
+        int startIndex = perimeter.size() - 1;
+        Set<Integer> temporarilyBlocked = Set.of(0, 2, 5, 9, 13);
+        int selections = perimeter.size() - temporarilyBlocked.size();
+
+        List<BlockPos> selected = MasonWallBuilderGoal.simulateLayerOneFirstLapAnchorOrderWithTemporaryBlocks(
+                perimeter,
+                startIndex,
+                temporarilyBlocked,
+                selections
+        );
+
+        assertEquals(selections, selected.size(), "Should still select all non-blocked first-lap anchors");
+        for (int i = 1; i < selected.size(); i++) {
+            int previousIndex = perimeter.indexOf(selected.get(i - 1));
+            int actualIndex = perimeter.indexOf(selected.get(i));
+            int expectedIndex = (previousIndex + 1) % perimeter.size();
+            while (temporarilyBlocked.contains(expectedIndex)) {
+                expectedIndex = (expectedIndex + 1) % perimeter.size();
+            }
+            assertEquals(expectedIndex, actualIndex,
+                    "Selection must continue forward around the perimeter, skipping blocked slots without region resets");
+        }
+    }
+
+    @Test
     void pivotAnchorSelection_doesNotEscalateToHigherLayersWhenLayerOnePendingExists() {
         List<Integer> segmentLayers = List.of(1, 2, 3, 2, 3);
         List<Boolean> buildableStates = List.of(false, true, true, true, true);
