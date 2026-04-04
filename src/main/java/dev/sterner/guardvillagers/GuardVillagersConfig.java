@@ -108,6 +108,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=0)
     public static int masonWallStagingMaxBelowSurfaceDelta = 3;
     @Entry
+    public static boolean masonWallRequireStaging = true;
+    @Entry
     public static boolean masonWallVerboseLogging = false;
     @Entry(min=1)
     public static int farmerWheatSeedReserveCap = 64;
