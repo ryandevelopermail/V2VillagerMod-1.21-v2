@@ -340,6 +340,8 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean failureCounterOverflowTrippedThisTick = false;
     private int failureCounterOverflow = 0;
     private int failureCounterOverflowConsecutiveTicks = 0;
+    private int invalidStageEvalSkips = 0;
+    private final Map<Stage, Integer> evalCallsByStage = new EnumMap<>(Stage.class);
     private long lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
     private BlockPos placeBlockFailureTarget = null;
     private int placeBlockConsecutiveNonPlacementTicks = 0;
@@ -392,6 +394,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean layerOneLapWrapped = false;
     private final Set<BlockPos> layerOneLapConsideredSegments = new HashSet<>();
     private final Map<String, LayerOneFaceCoverageState> layerOneFaceCoverageByFace = new HashMap<>();
+    private boolean inCompletionSweep = false;
 
     // Whether this mason is the elected builder this cycle
     private boolean isElectedBuilder = false;
@@ -635,6 +638,9 @@ public class MasonWallBuilderGoal extends Goal {
         placementRejectedByStatePolicy = 0;
         resetSortieFailureCounters();
         resetFailureCounterAccounting();
+        invalidStageEvalSkips = 0;
+        evalCallsByStage.clear();
+        inCompletionSweep = false;
         lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
@@ -776,6 +782,9 @@ public class MasonWallBuilderGoal extends Goal {
         placementRejectedByStatePolicy = 0;
         resetSortieFailureCounters();
         resetFailureCounterAccounting();
+        invalidStageEvalSkips = 0;
+        evalCallsByStage.clear();
+        inCompletionSweep = false;
         lastZeroPlacementRetryWarningTick = Long.MIN_VALUE;
         placeBlockFailureTarget = null;
         placeBlockConsecutiveNonPlacementTicks = 0;
@@ -1573,6 +1582,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private PreflightProbeResult evaluatePreflightPath(ServerWorld world, BlockPos segment, BlockPos navigationTarget) {
+        if (!shouldEvaluateExpensivePathing()) {
+            return PreflightProbeResult.FAIL;
+        }
         long now = world.getTime();
         BlockPos segmentKey = segment.toImmutable();
         BlockPos navKey = navigationTarget.toImmutable();
@@ -1611,6 +1623,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private List<BlockPos> buildNavigationTargetCandidates(ServerWorld world, BlockPos segmentPos, boolean applyBackoff) {
+        if (!shouldEvaluateExpensivePathing()) {
+            return List.of(segmentPos.toImmutable());
+        }
         Map<BlockPos, NavigationCandidate> deduped = new HashMap<>();
         SortieFailureCategory dominantFailure = dominantFailureCategory();
         int verticalSearchMin = -2;
@@ -1744,6 +1759,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private StandabilityAssessment assessStandabilityForNavigation(ServerWorld world, BlockPos pos) {
+        if (!shouldEvaluateExpensivePathing()) {
+            return new StandabilityAssessment(false, Integer.MAX_VALUE);
+        }
         if (!world.getBlockState(pos).isSolidBlock(world, pos)) return new StandabilityAssessment(false, Integer.MAX_VALUE);
         BlockPos above = pos.up();
         BlockPos twoAbove = above.up();
@@ -1882,6 +1900,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private int registerFailureBandAttempt(ServerWorld world, String bandSignature) {
+        if (!isEligibleFailureAccountingStage()) {
+            return 0;
+        }
         long now = world.getTime();
         FailureBandWindow state = failureBandWindows.get(bandSignature);
         if (state == null || (now - state.firstFailureTick()) > BAND_FAILURE_WINDOW_TICKS) {
@@ -1894,6 +1915,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private int registerNoProgressBandAbort(ServerWorld world, String bandSignature) {
+        if (!isEligibleFailureAccountingStage()) {
+            return 0;
+        }
         long now = world.getTime();
         FailureBandWindow state = noProgressAbortBandWindows.get(bandSignature);
         if (state == null || (now - state.firstFailureTick()) > BAND_NO_PROGRESS_ABORT_WINDOW_TICKS) {
@@ -1906,6 +1930,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private int registerUnbreakableEscalationBandAttempt(ServerWorld world, String bandSignature) {
+        if (!isEligibleFailureAccountingStage()) {
+            return 0;
+        }
         long now = world.getTime();
         FailureBandWindow state = unbreakableEscalationBandWindows.get(bandSignature);
         if (state == null || (now - state.firstFailureTick()) > UNBREAKABLE_ESCALATION_BAND_WINDOW_TICKS) {
@@ -3713,6 +3740,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
+        if (!shouldEvaluateExpensivePathing()) {
+            return List.of();
+        }
         boolean hasUnfinishedLayerOneSegments = hasUnfinishedLayerOneSegments(world);
         if (activeLayer > 1 && hasUnfinishedLayerOneSegments) {
             int anchorLayer = getSegmentLayer(world, anchor);
@@ -4134,7 +4164,13 @@ public class MasonWallBuilderGoal extends Goal {
         maybeRecoverStalledCycle(world, "completion_sweep");
         logSortieSummaryIfActive();
         releaseLocalSortieClaims(world, "completion_sweep");
-        SweepSummary summary = runCompletionSweep(world);
+        SweepSummary summary;
+        inCompletionSweep = true;
+        try {
+            summary = runCompletionSweep(world);
+        } finally {
+            inCompletionSweep = false;
+        }
         if (summary.filledDuringSweep > 0) {
             consecutiveDeferredSweeps = 0;
         }
@@ -4821,6 +4857,9 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void incrementSortieFailureCounter(SortieFailureCategory category) {
+        if (!isEligibleFailureAccountingStage()) {
+            return;
+        }
         ServerWorld world = worldOrNull();
         if (world != null) {
             refreshFailureCounterAccountingForTick(world);
@@ -4866,6 +4905,31 @@ public class MasonWallBuilderGoal extends Goal {
                 .orElse(SortieFailureCategory.NONE);
     }
 
+    private boolean shouldEvaluateExpensivePathing() {
+        Stage currentStage = stage;
+        evalCallsByStage.merge(currentStage, 1, Integer::sum);
+        if (isEligibleFailureAccountingStage()) {
+            return true;
+        }
+        invalidStageEvalSkips++;
+        return false;
+    }
+
+    private boolean isEligibleFailureAccountingStage() {
+        return stage == Stage.MOVE_TO_SEGMENT || inCompletionSweep;
+    }
+
+    private String formatEvalCallsByStage() {
+        List<String> parts = new ArrayList<>();
+        for (Stage stageValue : Stage.values()) {
+            int count = evalCallsByStage.getOrDefault(stageValue, 0);
+            if (count > 0) {
+                parts.add(stageValue + "=" + count);
+            }
+        }
+        return parts.isEmpty() ? "none" : String.join(",", parts);
+    }
+
     private void maybeEmitZeroPlacementRetryWarning(ServerWorld world) {
         if (placementAttempts > 0 || pathRetriesSinceCycleStart < ZERO_PLACEMENT_RETRY_WARNING_THRESHOLD) {
             return;
@@ -4901,6 +4965,7 @@ public class MasonWallBuilderGoal extends Goal {
                 ? 0.0D
                 : (double) sortieCandidateCountSum / (double) sortieCandidateCountSamples;
         String topFailureReasons = formatTopFailureCategories(2);
+        String stageEvalCalls = formatEvalCallsByStage();
         maybeEmitZeroPlacementRetryWarning(world);
         if (stage == Stage.PLACE_BLOCK && placementDeltaSinceLastSummary <= 0) {
             String stalledTarget = placeBlockFailureTarget == null ? "none" : placeBlockFailureTarget.toShortString();
@@ -4909,7 +4974,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4930,14 +4995,16 @@ public class MasonWallBuilderGoal extends Goal {
                     pathBudgetDeferredSinceLastPeriodic,
                     String.format("%.2f", averageCandidatesPerSortie),
                     topFailureReasons,
-                    failureCounterOverflow
+                    failureCounterOverflow,
+                    invalidStageEvalSkips,
+                    stageEvalCalls
             );
         } else {
             logInfoRateLimited(
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4956,7 +5023,9 @@ public class MasonWallBuilderGoal extends Goal {
                     pathBudgetDeferredSinceLastPeriodic,
                     String.format("%.2f", averageCandidatesPerSortie),
                     topFailureReasons,
-                    failureCounterOverflow
+                    failureCounterOverflow,
+                    invalidStageEvalSkips,
+                    stageEvalCalls
             );
         }
         maybeEmitLayerOneFaceCoverageInfo(world);
