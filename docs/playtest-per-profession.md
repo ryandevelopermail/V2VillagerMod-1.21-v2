@@ -16,6 +16,12 @@ Use `/time set 6000` to skip to midday and prevent guards from sleeping.
 
 ---
 
+## Pre-merge regression gate (Wallbuilder)
+
+- [ ] If a PR changes mason wallbuilder logic, complete the log-based contract checks in `docs/mason-wallbuilder-regression-contract.md` before merge.
+
+---
+
 ## A — Lumberjack
 
 ### A-1 · Auto-Spawn & Conversion
