@@ -22,6 +22,7 @@ repositories {
 		url = "https://jitpack.io"
 	}
 	maven { url = "https://maven.shedaniel.me/" }
+	maven { url = "https://cursemaven.com" }
 }
 
 dependencies {
@@ -35,6 +36,10 @@ dependencies {
 	modImplementation include ("maven.modrinth:midnightlib:${project.midnightlib_version}")
 
 	//modImplementation include("com.electronwill.night-config:core:${project.night_config_version}")
+
+	// Improved Village Placement v1.1.2 — flat terrain benefits mason wall builder
+	modRuntimeOnly "curse.maven:improved-village-placement-1175325:${project.improved_village_placement_file}"
+	modRuntimeOnly "maven.modrinth:lithostitched:${project.lithostitched_version}"
 
 	testImplementation platform('org.junit:junit-bom:5.10.2')
 	testImplementation 'org.junit.jupiter:junit-jupiter'

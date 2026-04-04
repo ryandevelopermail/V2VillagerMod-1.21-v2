@@ -28,7 +28,20 @@ class MasonWallBuilderGoalElectionAndStockTest {
         MasonWallBuilderGoal.WaitForStockDecision decision = MasonWallBuilderGoal.decideWaitForStockTransition(
                 12,
                 0,
-                8
+                8,
+                true
+        );
+
+        assertEquals(MasonWallBuilderGoal.WaitForStockDecision.MOVE_TO_SEGMENT, decision);
+    }
+
+    @Test
+    void waitForStock_withFallbackEnabledAndCobbleStock_advancesWithoutWalls() {
+        MasonWallBuilderGoal.WaitForStockDecision decision = MasonWallBuilderGoal.decideWaitForStockTransition(
+                0,
+                4,
+                4,
+                true
         );
 
         assertEquals(MasonWallBuilderGoal.WaitForStockDecision.MOVE_TO_SEGMENT, decision);

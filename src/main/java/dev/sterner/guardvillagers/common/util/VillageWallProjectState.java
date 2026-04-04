@@ -17,6 +17,7 @@ import net.minecraft.world.PersistentState;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 public class VillageWallProjectState extends PersistentState {
     private static final String STATE_ID = GuardVillagers.MODID + "_village_wall_projects";
@@ -35,6 +36,7 @@ public class VillageWallProjectState extends PersistentState {
     private static final String COMPLETE_KEY = "Complete";
 
     private final Map<GlobalPos, WallProject> projects = new HashMap<>();
+    private final Map<GlobalPos, Map<BlockPos, SegmentClaim>> segmentClaims = new HashMap<>();
 
     public static VillageWallProjectState get(MinecraftServer server) {
         return server.getOverworld().getPersistentStateManager().getOrCreate(getType(), STATE_ID);
@@ -157,6 +159,76 @@ public class VillageWallProjectState extends PersistentState {
         return false;
     }
 
+    public boolean isSegmentClaimedByOther(RegistryKey<net.minecraft.world.World> worldKey,
+                                           BlockPos anchorPos,
+                                           BlockPos segmentPos,
+                                           UUID guardId,
+                                           long currentTick) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        Map<BlockPos, SegmentClaim> claims = segmentClaims.get(key);
+        if (claims == null || claims.isEmpty()) {
+            return false;
+        }
+        purgeExpiredClaims(claims, currentTick);
+        SegmentClaim claim = claims.get(segmentPos);
+        return claim != null && !claim.guardId().equals(guardId);
+    }
+
+    public boolean claimSegment(RegistryKey<net.minecraft.world.World> worldKey,
+                                BlockPos anchorPos,
+                                BlockPos segmentPos,
+                                UUID guardId,
+                                long currentTick,
+                                long claimDurationTicks) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        Map<BlockPos, SegmentClaim> claims = segmentClaims.computeIfAbsent(key, ignored -> new HashMap<>());
+        purgeExpiredClaims(claims, currentTick);
+
+        SegmentClaim existing = claims.get(segmentPos);
+        long expiresAtTick = currentTick + Math.max(1L, claimDurationTicks);
+        if (existing == null || existing.guardId().equals(guardId)) {
+            claims.put(segmentPos.toImmutable(), new SegmentClaim(guardId, expiresAtTick));
+            return true;
+        }
+        return false;
+    }
+
+    public void releaseSegmentClaim(RegistryKey<net.minecraft.world.World> worldKey,
+                                    BlockPos anchorPos,
+                                    BlockPos segmentPos,
+                                    UUID guardId) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        Map<BlockPos, SegmentClaim> claims = segmentClaims.get(key);
+        if (claims == null || claims.isEmpty()) {
+            return;
+        }
+        SegmentClaim existing = claims.get(segmentPos);
+        if (existing != null && existing.guardId().equals(guardId)) {
+            claims.remove(segmentPos);
+        }
+        if (claims.isEmpty()) {
+            segmentClaims.remove(key);
+        }
+    }
+
+    public void releaseClaimsForGuard(RegistryKey<net.minecraft.world.World> worldKey,
+                                      BlockPos anchorPos,
+                                      UUID guardId) {
+        GlobalPos key = GlobalPos.create(worldKey, anchorPos.toImmutable());
+        Map<BlockPos, SegmentClaim> claims = segmentClaims.get(key);
+        if (claims == null || claims.isEmpty()) {
+            return;
+        }
+        claims.entrySet().removeIf(entry -> entry.getValue().guardId().equals(guardId));
+        if (claims.isEmpty()) {
+            segmentClaims.remove(key);
+        }
+    }
+
+    private void purgeExpiredClaims(Map<BlockPos, SegmentClaim> claims, long currentTick) {
+        claims.entrySet().removeIf(entry -> entry.getValue().expiresAtTick() <= currentTick);
+    }
+
     public record PerimeterBounds(int minX, int maxX, int minZ, int maxZ) {
         public boolean contains(BlockPos pos) {
             return pos.getX() >= minX && pos.getX() <= maxX && pos.getZ() >= minZ && pos.getZ() <= maxZ;
@@ -171,4 +243,6 @@ public class VillageWallProjectState extends PersistentState {
                                boolean layer2Complete,
                                boolean layer3Complete,
                                boolean complete) {}
+
+    private record SegmentClaim(UUID guardId, long expiresAtTick) {}
 }

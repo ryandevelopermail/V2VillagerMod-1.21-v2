@@ -78,6 +78,7 @@ public class MasonMiningStairGoal extends Goal {
     private int placedSupportCount;
     private ReturnReason lastFailureReason = ReturnReason.NONE;
     private int consecutiveFailureCount;
+    private boolean blockedByProtectedJobBlock;
     private final Set<BlockPos> protectedBlockSkipPositions = new HashSet<>();
     private Stage stage = Stage.IDLE;
 
@@ -177,6 +178,7 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryAttemptedForStep = false;
         this.repairedObstructionCount = 0;
         this.placedSupportCount = 0;
+        this.blockedByProtectedJobBlock = false;
         this.protectedBlockSkipPositions.clear();
         return true;
     }
@@ -621,6 +623,7 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
         if (isProtectedJobBlock(pos, state)) {
+            blockedByProtectedJobBlock = true;
             protectedBlockSkipPositions.add(pos.toImmutable());
             LOGGER.info("Mason guard {} protected-block-skip blockId={} pos={}",
                     guard.getUuidAsString(),
@@ -744,14 +747,20 @@ public class MasonMiningStairGoal extends Goal {
         }
         this.returnReason = reason;
         long worldTime = guard.getWorld().getTime();
-        long backoffTicks = computeSessionBackoffTicks(reason);
+        boolean protectedEarlyAbort = reason == ReturnReason.CANNOT_ADVANCE
+                && blockedByProtectedJobBlock
+                && minedBlockCount <= 0;
+        if (protectedEarlyAbort) {
+            rerouteMiningDirectionAwayFromProtectedBlocks();
+        }
+        long backoffTicks = protectedEarlyAbort ? 20L : computeSessionBackoffTicks(reason);
         this.nextSessionStartTick = worldTime + backoffTicks;
         guard.setNextMiningStartTick(this.nextSessionStartTick);
         this.cooldownQuarterLogTick = worldTime + Math.max(1L, backoffTicks / 4L);
         this.cooldownThreeQuarterLogTick = worldTime + Math.max(1L, (backoffTicks * 3L) / 4L);
         this.cooldownProgressLoggedForStartTick = -1L;
 
-        boolean forceSafeAnchorReset = trackFailureReason(reason);
+        boolean forceSafeAnchorReset = protectedEarlyAbort ? false : trackFailureReason(reason);
 
         LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
                 guard.getUuidAsString(),
@@ -785,6 +794,57 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         this.stage = Stage.RETURN_TO_CHEST;
+    }
+
+    private void rerouteMiningDirectionAwayFromProtectedBlocks() {
+        if (origin == null) {
+            return;
+        }
+        Direction current = miningDirection != null && miningDirection.getAxis().isHorizontal()
+                ? miningDirection
+                : guard.getHorizontalFacing();
+        Direction[] candidates = new Direction[]{
+                current.rotateYClockwise(),
+                current.rotateYCounterclockwise(),
+                current.getOpposite(),
+                current
+        };
+        for (Direction candidate : candidates) {
+            if (!candidate.getAxis().isHorizontal()) {
+                continue;
+            }
+            if (isDirectionBlockedByProtectedJobBlock(candidate)) {
+                continue;
+            }
+            miningDirection = candidate;
+            stepIndex = 0;
+            currentStepTarget = computeStepTarget(0);
+            guard.setMiningProgress(origin, 0, miningDirection.getId());
+            guard.setMiningPathAnchors(origin, null);
+            LOGGER.info("Mason guard {} rerouted initial mining direction away from protected job block: newDirection={} origin={}",
+                    guard.getUuidAsString(),
+                    miningDirection,
+                    origin.toShortString());
+            return;
+        }
+    }
+
+    private boolean isDirectionBlockedByProtectedJobBlock(Direction direction) {
+        if (origin == null || direction == null || !direction.getAxis().isHorizontal()) {
+            return false;
+        }
+        BlockPos footTarget = origin.offset(direction).down();
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            BlockPos pos = footTarget.up(i);
+            BlockState state = guard.getWorld().getBlockState(pos);
+            if (state.isAir() || state.getCollisionShape(guard.getWorld(), pos).isEmpty()) {
+                continue;
+            }
+            if (isProtectedJobBlock(pos, state)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void depositMinedMaterials(ServerWorld world) {
@@ -961,6 +1021,7 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryMoveTarget = null;
         this.recoveryTicks = 0;
         this.recoveryAttemptedForStep = false;
+        this.blockedByProtectedJobBlock = false;
         this.protectedBlockSkipPositions.clear();
     }
 
