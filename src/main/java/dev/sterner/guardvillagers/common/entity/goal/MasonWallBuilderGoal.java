@@ -202,6 +202,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WALL_STAGING_START_COOLDOWN_TICKS = 30L;
     private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
     private static final long WALL_STAGING_LOG_RATE_LIMIT_TICKS = 40L;
+    private static final long WALL_STAGING_SWEEP_GRACE_TICKS = 40L;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
@@ -270,6 +271,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int stagingStartsSinceLastSummary = 0;
     private int stagingCompletesSinceLastSummary = 0;
     private int stagingSkipsByDebounceSinceLastSummary = 0;
+    private int stagingSuppressedLogsSinceLastSummary = 0;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
@@ -319,6 +321,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long PROGRESS_WATCHDOG_TIMEOUT_TICKS = 600L;
     private int suppressedSweepInfoLogCount = 0;
     private boolean sweepInfoSuppressionDebugEmitted = false;
+    private boolean sweepBlockedDueToStagingLogged = false;
     private long lastPlacementTick = -1L;
     private int placementsSinceCycleStart = 0;
     private final Map<BlockPos, String> skippedSegmentReasons = new HashMap<>();
@@ -566,6 +569,7 @@ public class MasonWallBuilderGoal extends Goal {
         stagingStartsSinceLastSummary = 0;
         stagingCompletesSinceLastSummary = 0;
         stagingSkipsByDebounceSinceLastSummary = 0;
+        stagingSuppressedLogsSinceLastSummary = 0;
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
@@ -623,6 +627,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastSweepLogTick = Long.MIN_VALUE;
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
+        sweepBlockedDueToStagingLogged = false;
         ServerWorld world = worldOrNull();
         cycleStartTick = world != null ? world.getTime() : -1L;
         lastPlacementTick = world != null ? world.getTime() : 0L;
@@ -726,6 +731,7 @@ public class MasonWallBuilderGoal extends Goal {
         stagingStartsSinceLastSummary = 0;
         stagingCompletesSinceLastSummary = 0;
         stagingSkipsByDebounceSinceLastSummary = 0;
+        stagingSuppressedLogsSinceLastSummary = 0;
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
@@ -766,6 +772,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastSweepLogTick = Long.MIN_VALUE;
         suppressedSweepInfoLogCount = 0;
         sweepInfoSuppressionDebugEmitted = false;
+        sweepBlockedDueToStagingLogged = false;
         lastPlacementTick = -1L;
         placementsSinceCycleStart = 0;
         skippedSegmentFailMetadata.clear();
@@ -1311,7 +1318,7 @@ public class MasonWallBuilderGoal extends Goal {
             stagingSatisfiedThisCycle = true;
             stagingCompletedTick = world.getTime();
             stagingCompletesSinceLastSummary++;
-            logWallStagingRateLimited(world, "complete", stagingReasonActive, stagingTarget,
+            logWallStagingRateLimited(world, "complete", stagingTarget,
                     "MasonWallBuilder {}: wall_staging_complete reason={} target={} elapsedTicks={}",
                     guard.getUuidAsString(),
                     stagingReasonActive == null ? "none" : stagingReasonActive,
@@ -1360,7 +1367,9 @@ public class MasonWallBuilderGoal extends Goal {
                     stage = Stage.WAIT_FOR_WALL_STOCK;
                     return;
                 }
-                runCompletionSweepAndFinish(world);
+                if (!runCompletionSweepAndFinish(world)) {
+                    stage = Stage.WAIT_FOR_WALL_STOCK;
+                }
                 return;
             }
         }
@@ -4160,7 +4169,10 @@ public class MasonWallBuilderGoal extends Goal {
         return true;
     }
 
-    private void runCompletionSweepAndFinish(ServerWorld world) {
+    private boolean runCompletionSweepAndFinish(ServerWorld world) {
+        if (isCompletionSweepBlockedDueToStaging(world)) {
+            return false;
+        }
         maybeRecoverStalledCycle(world, "completion_sweep");
         logSortieSummaryIfActive();
         releaseLocalSortieClaims(world, "completion_sweep");
@@ -4176,7 +4188,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (summary.remainingAfterSweep == 0) {
             completeCycle(CycleEndReason.WALL_COMPLETE);
-            return;
+            return true;
         }
 
         if (!hasTerminalIrrecoverableReasons(summary.irrecoverableReasons)) {
@@ -4207,7 +4219,7 @@ public class MasonWallBuilderGoal extends Goal {
             stage = canResumeMoveToSegmentFromSweep(world)
                     ? Stage.MOVE_TO_SEGMENT
                     : Stage.WAIT_FOR_WALL_STOCK;
-            return;
+            return true;
         }
 
         LOGGER.warn("MasonWallBuilder {}: completion sweep unresolved segments remain={} deferred={} deferredReasons={} irrecoverable={} irrecoverableReasons={}",
@@ -4218,6 +4230,28 @@ public class MasonWallBuilderGoal extends Goal {
                 summary.irrecoverableCount,
                 summary.irrecoverableReasons);
         completeCycle(CycleEndReason.UNREACHABLE_SEGMENTS);
+        return true;
+    }
+
+    private boolean isCompletionSweepBlockedDueToStaging(ServerWorld world) {
+        long now = world.getTime();
+        boolean inStagingStage = stage == Stage.MOVE_TO_STAGING;
+        boolean withinStagingGrace = stagingCompletedTick >= 0L
+                && (now - stagingCompletedTick) < WALL_STAGING_SWEEP_GRACE_TICKS;
+        if (!inStagingStage && !withinStagingGrace) {
+            sweepBlockedDueToStagingLogged = false;
+            return false;
+        }
+        if (!sweepBlockedDueToStagingLogged) {
+            LOGGER.info("MasonWallBuilder {}: sweep_blocked_due_to_staging stage={} stagingCompletedTick={} now={} graceTicks={}",
+                    guard.getUuidAsString(),
+                    stage,
+                    stagingCompletedTick,
+                    now,
+                    WALL_STAGING_SWEEP_GRACE_TICKS);
+            sweepBlockedDueToStagingLogged = true;
+        }
+        return true;
     }
 
     private long computeDeferredSweepBackoffTicks(int deferredSweepCount) {
@@ -4802,16 +4836,16 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void logWallStagingRateLimited(ServerWorld world,
                                            String eventType,
-                                           String reason,
                                            BlockPos target,
                                            String message,
                                            Object... args) {
-        String signature = eventType
-                + "|" + (reason == null ? "none" : reason)
+        String signature = guard.getUuidAsString()
+                + "|" + eventType
                 + "|" + (target == null ? "none" : target.toShortString());
         long now = world.getTime();
         Long lastTick = stagingLogRateLimitTickBySignature.get(signature);
         if (lastTick != null && (now - lastTick) < WALL_STAGING_LOG_RATE_LIMIT_TICKS) {
+            stagingSuppressedLogsSinceLastSummary++;
             return;
         }
         stagingLogRateLimitTickBySignature.put(signature, now);
@@ -5033,11 +5067,12 @@ public class MasonWallBuilderGoal extends Goal {
                 world,
                 "periodic_staging_summary",
                 PERIODIC_INFO_INTERVAL_TICKS,
-                "MasonWallBuilder {}: staging telemetry stagingStarts={} stagingCompletes={} stagingSkipsByDebounce={}",
+                "MasonWallBuilder {}: staging telemetry stagingStarts={} stagingCompletes={} stagingSkipsByDebounce={} stagingSuppressedLogs={}",
                 guard.getUuidAsString(),
                 stagingStartsSinceLastSummary,
                 stagingCompletesSinceLastSummary,
-                stagingSkipsByDebounceSinceLastSummary
+                stagingSkipsByDebounceSinceLastSummary,
+                stagingSuppressedLogsSinceLastSummary
         );
         lastPeriodicSummaryPlacementCount = placedSegments;
         pathBudgetUsedSinceLastPeriodic = 0;
@@ -5045,6 +5080,7 @@ public class MasonWallBuilderGoal extends Goal {
         stagingStartsSinceLastSummary = 0;
         stagingCompletesSinceLastSummary = 0;
         stagingSkipsByDebounceSinceLastSummary = 0;
+        stagingSuppressedLogsSinceLastSummary = 0;
     }
 
     private void maybeEmitLayerOneFaceCoverageInfo(ServerWorld world) {
@@ -7396,7 +7432,7 @@ public class MasonWallBuilderGoal extends Goal {
         wallStagingTarget = stagingTarget;
         stagingReasonActive = reason;
         stagingStartsSinceLastSummary++;
-        logWallStagingRateLimited(world, "start", reason, stagingTarget,
+        logWallStagingRateLimited(world, "start", stagingTarget,
                 "MasonWallBuilder {}: wall_staging_start reason={} target={} chest={} job={}",
                 guard.getUuidAsString(),
                 reason,
