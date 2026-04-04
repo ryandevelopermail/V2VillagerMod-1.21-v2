@@ -16,6 +16,14 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET = 32000;
     public static final int MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET = 500;
     public static final int MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET = 128000;
+    public static final int MIN_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS = 1;
+    public static final int MAX_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS = 32;
+    public static final int MIN_LUMBERJACK_GOVERNOR_THRESHOLD = 100;
+    public static final int MAX_LUMBERJACK_GOVERNOR_THRESHOLD = 5000;
+    public static final int MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS = 20;
+    public static final int MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS = 20 * 60 * 10;
+    public static final int MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 1;
+    public static final int MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 500;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -135,6 +143,16 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackTreeScanPerGuardBudgetCap = 8000;
     @Entry(min=500)
     public static int lumberjackTreeScanWorldSharedBudgetCap = 24000;
+    @Entry(min=1)
+    public static int lumberjackMaxConcurrentHeavyScansPerWorld = 2;
+    @Entry(min=100)
+    public static int lumberjackGovernorHighLoadThresholdPermille = 1350;
+    @Entry(min=100)
+    public static int lumberjackGovernorLowLoadThresholdPermille = 700;
+    @Entry(min=20)
+    public static int lumberjackGovernorHighLoadDeferTicks = 20 * 15;
+    @Entry(min=1)
+    public static int lumberjackGovernorMetricsLogInterval = 10;
     @Entry
     public static boolean lumberjackVerboseLogging = false;
     @Entry
@@ -161,6 +179,26 @@ public class GuardVillagersConfig extends MidnightConfig {
                 lumberjackTreeScanWorldSharedBudgetCap,
                 MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET,
                 MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET);
+        lumberjackMaxConcurrentHeavyScansPerWorld = clamp(
+                lumberjackMaxConcurrentHeavyScansPerWorld,
+                MIN_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS,
+                MAX_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS);
+        lumberjackGovernorHighLoadThresholdPermille = clamp(
+                lumberjackGovernorHighLoadThresholdPermille,
+                MIN_LUMBERJACK_GOVERNOR_THRESHOLD,
+                MAX_LUMBERJACK_GOVERNOR_THRESHOLD);
+        lumberjackGovernorLowLoadThresholdPermille = clamp(
+                lumberjackGovernorLowLoadThresholdPermille,
+                MIN_LUMBERJACK_GOVERNOR_THRESHOLD,
+                MAX_LUMBERJACK_GOVERNOR_THRESHOLD);
+        lumberjackGovernorHighLoadDeferTicks = clamp(
+                lumberjackGovernorHighLoadDeferTicks,
+                MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
+                MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+        lumberjackGovernorMetricsLogInterval = clamp(
+                lumberjackGovernorMetricsLogInterval,
+                MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL,
+                MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL);
     }
 
     private static int clamp(int value, int min, int max) {
