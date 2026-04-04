@@ -317,6 +317,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int lastPeriodicSummaryPlacementCount = 0;
     private boolean firstPlacementLoggedThisCycle = false;
     private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
+    private final Map<String, String> infoLogLastStateByType = new HashMap<>();
     private BlockPos watchdogLastRecoverySegment = null;
     private int watchdogSameRecoverySegmentCount = 0;
     private int watchdogPlacementCountAtLastRecovery = 0;
@@ -591,6 +592,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        infoLogLastStateByType.clear();
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
@@ -712,6 +714,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        infoLogLastStateByType.clear();
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
@@ -4470,6 +4473,28 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.info(message, args);
     }
 
+    private void logInfoOnStateChangeOrRateLimited(ServerWorld world,
+                                                 String messageType,
+                                                 String stateKey,
+                                                 long intervalTicks,
+                                                 String message,
+                                                 Object... args) {
+        long now = world.getTime();
+        String previousState = infoLogLastStateByType.get(messageType);
+        Long lastTick = infoLogRateLimitTickByType.get(messageType);
+        boolean stateChanged = !Objects.equals(previousState, stateKey);
+        if (!stateChanged && lastTick != null && (now - lastTick) < intervalTicks) {
+            if (verboseMasonWallLogging()) {
+                LOGGER.debug("MasonWallBuilder {}: suppressed INFO log type={} state={} due to rate limit ({} ticks)",
+                        guard.getUuidAsString(), messageType, stateKey, intervalTicks);
+            }
+            return;
+        }
+        infoLogLastStateByType.put(messageType, stateKey);
+        infoLogRateLimitTickByType.put(messageType, now);
+        LOGGER.info(message, args);
+    }
+
     private void resetSortieFailureCounters() {
         sortieFailureCategoryCounts.clear();
         for (SortieFailureCategory category : SortieFailureCategory.values()) {
@@ -5271,12 +5296,33 @@ public class MasonWallBuilderGoal extends Goal {
                         "cooldown_requeue",
                         repeatRecoveryCount
                 );
-                LOGGER.info("MasonWallBuilder {}: watchdog_repeat_recovery_segment segment={} sameRecoveryHits={} repeatRecoveryCount={} cooldownTicks={}",
+                logInfoOnStateChangeOrRateLimited(
+                        world,
+                        "watchdog_repeat_recovery_segment",
+                        recoverySegment.toShortString() + "|" + repeatRecoveryCount,
+                        PERIODIC_INFO_INTERVAL_TICKS,
+                        "MasonWallBuilder {}: watchdog_repeat_recovery_segment segment={} sameRecoveryHits={} repeatRecoveryCount={} cooldownTicks={}",
                         guard.getUuidAsString(),
                         recoverySegment.toShortString(),
                         watchdogSameRecoverySegmentCount,
                         repeatRecoveryCount,
                         cooldownTicks);
+            }
+            boolean recoveryShifted = forceWatchdogRecoveryTransition(world, recoverySegment);
+            if (recoveryShifted) {
+                BlockPos shiftedSegment = getPendingSegmentAt(currentSegmentIndex);
+                logInfoOnStateChangeOrRateLimited(
+                        world,
+                        "watchdog_recovery_transition",
+                        recoverySegment.toShortString() + "->" + (shiftedSegment == null ? "none" : shiftedSegment.toShortString()),
+                        PERIODIC_INFO_INTERVAL_TICKS,
+                        "MasonWallBuilder {}: watchdog_forced_recovery_transition from={} to={} newIndex={} sameRecoveryHits={} placementsSinceCycleStart={}",
+                        guard.getUuidAsString(),
+                        recoverySegment.toShortString(),
+                        shiftedSegment == null ? "none" : shiftedSegment.toShortString(),
+                        currentSegmentIndex,
+                        watchdogSameRecoverySegmentCount,
+                        placementsSinceCycleStart);
             }
         }
         lastPlacementTick = world.getTime();
@@ -5292,6 +5338,70 @@ public class MasonWallBuilderGoal extends Goal {
                 skippedLayerCount,
                 currentSegmentIndex);
         debugLogSegmentStateSanity(world, "watchdog_recover");
+    }
+
+    private boolean forceWatchdogRecoveryTransition(ServerWorld world, BlockPos recoverySegment) {
+        if (recoverySegment == null || pendingSegments.isEmpty()) {
+            return false;
+        }
+        int currentIndexBeforeShift = Math.max(0, Math.min(currentSegmentIndex, pendingSegments.size() - 1));
+        long now = world.getTime();
+        int shiftedIndex = findDeterministicRecoveryIndex(
+                pendingSegments,
+                currentIndexBeforeShift,
+                candidate -> !candidate.equals(recoverySegment)
+                        && !isGatePosition(candidate)
+                        && !isPlacedWallBlock(world.getBlockState(candidate))
+                        && !isTerminalSegment(candidate)
+                        && !isSegmentInCooldown(candidate, now)
+                        && !isRegionSuppressed(world, candidate)
+        );
+        if (shiftedIndex < 0 || shiftedIndex == currentIndexBeforeShift) {
+            return false;
+        }
+        currentSegmentIndex = shiftedIndex;
+        return true;
+    }
+
+    static int simulateDeterministicRecoveryIndexShift(int pendingSize,
+                                                       int currentIndex,
+                                                       Set<Integer> blockedIndices) {
+        if (pendingSize <= 0) {
+            return -1;
+        }
+        int normalized = Math.floorMod(currentIndex, pendingSize);
+        int shifted = findDeterministicRecoveryIndex(
+                pendingSize,
+                normalized,
+                index -> index != normalized && !blockedIndices.contains(index)
+        );
+        return shifted < 0 ? normalized : shifted;
+    }
+
+    private static int findDeterministicRecoveryIndex(List<BlockPos> segments,
+                                                      int currentIndex,
+                                                      java.util.function.Predicate<BlockPos> candidateFilter) {
+        if (segments.isEmpty()) {
+            return -1;
+        }
+        int normalized = Math.floorMod(currentIndex, segments.size());
+        return findDeterministicRecoveryIndex(segments.size(), normalized, index -> candidateFilter.test(segments.get(index)));
+    }
+
+    private static int findDeterministicRecoveryIndex(int size,
+                                                      int currentIndex,
+                                                      java.util.function.IntPredicate candidateFilter) {
+        if (size <= 0) {
+            return -1;
+        }
+        int normalized = Math.floorMod(currentIndex, size);
+        for (int offset = 1; offset < size; offset++) {
+            int candidateIndex = (normalized + offset) % size;
+            if (candidateFilter.test(candidateIndex)) {
+                return candidateIndex;
+            }
+        }
+        return normalized;
     }
 
     private int findNearestPendingSegmentIndex(ServerWorld world, BlockPos from, int layer) {
@@ -6597,6 +6707,28 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return new RetryDensityFallbackDecision(false, ticks, 0, 0, 0, 0.0D);
+    }
+
+    static int simulateInfoLogEmissionsForRepeatedState(List<Long> attemptTicks,
+                                                       long intervalTicks,
+                                                       List<String> stateKeys) {
+        Map<String, Long> lastTickByType = new HashMap<>();
+        Map<String, String> lastStateByType = new HashMap<>();
+        int emissions = 0;
+        int attempts = Math.min(attemptTicks.size(), stateKeys.size());
+        for (int i = 0; i < attempts; i++) {
+            long now = attemptTicks.get(i);
+            String state = stateKeys.get(i);
+            String previousState = lastStateByType.get("retry");
+            Long lastTick = lastTickByType.get("retry");
+            boolean stateChanged = !Objects.equals(previousState, state);
+            if (stateChanged || lastTick == null || (now - lastTick) >= intervalTicks) {
+                emissions++;
+                lastStateByType.put("retry", state);
+                lastTickByType.put("retry", now);
+            }
+        }
+        return emissions;
     }
 
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
