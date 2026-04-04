@@ -414,6 +414,10 @@ public class MasonWallBuilderGoal extends Goal {
     private int sameCycleSuppressionMaterialSignature = 0;
     /** Tick after which suppression may clear due to retry cooldown eligibility changes. */
     private long sameCycleSuppressionRetryCooldownUntilTick = 0L;
+    /** Cached planning artifacts reused across replan checks for the same planning identity. */
+    private PlanningCacheEntry planningCacheEntry = null;
+    private int planningCacheHit = 0;
+    private int planningCacheMiss = 0;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -753,6 +757,7 @@ public class MasonWallBuilderGoal extends Goal {
         cyclePlannedSegments.clear();
         bootstrapExpansionStage = 0;
         activeCycleIdentity = null;
+        invalidatePlanningCache();
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
         waitForStockCycleStillValid = true;
@@ -819,6 +824,7 @@ public class MasonWallBuilderGoal extends Goal {
             cachedWallRect = null;
             cachedWallRectAnchor = null;
             cachedPoiFootprintSignature = null;
+            invalidatePlanningCache();
             return false;
         }
 
@@ -833,21 +839,40 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
-        // 2. Compute (or reuse cached) wall rectangle.
-        WallRect rect;
-        boolean cacheValid = cachedWallRect != null
-                && anchorPos.equals(cachedWallRectAnchor)
-                && currentSignature.equals(cachedPoiFootprintSignature);
-        if (cacheValid) {
-            rect = cachedWallRect;
-        } else {
-            rect = computeWallRect(anchorPos, currentSignature);
-            cachedWallRect = rect;
-            cachedWallRectAnchor = anchorPos.toImmutable();
-            cachedPoiFootprintSignature = currentSignature;
-        }
+        // 2. Compute (or reuse cached) planning artifacts for this identity.
+        WallRect rect = computeWallRect(anchorPos, currentSignature);
         int boundsHash = computeWallBoundsHash(rect);
         candidateCycleIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, boundsHash, world.getTime());
+        CycleIdentity planningIdentity = new CycleIdentity(anchorPos.toImmutable(), perimeterSignatureHash, boundsHash, 0L);
+        int lightweightPoiSignatureHash = computeLightweightPoiSignatureHash(world, anchorPos)
+                .orElse(Integer.MIN_VALUE);
+        PlanningCacheEntry cachedPlanning = planningCacheEntry;
+        boolean planningCacheValid = cachedPlanning != null
+                && samePlanningIdentity(cachedPlanning.identity(), planningIdentity)
+                && cachedPlanning.lightweightPoiSignatureHash() == lightweightPoiSignatureHash;
+        if (planningCacheValid) {
+            planningCacheHit++;
+            logPlanningCacheCounters();
+        } else {
+            planningCacheMiss++;
+            logPlanningCacheCounters();
+            List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
+            Map<Long, Integer> baselineByColumn = buildBaselineMap(world, perimeterColumns);
+            List<BlockPos> allSegments = computeWallSegments(world, perimeterColumns, baselineByColumn);
+            planningCacheEntry = new PlanningCacheEntry(
+                    planningIdentity,
+                    rect,
+                    List.copyOf(perimeterColumns),
+                    Map.copyOf(baselineByColumn),
+                    List.copyOf(allSegments),
+                    lightweightPoiSignatureHash
+            );
+            cachedPlanning = planningCacheEntry;
+        }
+
+        cachedWallRect = rect;
+        cachedWallRectAnchor = anchorPos.toImmutable();
+        cachedPoiFootprintSignature = currentSignature;
         VillageWallProjectState wallProjectState = VillageWallProjectState.get(world.getServer());
         VillageWallProjectState.PerimeterBounds perimeterBounds = new VillageWallProjectState.PerimeterBounds(
                 rect.minX(), rect.maxX(), rect.minZ(), rect.maxZ()
@@ -862,7 +887,7 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         // 3. Compute full wall segment plan, then derive an active bootstrap subset for startup.
-        List<BlockPos> allSegments = computeWallSegments(world, rect);
+        List<BlockPos> allSegments = cachedPlanning.segments();
         if (allSegments.isEmpty()) {
             return false;
         }
@@ -1042,6 +1067,8 @@ public class MasonWallBuilderGoal extends Goal {
         cyclePoiSignature = currentSignature;
         bootstrapExpansionStage = sameWallRect(rect, bootstrapRect) ? 2 : 0;
         activeCycleIdentity = candidateCycleIdentity;
+        cycleBaselineGroundYByColumn.clear();
+        cycleBaselineGroundYByColumn.putAll(cachedPlanning.baselineGroundYByColumn());
         waitForStockReplanCooldownUntilTick = 0L;
         waitForStockCycleStillValid = true;
         nextWaitForStockCycleValidationTick = 0L;
@@ -4368,6 +4395,7 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
+        invalidatePlanningCache();
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
@@ -4490,25 +4518,6 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockCycleStillValid = false;
         nextWaitForStockCycleValidationTick = now + WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS;
 
-        Optional<PoiFootprintSignature> signatureOpt = computePoiFootprintSignature(world, activeAnchorPos);
-        if (signatureOpt.isEmpty()) {
-            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; no footprint for active anchor {}",
-                    guard.getUuidAsString(), activeAnchorPos.toShortString());
-            markWaitForStockReplanInvalidated(now);
-            return false;
-        }
-
-        int currentPerimeterSignatureHash = computePerimeterSignatureHash(signatureOpt.get());
-        if (currentPerimeterSignatureHash != activeCycleIdentity.perimeterSignatureHash()) {
-            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; signature changed old={} new={} anchor={}",
-                    guard.getUuidAsString(),
-                    activeCycleIdentity.perimeterSignatureHash(),
-                    currentPerimeterSignatureHash,
-                    activeAnchorPos.toShortString());
-            markWaitForStockReplanInvalidated(now);
-            return false;
-        }
-
         BlockPos origin = resolveAnchorOrigin();
         Optional<BlockPos> latestAnchorOpt = VillageAnchorState.get(world.getServer())
                 .getNearestQmChest(world, origin, (int) PEER_SCAN_RANGE);
@@ -4521,8 +4530,91 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
 
+        Optional<Integer> lightweightSignatureOpt = computeLightweightPoiSignatureHash(world, activeAnchorPos);
+        if (lightweightSignatureOpt.isEmpty()) {
+            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; no POI signature for active anchor {}",
+                    guard.getUuidAsString(), activeAnchorPos.toShortString());
+            markWaitForStockReplanInvalidated(now);
+            invalidatePlanningCache();
+            return false;
+        }
+        int currentPoiSignatureHash = lightweightSignatureOpt.get();
+        PlanningCacheEntry cachedPlanning = planningCacheEntry;
+        if (cachedPlanning == null
+                || !samePlanningIdentity(cachedPlanning.identity(), new CycleIdentity(activeCycleIdentity.anchorPos(), activeCycleIdentity.perimeterSignatureHash(), activeCycleIdentity.boundsHash(), 0L))
+                || cachedPlanning.lightweightPoiSignatureHash() != currentPoiSignatureHash) {
+            LOGGER.debug("MasonWallBuilder {}: WAIT_FOR_WALL_STOCK invalidated; POI signature changed anchor={} cached={} current={}",
+                    guard.getUuidAsString(),
+                    activeAnchorPos.toShortString(),
+                    cachedPlanning == null ? "none" : cachedPlanning.lightweightPoiSignatureHash(),
+                    currentPoiSignatureHash);
+            markWaitForStockReplanInvalidated(now);
+            invalidatePlanningCache();
+            return false;
+        }
+
         waitForStockCycleStillValid = true;
         return true;
+    }
+
+    private Optional<Integer> computeLightweightPoiSignatureHash(ServerWorld world, BlockPos anchorPos) {
+        int range = GuardVillagersConfig.masonWallFootprintRadius;
+        Box searchBox = new Box(anchorPos).expand(range);
+        GuardVillagersConfig.MasonWallPoiMode poiMode = resolveWallPoiMode();
+        PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+        Stream<BlockPos> poiStream = poiStorage.getInSquare(
+                type -> switch (poiMode) {
+                    case JOB_SITES_ONLY -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE);
+                    case JOBS_AND_BEDS -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME);
+                    case ALL_POIS -> true;
+                },
+                anchorPos,
+                range,
+                PointOfInterestStorage.OccupationStatus.ANY
+        ).map(poi -> poi.getPos());
+
+        int count = 0;
+        int hash = 1;
+        int minX = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        for (BlockPos pos : (Iterable<BlockPos>) poiStream::iterator) {
+            if (!searchBox.contains(pos.getX(), pos.getY(), pos.getZ())) continue;
+            count++;
+            hash = 31 * hash + (31 * (31 * pos.getX() + pos.getY()) + pos.getZ());
+            minX = Math.min(minX, pos.getX());
+            minZ = Math.min(minZ, pos.getZ());
+            maxX = Math.max(maxX, pos.getX());
+            maxZ = Math.max(maxZ, pos.getZ());
+        }
+        if (count == 0) {
+            return Optional.empty();
+        }
+        return Optional.of(Objects.hash(minX, minZ, maxX, maxZ, count, hash));
+    }
+
+    private Map<Long, Integer> buildBaselineMap(ServerWorld world, List<BlockPos> perimeterColumns) {
+        Map<Long, Integer> baselineByColumn = new HashMap<>(perimeterColumns.size());
+        for (BlockPos column : perimeterColumns) {
+            baselineByColumn.put(packXZ(column.getX(), column.getZ()), getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+        }
+        return baselineByColumn;
+    }
+
+    private void logPlanningCacheCounters() {
+        LOGGER.debug("MasonWallBuilder {}: planningCacheHit/planningCacheMiss={}/{}",
+                guard.getUuidAsString(), planningCacheHit, planningCacheMiss);
+    }
+
+    private void invalidatePlanningCache() {
+        planningCacheEntry = null;
+    }
+
+    private boolean samePlanningIdentity(CycleIdentity left, CycleIdentity right) {
+        return left != null
+                && right != null
+                && left.anchorPos().equals(right.anchorPos())
+                && left.perimeterSignatureHash() == right.perimeterSignatureHash()
+                && left.boundsHash() == right.boundsHash();
     }
 
     private int computePerimeterSignatureHash(PoiFootprintSignature signature) {
@@ -6504,16 +6596,13 @@ public class MasonWallBuilderGoal extends Goal {
      * groundY+1, groundY+2, and groundY+3.
      * Layers are appended in that order so planning remains layer-first.
      */
-    private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
+    private List<BlockPos> computeWallSegments(ServerWorld world, List<BlockPos> perimeterColumns, Map<Long, Integer> baselineByColumn) {
         List<BlockPos> segments = new ArrayList<>();
-        List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
         Map<BlockPos, Integer> groundByColumn = new HashMap<>(perimeterColumns.size());
-        cycleBaselineGroundYByColumn.clear();
 
         for (BlockPos column : perimeterColumns) {
-            int groundY = getPerimeterColumnGroundY(world, column.getX(), column.getZ());
+            int groundY = baselineByColumn.getOrDefault(packXZ(column.getX(), column.getZ()), getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
             groundByColumn.put(column, groundY);
-            cycleBaselineGroundYByColumn.put(packXZ(column.getX(), column.getZ()), groundY);
         }
 
         for (int layer = 1; layer <= 3; layer++) {
@@ -6530,7 +6619,11 @@ public class MasonWallBuilderGoal extends Goal {
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
-            int perimeterTotal = 2 * (rect.maxX() - rect.minX() + rect.maxZ() - rect.minZ()) * 3;
+            int minX = perimeterColumns.stream().mapToInt(BlockPos::getX).min().orElse(0);
+            int maxX = perimeterColumns.stream().mapToInt(BlockPos::getX).max().orElse(0);
+            int minZ = perimeterColumns.stream().mapToInt(BlockPos::getZ).min().orElse(0);
+            int maxZ = perimeterColumns.stream().mapToInt(BlockPos::getZ).max().orElse(0);
+            int perimeterTotal = 2 * (maxX - minX + maxZ - minZ) * 3;
             if (segments.size() >= perimeterTotal) {
                 segments.remove(segments.size() - 1);
             }
@@ -7278,6 +7371,14 @@ public class MasonWallBuilderGoal extends Goal {
     private record TransferTask(BlockPos sourceChestPos, BlockPos destChestPos, int amount) {}
 
     private record CycleIdentity(BlockPos anchorPos, int perimeterSignatureHash, int boundsHash, long cycleStartTick) {}
+    private record PlanningCacheEntry(
+            CycleIdentity identity,
+            WallRect rect,
+            List<BlockPos> perimeterTraversal,
+            Map<Long, Integer> baselineGroundYByColumn,
+            List<BlockPos> segments,
+            int lightweightPoiSignatureHash
+    ) {}
 
     private enum WallPlacementMaterial {
         COBBLESTONE_WALL(Items.COBBLESTONE_WALL, Blocks.COBBLESTONE_WALL.getDefaultState());
