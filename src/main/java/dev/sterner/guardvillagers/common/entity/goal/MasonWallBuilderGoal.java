@@ -198,6 +198,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
     private static final long WALL_STAGING_TIMEOUT_TICKS = 120L;
     private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
+    private static final long STAGING_REENTRY_GUARD_WINDOW_TICKS = 40L;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
@@ -253,6 +254,9 @@ public class MasonWallBuilderGoal extends Goal {
     private int lastLoggedProceedThreshold = -1;
     private long wallStagingStartedTick = -1L;
     private BlockPos wallStagingTarget = null;
+    private boolean stagingSatisfiedThisCycle = false;
+    private long stagingCompletedTick = -1L;
+    private String stagingReasonActive = null;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
@@ -528,6 +532,7 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
+        resetWallStagingCycleState();
         clearWallStagingState();
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         waitForStockReplanCooldownUntilTick = 0L;
@@ -668,6 +673,7 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
         resetWaitForStockProceedLogState();
+        resetWallStagingCycleState();
         clearWallStagingState();
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
@@ -1166,10 +1172,14 @@ public class MasonWallBuilderGoal extends Goal {
                 lastLoggedProceedWalls = availableWalls;
                 lastLoggedProceedThreshold = threshold;
             }
-            stage = Stage.MOVE_TO_STAGING;
+            if (stagingSatisfiedThisCycle) {
+                stage = resolvePostStagingStage();
+            } else {
+                stage = Stage.MOVE_TO_STAGING;
+                beginWallStaging(world, "wait_for_wall_stock_ready");
+            }
             waitForStockReplanCooldownUntilTick = 0L;
             clearWaitForStockState();
-            beginWallStaging(world, "wait_for_wall_stock_ready");
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
@@ -1198,6 +1208,12 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickMoveToStaging(ServerWorld world) {
+        if (stagingSatisfiedThisCycle) {
+            clearWallStagingState();
+            stage = resolvePostStagingStage();
+            return;
+        }
+
         BlockPos stagingTarget = resolveWallStagingTarget(world);
         if (stagingTarget == null) {
             logWallStagingTimeout(world, "missing_anchor");
@@ -1210,12 +1226,14 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         if (isWallStagingReady(world, stagingTarget)) {
+            stagingSatisfiedThisCycle = true;
+            stagingCompletedTick = world.getTime();
             LOGGER.info("MasonWallBuilder {}: wall_staging_complete target={} elapsedTicks={}",
                     guard.getUuidAsString(),
                     stagingTarget.toShortString(),
                     Math.max(0L, world.getTime() - wallStagingStartedTick));
             clearWallStagingState();
-            stage = Stage.MOVE_TO_SEGMENT;
+            stage = resolvePostStagingStage();
             return;
         }
 
@@ -4388,6 +4406,8 @@ public class MasonWallBuilderGoal extends Goal {
         releaseAllSegmentClaims(worldOrNull());
         clearWaitForStockState();
         resetWaitForStockProceedLogState();
+        resetWallStagingCycleState();
+        clearWallStagingState();
         stage = Stage.DONE;
         guard.clearWallSegments();
         guard.setWallBuildPending(false, 0);
@@ -7114,11 +7134,25 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void beginWallStaging(ServerWorld world, String reason) {
+        if (stagingSatisfiedThisCycle) {
+            long now = world.getTime();
+            if (stagingCompletedTick >= 0L && now - stagingCompletedTick <= STAGING_REENTRY_GUARD_WINDOW_TICKS) {
+                LOGGER.warn("MasonWallBuilder {}: staging_reentry_guard_triggered reason={} activeReason={} completedTick={} now={} stage={}",
+                        guard.getUuidAsString(),
+                        reason,
+                        stagingReasonActive == null ? "none" : stagingReasonActive,
+                        stagingCompletedTick,
+                        now,
+                        stage);
+            }
+            return;
+        }
         if (wallStagingStartedTick >= 0L) {
             return;
         }
         wallStagingStartedTick = world.getTime();
         wallStagingTarget = resolveWallStagingTarget(world);
+        stagingReasonActive = reason;
         LOGGER.info("MasonWallBuilder {}: wall_staging_start reason={} target={} chest={} job={}",
                 guard.getUuidAsString(),
                 reason,
@@ -7139,6 +7173,17 @@ public class MasonWallBuilderGoal extends Goal {
     private void clearWallStagingState() {
         wallStagingStartedTick = -1L;
         wallStagingTarget = null;
+        stagingReasonActive = null;
+    }
+
+    private void resetWallStagingCycleState() {
+        stagingSatisfiedThisCycle = false;
+        stagingCompletedTick = -1L;
+        stagingReasonActive = null;
+    }
+
+    private Stage resolvePostStagingStage() {
+        return pendingSegments.isEmpty() ? Stage.WAIT_FOR_WALL_STOCK : Stage.MOVE_TO_SEGMENT;
     }
 
     private BlockPos resolveWallStagingTarget(ServerWorld world) {
