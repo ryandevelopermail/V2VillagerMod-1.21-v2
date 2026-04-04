@@ -661,6 +661,10 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (isElectedBuilder) {
             String firstTarget = pendingSegments.isEmpty() ? "none" : pendingSegments.get(0).toShortString();
+            if (isWallStagingBypassEnabled()) {
+                LOGGER.info("MasonWallBuilder {}: staging_bypass_enabled requireStaging={}",
+                        guard.getUuidAsString(), GuardVillagersConfig.masonWallRequireStaging);
+            }
             if (cycleWallRect != null) {
                 LOGGER.info(
                         "MasonWallBuilder {}: build cycle started (segments={}, transfers={}, firstTarget={}, rect=[x:{}..{} z:{}..{} y:{}], width={}, depth={})",
@@ -1201,7 +1205,10 @@ public class MasonWallBuilderGoal extends Goal {
                 lastLoggedProceedWalls = availableWalls;
                 lastLoggedProceedThreshold = threshold;
             }
-            if (stagingSatisfiedThisCycle) {
+            if (isWallStagingBypassEnabled()) {
+                clearWallStagingState();
+                stage = resolvePostStagingStage();
+            } else if (stagingSatisfiedThisCycle) {
                 stage = resolvePostStagingStage();
             } else {
                 stage = Stage.MOVE_TO_STAGING;
@@ -1237,6 +1244,11 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void tickMoveToStaging(ServerWorld world) {
+        if (isWallStagingBypassEnabled()) {
+            clearWallStagingState();
+            stage = resolvePostStagingStage();
+            return;
+        }
         if (stagingSatisfiedThisCycle) {
             clearWallStagingState();
             stage = resolvePostStagingStage();
@@ -7270,6 +7282,10 @@ public class MasonWallBuilderGoal extends Goal {
 
     private Stage resolvePostStagingStage() {
         return pendingSegments.isEmpty() ? Stage.WAIT_FOR_WALL_STOCK : Stage.MOVE_TO_SEGMENT;
+    }
+
+    private boolean isWallStagingBypassEnabled() {
+        return !GuardVillagersConfig.masonWallRequireStaging;
     }
 
     private BlockPos resolveWallStagingTarget(ServerWorld world) {
