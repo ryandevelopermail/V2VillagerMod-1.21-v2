@@ -89,4 +89,15 @@ class MasonWallBuilderGoalTraversalTest {
                     "Layer-one first-lap policy should advance by exactly one perimeter index (with wraparound)");
         }
     }
+
+    @Test
+    void pivotAnchorSelection_doesNotEscalateToHigherLayersWhenLayerOnePendingExists() {
+        List<Integer> segmentLayers = List.of(1, 2, 3, 2, 3);
+        List<Boolean> buildableStates = List.of(false, true, true, true, true);
+
+        int selectedLayer = MasonWallBuilderGoal.simulatePivotAnchorLayerSelection(segmentLayers, buildableStates, 1);
+
+        assertEquals(-1, selectedLayer,
+                "Pivot anchor selection must return null-equivalent when active layer has no buildable candidate");
+    }
 }

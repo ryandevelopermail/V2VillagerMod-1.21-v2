@@ -5132,17 +5132,7 @@ public class MasonWallBuilderGoal extends Goal {
                 return candidate;
             }
         }
-        for (int layer = activeLayer + 1; layer <= 3; layer++) {
-            for (int i = 0; i < pendingSegments.size(); i++) {
-                BlockPos candidate = pendingSegments.get(i);
-                if (isPivotExcludedSegment(world, i, candidate)) continue;
-                if (getSegmentLayer(world, candidate) != layer) continue;
-                if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) continue;
-                if (isBuildableCandidate(world, candidate)) {
-                    return candidate;
-                }
-            }
-        }
+        // Preserve strict layer-first ordering: pivot scans never jump above activeLayer.
         return null;
     }
 
@@ -6443,6 +6433,21 @@ public class MasonWallBuilderGoal extends Goal {
             cursor = (cursor + 1) % size;
         }
         return selected;
+    }
+
+    static int simulatePivotAnchorLayerSelection(List<Integer> segmentLayers,
+                                                 List<Boolean> buildableStates,
+                                                 int activeLayer) {
+        int candidates = Math.min(segmentLayers.size(), buildableStates.size());
+        for (int i = 0; i < candidates; i++) {
+            if (segmentLayers.get(i) != activeLayer) {
+                continue;
+            }
+            if (buildableStates.get(i)) {
+                return activeLayer;
+            }
+        }
+        return -1;
     }
 
     static PathRetrySimulationResult simulatePathRetryPolicy(List<Boolean> pathStartSuccessPerTick,
