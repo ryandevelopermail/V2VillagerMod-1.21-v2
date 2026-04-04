@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -67,32 +68,14 @@ public final class DistributionRecipientHelper {
             return List.of();
         }
 
-        List<RecipientRecord> recipients = new ArrayList<>();
-        Box scanBox = new Box(source.getBlockPos()).expand(range);
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == VillagerProfession.FISHERMAN)) {
-            Optional<GlobalPos> jobSiteMemory = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
-            if (jobSiteMemory.isEmpty()) {
-                continue;
+        double shortRange = resolveShortRange(range);
+        List<RecipientRecord> recipients = collectEligibleFishermanRecipients(world, source, shortRange);
+        if (recipients.isEmpty()) {
+            double wideRange = resolveWideRange(shortRange);
+            if (wideRange > shortRange) {
+                recipients = collectEligibleFishermanRecipients(world, source, wideRange);
             }
-
-            GlobalPos globalPos = jobSiteMemory.get();
-            if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
-                continue;
-            }
-
-            BlockPos jobPos = globalPos.pos();
-            if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
-                continue;
-            }
-
-            double squaredDistance = source.squaredDistanceTo(villager);
-            recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), jobPos.toImmutable(), squaredDistance));
-            // Exclude jobPos so the fisherman's barrel job block does not self-match as its own chest.
-            JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
-                    .ifPresent(chestPos -> recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), chestPos.toImmutable(), squaredDistance)));
         }
-
-        recipients.sort(RECIPIENT_ORDER);
         return recipients;
     }
 
@@ -165,14 +148,14 @@ public final class DistributionRecipientHelper {
             return List.of();
         }
 
-        List<RecipientRecord> recipients = new ArrayList<>();
-        Box scanBox = new Box(source.getBlockPos()).expand(range);
-        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == profession)) {
-            Optional<RecipientRecord> recipient = validateRecipient(world, source, villager, expectedJobBlock);
-            recipient.ifPresent(recipients::add);
+        double shortRange = resolveShortRange(range);
+        List<RecipientRecord> recipients = collectEligibleVillagerRecipients(world, source, shortRange, profession, expectedJobBlock);
+        if (recipients.isEmpty()) {
+            double wideRange = resolveWideRange(shortRange);
+            if (wideRange > shortRange) {
+                recipients = collectEligibleVillagerRecipients(world, source, wideRange, profession, expectedJobBlock);
+            }
         }
-
-        recipients.sort(RECIPIENT_ORDER);
         return recipients;
     }
 
@@ -187,11 +170,61 @@ public final class DistributionRecipientHelper {
             return List.of();
         }
 
+        double shortRange = resolveShortRange(range);
+        List<RecipientRecord> recipients = collectEligibleVillagerRecipients(world, source, shortRange, profession, expectedJobBlock);
+        if (recipients.isEmpty()) {
+            double wideRange = resolveWideRange(shortRange);
+            if (wideRange > shortRange) {
+                recipients = collectEligibleVillagerRecipients(world, source, wideRange, profession, expectedJobBlock);
+            }
+        }
+        return recipients;
+    }
+
+    private static List<RecipientRecord> collectEligibleVillagerRecipients(
+            ServerWorld world,
+            Entity source,
+            double range,
+            VillagerProfession profession,
+            Block expectedJobBlock
+    ) {
         List<RecipientRecord> recipients = new ArrayList<>();
         Box scanBox = new Box(source.getBlockPos()).expand(range);
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == profession)) {
             Optional<RecipientRecord> recipient = validateRecipient(world, source, villager, expectedJobBlock);
             recipient.ifPresent(recipients::add);
+        }
+        recipients.sort(RECIPIENT_ORDER);
+        return recipients;
+    }
+
+    private static List<RecipientRecord> collectEligibleFishermanRecipients(ServerWorld world, VillagerEntity source, double range) {
+        List<RecipientRecord> recipients = new ArrayList<>();
+        Box scanBox = new Box(source.getBlockPos()).expand(range);
+        for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox, candidate -> candidate != source && isEmployed(candidate) && candidate.getVillagerData().getProfession() == VillagerProfession.FISHERMAN)) {
+            if (!isSameVillageOrUnknown(source, villager)) {
+                continue;
+            }
+            Optional<GlobalPos> jobSiteMemory = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSiteMemory.isEmpty()) {
+                continue;
+            }
+
+            GlobalPos globalPos = jobSiteMemory.get();
+            if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
+                continue;
+            }
+
+            BlockPos jobPos = globalPos.pos();
+            if (!world.getBlockState(jobPos).isOf(Blocks.BARREL)) {
+                continue;
+            }
+
+            double squaredDistance = source.squaredDistanceTo(villager);
+            recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), jobPos.toImmutable(), squaredDistance));
+            // Exclude jobPos so the fisherman's barrel job block does not self-match as its own chest.
+            JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
+                    .ifPresent(chestPos -> recipients.add(new RecipientRecord(villager, jobPos.toImmutable(), chestPos.toImmutable(), squaredDistance)));
         }
 
         recipients.sort(RECIPIENT_ORDER);
@@ -203,6 +236,9 @@ public final class DistributionRecipientHelper {
     }
 
     private static Optional<RecipientRecord> validateRecipient(ServerWorld world, Entity source, VillagerEntity recipient, Block expectedJobBlock) {
+        if (source instanceof VillagerEntity sourceVillager && !isSameVillageOrUnknown(sourceVillager, recipient)) {
+            return Optional.empty();
+        }
         Optional<GlobalPos> jobSiteMemory = recipient.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSiteMemory.isEmpty()) {
             return Optional.empty();
@@ -256,6 +292,23 @@ public final class DistributionRecipientHelper {
         return JobBlockPairingHelper.findNearbyChest(world, craftingTable.get(), recipient.jobPos())
                 .map(chest -> chest.equals(recipient.chestPos()))
                 .orElse(false);
+    }
+
+    private static double resolveShortRange(double requestedRange) {
+        return Math.max(requestedRange, GuardVillagersConfig.professionalRecipientScanRange);
+    }
+
+    private static double resolveWideRange(double shortRange) {
+        return Math.max(shortRange, GuardVillagersConfig.professionalRecipientWideScanRange);
+    }
+
+    private static boolean isSameVillageOrUnknown(VillagerEntity source, VillagerEntity recipient) {
+        GlobalPos sourceBell = VillageMembershipTracker.getHomeBell(source);
+        GlobalPos recipientBell = VillageMembershipTracker.getHomeBell(recipient);
+        if (sourceBell == null || recipientBell == null) {
+            return true;
+        }
+        return sourceBell.equals(recipientBell);
     }
 
     public record RecipientRecord(VillagerEntity recipient, BlockPos jobPos, BlockPos chestPos, double sourceSquaredDistance) {

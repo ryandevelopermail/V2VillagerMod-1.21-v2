@@ -10,6 +10,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_HEAVY_SCAN_RANGE = 512;
     public static final int MIN_OVERFLOW_RECIPIENT_SCAN_RANGE = 16;
     public static final int MAX_OVERFLOW_RECIPIENT_SCAN_RANGE = 256;
+    public static final int MIN_PROFESSIONAL_RECIPIENT_SCAN_RANGE = 16;
+    public static final int MAX_PROFESSIONAL_RECIPIENT_SCAN_RANGE = 256;
     public static final int MIN_MASON_WALL_FOOTPRINT_RADIUS = 32;
     public static final int MAX_MASON_WALL_FOOTPRINT_RADIUS = 256;
     public static final int MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET = 250;
@@ -206,6 +208,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int armorerFallbackScanRange = 128;
     @Entry
     public static int overflowRecipientScanRange = 96;
+    @Entry(min=16)
+    public static int professionalRecipientScanRange = 32;
+    @Entry(min=16)
+    public static int professionalRecipientWideScanRange = 64;
     @Entry
     public static int overflowFallbackQmSearchRadius = 128;
 
@@ -213,6 +219,11 @@ public class GuardVillagersConfig extends MidnightConfig {
         quartermasterScanRange = clamp(quartermasterScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         armorerFallbackScanRange = clamp(armorerFallbackScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         overflowRecipientScanRange = clamp(overflowRecipientScanRange, MIN_OVERFLOW_RECIPIENT_SCAN_RANGE, MAX_OVERFLOW_RECIPIENT_SCAN_RANGE);
+        professionalRecipientScanRange = clamp(professionalRecipientScanRange, MIN_PROFESSIONAL_RECIPIENT_SCAN_RANGE, MAX_PROFESSIONAL_RECIPIENT_SCAN_RANGE);
+        professionalRecipientWideScanRange = clamp(professionalRecipientWideScanRange, MIN_PROFESSIONAL_RECIPIENT_SCAN_RANGE, MAX_PROFESSIONAL_RECIPIENT_SCAN_RANGE);
+        if (professionalRecipientWideScanRange < professionalRecipientScanRange) {
+            professionalRecipientWideScanRange = professionalRecipientScanRange;
+        }
         overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
         masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
