@@ -21,6 +21,7 @@ import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.registry.tag.TagKey;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
@@ -93,7 +94,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TARGET_STUCK_FALLBACK_TICKS = 20 * 30;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
-    private static final int TREE_SCAN_BLOCK_BUDGET_PER_TICK = 8000;
+    private static final int TREE_SCAN_HIGH_ELAPSED_MS = 12;
+    private static final int TREE_SCAN_LOW_ELAPSED_MS = 4;
+    private static final float TREE_SCAN_HIGH_ELAPSED_REDUCTION_FACTOR = 0.75F;
+    private static final float TREE_SCAN_LOW_ELAPSED_INCREASE_FACTOR = 1.15F;
     private static final int INITIAL_SCAN_ACCEPTED_ROOT_TARGET = SESSION_TARGET_MAX;
     private static final int INITIAL_SCAN_LOCAL_ROOT_TARGET = 1;
     private static final int MAX_REGION_BLOCK_VISITS_PER_PASS = 12000;
@@ -111,6 +115,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int stallRecoveryAttempts;
     private boolean bootstrapRetryTreeScheduled;
     private @Nullable TreeTargetScanSession pendingTreeTargetScan;
+    private int adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
+    private long lastObservedScanElapsedMs;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -332,10 +338,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private void continueOrStartTreeTargetScan(ServerWorld world) {
         if (this.pendingTreeTargetScan == null) {
             this.pendingTreeTargetScan = createTreeTargetScanSession(world);
+            this.adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
+            this.lastObservedScanElapsedMs = 0L;
         }
 
-        this.pendingTreeTargetScan.scanNextBudget(world, TREE_SCAN_BLOCK_BUDGET_PER_TICK,
+        int perGuardCap = Math.max(1, Math.min(this.adaptiveScanPerGuardBudget, getConfiguredTreeScanPerGuardBudgetCap()));
+        int worldSharedRemaining = WorldScanBudgetManager.remaining(world);
+        int grantedBudget = Math.min(perGuardCap, worldSharedRemaining);
+        if (grantedBudget <= 0) {
+            return;
+        }
+
+        this.pendingTreeTargetScan.scanNextBudget(world, grantedBudget,
                 (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+        WorldScanBudgetManager.consume(world, grantedBudget);
+        adaptPerGuardScanBudgetFromElapsed(this.pendingTreeTargetScan.metricsElapsedMs());
 
         if (!this.pendingTreeTargetScan.complete()) {
             return;
@@ -345,6 +362,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString());
         this.pendingTreeTargetScan = null;
         startSession(world, targets);
+    }
+
+    private void adaptPerGuardScanBudgetFromElapsed(long cumulativeElapsedMs) {
+        long elapsedThisPass = Math.max(0L, cumulativeElapsedMs - this.lastObservedScanElapsedMs);
+        this.lastObservedScanElapsedMs = cumulativeElapsedMs;
+        int cap = getConfiguredTreeScanPerGuardBudgetCap();
+        int min = getConfiguredTreeScanPerGuardBudgetFloor(cap);
+
+        if (elapsedThisPass >= TREE_SCAN_HIGH_ELAPSED_MS) {
+            this.adaptiveScanPerGuardBudget = Math.max(min,
+                    Math.round(this.adaptiveScanPerGuardBudget * TREE_SCAN_HIGH_ELAPSED_REDUCTION_FACTOR));
+            return;
+        }
+        if (elapsedThisPass <= TREE_SCAN_LOW_ELAPSED_MS) {
+            this.adaptiveScanPerGuardBudget = Math.min(cap,
+                    Math.max(min + 1, Math.round(this.adaptiveScanPerGuardBudget * TREE_SCAN_LOW_ELAPSED_INCREASE_FACTOR)));
+        }
     }
 
     private void startSession(ServerWorld world, List<BlockPos> targets) {
@@ -1324,6 +1358,41 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
     }
 
+    private static final class WorldScanBudgetManager {
+        private static final Map<RegistryKey<net.minecraft.world.World>, TickBudgetState> BUDGET_BY_WORLD = new HashMap<>();
+
+        private static int remaining(ServerWorld world) {
+            TickBudgetState state = BUDGET_BY_WORLD.computeIfAbsent(world.getRegistryKey(),
+                    key -> new TickBudgetState(Long.MIN_VALUE, 0));
+            long tick = world.getTime();
+            int cap = getConfiguredTreeScanWorldSharedBudgetCap();
+            if (state.tick != tick) {
+                state.tick = tick;
+                state.remaining = cap;
+            }
+            return Math.max(0, state.remaining);
+        }
+
+        private static void consume(ServerWorld world, int budgetRequested) {
+            remaining(world);
+            TickBudgetState state = BUDGET_BY_WORLD.get(world.getRegistryKey());
+            if (state == null) {
+                return;
+            }
+            state.remaining = Math.max(0, state.remaining - Math.max(0, budgetRequested));
+        }
+
+        private static final class TickBudgetState {
+            private long tick;
+            private int remaining;
+
+            private TickBudgetState(long tick, int remaining) {
+                this.tick = tick;
+                this.remaining = remaining;
+            }
+        }
+    }
+
     private static final class TreeTargetScanSession {
         private static final List<Integer> INITIAL_LAYER_OFFSETS = List.of(0, 1, -1, 2, -2, 3);
         private static final List<Integer> SECONDARY_LAYER_OFFSETS = List.of(4, -3, 5, -4, 6, -5, 7, -6, 8, -7, 9, -8, 10, -9, -10);
@@ -1532,6 +1601,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return this.complete;
         }
 
+        long metricsElapsedMs() {
+            return this.metrics.elapsedMs();
+        }
+
         List<BlockPos> sortedRoots() {
             List<BlockPos> sorted = new ArrayList<>(this.uniqueRoots);
             sorted.sort(Comparator.comparingDouble(this.center::getSquaredDistance));
@@ -1728,6 +1801,24 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private static int getConfiguredHousePoiProtectionRadius() {
         return Math.max(1, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
+    }
+
+    private static int getConfiguredTreeScanPerGuardBudgetCap() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackTreeScanPerGuardBudgetCap,
+                GuardVillagersConfig.MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET,
+                GuardVillagersConfig.MAX_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET);
+    }
+
+    private static int getConfiguredTreeScanPerGuardBudgetFloor(int cap) {
+        return Math.max(64, cap / 4);
+    }
+
+    private static int getConfiguredTreeScanWorldSharedBudgetCap() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackTreeScanWorldSharedBudgetCap,
+                GuardVillagersConfig.MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET,
+                GuardVillagersConfig.MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET);
     }
 
     private static boolean isNearProtectedVillagePoi(ServerWorld world, BlockPos root, int radius) {
