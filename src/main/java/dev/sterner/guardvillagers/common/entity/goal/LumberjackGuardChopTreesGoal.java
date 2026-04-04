@@ -104,6 +104,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int NO_TREE_ESCALATION_HIGH_WATER_MARK = 5;
     private static final int NO_TREE_ESCALATION_REPEAT_INTERVAL = 3;
     private static final int NO_TREE_ESCALATION_RETRY_DELAY_TICKS = 20 * 60 * 12;
+    private static final int TREE_SCAN_METRICS_INFO_ELAPSED_MS = 20;
+    private static final int TREE_SCAN_METRICS_INFO_INTERVAL = 5;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -117,6 +119,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private @Nullable TreeTargetScanSession pendingTreeTargetScan;
     private int adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
     private long lastObservedScanElapsedMs;
+    private int completedTreeScanCount;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -211,14 +214,6 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         int remainingLogs = remainingLogCountResult.count();
         collectNearbyWoodDrops(world);
 
-        LOGGER.info("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={} fallbackSeedUsed={}",
-                this.guard.getUuidAsString(),
-                targetRoot,
-                teardownResult.initialCandidateLogs(),
-                teardownResult.brokenLogs(),
-                remainingLogs,
-                remainingLogCountResult.fallbackSeedUsed());
-
         if (remainingLogs > 0) {
             int retryAttempt = this.rootTeardownRetryAttempts.getOrDefault(targetRoot, 0) + 1;
             this.rootTeardownRetryAttempts.put(targetRoot.toImmutable(), retryAttempt);
@@ -242,6 +237,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                         remainingLogs);
             }
             return;
+        }
+        if (isLumberjackVerboseLoggingEnabled()) {
+            LOGGER.debug("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={} fallbackSeedUsed={}",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    teardownResult.initialCandidateLogs(),
+                    teardownResult.brokenLogs(),
+                    remainingLogs,
+                    remainingLogCountResult.fallbackSeedUsed());
         }
 
         this.rootTeardownRetryAttempts.remove(targetRoot);
@@ -359,7 +363,10 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         List<BlockPos> targets = this.pendingTreeTargetScan.sortedRoots();
-        this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString());
+        this.completedTreeScanCount++;
+        boolean logScanMetricsAtInfo = this.pendingTreeTargetScan.metricsElapsedMs() >= TREE_SCAN_METRICS_INFO_ELAPSED_MS
+                || this.completedTreeScanCount % TREE_SCAN_METRICS_INFO_INTERVAL == 0;
+        this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
         this.pendingTreeTargetScan = null;
         startSession(world, targets);
     }
@@ -460,10 +467,19 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
-        LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
-                this.guard.getUuidAsString(),
-                reason,
-                this.guard.getGatheredStackBuffer().size());
+        if ("session complete".equals(reason)) {
+            if (isLumberjackVerboseLoggingEnabled()) {
+                LOGGER.debug("Lumberjack Guard {} {} (buffer stacks: {})",
+                        this.guard.getUuidAsString(),
+                        reason,
+                        this.guard.getGatheredStackBuffer().size());
+            }
+        } else {
+            LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
+                    this.guard.getUuidAsString(),
+                    reason,
+                    this.guard.getGatheredStackBuffer().size());
+        }
     }
 
     private boolean updateStallState(ServerWorld world, BlockPos targetRoot, double treeDistanceSq) {
@@ -789,10 +805,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         long remaining = this.guard.getNextChopTick() - world.getTime();
-        LOGGER.info("Lumberjack Guard {} chop countdown {}% ({} ticks remaining)",
-                this.guard.getUuidAsString(),
-                step * 25,
-                Math.max(remaining, 0L));
+        if (isLumberjackVerboseLoggingEnabled()) {
+            LOGGER.debug("Lumberjack Guard {} chop countdown {}% ({} ticks remaining)",
+                    this.guard.getUuidAsString(),
+                    step * 25,
+                    Math.max(remaining, 0L));
+        }
+    }
+
+    private static boolean isLumberjackVerboseLoggingEnabled() {
+        return GuardVillagersConfig.lumberjackVerboseLogging;
     }
 
     static boolean runMidpointUpgradeNeedPass(ServerWorld world, LumberjackGuardEntity guard) {
@@ -1652,8 +1674,26 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return sorted;
         }
 
-        void logMetrics(String guardId) {
-            LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
+        void logMetrics(String guardId, boolean infoLevel, boolean verboseLogging) {
+            if (!infoLevel && !verboseLogging) {
+                return;
+            }
+            if (infoLevel) {
+                LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
+                        guardId,
+                        this.hasMappedBounds ? "local+mapped" : "local-only",
+                        this.cartographerCount,
+                        this.regions.size(),
+                        this.metrics.elapsedMs(),
+                        this.metrics.visitedBlocks,
+                        this.metrics.candidateLogs,
+                        this.metrics.acceptedRoots,
+                        this.metrics.rootQualificationCacheHits,
+                        this.metrics.rootQualificationCacheMisses,
+                        this.metrics.skippedReasons);
+                return;
+            }
+            LOGGER.debug("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
                     guardId,
                     this.hasMappedBounds ? "local+mapped" : "local-only",
                     this.cartographerCount,

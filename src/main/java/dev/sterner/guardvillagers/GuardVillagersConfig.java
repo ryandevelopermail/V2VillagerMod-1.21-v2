@@ -136,6 +136,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=500)
     public static int lumberjackTreeScanWorldSharedBudgetCap = 24000;
     @Entry
+    public static boolean lumberjackVerboseLogging = false;
+    @Entry
     public static int quartermasterScanRange = 128;
     @Entry
     public static int armorerFallbackScanRange = 128;
