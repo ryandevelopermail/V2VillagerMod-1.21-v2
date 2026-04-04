@@ -116,6 +116,12 @@ public class FarmerHarvestGoal extends Goal {
     private static final int COVERAGE_CACHE_TTL = 200;
     private FarmlandCoverageStats cachedCoverage = null;
     private long coverageCacheTime = -1L;
+    private long adaptiveThrottleUntilTick = 0L;
+    private long adaptiveScanVolumeWindow = 0L;
+    private int adaptivePathRetryWindow = 0;
+    private int adaptiveFailedSessionWindow = 0;
+    private int adaptiveForcedRecoveryWindow = 0;
+    private int adaptiveSessionCount = 0;
     /** World-time tick after which the next incremental chest seed pickup is allowed (no-seeds, no-hoe idle mode). */
     private long nextIncrementalSeedPickupTick = 0L;
 
@@ -188,6 +194,12 @@ public class FarmerHarvestGoal extends Goal {
         }
         if (immediateRunRequested) {
             immediateRunRequested = false;
+        }
+        if (world.getTime() < adaptiveThrottleUntilTick) {
+            return false;
+        }
+        if (shouldThrottleFarmlandExpansionChecks(world)) {
+            return false;
         }
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
@@ -352,6 +364,8 @@ public class FarmerHarvestGoal extends Goal {
         currentGatherTarget = null;
         gatherSeedTargets.clear();
         setStage(Stage.DONE);
+        adaptiveSessionCount++;
+        maybeLogAdaptiveSummary();
     }
 
     @Override
@@ -388,6 +402,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 if (serverWorld.getTime() - currentTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    adaptivePathRetryWindow++;
                     harvestTargets.removeFirst();
                     currentTarget = null;
                     return;
@@ -529,6 +544,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 if (serverWorld.getTime() - currentHoeTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    adaptivePathRetryWindow++;
                     hoeTargets.removeFirst();
                     currentHoeTarget = null;
                     return;
@@ -631,6 +647,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 if (serverWorld.getTime() - gatherSeedsStageStartTick >= GATHER_SEEDS_TIMEOUT_TICKS) {
+                    adaptiveFailedSessionWindow++;
                     stopSeedForageWithOutcome(serverWorld, "timeout", "timed out while gathering wheat seeds");
                     return;
                 }
@@ -660,6 +677,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 if (serverWorld.getTime() - currentGatherTargetStartTick >= TARGET_TIMEOUT_TICKS) {
+                    adaptivePathRetryWindow++;
                     gatherSeedTargets.removeFirst();
                     currentGatherTarget = null;
                     return;
@@ -1361,9 +1379,11 @@ public class FarmerHarvestGoal extends Goal {
         plantTargets.clear();
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
+        long scanned = 0L;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
         BlockPos end = jobPos.add(radius, radius, radius);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
+            scanned++;
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
@@ -1375,6 +1395,7 @@ public class FarmerHarvestGoal extends Goal {
             }
             plantTargets.add(pos.toImmutable());
         }
+        adaptiveScanVolumeWindow += scanned;
     }
 
     private Block getCropBlockForItem(Item item) {
@@ -1595,11 +1616,13 @@ public class FarmerHarvestGoal extends Goal {
         }
         int accessible = 0;
         int seeded = 0;
+        long scanned = 0L;
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -1, -radius);
         BlockPos end = jobPos.add(radius, 1, radius);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
+            scanned++;
             if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
                 continue;
             }
@@ -1614,6 +1637,7 @@ public class FarmerHarvestGoal extends Goal {
                 seeded++;
             }
         }
+        adaptiveScanVolumeWindow += scanned;
         cachedCoverage = new FarmlandCoverageStats(accessible, seeded);
         coverageCacheTime = now;
         return cachedCoverage;
@@ -1675,6 +1699,42 @@ public class FarmerHarvestGoal extends Goal {
 
     static boolean shouldForceBootstrapSeedGather(boolean hasPlantablesForPlanting) {
         return !hasPlantablesForPlanting;
+    }
+
+    private boolean shouldThrottleFarmlandExpansionChecks(ServerWorld world) {
+        long adaptiveLoadScore = adaptiveScanVolumeWindow
+                + (long) adaptivePathRetryWindow * 18L
+                + (long) adaptiveFailedSessionWindow * 40L
+                + (long) adaptiveForcedRecoveryWindow * 55L;
+        if (adaptiveLoadScore < GuardVillagersConfig.farmerAdaptiveThrottleLoadThreshold) {
+            return false;
+        }
+        int jitter = GuardVillagersConfig.farmerAdaptiveThrottleJitterTicks <= 0
+                ? 0
+                : villager.getRandom().nextInt(GuardVillagersConfig.farmerAdaptiveThrottleJitterTicks + 1);
+        int deferTicks = GuardVillagersConfig.farmerAdaptiveThrottleDeferTicks + jitter;
+        adaptiveThrottleUntilTick = world.getTime() + deferTicks;
+        nextCheckTime = Math.max(nextCheckTime, adaptiveThrottleUntilTick);
+        adaptiveScanVolumeWindow = Math.max(0L, adaptiveScanVolumeWindow / 2L);
+        adaptivePathRetryWindow = Math.max(0, adaptivePathRetryWindow / 2);
+        adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
+        adaptiveForcedRecoveryWindow = Math.max(0, adaptiveForcedRecoveryWindow / 2);
+        return true;
+    }
+
+    private void maybeLogAdaptiveSummary() {
+        int interval = Math.max(1, GuardVillagersConfig.farmerAdaptiveSummaryLogIntervalSessions);
+        if (adaptiveSessionCount % interval != 0) {
+            return;
+        }
+        LOGGER.info("Farmer adaptive summary villager={} sessions={} scanVolume={} pathRetries={} failedSessions={} forcedRecoveries={} throttleUntilTick={}",
+                villager.getUuidAsString(),
+                adaptiveSessionCount,
+                adaptiveScanVolumeWindow,
+                adaptivePathRetryWindow,
+                adaptiveFailedSessionWindow,
+                adaptiveForcedRecoveryWindow,
+                adaptiveThrottleUntilTick);
     }
 
     private void logWheatSeedStartupDecision(ServerWorld world,
