@@ -96,6 +96,17 @@ public class MasonWallBuilderGoal extends Goal {
     private static final int PATH_PROBE_BUDGET_PER_SORTIE = 48;
     private static final long PREFLIGHT_CACHE_BUCKET_TICKS = 20L;
     private static final long PREFLIGHT_CACHE_TTL_TICKS = 80L;
+    private static final long ADAPTIVE_BUDGET_WINDOW_TICKS = 200L;
+    private static final int ADAPTIVE_THROTTLE_ZERO_PLACEMENT_THRESHOLD = 0;
+    private static final int ADAPTIVE_THROTTLE_RETRY_GROWTH_THRESHOLD = 5;
+    private static final int ADAPTIVE_THROTTLE_DEFER_GROWTH_THRESHOLD = 4;
+    private static final int ADAPTIVE_RECOVER_PLACEMENT_GROWTH_THRESHOLD = 1;
+    private static final long ADAPTIVE_RECOVERY_COOLDOWN_TICKS = 120L;
+    private static final int THROTTLED_STANDABLE_SEARCH_RADIUS = 2;
+    private static final int THROTTLED_VERTICAL_SEARCH_MIN = -1;
+    private static final int THROTTLED_VERTICAL_SEARCH_MAX = 1;
+    private static final int THROTTLED_FALLBACK_CANDIDATE_LIMIT = 2;
+    private static final long THROTTLED_DEFERRED_PROBE_TTL_TICKS = 30L;
     // Gameplay cadence: placements happen in short local sorties of 3-5 segments
     // before the guard picks a new nearby anchor.
     static final int MIN_SEGMENTS_PER_SORTIE = 3;
@@ -275,6 +286,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
     private int pathBudgetUsedSinceLastPeriodic = 0;
     private int pathBudgetDeferredSinceLastPeriodic = 0;
+    private int pathBudgetDeferredSinceCycleStart = 0;
     private int sortieCandidateCountSamples = 0;
     private int sortieCandidateCountSum = 0;
     private int obstaclesCleared = 0;
@@ -327,6 +339,11 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<Long, Integer> cycleBaselineGroundYByColumn = new HashMap<>();
     private final Deque<ProgressSnapshot> progressSnapshots = new ArrayDeque<>();
     private final Deque<ProgressSnapshot> retryDensitySnapshots = new ArrayDeque<>();
+    private final Deque<AdaptiveBudgetSnapshot> adaptiveBudgetSnapshots = new ArrayDeque<>();
+    private AdaptivePerfMode adaptivePerfMode = AdaptivePerfMode.NORMAL;
+    private long adaptivePerfModeLastChangedTick = Long.MIN_VALUE;
+    private long adaptivePerfRecoverCooldownUntilTick = 0L;
+    private final Map<PreflightDeferredProbeKey, Long> deferredProbeSkipUntilTickByKey = new HashMap<>();
     private boolean retryDensityFallbackModeActive = false;
     private int retryDensityFallbackPlacementStreak = 0;
     private boolean stagnationPivotActive = false;
@@ -547,6 +564,7 @@ public class MasonWallBuilderGoal extends Goal {
         pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
         pathBudgetUsedSinceLastPeriodic = 0;
         pathBudgetDeferredSinceLastPeriodic = 0;
+        pathBudgetDeferredSinceCycleStart = 0;
         sortieCandidateCountSamples = 0;
         sortieCandidateCountSum = 0;
         sortiePlacementsAtStart = 0;
@@ -602,6 +620,7 @@ public class MasonWallBuilderGoal extends Goal {
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
         resetLayerOneLapState();
+        resetAdaptiveBudgetController();
         seedSegmentStateModel(world);
         if (isElectedBuilder && !pendingTransfers.isEmpty()) {
             stage = Stage.TRANSFER_FROM_PEERS;
@@ -676,6 +695,7 @@ public class MasonWallBuilderGoal extends Goal {
         pathProbeBudgetRemainingThisSortie = PATH_PROBE_BUDGET_PER_SORTIE;
         pathBudgetUsedSinceLastPeriodic = 0;
         pathBudgetDeferredSinceLastPeriodic = 0;
+        pathBudgetDeferredSinceCycleStart = 0;
         sortieCandidateCountSamples = 0;
         sortieCandidateCountSum = 0;
         sortieNoNetProgressGraceSuppressedLogged = false;
@@ -724,6 +744,7 @@ public class MasonWallBuilderGoal extends Goal {
         consecutiveSortiesSameRegion = 0;
         sortieRetryAttemptsByRegion.clear();
         resetLayerOneLapState();
+        resetAdaptiveBudgetController();
         activeAnchorPos = null;
         cycleWallRect = null;
         cycleActiveRect = null;
@@ -752,6 +773,8 @@ public class MasonWallBuilderGoal extends Goal {
 
         refreshPathProbeBudgetForTick(world);
         pruneExpiredSortiePreflightCache(world);
+        pruneDeferredProbeSkips(world);
+        updateAdaptivePerfMode(world);
         maybeEmitPeriodicInfo(world);
         maybeTriggerRetryDensityFallback(world);
         maybeActivateStagnationPivot(world);
@@ -1396,6 +1419,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void noteDeferredPathProbe() {
         pathBudgetDeferredSinceLastPeriodic++;
+        pathBudgetDeferredSinceCycleStart++;
     }
 
     private long coarseTickBucket(long tick) {
@@ -1431,6 +1455,13 @@ public class MasonWallBuilderGoal extends Goal {
         long now = world.getTime();
         BlockPos segmentKey = segment.toImmutable();
         BlockPos navKey = navigationTarget.toImmutable();
+        if (adaptivePerfMode == AdaptivePerfMode.THROTTLED) {
+            Long skipUntilTick = deferredProbeSkipUntilTickByKey.get(new PreflightDeferredProbeKey(segmentKey, navKey));
+            if (skipUntilTick != null && skipUntilTick > now) {
+                noteDeferredPathProbe();
+                return PreflightProbeResult.DEFERRED;
+            }
+        }
         PreflightCacheEntry cached = findCachedPreflightResult(segmentKey, navKey, now);
         if (cached != null) {
             return cached.reachesTarget() ? PreflightProbeResult.PASS : PreflightProbeResult.FAIL;
@@ -1440,6 +1471,12 @@ public class MasonWallBuilderGoal extends Goal {
         }
         if (!tryConsumePathProbeBudget(world)) {
             noteDeferredPathProbe();
+            if (adaptivePerfMode == AdaptivePerfMode.THROTTLED) {
+                deferredProbeSkipUntilTickByKey.put(
+                        new PreflightDeferredProbeKey(segmentKey, navKey),
+                        now + THROTTLED_DEFERRED_PROBE_TTL_TICKS
+                );
+            }
             return PreflightProbeResult.DEFERRED;
         }
         Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
@@ -1457,9 +1494,15 @@ public class MasonWallBuilderGoal extends Goal {
         SortieFailureCategory dominantFailure = dominantFailureCategory();
         int verticalSearchMin = -2;
         int verticalSearchMax = 2;
+        int searchRadius = NEAREST_STANDABLE_SEARCH_RADIUS;
         if (dominantFailure == SortieFailureCategory.STANDABILITY_REJECTED) {
             verticalSearchMin = -3;
             verticalSearchMax = 3;
+        }
+        if (adaptivePerfMode == AdaptivePerfMode.THROTTLED) {
+            searchRadius = Math.min(searchRadius, THROTTLED_STANDABLE_SEARCH_RADIUS);
+            verticalSearchMin = Math.max(verticalSearchMin, THROTTLED_VERTICAL_SEARCH_MIN);
+            verticalSearchMax = Math.min(verticalSearchMax, THROTTLED_VERTICAL_SEARCH_MAX);
         }
 
         boolean budgetExhausted = false;
@@ -1476,7 +1519,7 @@ public class MasonWallBuilderGoal extends Goal {
             budgetExhausted |= addNavigationCandidate(world, segmentPos, segmentPos.offset(direction).down(), deduped);
         }
 
-        for (int radius = 1; radius <= NEAREST_STANDABLE_SEARCH_RADIUS; radius++) {
+        for (int radius = 1; radius <= searchRadius; radius++) {
             if (budgetExhausted) {
                 break;
             }
@@ -3632,7 +3675,10 @@ public class MasonWallBuilderGoal extends Goal {
             if (retryDensityFallbackModeActive) {
                 return accepted;
             }
-            int fallbackLimit = Math.min(MAX_SEGMENTS_PER_SORTIE, preflightFailed.size());
+            int fallbackCap = adaptivePerfMode == AdaptivePerfMode.THROTTLED
+                    ? THROTTLED_FALLBACK_CANDIDATE_LIMIT
+                    : MAX_SEGMENTS_PER_SORTIE;
+            int fallbackLimit = Math.min(fallbackCap, preflightFailed.size());
             for (BlockPos candidate : preflightFailed) {
                 if (accepted.size() >= fallbackLimit) {
                     break;
@@ -4610,7 +4656,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4621,6 +4667,7 @@ public class MasonWallBuilderGoal extends Goal {
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
                     stage,
+                    adaptivePerfMode.logValue,
                     stalledTarget,
                     stalledReason,
                     suppressedRegionCount,
@@ -4636,7 +4683,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -4647,6 +4694,7 @@ public class MasonWallBuilderGoal extends Goal {
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
                     stage,
+                    adaptivePerfMode.logValue,
                     suppressedRegionCount,
                     oldestSuppressionAge,
                     Math.max(0, placementsSinceLastSuppression),
@@ -4685,6 +4733,86 @@ public class MasonWallBuilderGoal extends Goal {
                 layerOneLapWrapped,
                 layerOneLapCompleted,
                 isLayerOneAggressiveHeuristicsEnabled(1));
+    }
+
+    private void resetAdaptiveBudgetController() {
+        adaptiveBudgetSnapshots.clear();
+        adaptivePerfMode = AdaptivePerfMode.NORMAL;
+        adaptivePerfModeLastChangedTick = Long.MIN_VALUE;
+        adaptivePerfRecoverCooldownUntilTick = 0L;
+        deferredProbeSkipUntilTickByKey.clear();
+    }
+
+    private void pruneDeferredProbeSkips(ServerWorld world) {
+        long now = world.getTime();
+        deferredProbeSkipUntilTickByKey.entrySet().removeIf(entry -> entry.getValue() <= now);
+    }
+
+    private void updateAdaptivePerfMode(ServerWorld world) {
+        long now = world.getTime();
+        adaptiveBudgetSnapshots.addLast(new AdaptiveBudgetSnapshot(
+                now,
+                pathRetriesSinceCycleStart,
+                deferredOrSkippedSinceCycleStart,
+                placementsSinceCycleStart,
+                pathBudgetDeferredSinceCycleStart
+        ));
+        while (!adaptiveBudgetSnapshots.isEmpty()
+                && (now - adaptiveBudgetSnapshots.peekFirst().tick()) > ADAPTIVE_BUDGET_WINDOW_TICKS) {
+            adaptiveBudgetSnapshots.pollFirst();
+        }
+        AdaptiveBudgetSnapshot baseline = adaptiveBudgetSnapshots.peekFirst();
+        if (baseline == null) {
+            return;
+        }
+        int retryGrowth = Math.max(0, pathRetriesSinceCycleStart - baseline.pathRetries());
+        int deferredGrowth = Math.max(0, deferredOrSkippedSinceCycleStart - baseline.deferredCount());
+        int placementGrowth = Math.max(0, placementsSinceCycleStart - baseline.placements());
+        int pathDeferralGrowth = Math.max(0, pathBudgetDeferredSinceCycleStart - baseline.pathBudgetDeferrals());
+        boolean shouldThrottle = placementGrowth <= ADAPTIVE_THROTTLE_ZERO_PLACEMENT_THRESHOLD
+                && (retryGrowth >= ADAPTIVE_THROTTLE_RETRY_GROWTH_THRESHOLD
+                || deferredGrowth >= ADAPTIVE_THROTTLE_DEFER_GROWTH_THRESHOLD
+                || pathDeferralGrowth >= ADAPTIVE_THROTTLE_DEFER_GROWTH_THRESHOLD);
+        boolean placementRecovered = placementGrowth >= ADAPTIVE_RECOVER_PLACEMENT_GROWTH_THRESHOLD;
+        if (adaptivePerfMode == AdaptivePerfMode.NORMAL && shouldThrottle) {
+            switchAdaptivePerfMode(world, AdaptivePerfMode.THROTTLED, retryGrowth, deferredGrowth, placementGrowth, pathDeferralGrowth);
+            return;
+        }
+        if (adaptivePerfMode == AdaptivePerfMode.THROTTLED && placementRecovered) {
+            adaptivePerfRecoverCooldownUntilTick = now + ADAPTIVE_RECOVERY_COOLDOWN_TICKS;
+            switchAdaptivePerfMode(world, AdaptivePerfMode.RECOVERED, retryGrowth, deferredGrowth, placementGrowth, pathDeferralGrowth);
+            return;
+        }
+        if (adaptivePerfMode == AdaptivePerfMode.RECOVERED) {
+            if (shouldThrottle) {
+                switchAdaptivePerfMode(world, AdaptivePerfMode.THROTTLED, retryGrowth, deferredGrowth, placementGrowth, pathDeferralGrowth);
+                return;
+            }
+            if (now >= adaptivePerfRecoverCooldownUntilTick) {
+                switchAdaptivePerfMode(world, AdaptivePerfMode.NORMAL, retryGrowth, deferredGrowth, placementGrowth, pathDeferralGrowth);
+            }
+        }
+    }
+
+    private void switchAdaptivePerfMode(ServerWorld world,
+                                        AdaptivePerfMode nextMode,
+                                        int retryGrowth,
+                                        int deferredGrowth,
+                                        int placementGrowth,
+                                        int pathDeferralGrowth) {
+        if (adaptivePerfMode == nextMode) {
+            return;
+        }
+        adaptivePerfMode = nextMode;
+        adaptivePerfModeLastChangedTick = world.getTime();
+        LOGGER.info("MasonWallBuilder {}: adaptive_perf_mode perfMode={} retryGrowth={} deferredGrowth={} placementsGrowth={} pathDeferralsGrowth={} cooldownUntil={}",
+                guard.getUuidAsString(),
+                adaptivePerfMode.logValue,
+                retryGrowth,
+                deferredGrowth,
+                placementGrowth,
+                pathDeferralGrowth,
+                adaptivePerfRecoverCooldownUntilTick);
     }
 
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
@@ -6578,6 +6706,57 @@ public class MasonWallBuilderGoal extends Goal {
         return new RetryDensityFallbackDecision(false, ticks, 0, 0, 0, 0.0D);
     }
 
+    static AdaptivePerfModeDecision simulateAdaptiveBudgetPolicy(List<Integer> placements,
+                                                                 List<Integer> retries,
+                                                                 List<Integer> deferred,
+                                                                 List<Integer> pathDeferrals,
+                                                                 int windowTicks,
+                                                                 int recoveryCooldownTicks) {
+        int ticks = Math.min(Math.min(placements.size(), retries.size()), Math.min(deferred.size(), pathDeferrals.size()));
+        Deque<AdaptiveBudgetSnapshot> snapshots = new ArrayDeque<>();
+        AdaptivePerfMode mode = AdaptivePerfMode.NORMAL;
+        int cooldownUntilTick = -1;
+        int decisionTick = ticks;
+        for (int tick = 0; tick < ticks; tick++) {
+            snapshots.addLast(new AdaptiveBudgetSnapshot(tick, retries.get(tick), deferred.get(tick), placements.get(tick), pathDeferrals.get(tick)));
+            while (!snapshots.isEmpty() && (tick - snapshots.peekFirst().tick()) > windowTicks) {
+                snapshots.pollFirst();
+            }
+            AdaptiveBudgetSnapshot baseline = snapshots.peekFirst();
+            if (baseline == null) {
+                continue;
+            }
+            int retryGrowth = Math.max(0, retries.get(tick) - baseline.pathRetries());
+            int deferredGrowth = Math.max(0, deferred.get(tick) - baseline.deferredCount());
+            int placementGrowth = Math.max(0, placements.get(tick) - baseline.placements());
+            int pathDeferralGrowth = Math.max(0, pathDeferrals.get(tick) - baseline.pathBudgetDeferrals());
+            boolean shouldThrottle = placementGrowth <= ADAPTIVE_THROTTLE_ZERO_PLACEMENT_THRESHOLD
+                    && (retryGrowth >= ADAPTIVE_THROTTLE_RETRY_GROWTH_THRESHOLD
+                    || deferredGrowth >= ADAPTIVE_THROTTLE_DEFER_GROWTH_THRESHOLD
+                    || pathDeferralGrowth >= ADAPTIVE_THROTTLE_DEFER_GROWTH_THRESHOLD);
+            boolean placementRecovered = placementGrowth >= ADAPTIVE_RECOVER_PLACEMENT_GROWTH_THRESHOLD;
+            if (mode == AdaptivePerfMode.NORMAL && shouldThrottle) {
+                mode = AdaptivePerfMode.THROTTLED;
+                decisionTick = tick + 1;
+            }
+            if (mode == AdaptivePerfMode.THROTTLED && placementRecovered) {
+                mode = AdaptivePerfMode.RECOVERED;
+                cooldownUntilTick = tick + recoveryCooldownTicks;
+                decisionTick = tick + 1;
+            } else if (mode == AdaptivePerfMode.RECOVERED) {
+                if (shouldThrottle) {
+                    mode = AdaptivePerfMode.THROTTLED;
+                    cooldownUntilTick = -1;
+                    decisionTick = tick + 1;
+                } else if (tick >= cooldownUntilTick) {
+                    mode = AdaptivePerfMode.NORMAL;
+                    decisionTick = tick + 1;
+                }
+            }
+        }
+        return new AdaptivePerfModeDecision(mode, decisionTick);
+    }
+
     static WaitForStockDecision decideWaitForStockTransition(int availableWalls,
                                                             int availableCobblestone,
                                                             int threshold,
@@ -7131,7 +7310,23 @@ public class MasonWallBuilderGoal extends Goal {
                                         int hardUnreachableDelta,
                                         double retryDensity) {}
 
+    record AdaptivePerfModeDecision(AdaptivePerfMode mode, int decisionTick) {}
+
+    enum AdaptivePerfMode {
+        NORMAL("normal"),
+        THROTTLED("throttled"),
+        RECOVERED("recovered");
+
+        private final String logValue;
+
+        AdaptivePerfMode(String logValue) {
+            this.logValue = logValue;
+        }
+    }
+
     private record ProgressSnapshot(long tick, int placements, int pathRetries, int hardUnreachable) {}
+
+    private record AdaptiveBudgetSnapshot(long tick, int pathRetries, int deferredCount, int placements, int pathBudgetDeferrals) {}
 
     private record FailureBandWindow(int count, long firstFailureTick) {}
 
@@ -7217,6 +7412,8 @@ public class MasonWallBuilderGoal extends Goal {
     private record PreflightCacheKey(BlockPos segment, BlockPos navTarget, long coarseTickBucket) {}
 
     private record PreflightCacheEntry(boolean reachesTarget, long expiresAtTick) {}
+
+    private record PreflightDeferredProbeKey(BlockPos segment, BlockPos navTarget) {}
 
     record EarlyCycleAbortPolicyDecision(long cooldownTicks, boolean shouldQuarantineBand) {}
 
