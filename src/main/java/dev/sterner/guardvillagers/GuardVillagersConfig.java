@@ -24,6 +24,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS = 20 * 60 * 10;
     public static final int MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 1;
     public static final int MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 500;
+    public static final int MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 8;
+    public static final int MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 31;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -139,6 +141,9 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackStructureProximityRadius = 2;
     @Entry(min=1)
     public static int lumberjackHousePoiProtectionRadius = 8;
+    // Dense-village tuning: larger radius finds more candidates but increases scan cost unless governor throttling is active.
+    @Entry(min=8)
+    public static int lumberjackBaseTreeSearchRadius = 24;
     @Entry(min=250)
     public static int lumberjackTreeScanPerGuardBudgetCap = 8000;
     @Entry(min=500)
@@ -199,6 +204,10 @@ public class GuardVillagersConfig extends MidnightConfig {
                 lumberjackGovernorMetricsLogInterval,
                 MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL,
                 MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL);
+        lumberjackBaseTreeSearchRadius = clamp(
+                lumberjackBaseTreeSearchRadius,
+                MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
+                MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS);
     }
 
     private static int clamp(int value, int min, int max) {
