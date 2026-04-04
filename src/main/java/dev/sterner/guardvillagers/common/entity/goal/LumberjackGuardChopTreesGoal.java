@@ -59,7 +59,6 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int STICKS_PER_PLANK = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
-    private static final int TREE_SEARCH_RADIUS = 20;
     private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
     private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
@@ -976,13 +975,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
+        int baseRadius = getConfiguredBaseTreeSearchRadius();
         if (attempts >= 4) {
             return TREE_SEARCH_MAX_EXPANDED_RADIUS;
         }
         if (attempts >= 2) {
             return TREE_SEARCH_EXPANDED_RADIUS;
         }
-        return TREE_SEARCH_RADIUS;
+        return baseRadius;
+    }
+
+    private static int getConfiguredBaseTreeSearchRadius() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackBaseTreeSearchRadius,
+                GuardVillagersConfig.MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
+                GuardVillagersConfig.MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS);
     }
 
     private static BlockPos normalizeRootStatic(ServerWorld world, BlockPos pos) {
@@ -1347,7 +1354,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
-        return isCandidateInScanMode(center, candidate, mappedBounds, TREE_SEARCH_RADIUS);
+        return isCandidateInScanMode(center, candidate, mappedBounds, getConfiguredBaseTreeSearchRadius());
     }
 
     static boolean isCandidateInScanMode(BlockPos center,
@@ -1379,7 +1386,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                               @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
                               boolean usesLocalBellExclusion) {
         static ScanBounds fromLocalRadius(BlockPos center) {
-            return fromLocalRadius(center, TREE_SEARCH_RADIUS);
+            return fromLocalRadius(center, getConfiguredBaseTreeSearchRadius());
         }
 
         static ScanBounds fromLocalRadius(BlockPos center, int radius) {
