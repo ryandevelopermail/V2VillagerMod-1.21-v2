@@ -12,6 +12,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_OVERFLOW_RECIPIENT_SCAN_RANGE = 256;
     public static final int MIN_MASON_WALL_FOOTPRINT_RADIUS = 32;
     public static final int MAX_MASON_WALL_FOOTPRINT_RADIUS = 256;
+    public static final int MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET = 250;
+    public static final int MAX_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET = 32000;
+    public static final int MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET = 500;
+    public static final int MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET = 128000;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -127,6 +131,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackStructureProximityRadius = 2;
     @Entry(min=1)
     public static int lumberjackHousePoiProtectionRadius = 8;
+    @Entry(min=250)
+    public static int lumberjackTreeScanPerGuardBudgetCap = 8000;
+    @Entry(min=500)
+    public static int lumberjackTreeScanWorldSharedBudgetCap = 24000;
     @Entry
     public static int quartermasterScanRange = 128;
     @Entry
@@ -143,6 +151,14 @@ public class GuardVillagersConfig extends MidnightConfig {
         overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
         masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
+        lumberjackTreeScanPerGuardBudgetCap = clamp(
+                lumberjackTreeScanPerGuardBudgetCap,
+                MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET,
+                MAX_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET);
+        lumberjackTreeScanWorldSharedBudgetCap = clamp(
+                lumberjackTreeScanWorldSharedBudgetCap,
+                MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET,
+                MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET);
     }
 
     private static int clamp(int value, int min, int max) {
