@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -80,6 +81,12 @@ public class MasonMiningStairGoal extends Goal {
     private int consecutiveFailureCount;
     private boolean blockedByProtectedJobBlock;
     private final Set<BlockPos> protectedBlockSkipPositions = new HashSet<>();
+    private long adaptiveThrottleUntilTick;
+    private long adaptiveScanVolumeWindow;
+    private int adaptivePathRetryWindow;
+    private int adaptiveFailedSessionWindow;
+    private int adaptiveForcedRecoveryWindow;
+    private int adaptiveSessionCount;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -116,10 +123,17 @@ public class MasonMiningStairGoal extends Goal {
             maybeLogCooldownProgress(worldTime);
             return false;
         }
+        if (worldTime < adaptiveThrottleUntilTick) {
+            return false;
+        }
+        if (shouldThrottleMiningSelection(world, worldTime)) {
+            return false;
+        }
 
         this.cooldownQuarterLogTick = 0L;
         this.cooldownThreeQuarterLogTick = 0L;
         this.cooldownProgressLoggedForStartTick = -1L;
+        this.adaptiveScanVolumeWindow += Math.max(1L, this.stepIndex + 1L);
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
         Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
@@ -332,6 +346,7 @@ public class MasonMiningStairGoal extends Goal {
             lastDistanceToTarget = distanceToTarget;
         } else {
             noProgressTicks++;
+            adaptivePathRetryWindow++;
             if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
                 recoveryAttemptedForStep = true;
                 if (tryStartRecoveryMove(world, rejoinStepTarget, "rejoin")) {
@@ -392,6 +407,7 @@ public class MasonMiningStairGoal extends Goal {
             lastDistanceToTarget = distanceToTarget;
         } else {
             noProgressTicks++;
+            adaptivePathRetryWindow++;
             if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
                 recoveryAttemptedForStep = true;
                 if (tryStartRecoveryMove(world, currentStepTarget, "mining")) {
@@ -746,6 +762,9 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
         this.returnReason = reason;
+        if (reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE) {
+            adaptiveFailedSessionWindow++;
+        }
         long worldTime = guard.getWorld().getTime();
         boolean protectedEarlyAbort = reason == ReturnReason.CANNOT_ADVANCE
                 && blockedByProtectedJobBlock
@@ -1126,6 +1145,7 @@ public class MasonMiningStairGoal extends Goal {
 
             recoveryMoveTarget = candidate;
             recoveryTicks = 0;
+            adaptiveForcedRecoveryWindow++;
             LOGGER.info("Mason guard {} recovery move started: context={}, from={}, candidate={}, noProgressTicks={}",
                     guard.getUuidAsString(),
                     context,
@@ -1220,6 +1240,8 @@ public class MasonMiningStairGoal extends Goal {
                 reservedCobblestone,
                 reservedDirt,
                 guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
+        adaptiveSessionCount++;
+        maybeLogAdaptiveSummary();
     }
 
     static boolean hasRepairSummaryData(int repairedObstructions, int placedSupports) {
@@ -1237,6 +1259,42 @@ public class MasonMiningStairGoal extends Goal {
                 placedSupportCount,
                 returnReason,
                 stepIndex);
+    }
+
+    private boolean shouldThrottleMiningSelection(ServerWorld world, long worldTime) {
+        long adaptiveLoadScore = adaptiveScanVolumeWindow
+                + (long) adaptivePathRetryWindow * 20L
+                + (long) adaptiveFailedSessionWindow * 45L
+                + (long) adaptiveForcedRecoveryWindow * 60L;
+        if (adaptiveLoadScore < GuardVillagersConfig.masonAdaptiveThrottleLoadThreshold) {
+            return false;
+        }
+        int jitter = GuardVillagersConfig.masonAdaptiveThrottleJitterTicks <= 0
+                ? 0
+                : guard.getRandom().nextInt(GuardVillagersConfig.masonAdaptiveThrottleJitterTicks + 1);
+        int deferTicks = GuardVillagersConfig.masonAdaptiveThrottleDeferTicks + jitter;
+        adaptiveThrottleUntilTick = worldTime + deferTicks;
+        guard.setNextMiningStartTick(Math.max(guard.getNextMiningStartTick(), worldTime + deferTicks));
+        adaptiveScanVolumeWindow = Math.max(0L, adaptiveScanVolumeWindow / 2L);
+        adaptivePathRetryWindow = Math.max(0, adaptivePathRetryWindow / 2);
+        adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
+        adaptiveForcedRecoveryWindow = Math.max(0, adaptiveForcedRecoveryWindow / 2);
+        return true;
+    }
+
+    private void maybeLogAdaptiveSummary() {
+        int interval = Math.max(1, GuardVillagersConfig.masonAdaptiveSummaryLogIntervalSessions);
+        if (adaptiveSessionCount % interval != 0) {
+            return;
+        }
+        LOGGER.info("Mason adaptive summary guard={} sessions={} scanVolume={} pathRetries={} failedSessions={} forcedRecoveries={} throttleUntilTick={}",
+                guard.getUuidAsString(),
+                adaptiveSessionCount,
+                adaptiveScanVolumeWindow,
+                adaptivePathRetryWindow,
+                adaptiveFailedSessionWindow,
+                adaptiveForcedRecoveryWindow,
+                adaptiveThrottleUntilTick);
     }
 
     private enum Stage {

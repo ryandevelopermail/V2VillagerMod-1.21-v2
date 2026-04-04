@@ -26,6 +26,14 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 500;
     public static final int MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 8;
     public static final int MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 31;
+    public static final int MIN_PROFESSION_THROTTLE_THRESHOLD = 1;
+    public static final int MAX_PROFESSION_THROTTLE_THRESHOLD = 500000;
+    public static final int MIN_PROFESSION_THROTTLE_DEFER_TICKS = 20;
+    public static final int MAX_PROFESSION_THROTTLE_DEFER_TICKS = 20 * 60 * 10;
+    public static final int MIN_PROFESSION_THROTTLE_JITTER_TICKS = 0;
+    public static final int MAX_PROFESSION_THROTTLE_JITTER_TICKS = 20 * 60;
+    public static final int MIN_PROFESSION_SUMMARY_LOG_INTERVAL = 1;
+    public static final int MAX_PROFESSION_SUMMARY_LOG_INTERVAL = 1000;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -160,6 +168,38 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackGovernorMetricsLogInterval = 10;
     @Entry
     public static boolean lumberjackVerboseLogging = false;
+    @Entry(min=1)
+    public static int lumberjackAdaptiveThrottleLoadThreshold = 26000;
+    @Entry(min=20)
+    public static int lumberjackAdaptiveThrottleDeferTicks = 20 * 8;
+    @Entry(min=0)
+    public static int lumberjackAdaptiveThrottleJitterTicks = 40;
+    @Entry(min=1)
+    public static int lumberjackAdaptiveSummaryLogIntervalSessions = 8;
+    @Entry(min=1)
+    public static int masonAdaptiveThrottleLoadThreshold = 180;
+    @Entry(min=20)
+    public static int masonAdaptiveThrottleDeferTicks = 20 * 6;
+    @Entry(min=0)
+    public static int masonAdaptiveThrottleJitterTicks = 60;
+    @Entry(min=1)
+    public static int masonAdaptiveSummaryLogIntervalSessions = 8;
+    @Entry(min=1)
+    public static int farmerAdaptiveThrottleLoadThreshold = 32000;
+    @Entry(min=20)
+    public static int farmerAdaptiveThrottleDeferTicks = 20 * 8;
+    @Entry(min=0)
+    public static int farmerAdaptiveThrottleJitterTicks = 60;
+    @Entry(min=1)
+    public static int farmerAdaptiveSummaryLogIntervalSessions = 10;
+    @Entry(min=1)
+    public static int weaponsmithAdaptiveThrottleLoadThreshold = 420;
+    @Entry(min=20)
+    public static int weaponsmithAdaptiveThrottleDeferTicks = 20 * 5;
+    @Entry(min=0)
+    public static int weaponsmithAdaptiveThrottleJitterTicks = 50;
+    @Entry(min=1)
+    public static int weaponsmithAdaptiveSummaryLogIntervalSessions = 10;
     @Entry
     public static int quartermasterScanRange = 128;
     @Entry
@@ -208,6 +248,22 @@ public class GuardVillagersConfig extends MidnightConfig {
                 lumberjackBaseTreeSearchRadius,
                 MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
                 MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS);
+        lumberjackAdaptiveThrottleLoadThreshold = clamp(lumberjackAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
+        lumberjackAdaptiveThrottleDeferTicks = clamp(lumberjackAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        lumberjackAdaptiveThrottleJitterTicks = clamp(lumberjackAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
+        lumberjackAdaptiveSummaryLogIntervalSessions = clamp(lumberjackAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        masonAdaptiveThrottleLoadThreshold = clamp(masonAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
+        masonAdaptiveThrottleDeferTicks = clamp(masonAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        masonAdaptiveThrottleJitterTicks = clamp(masonAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
+        masonAdaptiveSummaryLogIntervalSessions = clamp(masonAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        farmerAdaptiveThrottleLoadThreshold = clamp(farmerAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
+        farmerAdaptiveThrottleDeferTicks = clamp(farmerAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        farmerAdaptiveThrottleJitterTicks = clamp(farmerAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
+        farmerAdaptiveSummaryLogIntervalSessions = clamp(farmerAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        weaponsmithAdaptiveThrottleLoadThreshold = clamp(weaponsmithAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
+        weaponsmithAdaptiveThrottleDeferTicks = clamp(weaponsmithAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        weaponsmithAdaptiveThrottleJitterTicks = clamp(weaponsmithAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
+        weaponsmithAdaptiveSummaryLogIntervalSessions = clamp(weaponsmithAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
     }
 
     private static int clamp(int value, int min, int max) {

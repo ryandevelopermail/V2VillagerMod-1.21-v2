@@ -129,6 +129,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int completedTreeScanCount;
     private int pendingGovernorRetryEvents;
     private int pendingGovernorForcedRemovals;
+    private long throttleUntilTick;
+    private long adaptiveScanVolumeWindow;
+    private int adaptivePathRetryWindow;
+    private int adaptiveFailedSessionWindow;
+    private int adaptiveForcedRecoveryWindow;
+    private int adaptiveSessionCount;
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -351,6 +357,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void continueOrStartTreeTargetScan(ServerWorld world) {
         if (this.pendingTreeTargetScan == null) {
+            if (world.getTime() < this.throttleUntilTick) {
+                return;
+            }
+            if (shouldThrottleAdaptiveScan(world)) {
+                return;
+            }
             if (WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
                 int deferTicks = getConfiguredGovernorHighLoadDeferTicks();
                 LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
@@ -391,6 +403,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         boolean logScanMetricsAtInfo = shouldLogScanMetricsAtInfo(this.pendingTreeTargetScan)
                 || this.completedTreeScanCount % TREE_SCAN_METRICS_INFO_INTERVAL == 0;
         this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
+        this.adaptiveScanVolumeWindow += this.pendingTreeTargetScan.metricsVisitedBlocks();
+        this.adaptiveSessionCount++;
+        maybeLogAdaptiveSummary(world);
         WorldLumberjackGovernor.recordScanSession(world,
                 this.pendingTreeTargetScan.metricsElapsedMs(),
                 this.pendingTreeTargetScan.metricsVisitedBlocks(),
@@ -419,8 +434,45 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
     }
 
+    private boolean shouldThrottleAdaptiveScan(ServerWorld world) {
+        long adaptiveLoadScore = this.adaptiveScanVolumeWindow
+                + (long) this.adaptivePathRetryWindow * 120L
+                + (long) this.adaptiveFailedSessionWindow * 200L
+                + (long) this.adaptiveForcedRecoveryWindow * 260L;
+        if (adaptiveLoadScore < GuardVillagersConfig.lumberjackAdaptiveThrottleLoadThreshold) {
+            return false;
+        }
+        long jitter = GuardVillagersConfig.lumberjackAdaptiveThrottleJitterTicks <= 0
+                ? 0L
+                : this.guard.getRandom().nextInt(GuardVillagersConfig.lumberjackAdaptiveThrottleJitterTicks + 1);
+        long deferTicks = GuardVillagersConfig.lumberjackAdaptiveThrottleDeferTicks + jitter;
+        this.throttleUntilTick = world.getTime() + deferTicks;
+        this.adaptiveScanVolumeWindow = Math.max(0L, this.adaptiveScanVolumeWindow / 2L);
+        this.adaptivePathRetryWindow = Math.max(0, this.adaptivePathRetryWindow / 2);
+        this.adaptiveFailedSessionWindow = Math.max(0, this.adaptiveFailedSessionWindow / 2);
+        this.adaptiveForcedRecoveryWindow = Math.max(0, this.adaptiveForcedRecoveryWindow / 2);
+        startChopCountdown(world, deferTicks, "adaptive throttle");
+        return true;
+    }
+
+    private void maybeLogAdaptiveSummary(ServerWorld world) {
+        int interval = Math.max(1, GuardVillagersConfig.lumberjackAdaptiveSummaryLogIntervalSessions);
+        if (this.adaptiveSessionCount % interval != 0) {
+            return;
+        }
+        LOGGER.info("Lumberjack adaptive summary guard={} sessions={} scanVolume={} pathRetries={} failedSessions={} forcedRecoveries={} throttleUntilTick={}",
+                this.guard.getUuidAsString(),
+                this.adaptiveSessionCount,
+                this.adaptiveScanVolumeWindow,
+                this.adaptivePathRetryWindow,
+                this.adaptiveFailedSessionWindow,
+                this.adaptiveForcedRecoveryWindow,
+                this.throttleUntilTick);
+    }
+
     private void startSession(ServerWorld world, List<BlockPos> targets) {
         if (targets.isEmpty()) {
+            this.adaptiveFailedSessionWindow++;
             int noTreeFailures = this.guard.getConsecutiveNoTreeSessions() + 1;
             this.guard.setConsecutiveNoTreeSessions(noTreeFailures);
             boolean escalated = maybeRunNoTreeEscalation(world, noTreeFailures);
@@ -564,6 +616,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
 
             this.stallRecoveryAttempts++;
+            this.adaptivePathRetryWindow++;
             this.stalledTicks = 0;
             if (this.stallRecoveryAttempts >= MAX_STALL_RECOVERY_ATTEMPTS) {
                 LOGGER.debug("Lumberjack Guard {} target {} exhausted stall recovery after {} attempts",
@@ -700,6 +753,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void recordFailedTargetAttempt(BlockPos targetRoot, String reason) {
+        this.adaptiveFailedSessionWindow++;
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
         this.failedSessionRoots.add(targetRoot.toImmutable());
         this.rootTeardownRetryAttempts.remove(targetRoot);
@@ -2331,6 +2385,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void executeForcedTreeRemoval(ServerWorld world, BlockPos root, String reason) {
         this.pendingGovernorForcedRemovals++;
+        this.adaptiveForcedRecoveryWindow++;
         TreeTeardownResult forcedTeardown = teardownTree(world, root);
         RemainingLogCountResult afterForcedTeardown = countRemainingConnectedLogs(world, root);
         int remainingAfterForcedTeardown = afterForcedTeardown.count();
