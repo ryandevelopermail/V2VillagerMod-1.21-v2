@@ -197,8 +197,10 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS = 40L;
     private static final long WAIT_FOR_STOCK_CYCLE_VALIDATION_INTERVAL_TICKS = 40L;
     private static final long WALL_STAGING_TIMEOUT_TICKS = 120L;
+    private static final long WALL_STAGING_START_COOLDOWN_TICKS = 30L;
     private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
     private static final long STAGING_REENTRY_GUARD_WINDOW_TICKS = 40L;
+    private static final long WALL_STAGING_LOG_RATE_LIMIT_TICKS = 40L;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
     // Maximum range for scanning peers
@@ -253,10 +255,18 @@ public class MasonWallBuilderGoal extends Goal {
     private int lastLoggedProceedWalls = -1;
     private int lastLoggedProceedThreshold = -1;
     private long wallStagingStartedTick = -1L;
+    private long nextStagingEligibleTick = 0L;
     private BlockPos wallStagingTarget = null;
+    private long lastStagingAttemptTick = -1L;
+    private BlockPos lastStagingAttemptTarget = null;
+    private BlockPos lastStagingAttemptChest = null;
+    private BlockPos lastStagingAttemptJob = null;
     private boolean stagingSatisfiedThisCycle = false;
     private long stagingCompletedTick = -1L;
     private String stagingReasonActive = null;
+    private int stagingStartsSinceLastSummary = 0;
+    private int stagingCompletesSinceLastSummary = 0;
+    private int stagingSkipsByDebounceSinceLastSummary = 0;
     private CycleEndReason cycleEndReason = CycleEndReason.WALL_COMPLETE;
     private BlockPos activeAnchorPos = null;
     private final Map<String, Long> retryLogRateLimitTickBySignature = new HashMap<>();
@@ -331,6 +341,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int lastPeriodicSummaryPlacementCount = 0;
     private boolean firstPlacementLoggedThisCycle = false;
     private final Map<String, Long> infoLogRateLimitTickByType = new HashMap<>();
+    private final Map<String, Long> stagingLogRateLimitTickBySignature = new HashMap<>();
     private BlockPos watchdogLastRecoverySegment = null;
     private int watchdogSameRecoverySegmentCount = 0;
     private int watchdogPlacementCountAtLastRecovery = 0;
@@ -534,6 +545,14 @@ public class MasonWallBuilderGoal extends Goal {
         resetWaitForStockProceedLogState();
         resetWallStagingCycleState();
         clearWallStagingState();
+        nextStagingEligibleTick = 0L;
+        lastStagingAttemptTick = -1L;
+        lastStagingAttemptTarget = null;
+        lastStagingAttemptChest = null;
+        lastStagingAttemptJob = null;
+        stagingStartsSinceLastSummary = 0;
+        stagingCompletesSinceLastSummary = 0;
+        stagingSkipsByDebounceSinceLastSummary = 0;
         cycleEndReason = CycleEndReason.WALL_COMPLETE;
         waitForStockReplanCooldownUntilTick = 0L;
         nextWaitForStockCycleValidationTick = 0L;
@@ -612,6 +631,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        stagingLogRateLimitTickBySignature.clear();
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
@@ -675,6 +695,14 @@ public class MasonWallBuilderGoal extends Goal {
         resetWaitForStockProceedLogState();
         resetWallStagingCycleState();
         clearWallStagingState();
+        nextStagingEligibleTick = 0L;
+        lastStagingAttemptTick = -1L;
+        lastStagingAttemptTarget = null;
+        lastStagingAttemptChest = null;
+        lastStagingAttemptJob = null;
+        stagingStartsSinceLastSummary = 0;
+        stagingCompletesSinceLastSummary = 0;
+        stagingSkipsByDebounceSinceLastSummary = 0;
         retryLogRateLimitTickBySignature.clear();
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
@@ -737,6 +765,7 @@ public class MasonWallBuilderGoal extends Goal {
         lastPeriodicSummaryPlacementCount = 0;
         firstPlacementLoggedThisCycle = false;
         infoLogRateLimitTickByType.clear();
+        stagingLogRateLimitTickBySignature.clear();
         watchdogLastRecoverySegment = null;
         watchdogSameRecoverySegmentCount = 0;
         watchdogPlacementCountAtLastRecovery = 0;
@@ -1228,8 +1257,11 @@ public class MasonWallBuilderGoal extends Goal {
         if (isWallStagingReady(world, stagingTarget)) {
             stagingSatisfiedThisCycle = true;
             stagingCompletedTick = world.getTime();
-            LOGGER.info("MasonWallBuilder {}: wall_staging_complete target={} elapsedTicks={}",
+            stagingCompletesSinceLastSummary++;
+            logWallStagingRateLimited(world, "complete", stagingReasonActive, stagingTarget,
+                    "MasonWallBuilder {}: wall_staging_complete reason={} target={} elapsedTicks={}",
                     guard.getUuidAsString(),
+                    stagingReasonActive == null ? "none" : stagingReasonActive,
                     stagingTarget.toShortString(),
                     Math.max(0L, world.getTime() - wallStagingStartedTick));
             clearWallStagingState();
@@ -4687,6 +4719,24 @@ public class MasonWallBuilderGoal extends Goal {
         LOGGER.info(message, args);
     }
 
+    private void logWallStagingRateLimited(ServerWorld world,
+                                           String eventType,
+                                           String reason,
+                                           BlockPos target,
+                                           String message,
+                                           Object... args) {
+        String signature = eventType
+                + "|" + (reason == null ? "none" : reason)
+                + "|" + (target == null ? "none" : target.toShortString());
+        long now = world.getTime();
+        Long lastTick = stagingLogRateLimitTickBySignature.get(signature);
+        if (lastTick != null && (now - lastTick) < WALL_STAGING_LOG_RATE_LIMIT_TICKS) {
+            return;
+        }
+        stagingLogRateLimitTickBySignature.put(signature, now);
+        LOGGER.info(message, args);
+    }
+
     private void resetSortieFailureCounters() {
         sortieFailureCategoryCounts.clear();
         for (SortieFailureCategory category : SortieFailureCategory.values()) {
@@ -4817,9 +4867,22 @@ public class MasonWallBuilderGoal extends Goal {
             );
         }
         maybeEmitLayerOneFaceCoverageInfo(world);
+        logInfoRateLimited(
+                world,
+                "periodic_staging_summary",
+                PERIODIC_INFO_INTERVAL_TICKS,
+                "MasonWallBuilder {}: staging telemetry stagingStarts={} stagingCompletes={} stagingSkipsByDebounce={}",
+                guard.getUuidAsString(),
+                stagingStartsSinceLastSummary,
+                stagingCompletesSinceLastSummary,
+                stagingSkipsByDebounceSinceLastSummary
+        );
         lastPeriodicSummaryPlacementCount = placedSegments;
         pathBudgetUsedSinceLastPeriodic = 0;
         pathBudgetDeferredSinceLastPeriodic = 0;
+        stagingStartsSinceLastSummary = 0;
+        stagingCompletesSinceLastSummary = 0;
+        stagingSkipsByDebounceSinceLastSummary = 0;
     }
 
     private void maybeEmitLayerOneFaceCoverageInfo(ServerWorld world) {
@@ -7150,10 +7213,33 @@ public class MasonWallBuilderGoal extends Goal {
         if (wallStagingStartedTick >= 0L) {
             return;
         }
-        wallStagingStartedTick = world.getTime();
-        wallStagingTarget = resolveWallStagingTarget(world);
+        long now = world.getTime();
+        BlockPos stagingTarget = resolveWallStagingTarget(world);
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos jobPos = guard.getPairedJobPos();
+        boolean unchangedFromPreviousAttempt = Objects.equals(stagingTarget, lastStagingAttemptTarget)
+                && Objects.equals(chestPos, lastStagingAttemptChest)
+                && Objects.equals(jobPos, lastStagingAttemptJob);
+        long elapsedSinceAttempt = lastStagingAttemptTick < 0L ? Long.MAX_VALUE : Math.max(0L, now - lastStagingAttemptTick);
+        lastStagingAttemptTick = now;
+        lastStagingAttemptTarget = stagingTarget == null ? null : stagingTarget.toImmutable();
+        lastStagingAttemptChest = chestPos == null ? null : chestPos.toImmutable();
+        lastStagingAttemptJob = jobPos == null ? null : jobPos.toImmutable();
+        if (unchangedFromPreviousAttempt && elapsedSinceAttempt < WALL_STAGING_START_COOLDOWN_TICKS) {
+            stagingSkipsByDebounceSinceLastSummary++;
+            return;
+        }
+        if (now < nextStagingEligibleTick) {
+            stagingSkipsByDebounceSinceLastSummary++;
+            return;
+        }
+        wallStagingStartedTick = now;
+        nextStagingEligibleTick = now + WALL_STAGING_START_COOLDOWN_TICKS;
+        wallStagingTarget = stagingTarget;
         stagingReasonActive = reason;
-        LOGGER.info("MasonWallBuilder {}: wall_staging_start reason={} target={} chest={} job={}",
+        stagingStartsSinceLastSummary++;
+        logWallStagingRateLimited(world, "start", reason, stagingTarget,
+                "MasonWallBuilder {}: wall_staging_start reason={} target={} chest={} job={}",
                 guard.getUuidAsString(),
                 reason,
                 wallStagingTarget == null ? "none" : wallStagingTarget.toShortString(),
