@@ -309,6 +309,7 @@ public class MasonWallBuilderGoal extends Goal {
     private int sortieCandidateCountSamples = 0;
     private int sortieCandidateCountSum = 0;
     private int obstaclesCleared = 0;
+    private int groundLayerPlantClears = 0;
     private int protectedObstaclesSkipped = 0;
     private int unbreakableObstaclesSkipped = 0;
     private long obstacleBreakTick = Long.MIN_VALUE;
@@ -617,6 +618,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieActivationTick = -1L;
         sortieNoNetProgressGraceSuppressedLogged = false;
         obstaclesCleared = 0;
+        groundLayerPlantClears = 0;
         protectedObstaclesSkipped = 0;
         unbreakableObstaclesSkipped = 0;
         obstacleBreakTick = Long.MIN_VALUE;
@@ -1837,6 +1839,22 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        if (tryClearGroundLayerPlantsForSegment(world, segmentTarget)) {
+            if (isWithinSegmentInteractionReach(segmentTarget) && hasAcceptablePlacementLine(world, segmentTarget)) {
+                transitionToPlaceBlock(world, segmentTarget, "ground_layer_plant_cleared_move_recovery");
+                tickPlaceBlock(world);
+                return;
+            }
+            LOGGER.debug("MasonWallBuilder {}: movement_ground_layer_plant_cleared_retrying segment={} navTarget={}",
+                    guard.getUuidAsString(),
+                    segmentTarget.toShortString(),
+                    attemptedNavTarget.toShortString());
+            activeMoveTarget = null;
+            resetActiveMoveProgressTracking(world);
+            resetPathFailureState();
+            return;
+        }
+
         if (tryClearObstructionsForSegment(world, segmentTarget, attemptedNavTarget)) {
             LOGGER.debug("MasonWallBuilder {}: movement_obstruction_cleared_retrying segment={} navTarget={}",
                     guard.getUuidAsString(),
@@ -2377,6 +2395,12 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        if (tryClearGroundLayerPlantsForSegment(world, target)) {
+            LOGGER.debug("MasonWallBuilder {}: placement_prewrite_ground_layer_plant_cleared target={}",
+                    guard.getUuidAsString(),
+                    target.toShortString());
+        }
+
         // Check we still have wall blocks in our chest
         BlockPos chestPos = guard.getPairedChestPos();
         if (chestPos == null) {
@@ -2781,8 +2805,9 @@ public class MasonWallBuilderGoal extends Goal {
         }
         obstaclesCleared++;
         String reasonCode = "cleared_obstacle";
-        if (isLowCostClearableWallObstacle(state) && obstaclePos.getY() == segmentPos.getY()) {
-            reasonCode = "cleared_ground_plant";
+        if (isGroundLayerPlantClearCandidate(segmentPos, obstaclePos, state)) {
+            reasonCode = "ground_layer_plant_clears";
+            groundLayerPlantClears++;
             markPlantClearedForRetry(world, segmentPos);
         }
         LOGGER.debug("MasonWallBuilder {}: cleared_obstacle segment={} obstacle={} block={} reason={}",
@@ -2792,6 +2817,43 @@ public class MasonWallBuilderGoal extends Goal {
                 state.getBlock().getTranslationKey(),
                 reasonCode);
         return ObstacleClearanceResult.CLEARED_THIS_TICK;
+    }
+
+    private boolean tryClearGroundLayerPlantsForSegment(ServerWorld world, BlockPos segmentTarget) {
+        if (!isGroundLayerSegmentTarget(segmentTarget)) {
+            return false;
+        }
+        boolean clearedAny = false;
+        for (BlockPos candidate : new BlockPos[]{segmentTarget, segmentTarget.up()}) {
+            BlockState state = world.getBlockState(candidate);
+            if (!isGroundLayerPlantClearCandidate(segmentTarget, candidate, state)) {
+                continue;
+            }
+            ObstacleClearanceResult result = clearObstacleAt(world, segmentTarget, candidate);
+            if (result == ObstacleClearanceResult.PROTECTED_OBSTACLE
+                    || result == ObstacleClearanceResult.UNBREAKABLE_OBSTACLE) {
+                return clearedAny;
+            }
+            if (world.isAir(candidate)) {
+                clearedAny = true;
+            }
+        }
+        return clearedAny;
+    }
+
+    private boolean isGroundLayerSegmentTarget(BlockPos segmentTarget) {
+        return getPlannedSegmentLayer(segmentTarget) == 1;
+    }
+
+    private boolean isGroundLayerPlantClearCandidate(BlockPos segmentPos, BlockPos obstaclePos, BlockState state) {
+        if (!isLowCostClearableWallObstacle(state)) {
+            return false;
+        }
+        if (!isGroundLayerSegmentTarget(segmentPos)) {
+            return false;
+        }
+        int dy = obstaclePos.getY() - segmentPos.getY();
+        return dy == 0 || dy == 1;
     }
 
     private boolean isProtectedObstacle(ServerWorld world, BlockPos pos, BlockState state) {
@@ -4593,7 +4655,7 @@ public class MasonWallBuilderGoal extends Goal {
         nextWaitForStockReplanAttemptTick = world != null
                 ? world.getTime() + WAIT_FOR_STOCK_MIN_REPLAN_INTERVAL_TICKS
                 : 0L;
-        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={}",
+        LOGGER.info("MasonWallBuilder {}: build cycle ended reason={} placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} ground_layer_plant_clears={}",
                 guard.getUuidAsString(),
                 cycleEndReason.logValue,
                 placedSegments,
@@ -4603,7 +4665,8 @@ public class MasonWallBuilderGoal extends Goal {
                 placementRejectedByStatePolicy,
                 pathRetriesSinceCycleStart,
                 hardUnreachableSinceCycleStart,
-                deferredOrSkippedSinceCycleStart);
+                deferredOrSkippedSinceCycleStart,
+                groundLayerPlantClears);
     }
 
     private void resetWaitForStockProceedLogState() {
@@ -5008,7 +5071,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} ground_layer_plant_clears={} stage={} perfMode={} placeBlockTarget={} placeBlockReason={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -5018,6 +5081,7 @@ public class MasonWallBuilderGoal extends Goal {
                     pathRetriesSinceCycleStart,
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
+                    groundLayerPlantClears,
                     stage,
                     adaptivePerfMode.logValue,
                     stalledTarget,
@@ -5038,7 +5102,7 @@ public class MasonWallBuilderGoal extends Goal {
                     world,
                     "periodic_cycle_summary",
                     PERIODIC_INFO_INTERVAL_TICKS,
-                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} stage={} perfMode={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
+                    "MasonWallBuilder {}: periodic summary placements={} placementAttempts={} placementWriteSuccess={} placementPostVerifySuccess={} placementRejectedByStatePolicy={} retries={} hard_unreachable={} deferred_or_skipped={} ground_layer_plant_clears={} stage={} perfMode={} suppressedRegions={} oldestSuppressionAgeTicks={} placementsSinceLastSuppression={} pathBudgetUsed={} pathBudgetDeferred={} avgCandidatesPerSortie={} topFailureReasons={} failureCounterOverflow={} invalidStageEvalSkips={} evalCallsByStage={}",
                     guard.getUuidAsString(),
                     placedSegments,
                     placementAttempts,
@@ -5048,6 +5112,7 @@ public class MasonWallBuilderGoal extends Goal {
                     pathRetriesSinceCycleStart,
                     hardUnreachableSinceCycleStart,
                     deferredOrSkippedSinceCycleStart,
+                    groundLayerPlantClears,
                     stage,
                     adaptivePerfMode.logValue,
                     suppressedRegionCount,
@@ -5913,7 +5978,7 @@ public class MasonWallBuilderGoal extends Goal {
 
     private void logSortieSummaryIfActive() {
         if (!sortieActive) return;
-        logDetailed("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={} nearestFallbackSuppressedByLayerOneLap={}",
+        logDetailed("MasonWallBuilder {}: sortie_end_summary anchor={} layer={} transientRetries={} fallbackTargets={} hard_unreachable_marked={} obstaclesCleared={} ground_layer_plant_clears={} protectedObstaclesSkipped={} unbreakableObstaclesSkipped={} nearestFallbackSuppressedByLayerOneLap={}",
                 guard.getUuidAsString(),
                 activeAnchorPos == null ? "none" : activeAnchorPos.toShortString(),
                 sortieActiveLayer,
@@ -5921,6 +5986,7 @@ public class MasonWallBuilderGoal extends Goal {
                 sortieFallbackTargetsTried,
                 sortieHardUnreachableMarked,
                 obstaclesCleared,
+                groundLayerPlantClears,
                 protectedObstaclesSkipped,
                 unbreakableObstaclesSkipped,
                 sortieNearestFallbackSuppressedByLayerOneLap);
@@ -5948,6 +6014,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieCandidatesFallbackAccepted = 0;
         sortieNearestFallbackSuppressedByLayerOneLap = false;
         obstaclesCleared = 0;
+        groundLayerPlantClears = 0;
         protectedObstaclesSkipped = 0;
         unbreakableObstaclesSkipped = 0;
     }
