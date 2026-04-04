@@ -3050,6 +3050,10 @@ public class MasonWallBuilderGoal extends Goal {
         if (activeLayer < 1) {
             return false;
         }
+        boolean hasUnfinishedLayerOneSegments = hasUnfinishedLayerOneSegments(world);
+        if (activeLayer > 1 && hasUnfinishedLayerOneSegments) {
+            return false;
+        }
         boolean preferNonQuarantinedBands = hasNonQuarantinedBuildableSegments(world, activeLayer);
         int buildablePoolSize = countBuildableSegmentsForLayer(world, activeLayer, preferNonQuarantinedBands, false);
         boolean preferNonCycleExcludedBands = hasNonCycleExcludedBuildableSegments(world, activeLayer, preferNonQuarantinedBands);
@@ -3075,6 +3079,13 @@ public class MasonWallBuilderGoal extends Goal {
                     : findNextIndexAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchor == null) {
                 break;
+            }
+            int anchorLayer = getSegmentLayer(world, anchor);
+            if (anchorLayer > 1 && hasUnfinishedLayerOneSegments) {
+                logLayerOrderViolationGuard("startNextSortie", anchor, anchorLayer);
+                markSkippedSegment(world, anchor, "layer_order_violation_guard");
+                anchorAttempts++;
+                continue;
             }
             if (dominantSelection != null && dominantSelection.forcedFromRegion() != null) {
                 forcedRotationFromRegion = dominantSelection.forcedFromRegion();
@@ -3139,6 +3150,10 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private BlockPos findNextIndexAnchor(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
+        boolean hasUnfinishedLayerOneSegments = hasUnfinishedLayerOneSegments(world);
+        if (activeLayer > 1 && hasUnfinishedLayerOneSegments) {
+            return null;
+        }
         if (isLayerOneFirstLapEnforced(world)) {
             return findNextLayerOneLapAnchor(world, preferNonQuarantinedBands, preferNonCycleExcludedBands);
         }
@@ -3162,6 +3177,11 @@ public class MasonWallBuilderGoal extends Goal {
             }
             if (tryRecoverSkippedSegmentIfEligible(world, retryCandidate, "hard_queue_retry")
                     && isBuildableCandidate(world, retryCandidate)) {
+                int retryCandidateLayer = getSegmentLayer(world, retryCandidate);
+                if (retryCandidateLayer > 1 && hasUnfinishedLayerOneSegments) {
+                    logLayerOrderViolationGuard("findNextIndexAnchor:hard_queue_retry", retryCandidate, retryCandidateLayer);
+                    continue;
+                }
                 return retryCandidate;
             }
         }
@@ -3177,6 +3197,11 @@ public class MasonWallBuilderGoal extends Goal {
         } else {
             BlockPos rescannedAvailable = findFirstAvailableSegmentForLayer(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (rescannedAvailable != null) {
+                int rescannedLayer = getSegmentLayer(world, rescannedAvailable);
+                if (rescannedLayer > 1 && hasUnfinishedLayerOneSegments) {
+                    logLayerOrderViolationGuard("findNextIndexAnchor:rescanned_available", rescannedAvailable, rescannedLayer);
+                    return null;
+                }
                 return rescannedAvailable;
             }
         }
@@ -3186,7 +3211,12 @@ public class MasonWallBuilderGoal extends Goal {
                 if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pivotCandidate, activeLayer)) {
                     // continue scanning for a non-excluded anchor when possible
                 } else {
-                    return pivotCandidate;
+                    int pivotLayer = getSegmentLayer(world, pivotCandidate);
+                    if (pivotLayer > 1 && hasUnfinishedLayerOneSegments) {
+                        logLayerOrderViolationGuard("findNextIndexAnchor:pivot", pivotCandidate, pivotLayer);
+                    } else {
+                        return pivotCandidate;
+                    }
                 }
             }
         }
@@ -3206,6 +3236,11 @@ public class MasonWallBuilderGoal extends Goal {
                 continue;
             }
             if (getSegmentLayer(world, candidate) == activeLayer && isBuildableCandidate(world, candidate)) {
+                int candidateLayer = getSegmentLayer(world, candidate);
+                if (candidateLayer > 1 && hasUnfinishedLayerOneSegments) {
+                    logLayerOrderViolationGuard("findNextIndexAnchor:index_scan", candidate, candidateLayer);
+                    continue;
+                }
                 return candidate;
             }
         }
@@ -3513,6 +3548,14 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private List<BlockPos> buildLocalSortieCandidates(ServerWorld world, BlockPos anchor, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
+        boolean hasUnfinishedLayerOneSegments = hasUnfinishedLayerOneSegments(world);
+        if (activeLayer > 1 && hasUnfinishedLayerOneSegments) {
+            int anchorLayer = getSegmentLayer(world, anchor);
+            if (anchorLayer > 1) {
+                logLayerOrderViolationGuard("buildLocalSortieCandidates:anchor", anchor, anchorLayer);
+            }
+            return List.of();
+        }
         int radiusSq = LOCAL_SORTIE_RADIUS * LOCAL_SORTIE_RADIUS;
         List<BlockPos> local = new ArrayList<>();
         long now = world.getTime();
@@ -3525,6 +3568,11 @@ public class MasonWallBuilderGoal extends Goal {
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(pos, activeLayer)) continue;
             if (isSegmentInCooldown(pos, now)) continue;
             if (!isBuildableCandidate(world, pos)) continue;
+            int segmentLayer = getSegmentLayer(world, pos);
+            if (segmentLayer > 1 && hasUnfinishedLayerOneSegments) {
+                logLayerOrderViolationGuard("buildLocalSortieCandidates:candidate", pos, segmentLayer);
+                continue;
+            }
             if (anchor.getSquaredDistance(pos) <= radiusSq) {
                 local.add(pos);
             }
@@ -3601,6 +3649,33 @@ public class MasonWallBuilderGoal extends Goal {
             }
         }
         return accepted;
+    }
+
+    private boolean hasUnfinishedLayerOneSegments(ServerWorld world) {
+        if (world == null || cycleBaselineGroundYByColumn.isEmpty()) {
+            return false;
+        }
+        for (BlockPos segment : pendingSegments) {
+            if (isTerminalSegment(segment) || isGatePosition(segment)) {
+                continue;
+            }
+            int plannedLayer = getPlannedSegmentLayer(segment);
+            if (plannedLayer != 1) {
+                continue;
+            }
+            if (!isPlacedWallBlock(world.getBlockState(segment))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void logLayerOrderViolationGuard(String source, BlockPos candidate, int candidateLayer) {
+        LOGGER.warn("MasonWallBuilder {}: layer_order_violation_guard source={} layer={} candidate={}",
+                guard.getUuidAsString(),
+                source,
+                candidateLayer,
+                candidate.toShortString());
     }
 
     private double computeSortieCandidateScore(ServerWorld world, BlockPos anchor, BlockPos candidate, LayerOneDominanceContext dominance) {
