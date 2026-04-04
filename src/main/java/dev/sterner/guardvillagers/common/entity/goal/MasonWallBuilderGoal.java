@@ -323,6 +323,8 @@ public class MasonWallBuilderGoal extends Goal {
     private final Map<String, Integer> sortieAbortBandRepeatCounts = new HashMap<>();
     private final Map<BlockPos, String> sortieAbortSegmentBandKeys = new HashMap<>();
     private final Map<BlockPos, String> terminalSegmentReasons = new HashMap<>();
+    /** Per-cycle perimeter baseline map: packed (x,z) -> groundY used when planning. */
+    private final Map<Long, Integer> cycleBaselineGroundYByColumn = new HashMap<>();
     private final Deque<ProgressSnapshot> progressSnapshots = new ArrayDeque<>();
     private final Deque<ProgressSnapshot> retryDensitySnapshots = new ArrayDeque<>();
     private boolean retryDensityFallbackModeActive = false;
@@ -591,6 +593,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortBandRepeatCounts.clear();
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
+        cycleBaselineGroundYByColumn.clear();
         clearStagnationPivotState();
         stagnationSuppressionByRegion.clear();
         lastSuppressionAppliedTick = -1L;
@@ -712,6 +715,7 @@ public class MasonWallBuilderGoal extends Goal {
         sortieAbortBandRepeatCounts.clear();
         sortieAbortSegmentBandKeys.clear();
         terminalSegmentReasons.clear();
+        cycleBaselineGroundYByColumn.clear();
         clearStagnationPivotState();
         stagnationSuppressionByRegion.clear();
         lastSuppressionAppliedTick = -1L;
@@ -2117,6 +2121,34 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        int plannedLayer = getPlannedSegmentLayer(target);
+        if (plannedLayer == Integer.MIN_VALUE) {
+            placementRejectedByStatePolicy++;
+            localSortieQueue.pollFirst();
+            releaseSegmentClaim(world, target, "baseline_missing_deferred");
+            requeueSegmentWithCooldown(world, target, "metric_baseline_missing_deferred", SEGMENT_COOLDOWN_TICKS, "baseline_missing_deferred", -1);
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+        if (plannedLayer < 1 || plannedLayer > 3) {
+            placementRejectedByStatePolicy++;
+            localSortieQueue.pollFirst();
+            releaseSegmentClaim(world, target, "planned_layer_out_of_range_terminal");
+            terminalSegmentReasons.put(target.toImmutable(), "metric_planned_layer_out_of_range_terminal");
+            transitionSegmentState(world, target, SegmentState.IRRECOVERABLE, "planned_layer_out_of_range_terminal");
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+        if (isColumnAtOrAbovePlannedHeightCap(world, target)) {
+            placementRejectedByStatePolicy++;
+            localSortieQueue.pollFirst();
+            releaseSegmentClaim(world, target, "column_height_cap_reached");
+            transitionSegmentState(world, target, SegmentState.PLACED, "column_height_cap_reached");
+            clearSegmentFailureState(target);
+            stage = Stage.MOVE_TO_SEGMENT;
+            return;
+        }
+
         ObstacleClearanceResult clearance = prepareSegmentForPlacement(world, target);
         if (clearance == ObstacleClearanceResult.CLEARED_THIS_TICK) {
             if (prioritizePlantClearRetry) {
@@ -2473,6 +2505,21 @@ public class MasonWallBuilderGoal extends Goal {
             logDetailed("MasonWallBuilder {}: placement progress {}/{} ({}%)",
                     guard.getUuidAsString(), placed, total, percent);
         }
+    }
+
+    private boolean isColumnAtOrAbovePlannedHeightCap(ServerWorld world, BlockPos target) {
+        Integer baselineGroundY = cycleBaselineGroundYByColumn.get(packXZ(target.getX(), target.getZ()));
+        if (baselineGroundY == null) {
+            return false;
+        }
+        int placedHeight = 0;
+        for (int layer = 1; layer <= 3; layer++) {
+            BlockPos checkPos = new BlockPos(target.getX(), baselineGroundY + layer, target.getZ());
+            if (isPlacedWallBlock(world.getBlockState(checkPos))) {
+                placedHeight++;
+            }
+        }
+        return placedHeight >= 3;
     }
 
     private ObstacleClearanceResult prepareSegmentForPlacement(ServerWorld world, BlockPos target) {
@@ -3790,7 +3837,7 @@ public class MasonWallBuilderGoal extends Goal {
         int lowestLayer = Integer.MAX_VALUE;
         for (BlockPos pos : pendingSegments) {
             if (isBuildableCandidate(world, pos)) {
-                int layer = getSegmentLayer(world, pos);
+                int layer = getPlannedSegmentLayer(pos);
                 if (layer > 0 && layer < lowestLayer) {
                     lowestLayer = layer;
                 }
@@ -3799,9 +3846,21 @@ public class MasonWallBuilderGoal extends Goal {
         return lowestLayer == Integer.MAX_VALUE ? -1 : lowestLayer;
     }
 
+    private int getPlannedSegmentLayer(BlockPos pos) {
+        Integer baselineGroundY = cycleBaselineGroundYByColumn.get(packXZ(pos.getX(), pos.getZ()));
+        if (baselineGroundY == null) {
+            return Integer.MIN_VALUE;
+        }
+        return pos.getY() - baselineGroundY;
+    }
+
     private int getSegmentLayer(ServerWorld world, BlockPos pos) {
-        int groundY = getPerimeterColumnGroundY(world, pos.getX(), pos.getZ());
-        return pos.getY() - groundY;
+        int plannedLayer = getPlannedSegmentLayer(pos);
+        if (plannedLayer != Integer.MIN_VALUE) {
+            return plannedLayer;
+        }
+        int liveGroundY = getPerimeterColumnGroundY(world, pos.getX(), pos.getZ());
+        return pos.getY() - liveGroundY;
     }
 
     private boolean hasRemainingSegments(ServerWorld world) {
@@ -6246,9 +6305,12 @@ public class MasonWallBuilderGoal extends Goal {
         List<BlockPos> segments = new ArrayList<>();
         List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
         Map<BlockPos, Integer> groundByColumn = new HashMap<>(perimeterColumns.size());
+        cycleBaselineGroundYByColumn.clear();
 
         for (BlockPos column : perimeterColumns) {
-            groundByColumn.put(column, getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+            int groundY = getPerimeterColumnGroundY(world, column.getX(), column.getZ());
+            groundByColumn.put(column, groundY);
+            cycleBaselineGroundYByColumn.put(packXZ(column.getX(), column.getZ()), groundY);
         }
 
         for (int layer = 1; layer <= 3; layer++) {
