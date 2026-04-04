@@ -71,4 +71,60 @@ class MasonWallBuilderGoalTraversalTest {
         assertEquals(batched.sortiesWithMinCandidates(), batched.sortiesMeetingMinPlacements(),
                 "Every sortie with >=3 nearby candidates should place at least 3 segments");
     }
+
+    @Test
+    void layerOneFirstLapSelectionPolicy_wrapsMonotonicallyBeforeLapCompletion() {
+        List<BlockPos> perimeter = MasonWallBuilderGoal.computePerimeterTraversal(0, 0, 4, 3, 64);
+        int startIndex = perimeter.size() - 2;
+        int selections = perimeter.size() - 1;
+
+        List<BlockPos> selected = MasonWallBuilderGoal.simulateLayerOneFirstLapAnchorOrder(perimeter, startIndex, selections);
+
+        assertEquals(selections, selected.size(), "Should select each requested layer-one anchor before lap completion");
+        for (int i = 1; i < selected.size(); i++) {
+            int previousIndex = perimeter.indexOf(selected.get(i - 1));
+            int expectedIndex = (previousIndex + 1) % perimeter.size();
+            int actualIndex = perimeter.indexOf(selected.get(i));
+            assertEquals(expectedIndex, actualIndex,
+                    "Layer-one first-lap policy should advance by exactly one perimeter index (with wraparound)");
+        }
+    }
+
+    @Test
+    void layerOneFirstLapSelectionPolicy_skipsIntermittentBlockedSegmentsWithoutRegionPingPong() {
+        List<BlockPos> perimeter = MasonWallBuilderGoal.computePerimeterTraversal(0, 0, 5, 4, 64);
+        int startIndex = perimeter.size() - 1;
+        Set<Integer> temporarilyBlocked = Set.of(0, 2, 5, 9, 13);
+        int selections = perimeter.size() - temporarilyBlocked.size();
+
+        List<BlockPos> selected = MasonWallBuilderGoal.simulateLayerOneFirstLapAnchorOrderWithTemporaryBlocks(
+                perimeter,
+                startIndex,
+                temporarilyBlocked,
+                selections
+        );
+
+        assertEquals(selections, selected.size(), "Should still select all non-blocked first-lap anchors");
+        for (int i = 1; i < selected.size(); i++) {
+            int previousIndex = perimeter.indexOf(selected.get(i - 1));
+            int actualIndex = perimeter.indexOf(selected.get(i));
+            int expectedIndex = (previousIndex + 1) % perimeter.size();
+            while (temporarilyBlocked.contains(expectedIndex)) {
+                expectedIndex = (expectedIndex + 1) % perimeter.size();
+            }
+            assertEquals(expectedIndex, actualIndex,
+                    "Selection must continue forward around the perimeter, skipping blocked slots without region resets");
+        }
+    }
+
+    @Test
+    void pivotAnchorSelection_doesNotEscalateToHigherLayersWhenLayerOnePendingExists() {
+        List<Integer> segmentLayers = List.of(1, 2, 3, 2, 3);
+        List<Boolean> buildableStates = List.of(false, true, true, true, true);
+
+        int selectedLayer = MasonWallBuilderGoal.simulatePivotAnchorLayerSelection(segmentLayers, buildableStates, 1);
+
+        assertEquals(-1, selectedLayer,
+                "Pivot anchor selection must return null-equivalent when active layer has no buildable candidate");
+    }
 }

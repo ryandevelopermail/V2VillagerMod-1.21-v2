@@ -80,7 +80,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
         Optional<Inventory> inventory = getChestInventory(world, chestPos);
         this.forceReturnToJob = false;
-        WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid());
+        WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid(), chestPos);
         return inventory.filter(value -> !getCraftableRecipes(world, value, wallPolicy).isEmpty()).isPresent();
     }
 
@@ -137,7 +137,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                     return;
                 }
                 Inventory inventory = optionalInventory.get();
-                WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid());
+                WallProjectPolicyResolver.PolicyDecision wallPolicy = WallProjectPolicyResolver.resolve(world, guard.getBlockPos(), guard.getUuid(), chestPos);
                 List<MasonRecipe> craftableRecipes = getCraftableRecipes(world, inventory, wallPolicy);
                 if (craftableRecipes.isEmpty()) {
                     stage = Stage.DONE;
