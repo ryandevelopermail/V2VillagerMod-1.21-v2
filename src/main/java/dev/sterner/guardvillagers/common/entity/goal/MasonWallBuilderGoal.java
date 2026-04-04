@@ -256,6 +256,8 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean waitForStockProceedLogged = false;
     private int lastLoggedProceedWalls = -1;
     private int lastLoggedProceedThreshold = -1;
+    private boolean wasWaitForStockReadyLastTick = false;
+    private boolean stagingRequestedForCurrentReadyEdge = false;
     private long wallStagingStartedTick = -1L;
     private long nextStagingEligibleTick = 0L;
     private BlockPos wallStagingTarget = null;
@@ -549,6 +551,8 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockStartedTick = -1L;
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
+        wasWaitForStockReadyLastTick = false;
+        stagingRequestedForCurrentReadyEdge = false;
         resetWaitForStockProceedLogState();
         resetWallStagingCycleState();
         clearWallStagingState();
@@ -704,6 +708,8 @@ public class MasonWallBuilderGoal extends Goal {
         waitForStockStartedTick = -1L;
         nextWaitForStockDiagnosticTick = 0L;
         waitForStockTimeoutEscalated = false;
+        wasWaitForStockReadyLastTick = false;
+        stagingRequestedForCurrentReadyEdge = false;
         resetWaitForStockProceedLogState();
         resetWallStagingCycleState();
         clearWallStagingState();
@@ -1196,6 +1202,10 @@ public class MasonWallBuilderGoal extends Goal {
                 threshold,
                 ALLOW_COBBLESTONE_PLACEMENT_FALLBACK
         );
+        boolean isReadyNow = decision == WaitForStockDecision.MOVE_TO_SEGMENT;
+        if (isReadyNow && !wasWaitForStockReadyLastTick) {
+            stagingRequestedForCurrentReadyEdge = false;
+        }
         if (decision == WaitForStockDecision.MOVE_TO_SEGMENT) {
             boolean conversionWaitEnded = conversionWaitActive;
             if (conversionWaitEnded) {
@@ -1219,16 +1229,28 @@ public class MasonWallBuilderGoal extends Goal {
                 stage = resolvePostStagingStage();
             } else if (stagingSatisfiedThisCycle) {
                 stage = resolvePostStagingStage();
-            } else {
+            } else if (!stagingRequestedForCurrentReadyEdge) {
+                LOGGER.info("MasonWallBuilder {}: wall_staging_edge_triggered readyNow={} readyLastTick={} stage={} walls={} threshold={}",
+                        guard.getUuidAsString(),
+                        true,
+                        wasWaitForStockReadyLastTick,
+                        stage,
+                        availableWalls,
+                        threshold);
+                stagingRequestedForCurrentReadyEdge = true;
                 stage = Stage.MOVE_TO_STAGING;
                 beginWallStaging(world, "wait_for_wall_stock_ready");
+            } else {
+                guard.getNavigation().stop();
             }
             waitForStockReplanCooldownUntilTick = 0L;
+            wasWaitForStockReadyLastTick = isReadyNow;
             clearWaitForStockState();
             return;
         }
         if (decision == WaitForStockDecision.DONE) {
             conversionWaitActive = false;
+            wasWaitForStockReadyLastTick = isReadyNow;
             clearWaitForStockState();
             resetWaitForStockProceedLogState();
             completeCycle(CycleEndReason.OUT_OF_MATERIALS);
@@ -1248,8 +1270,10 @@ public class MasonWallBuilderGoal extends Goal {
             guard.getNavigation().stop();
             LOGGER.debug("MasonWallBuilder {}: waiting for stonecutting conversion (availableWalls={}, availableCobblestone={}, threshold={})",
                     guard.getUuidAsString(), availableWalls, availableCobblestone, threshold);
+            wasWaitForStockReadyLastTick = isReadyNow;
             return;
         }
+        wasWaitForStockReadyLastTick = isReadyNow;
     }
 
     private void tickMoveToStaging(ServerWorld world) {
