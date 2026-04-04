@@ -105,6 +105,8 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WAIT_FOR_STOCK_ESCALATION_TIMEOUT_TICKS = 160L;
     private static final long WAIT_FOR_STOCK_DIAGNOSTIC_INTERVAL_TICKS = 40L;
     private static final int MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK = 8;
+    private static final int LAYER_ONE_FIRST_LAP_FORWARD_WINDOW = MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK;
+    private static final int LAYER_ONE_FIRST_LAP_DEFER_METADATA_LIMIT = 6;
     private static final int COMPLETION_SWEEP_MAX_RETRIES_PER_SEGMENT = 3;
     private static final int MAX_OBSTACLE_BREAKS_PER_TICK = 1;
     private static final int PLACE_BLOCK_NON_PLACEMENT_ESCALATION_THRESHOLD = 4;
@@ -2368,6 +2370,9 @@ public class MasonWallBuilderGoal extends Goal {
         if (world == null || cooldownTargets.isEmpty() || findLowestPendingLayer(world) != 1) {
             return;
         }
+        if (isLayerOneFirstLapEnforced(world)) {
+            return;
+        }
         BlockPos source = cooldownTargets.get(0);
         BlockPos sameFaceAnchor = findBootstrapFallbackAnchorOnSameFace(world, source);
         if (sameFaceAnchor != null) {
@@ -3027,8 +3032,10 @@ public class MasonWallBuilderGoal extends Goal {
         String forcedRotationFromRegion = null;
         while (anchorAttempts < MAX_SORTIE_ANCHOR_ATTEMPTS_PER_TICK) {
             boolean enforceLayerOneFirstLap = isLayerOneFirstLapEnforced(world);
+            boolean allowFirstLapTemporaryOverride = enforceLayerOneFirstLap
+                    && areLayerOneForwardWindowCandidatesTemporarilyBlocked(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             DominantAnchorSelection dominantSelection = null;
-            if (layerOneDominance.active() && !enforceLayerOneFirstLap) {
+            if (layerOneDominance.active() && (!enforceLayerOneFirstLap || allowFirstLapTemporaryOverride)) {
                 dominantSelection = findDominantLayerOneAnchor(world, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands, layerOneDominance);
             }
             BlockPos anchor = dominantSelection != null
@@ -3043,7 +3050,8 @@ public class MasonWallBuilderGoal extends Goal {
 
             List<BlockPos> anchorBatch = buildLocalSortieCandidates(world, anchor, activeLayer, preferNonQuarantinedBands, preferNonCycleExcludedBands);
             if (anchorBatch.size() < MIN_SEGMENTS_PER_SORTIE) {
-                boolean suppressNearestFallbackForFirstLap = enforceLayerOneFirstLap || (activeLayer == 1 && !isLayerOneAggressiveHeuristicsEnabled(activeLayer));
+                boolean suppressNearestFallbackForFirstLap = (enforceLayerOneFirstLap && !allowFirstLapTemporaryOverride)
+                        || (activeLayer == 1 && !isLayerOneAggressiveHeuristicsEnabled(activeLayer));
                 if (suppressNearestFallbackForFirstLap) {
                     sortieNearestFallbackSuppressedByLayerOneLap = true;
                 } else {
@@ -3184,6 +3192,7 @@ public class MasonWallBuilderGoal extends Goal {
 
         int visited = 0;
         long now = world.getTime();
+        int deferMetadataRecorded = 0;
         while (visited < pendingSegments.size()) {
             int candidateIndex = layerOneCursorIndex;
             BlockPos candidate = pendingSegments.get(candidateIndex);
@@ -3213,10 +3222,28 @@ public class MasonWallBuilderGoal extends Goal {
             if (isRetryDensitySuppressedSegment(world, candidate)) {
                 continue;
             }
+            if (isSegmentClaimedByOther(world, candidate)) {
+                if (deferMetadataRecorded < LAYER_ONE_FIRST_LAP_DEFER_METADATA_LIMIT) {
+                    registerSegmentFailureMetadata(world, candidate, null, "layer_one_first_lap_claimed");
+                    deferMetadataRecorded++;
+                }
+                continue;
+            }
             if (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now)) {
+                if (deferMetadataRecorded < LAYER_ONE_FIRST_LAP_DEFER_METADATA_LIMIT) {
+                    registerSegmentFailureMetadata(world, candidate, null, "layer_one_first_lap_quarantined");
+                    deferMetadataRecorded++;
+                }
                 continue;
             }
             if (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, 1)) {
+                continue;
+            }
+            if (isSegmentInCooldown(candidate, now)) {
+                if (deferMetadataRecorded < LAYER_ONE_FIRST_LAP_DEFER_METADATA_LIMIT) {
+                    registerSegmentFailureMetadata(world, candidate, null, "layer_one_first_lap_cooldown");
+                    deferMetadataRecorded++;
+                }
                 continue;
             }
             if (isBuildableCandidate(world, candidate)) {
@@ -3378,6 +3405,45 @@ public class MasonWallBuilderGoal extends Goal {
             return false;
         }
         return countBuildableSegmentsForLayer(world, 1, false, false) > 0;
+    }
+
+    private boolean areLayerOneForwardWindowCandidatesTemporarilyBlocked(ServerWorld world,
+                                                                         int activeLayer,
+                                                                         boolean preferNonQuarantinedBands,
+                                                                         boolean preferNonCycleExcludedBands) {
+        if (world == null || activeLayer != 1 || pendingSegments.isEmpty()) {
+            return false;
+        }
+        initializeLayerOneLapStateIfNeeded();
+        if (layerOneCursorIndex < 0 || layerOneCursorIndex >= pendingSegments.size()) {
+            return false;
+        }
+        long now = world.getTime();
+        int checked = 0;
+        int considered = 0;
+        int blocked = 0;
+        int size = pendingSegments.size();
+        while (checked < Math.min(LAYER_ONE_FIRST_LAP_FORWARD_WINDOW, size)) {
+            int idx = (layerOneCursorIndex + checked) % size;
+            BlockPos candidate = pendingSegments.get(idx);
+            checked++;
+            if (getSegmentLayer(world, candidate) != 1 || isGatePosition(candidate) || isTerminalSegment(candidate)) {
+                continue;
+            }
+            if (isPivotExcludedSegment(world, idx, candidate)
+                    || isRetryDensitySuppressedSegment(world, candidate)
+                    || (preferNonCycleExcludedBands && isSegmentInCycleExcludedBand(candidate, 1))) {
+                continue;
+            }
+            considered++;
+            boolean temporarilyBlocked = isSegmentInCooldown(candidate, now)
+                    || (preferNonQuarantinedBands && isSegmentBandQuarantined(world, candidate, now))
+                    || isSegmentClaimedByOther(world, candidate);
+            if (temporarilyBlocked) {
+                blocked++;
+            }
+        }
+        return considered > 0 && blocked == considered;
     }
 
     private BlockPos findFirstAvailableSegmentForLayer(ServerWorld world, int activeLayer, boolean preferNonQuarantinedBands, boolean preferNonCycleExcludedBands) {
@@ -6431,6 +6497,30 @@ public class MasonWallBuilderGoal extends Goal {
         for (int i = 0; i < maxSelections; i++) {
             selected.add(orderedSegments.get(cursor));
             cursor = (cursor + 1) % size;
+        }
+        return selected;
+    }
+
+    static List<BlockPos> simulateLayerOneFirstLapAnchorOrderWithTemporaryBlocks(List<BlockPos> orderedSegments,
+                                                                                  int startIndex,
+                                                                                  Set<Integer> temporarilyBlockedIndices,
+                                                                                  int selections) {
+        List<BlockPos> selected = new ArrayList<>();
+        if (orderedSegments.isEmpty() || selections <= 0) {
+            return selected;
+        }
+        int size = orderedSegments.size();
+        int cursor = Math.floorMod(startIndex, size);
+        int maxSelections = Math.min(selections, size);
+        int iterations = 0;
+        while (selected.size() < maxSelections && iterations < size * 2) {
+            int candidateIndex = cursor;
+            cursor = (cursor + 1) % size;
+            iterations++;
+            if (temporarilyBlockedIndices.contains(candidateIndex)) {
+                continue;
+            }
+            selected.add(orderedSegments.get(candidateIndex));
         }
         return selected;
     }
