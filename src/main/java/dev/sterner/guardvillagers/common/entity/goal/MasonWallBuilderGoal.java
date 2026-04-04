@@ -395,6 +395,12 @@ public class MasonWallBuilderGoal extends Goal {
     private int sameCycleSuppressionMaterialSignature = 0;
     /** Tick after which suppression may clear due to retry cooldown eligibility changes. */
     private long sameCycleSuppressionRetryCooldownUntilTick = 0L;
+    /** Frozen terrain baseline captured once per active wall project (keyed by perimeter x/z column). */
+    private final Map<Long, Integer> projectBaselineGroundYByColumn = new HashMap<>();
+    /** Anchor identity that owns {@link #projectBaselineGroundYByColumn}. */
+    private BlockPos projectBaselineAnchor = null;
+    /** Perimeter signature identity that owns {@link #projectBaselineGroundYByColumn}. */
+    private Integer projectBaselinePerimeterSignatureHash = null;
 
     public MasonWallBuilderGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -831,11 +837,13 @@ public class MasonWallBuilderGoal extends Goal {
         if (wallProjectState.isProjectComplete(world.getRegistryKey(), anchorPos)) {
             LOGGER.debug("MasonWallBuilder {}: wall project already complete for anchor {}",
                     guard.getUuidAsString(), anchorPos.toShortString());
+            clearProjectBaselineGround();
             return false;
         }
+        ensureProjectBaselineGround(world, rect, anchorPos, perimeterSignatureHash);
 
         // 3. Compute full wall segment plan, then derive an active bootstrap subset for startup.
-        List<BlockPos> allSegments = computeWallSegments(world, rect);
+        List<BlockPos> allSegments = computeWallSegments(world, rect, projectBaselineGroundYByColumn);
         if (allSegments.isEmpty()) {
             return false;
         }
@@ -4188,6 +4196,7 @@ public class MasonWallBuilderGoal extends Goal {
         cachedWallRect = null;
         cachedWallRectAnchor = null;
         cachedPoiFootprintSignature = null;
+        clearProjectBaselineGround();
         failureBandWindows.clear();
         noProgressAbortBandWindows.clear();
         quarantinedBandUntilTick.clear();
@@ -6242,26 +6251,32 @@ public class MasonWallBuilderGoal extends Goal {
      * groundY+1, groundY+2, and groundY+3.
      * Layers are appended in that order so planning remains layer-first.
      */
-    private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect) {
+    private List<BlockPos> computeWallSegments(ServerWorld world, WallRect rect, Map<Long, Integer> baselineGroundByColumn) {
         List<BlockPos> segments = new ArrayList<>();
         List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
-        Map<BlockPos, Integer> groundByColumn = new HashMap<>(perimeterColumns.size());
-
-        for (BlockPos column : perimeterColumns) {
-            groundByColumn.put(column, getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+        Map<Long, Integer> resolvedBaselineByColumn = new HashMap<>(perimeterColumns.size());
+        for (BlockPos perimeterColumn : perimeterColumns) {
+            long columnKey = perimeterColumnKey(perimeterColumn.getX(), perimeterColumn.getZ());
+            int groundY = baselineGroundByColumn.getOrDefault(
+                    columnKey,
+                    getPerimeterColumnGroundY(world, perimeterColumn.getX(), perimeterColumn.getZ()));
+            resolvedBaselineByColumn.put(columnKey, groundY);
         }
 
-        for (int layer = 1; layer <= 3; layer++) {
-            for (BlockPos perimeterColumn : perimeterColumns) {
-                int groundY = groundByColumn.get(perimeterColumn);
-                BlockPos targetPos = new BlockPos(perimeterColumn.getX(), groundY + layer, perimeterColumn.getZ());
+        List<BlockPos> targetSegments = computeWallSegmentTargetsFromBaseline(perimeterColumns, resolvedBaselineByColumn);
+        for (BlockPos targetPos : targetSegments) {
                 if (world.getBlockState(targetPos).isOf(Blocks.DIRT_PATH)) continue;
                 if (world.getBlockState(targetPos).isOf(Blocks.COBBLESTONE)) continue;
                 segments.add(targetPos.toImmutable());
-            }
         }
 
-        logPerimeterSampleColumns(world, perimeterColumns, groundByColumn);
+        Map<BlockPos, Integer> groundByColumnForLog = new HashMap<>(perimeterColumns.size());
+        for (BlockPos perimeterColumn : perimeterColumns) {
+            groundByColumnForLog.put(
+                    perimeterColumn,
+                    resolvedBaselineByColumn.getOrDefault(perimeterColumnKey(perimeterColumn.getX(), perimeterColumn.getZ()), 0));
+        }
+        logPerimeterSampleColumns(perimeterColumns, groundByColumnForLog);
 
         // Ensure at least 1 forced gap (remove last segment if the wall would be fully closed)
         if (!segments.isEmpty()) {
@@ -6274,16 +6289,29 @@ public class MasonWallBuilderGoal extends Goal {
         return segments;
     }
 
+    static List<BlockPos> computeWallSegmentTargetsFromBaseline(List<BlockPos> perimeterColumns, Map<Long, Integer> baselineGroundByColumn) {
+        List<BlockPos> targets = new ArrayList<>(perimeterColumns.size() * 3);
+        for (int layer = 1; layer <= 3; layer++) {
+            for (BlockPos perimeterColumn : perimeterColumns) {
+                int groundY = baselineGroundByColumn.getOrDefault(
+                        perimeterColumnKey(perimeterColumn.getX(), perimeterColumn.getZ()),
+                        perimeterColumn.getY());
+                targets.add(new BlockPos(perimeterColumn.getX(), groundY + layer, perimeterColumn.getZ()));
+            }
+        }
+        return targets;
+    }
+
     private int getPerimeterColumnGroundY(ServerWorld world, int x, int z) {
         return world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z) - 1;
     }
 
-    private void logPerimeterSampleColumns(ServerWorld world, List<BlockPos> perimeterColumns, Map<BlockPos, Integer> groundByColumn) {
+    private void logPerimeterSampleColumns(List<BlockPos> perimeterColumns, Map<BlockPos, Integer> groundByColumn) {
         if (!LOGGER.isDebugEnabled() || perimeterColumns.isEmpty()) return;
         int sampleCount = Math.min(5, perimeterColumns.size());
         for (int i = 0; i < sampleCount; i++) {
             BlockPos column = perimeterColumns.get(i);
-            int groundY = groundByColumn.getOrDefault(column, getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+            int groundY = groundByColumn.getOrDefault(column, 0);
             LOGGER.debug("MasonWallBuilder {}: terrain_relative_column_sample column={} groundY={} targets=[{},{},{}]",
                     guard.getUuidAsString(),
                     column.toShortString(),
@@ -6292,6 +6320,35 @@ public class MasonWallBuilderGoal extends Goal {
                     groundY + 2,
                     groundY + 3);
         }
+    }
+
+    private void ensureProjectBaselineGround(ServerWorld world, WallRect rect, BlockPos anchorPos, int perimeterSignatureHash) {
+        boolean sameIdentity = anchorPos.equals(projectBaselineAnchor)
+                && Objects.equals(projectBaselinePerimeterSignatureHash, perimeterSignatureHash);
+        if (!sameIdentity) {
+            clearProjectBaselineGround();
+        }
+        if (!projectBaselineGroundYByColumn.isEmpty()) {
+            return;
+        }
+        List<BlockPos> perimeterColumns = computePerimeterTraversal(rect.minX(), rect.minZ(), rect.maxX(), rect.maxZ());
+        for (BlockPos column : perimeterColumns) {
+            projectBaselineGroundYByColumn.put(
+                    perimeterColumnKey(column.getX(), column.getZ()),
+                    getPerimeterColumnGroundY(world, column.getX(), column.getZ()));
+        }
+        projectBaselineAnchor = anchorPos.toImmutable();
+        projectBaselinePerimeterSignatureHash = perimeterSignatureHash;
+    }
+
+    private void clearProjectBaselineGround() {
+        projectBaselineGroundYByColumn.clear();
+        projectBaselineAnchor = null;
+        projectBaselinePerimeterSignatureHash = null;
+    }
+
+    static long perimeterColumnKey(int x, int z) {
+        return BlockPos.asLong(x, 0, z);
     }
 
     static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ) {
@@ -6318,6 +6375,12 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         return perimeter;
+    }
+
+    static List<BlockPos> computePerimeterTraversal(int minX, int minZ, int maxX, int maxZ, int y) {
+        return computePerimeterTraversal(minX, minZ, maxX, maxZ).stream()
+                .map(pos -> new BlockPos(pos.getX(), y, pos.getZ()))
+                .toList();
     }
 
     static TraversalSimulationResult simulateSequentialTraversal(List<BlockPos> orderedSegments, BlockPos startPos) {
