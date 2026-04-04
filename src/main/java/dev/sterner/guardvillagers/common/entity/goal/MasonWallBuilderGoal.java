@@ -201,7 +201,6 @@ public class MasonWallBuilderGoal extends Goal {
     private static final long WALL_STAGING_TIMEOUT_TICKS = 120L;
     private static final long WALL_STAGING_START_COOLDOWN_TICKS = 30L;
     private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
-    private static final long STAGING_REENTRY_GUARD_WINDOW_TICKS = 40L;
     private static final long WALL_STAGING_LOG_RATE_LIMIT_TICKS = 40L;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
@@ -1310,7 +1309,7 @@ public class MasonWallBuilderGoal extends Goal {
                     stagingTarget.toShortString(),
                     Math.max(0L, world.getTime() - wallStagingStartedTick));
             clearWallStagingState();
-            stage = resolvePostStagingStage();
+            stage = Stage.MOVE_TO_SEGMENT;
             return;
         }
 
@@ -7292,17 +7291,12 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private void beginWallStaging(ServerWorld world, String reason) {
-        if (stagingSatisfiedThisCycle) {
-            long now = world.getTime();
-            if (stagingCompletedTick >= 0L && now - stagingCompletedTick <= STAGING_REENTRY_GUARD_WINDOW_TICKS) {
-                LOGGER.warn("MasonWallBuilder {}: staging_reentry_guard_triggered reason={} activeReason={} completedTick={} now={} stage={}",
-                        guard.getUuidAsString(),
-                        reason,
-                        stagingReasonActive == null ? "none" : stagingReasonActive,
-                        stagingCompletedTick,
-                        now,
-                        stage);
-            }
+        if (stage != Stage.MOVE_TO_STAGING || stagingSatisfiedThisCycle) {
+            LOGGER.warn("MasonWallBuilder {}: staging_reentry_blocked reason={} stage={} stagingSatisfiedThisCycle={}",
+                    guard.getUuidAsString(),
+                    reason,
+                    stage,
+                    stagingSatisfiedThisCycle);
             return;
         }
         if (wallStagingStartedTick >= 0L) {
