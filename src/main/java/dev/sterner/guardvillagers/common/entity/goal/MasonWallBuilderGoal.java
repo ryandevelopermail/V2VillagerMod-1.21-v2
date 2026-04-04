@@ -1642,7 +1642,8 @@ public class MasonWallBuilderGoal extends Goal {
         int verticalSearchMin = -2;
         int verticalSearchMax = 2;
         int searchRadius = NEAREST_STANDABLE_SEARCH_RADIUS;
-        if (dominantFailure == SortieFailureCategory.STANDABILITY_REJECTED) {
+        if (dominantFailure == SortieFailureCategory.STANDABILITY_REJECTED_HARD
+                || dominantFailure == SortieFailureCategory.STANDABILITY_REJECTED_CLEARABLE_VEGETATION) {
             verticalSearchMin = -3;
             verticalSearchMax = 3;
         }
@@ -1731,10 +1732,13 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private boolean addNavigationCandidate(ServerWorld world, BlockPos segmentPos, BlockPos candidatePos, Map<BlockPos, NavigationCandidate> deduped) {
-        StandabilityAssessment standability = assessStandabilityForNavigation(world, candidatePos);
-        if (!standability.standable()) {
-            incrementSortieFailureCounter(SortieFailureCategory.STANDABILITY_REJECTED);
+        StandabilityAssessment standability = assessStandabilityForNavigation(world, segmentPos, candidatePos);
+        if (standability.result() == StandabilityResult.HARD_REJECTED) {
+            incrementSortieFailureCounter(SortieFailureCategory.STANDABILITY_REJECTED_HARD);
             return false;
+        }
+        if (standability.result() == StandabilityResult.CLEARABLE_OBSTRUCTION) {
+            incrementSortieFailureCounter(SortieFailureCategory.STANDABILITY_REJECTED_CLEARABLE_VEGETATION);
         }
         PreflightProbeResult preflight = evaluatePreflightPath(world, segmentPos, candidatePos);
         if (preflight == PreflightProbeResult.DEFERRED) {
@@ -1765,28 +1769,35 @@ public class MasonWallBuilderGoal extends Goal {
         return candidate.obstacleCount() < existing.obstacleCount();
     }
 
-    private boolean isStandable(ServerWorld world, BlockPos pos) {
-        return assessStandabilityForNavigation(world, pos).standable();
+    private boolean isStandable(ServerWorld world, BlockPos segmentPos, BlockPos pos) {
+        return assessStandabilityForNavigation(world, segmentPos, pos).result() != StandabilityResult.HARD_REJECTED;
     }
 
-    private StandabilityAssessment assessStandabilityForNavigation(ServerWorld world, BlockPos pos) {
+    private StandabilityAssessment assessStandabilityForNavigation(ServerWorld world, BlockPos segmentPos, BlockPos pos) {
         if (!shouldEvaluateExpensivePathing()) {
-            return new StandabilityAssessment(false, Integer.MAX_VALUE);
+            return new StandabilityAssessment(StandabilityResult.HARD_REJECTED, Integer.MAX_VALUE);
         }
-        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return new StandabilityAssessment(false, Integer.MAX_VALUE);
+        int obstructionCount = 0;
+        if (!world.getBlockState(pos).isSolidBlock(world, pos)) {
+            if (isClearableVegetationObstacle(world, segmentPos, pos, pos)) {
+                obstructionCount++;
+            } else {
+                return new StandabilityAssessment(StandabilityResult.HARD_REJECTED, Integer.MAX_VALUE);
+            }
+        }
         BlockPos above = pos.up();
         BlockPos twoAbove = above.up();
-        int obstructionCount = 0;
         int clearableLeafObstructions = 0;
         for (BlockPos headPos : new BlockPos[]{above, twoAbove}) {
             BlockState headState = world.getBlockState(headPos);
             if (!world.getFluidState(headPos).isEmpty()) {
-                return new StandabilityAssessment(false, Integer.MAX_VALUE);
+                return new StandabilityAssessment(StandabilityResult.HARD_REJECTED, Integer.MAX_VALUE);
             }
             if (headState.getCollisionShape(world, headPos).isEmpty()) {
                 continue;
             }
             if (isLowCostClearableWallObstacle(headState) && isBreakableWallObstacle(world, headPos, headState)) {
+                obstructionCount++;
                 continue;
             }
             if (headState.isIn(BlockTags.LEAVES)
@@ -1796,9 +1807,29 @@ public class MasonWallBuilderGoal extends Goal {
                 obstructionCount++;
                 continue;
             }
-            return new StandabilityAssessment(false, Integer.MAX_VALUE);
+            if (isClearableVegetationObstacle(world, segmentPos, pos, headPos)) {
+                obstructionCount++;
+                continue;
+            }
+            return new StandabilityAssessment(StandabilityResult.HARD_REJECTED, Integer.MAX_VALUE);
         }
-        return new StandabilityAssessment(true, obstructionCount);
+        StandabilityResult result = obstructionCount > 0
+                ? StandabilityResult.CLEARABLE_OBSTRUCTION
+                : StandabilityResult.STANDABLE;
+        return new StandabilityAssessment(result, obstructionCount);
+    }
+
+    private boolean isClearableVegetationObstacle(ServerWorld world, BlockPos segmentPos, BlockPos navPos, BlockPos obstaclePos) {
+        if (!isAtOrAdjacentToColumn(segmentPos, obstaclePos) && !isAtOrAdjacentToColumn(navPos, obstaclePos)) {
+            return false;
+        }
+        BlockState state = world.getBlockState(obstaclePos);
+        return isLowCostClearableWallObstacle(state) && isBreakableWallObstacle(world, obstaclePos, state);
+    }
+
+    private boolean isAtOrAdjacentToColumn(BlockPos columnPos, BlockPos obstaclePos) {
+        return Math.abs(columnPos.getX() - obstaclePos.getX()) <= 1
+                && Math.abs(columnPos.getZ() - obstaclePos.getZ()) <= 1;
     }
 
     private void registerPathFailure(ServerWorld world, BlockPos segmentTarget, BlockPos attemptedNavTarget) {
@@ -3247,7 +3278,7 @@ public class MasonWallBuilderGoal extends Goal {
     private boolean hasPathCandidateForSegment(ServerWorld world, BlockPos segment) {
         List<BlockPos> candidates = buildNavigationTargetCandidates(world, segment, true);
         for (BlockPos navigationTarget : candidates) {
-            if (!isStandable(world, navigationTarget)) {
+            if (!isStandable(world, segment, navigationTarget)) {
                 continue;
             }
             Path preflightPath = guard.getNavigation().findPathTo(navigationTarget, 0);
@@ -4133,7 +4164,7 @@ public class MasonWallBuilderGoal extends Goal {
         if (navigationTarget == null) {
             return false;
         }
-        if (!isStandable(world, navigationTarget)) {
+        if (!isStandable(world, segment, navigationTarget)) {
             return false;
         }
         PreflightProbeResult preflight = evaluatePreflightPath(world, segment, navigationTarget);
@@ -7698,7 +7729,13 @@ public class MasonWallBuilderGoal extends Goal {
             int obstacleCount
     ) {}
 
-    private record StandabilityAssessment(boolean standable, int obstacleCount) {}
+    private enum StandabilityResult {
+        STANDABLE,
+        CLEARABLE_OBSTRUCTION,
+        HARD_REJECTED
+    }
+
+    private record StandabilityAssessment(StandabilityResult result, int obstacleCount) {}
 
     private record WallRect(int minX, int minZ, int maxX, int maxZ, int y) {}
 
@@ -7895,7 +7932,8 @@ public class MasonWallBuilderGoal extends Goal {
         NONE("none"),
         PREFLIGHT_NO_PATH("preflightNoPath"),
         NAV_TARGET_BACKOFF_FILTERED("navTargetBackoffFiltered"),
-        STANDABILITY_REJECTED("standabilityRejected"),
+        STANDABILITY_REJECTED_HARD("standabilityRejectedHard"),
+        STANDABILITY_REJECTED_CLEARABLE_VEGETATION("standabilityRejectedClearableVegetation"),
         PATH_START_FAILED("pathStartFailed"),
         MOVE_LIVELOCK_TIMEOUT("moveLivelockTimeout");
 
