@@ -364,7 +364,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         List<BlockPos> targets = this.pendingTreeTargetScan.sortedRoots();
         this.completedTreeScanCount++;
-        boolean logScanMetricsAtInfo = this.pendingTreeTargetScan.metricsElapsedMs() >= TREE_SCAN_METRICS_INFO_ELAPSED_MS
+        boolean logScanMetricsAtInfo = shouldLogScanMetricsAtInfo(this.pendingTreeTargetScan)
                 || this.completedTreeScanCount % TREE_SCAN_METRICS_INFO_INTERVAL == 0;
         this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
         this.pendingTreeTargetScan = null;
@@ -1079,8 +1079,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             session.scanNextBudget(world, Integer.MAX_VALUE / 4,
                     (scanWorld, pos, bells, roots, qualificationContext, metrics) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots, qualificationContext, metrics));
         }
-        session.logMetrics(this.guard.getUuidAsString());
+        boolean logScanMetricsAtInfo = shouldLogScanMetricsAtInfo(session);
+        session.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
         return session.sortedRoots();
+    }
+
+    private boolean shouldLogScanMetricsAtInfo(TreeTargetScanSession session) {
+        return session.metricsElapsedMs() >= TREE_SCAN_METRICS_INFO_ELAPSED_MS
+                || session.usedMappedBounds()
+                || session.earlyCompleted();
     }
 
     private TreeTargetScanSession createTreeTargetScanSession(ServerWorld world) {
@@ -1474,6 +1481,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private int localAcceptedRoots;
         private int debugRejectLogs;
         private boolean complete;
+        private boolean earlyCompleted;
 
         private TreeTargetScanSession(String guardId,
                                       BlockPos center,
@@ -1543,6 +1551,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                             this.localAcceptedRoots++;
                         }
                         if (shouldEarlyCompleteCurrentPass()) {
+                            this.earlyCompleted = true;
                             this.complete = true;
                             saveRegionCursor();
                             break;
@@ -1604,6 +1613,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         private void advancePassIfNeeded() {
             if (shouldEarlyCompleteCurrentPass()) {
+                this.earlyCompleted = true;
                 this.complete = true;
                 return;
             }
@@ -1666,6 +1676,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         long metricsElapsedMs() {
             return this.metrics.elapsedMs();
+        }
+
+        boolean usedMappedBounds() {
+            return this.hasMappedBounds;
+        }
+
+        boolean earlyCompleted() {
+            return this.earlyCompleted;
         }
 
         List<BlockPos> sortedRoots() {
