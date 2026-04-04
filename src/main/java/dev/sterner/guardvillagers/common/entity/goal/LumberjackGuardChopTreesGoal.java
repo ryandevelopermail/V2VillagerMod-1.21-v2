@@ -1765,12 +1765,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             int centerZ = (minZ + maxZ) / 2;
             int squareRadius = Math.max(maxX - centerX, maxZ - centerZ) + radius;
             BlockPos poiCenter = new BlockPos(centerX, (minY + maxY) / 2, centerZ);
-            poiStorage.getInSquare(
-                            type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
-                            poiCenter,
-                            squareRadius,
-                            PointOfInterestStorage.OccupationStatus.ANY)
-                    .forEach(poi -> addSquareInfluence(influence, poi.getPos(), radius, minX, maxX, minY, maxY, minZ, maxZ));
+            for (var poi : poiStorage.getInSquare(
+                    type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
+                    poiCenter,
+                    squareRadius,
+                    PointOfInterestStorage.OccupationStatus.ANY).toList()) {
+                addSquareInfluence(influence, poi.getPos(), radius, minX, maxX, minY, maxY, minZ, maxZ);
+            }
 
             BlockPos minDoor = new BlockPos(minX - radius, minY - 2, minZ - radius);
             BlockPos maxDoor = new BlockPos(maxX + radius, maxY + 2, maxZ + radius);
