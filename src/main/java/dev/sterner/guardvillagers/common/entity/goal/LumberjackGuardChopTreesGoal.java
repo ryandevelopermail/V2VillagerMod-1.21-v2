@@ -350,7 +350,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         this.pendingTreeTargetScan.scanNextBudget(world, grantedBudget,
-                (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+                (scanWorld, pos, bells, roots, qualificationContext, metrics) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots, qualificationContext, metrics));
         WorldScanBudgetManager.consume(world, grantedBudget);
         adaptPerGuardScanBudgetFromElapsed(this.pendingTreeTargetScan.metricsElapsedMs());
 
@@ -1055,7 +1055,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         TreeTargetScanSession session = createTreeTargetScanSession(world);
         while (!session.complete()) {
             session.scanNextBudget(world, Integer.MAX_VALUE / 4,
-                    (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+                    (scanWorld, pos, bells, roots, qualificationContext, metrics) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots, qualificationContext, metrics));
         }
         session.logMetrics(this.guard.getUuidAsString());
         return session.sortedRoots();
@@ -1092,7 +1092,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 hasMappedBounds,
                 mappedContext == null ? 0 : mappedContext.cartographerCount(),
                 regions,
-                nearbyBells);
+                nearbyBells,
+                ScanQualificationContext.create(world, regions, getConfiguredHousePoiProtectionRadius()));
     }
 
     private Set<BlockPos> collectQualifiedRootsInMappedBounds(ServerWorld world,
@@ -1161,9 +1162,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return uniqueRoots;
     }
 
-    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
-        BlockPos root = normalizeRoot(world, candidateLog);
-        RootQualificationResult qualification = qualifyRoot(world, root, cachedBells);
+    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world,
+                                                        BlockPos candidateLog,
+                                                        @Nullable Set<BlockPos> cachedBells,
+                                                        Set<BlockPos> uniqueRoots,
+                                                        @Nullable ScanQualificationContext qualificationContext,
+                                                        ScanMetrics metrics) {
+        BlockPos root = qualificationContext != null
+                ? qualificationContext.normalizeRootCached(world, candidateLog)
+                : normalizeRoot(world, candidateLog);
+        RootQualificationResult qualification = qualificationContext != null
+                ? qualificationContext.qualifyRootCached(world, root, cachedBells, metrics)
+                : qualifyRoot(world, root, cachedBells, null);
         if (!qualification.accepted()) {
             return qualification;
         }
@@ -1171,6 +1181,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return new RootQualificationResult(false, REJECTED_DUPLICATE_ROOT);
         }
         return new RootQualificationResult(true, "");
+    }
+
+    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world,
+                                                        BlockPos candidateLog,
+                                                        @Nullable Set<BlockPos> cachedBells,
+                                                        Set<BlockPos> uniqueRoots) {
+        return tryAddQualifiedRoot(world, candidateLog, cachedBells, uniqueRoots, null, new ScanMetrics());
     }
 
     private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
@@ -1325,7 +1342,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     @FunctionalInterface
     private interface RootCollector {
-        RootQualificationResult evaluate(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots);
+        RootQualificationResult evaluate(ServerWorld world,
+                                         BlockPos candidateLog,
+                                         @Nullable Set<BlockPos> cachedBells,
+                                         Set<BlockPos> uniqueRoots,
+                                         @Nullable ScanQualificationContext qualificationContext,
+                                         ScanMetrics metrics);
     }
 
     private record RootQualificationResult(boolean accepted, String rejectReason) {}
@@ -1335,6 +1357,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private long visitedBlocks;
         private long candidateLogs;
         private int acceptedRoots;
+        private long rootQualificationCacheHits;
+        private long rootQualificationCacheMisses;
         private final Map<String, Integer> skippedReasons = new LinkedHashMap<>();
 
         void visited() {
@@ -1347,6 +1371,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         void accepted() {
             this.acceptedRoots++;
+        }
+
+        void rootQualificationCacheHit() {
+            this.rootQualificationCacheHits++;
+        }
+
+        void rootQualificationCacheMiss() {
+            this.rootQualificationCacheMisses++;
         }
 
         void skipped(String reason) {
@@ -1404,6 +1436,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private final int cartographerCount;
         private final List<ScanBounds> regions;
         private final @Nullable Set<BlockPos> nearbyBells;
+        private final ScanQualificationContext qualificationContext;
         private final Set<BlockPos> uniqueRoots = new HashSet<>();
         private final ScanMetrics metrics = new ScanMetrics();
         private final int[] regionLayerIndices;
@@ -1426,7 +1459,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                                       boolean hasMappedBounds,
                                       int cartographerCount,
                                       List<ScanBounds> regions,
-                                      @Nullable Set<BlockPos> nearbyBells) {
+                                      @Nullable Set<BlockPos> nearbyBells,
+                                      ScanQualificationContext qualificationContext) {
             this.guardId = guardId;
             this.center = center;
             this.localSearchRadius = localSearchRadius;
@@ -1434,6 +1468,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.cartographerCount = cartographerCount;
             this.regions = regions;
             this.nearbyBells = nearbyBells;
+            this.qualificationContext = qualificationContext;
             this.regionLayerIndices = new int[regions.size()];
             this.regionX = new int[regions.size()];
             this.regionZ = new int[regions.size()];
@@ -1473,7 +1508,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 } else {
                     this.metrics.candidate();
                     Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
-                    RootQualificationResult qualificationResult = collector.evaluate(world, pos, bellExclusion, this.uniqueRoots);
+                    RootQualificationResult qualificationResult = collector.evaluate(
+                            world,
+                            pos,
+                            bellExclusion,
+                            this.uniqueRoots,
+                            this.qualificationContext,
+                            this.metrics);
                     if (qualificationResult.accepted()) {
                         this.metrics.accepted();
                         if (region.usesLocalBellExclusion()) {
@@ -1612,7 +1653,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         void logMetrics(String guardId) {
-            LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} skipped={}",
+            LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
                     guardId,
                     this.hasMappedBounds ? "local+mapped" : "local-only",
                     this.cartographerCount,
@@ -1621,7 +1662,137 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     this.metrics.visitedBlocks,
                     this.metrics.candidateLogs,
                     this.metrics.acceptedRoots,
+                    this.metrics.rootQualificationCacheHits,
+                    this.metrics.rootQualificationCacheMisses,
                     this.metrics.skippedReasons);
+        }
+    }
+
+    private static final class ScanQualificationContext {
+        private final Set<Long> protectedPoiDoorInfluence;
+        private final Map<BlockPos, RootQualificationResult> rootQualificationMemo = new HashMap<>();
+        private final Map<BlockPos, BlockPos> normalizedRootsMemo = new HashMap<>();
+
+        private ScanQualificationContext(Set<Long> protectedPoiDoorInfluence) {
+            this.protectedPoiDoorInfluence = protectedPoiDoorInfluence;
+        }
+
+        static ScanQualificationContext create(ServerWorld world, List<ScanBounds> regions, int housePoiRadius) {
+            Set<Long> influence = buildProtectedPoiDoorInfluence(world, regions, housePoiRadius);
+            return new ScanQualificationContext(influence);
+        }
+
+        private static Set<Long> buildProtectedPoiDoorInfluence(ServerWorld world, List<ScanBounds> regions, int radius) {
+            if (regions.isEmpty()) {
+                return Set.of();
+            }
+            int minX = Integer.MAX_VALUE;
+            int minY = Integer.MAX_VALUE;
+            int minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE;
+            int maxY = Integer.MIN_VALUE;
+            int maxZ = Integer.MIN_VALUE;
+            for (ScanBounds region : regions) {
+                minX = Math.min(minX, region.min().getX());
+                minY = Math.min(minY, region.min().getY());
+                minZ = Math.min(minZ, region.min().getZ());
+                maxX = Math.max(maxX, region.max().getX());
+                maxY = Math.max(maxY, region.max().getY());
+                maxZ = Math.max(maxZ, region.max().getZ());
+            }
+
+            Set<Long> influence = new HashSet<>();
+            PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+            int centerX = (minX + maxX) / 2;
+            int centerZ = (minZ + maxZ) / 2;
+            int squareRadius = Math.max(maxX - centerX, maxZ - centerZ) + radius;
+            BlockPos poiCenter = new BlockPos(centerX, (minY + maxY) / 2, centerZ);
+            poiStorage.getInSquare(
+                            type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
+                            poiCenter,
+                            squareRadius,
+                            PointOfInterestStorage.OccupationStatus.ANY)
+                    .forEach(poi -> addSquareInfluence(influence, poi.getPos(), radius, minX, maxX, minY, maxY, minZ, maxZ));
+
+            BlockPos minDoor = new BlockPos(minX - radius, minY - 2, minZ - radius);
+            BlockPos maxDoor = new BlockPos(maxX + radius, maxY + 2, maxZ + radius);
+            for (BlockPos cursor : BlockPos.iterate(minDoor, maxDoor)) {
+                BlockState state = world.getBlockState(cursor);
+                if (state.isIn(BlockTags.WOODEN_DOORS) || state.isOf(Blocks.IRON_DOOR)) {
+                    addDoorInfluence(influence, cursor.toImmutable(), radius, minX, maxX, minY, maxY, minZ, maxZ);
+                }
+            }
+            return influence;
+        }
+
+        private static void addSquareInfluence(Set<Long> influence,
+                                               BlockPos source,
+                                               int radius,
+                                               int minX,
+                                               int maxX,
+                                               int minY,
+                                               int maxY,
+                                               int minZ,
+                                               int maxZ) {
+            int startX = Math.max(minX, source.getX() - radius);
+            int endX = Math.min(maxX, source.getX() + radius);
+            int startZ = Math.max(minZ, source.getZ() - radius);
+            int endZ = Math.min(maxZ, source.getZ() + radius);
+            for (int x = startX; x <= endX; x++) {
+                for (int z = startZ; z <= endZ; z++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        influence.add(BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
+        }
+
+        private static void addDoorInfluence(Set<Long> influence,
+                                             BlockPos source,
+                                             int radius,
+                                             int minX,
+                                             int maxX,
+                                             int minY,
+                                             int maxY,
+                                             int minZ,
+                                             int maxZ) {
+            int startX = Math.max(minX, source.getX() - radius);
+            int endX = Math.min(maxX, source.getX() + radius);
+            int startY = Math.max(minY, source.getY() - 2);
+            int endY = Math.min(maxY, source.getY() + 2);
+            int startZ = Math.max(minZ, source.getZ() - radius);
+            int endZ = Math.min(maxZ, source.getZ() + radius);
+            for (int x = startX; x <= endX; x++) {
+                for (int y = startY; y <= endY; y++) {
+                    for (int z = startZ; z <= endZ; z++) {
+                        influence.add(BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
+        }
+
+        BlockPos normalizeRootCached(ServerWorld world, BlockPos candidateLog) {
+            return this.normalizedRootsMemo.computeIfAbsent(candidateLog.toImmutable(),
+                    key -> normalizeRootStatic(world, key));
+        }
+
+        RootQualificationResult qualifyRootCached(ServerWorld world,
+                                                  BlockPos root,
+                                                  @Nullable Set<BlockPos> cachedBells,
+                                                  ScanMetrics metrics) {
+            RootQualificationResult cached = this.rootQualificationMemo.get(root);
+            if (cached != null) {
+                metrics.rootQualificationCacheHit();
+                return cached;
+            }
+            metrics.rootQualificationCacheMiss();
+            RootQualificationResult computed = qualifyRoot(world, root, cachedBells, this);
+            this.rootQualificationMemo.put(root.toImmutable(), computed);
+            return computed;
+        }
+
+        boolean isWithinProtectedPoiDoorInfluence(BlockPos root) {
+            return this.protectedPoiDoorInfluence.contains(root.asLong());
         }
     }
 
@@ -1669,10 +1840,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
      *                    scan the world on demand (slower — only use for one-off checks)
      */
     private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
-        return qualifyRoot(world, pos, cachedBells).accepted();
+        return qualifyRoot(world, pos, cachedBells, null).accepted();
     }
 
-    private static RootQualificationResult qualifyRoot(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
+    private static RootQualificationResult qualifyRoot(ServerWorld world,
+                                                       BlockPos pos,
+                                                       Set<BlockPos> cachedBells,
+                                                       @Nullable ScanQualificationContext qualificationContext) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return new RootQualificationResult(false, REJECTED_NOT_LOG);
@@ -1705,7 +1879,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return new RootQualificationResult(false, REJECTED_BELL_RADIUS);
         }
 
-        if (isNearProtectedVillagePoi(world, pos, getConfiguredHousePoiProtectionRadius())) {
+        if (isNearProtectedVillagePoi(world, pos, getConfiguredHousePoiProtectionRadius(), qualificationContext)) {
             return new RootQualificationResult(false, REJECTED_HOUSE_POI_RADIUS);
         }
 
@@ -1821,7 +1995,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 GuardVillagersConfig.MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET);
     }
 
-    private static boolean isNearProtectedVillagePoi(ServerWorld world, BlockPos root, int radius) {
+    private static boolean isNearProtectedVillagePoi(ServerWorld world,
+                                                     BlockPos root,
+                                                     int radius,
+                                                     @Nullable ScanQualificationContext qualificationContext) {
+        if (qualificationContext != null) {
+            return qualificationContext.isWithinProtectedPoiDoorInfluence(root);
+        }
         PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         boolean nearBedOrJob = poiStorage.getInSquare(
                         type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
