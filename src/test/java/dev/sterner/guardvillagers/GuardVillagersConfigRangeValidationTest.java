@@ -11,6 +11,8 @@ class GuardVillagersConfigRangeValidationTest {
         GuardVillagersConfig.quartermasterScanRange = -1;
         GuardVillagersConfig.armorerFallbackScanRange = 9000;
         GuardVillagersConfig.overflowRecipientScanRange = 2;
+        GuardVillagersConfig.professionalRecipientScanRange = 1;
+        GuardVillagersConfig.professionalRecipientWideScanRange = 9999;
         GuardVillagersConfig.overflowFallbackQmSearchRadius = 0;
         GuardVillagersConfig.lumberjackMaxConcurrentHeavyScansPerWorld = 0;
         GuardVillagersConfig.lumberjackGovernorHighLoadThresholdPermille = 9999;
@@ -31,6 +33,8 @@ class GuardVillagersConfigRangeValidationTest {
         assertEquals(GuardVillagersConfig.MIN_HEAVY_SCAN_RANGE, GuardVillagersConfig.quartermasterScanRange);
         assertEquals(GuardVillagersConfig.MAX_HEAVY_SCAN_RANGE, GuardVillagersConfig.armorerFallbackScanRange);
         assertEquals(GuardVillagersConfig.MIN_OVERFLOW_RECIPIENT_SCAN_RANGE, GuardVillagersConfig.overflowRecipientScanRange);
+        assertEquals(GuardVillagersConfig.MIN_PROFESSIONAL_RECIPIENT_SCAN_RANGE, GuardVillagersConfig.professionalRecipientScanRange);
+        assertEquals(GuardVillagersConfig.MAX_PROFESSIONAL_RECIPIENT_SCAN_RANGE, GuardVillagersConfig.professionalRecipientWideScanRange);
         assertEquals(GuardVillagersConfig.MIN_HEAVY_SCAN_RANGE, GuardVillagersConfig.overflowFallbackQmSearchRadius);
         assertEquals(GuardVillagersConfig.MIN_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS, GuardVillagersConfig.lumberjackMaxConcurrentHeavyScansPerWorld);
         assertEquals(GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_THRESHOLD, GuardVillagersConfig.lumberjackGovernorHighLoadThresholdPermille);
