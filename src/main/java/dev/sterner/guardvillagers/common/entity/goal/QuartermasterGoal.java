@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.behavior.WeaponsmithBehavior;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.BedBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.enums.ChestType;
@@ -33,6 +34,8 @@ import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -92,6 +95,22 @@ public class QuartermasterGoal extends Goal {
     private static final int MAX_PAIRINGS_SCANNED_PER_CYCLE = 24;
     /** Candidate chest cache refresh cadence. */
     private static final int CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS = 20 * 30;
+    private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 8;
+    private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
+            Blocks.BLAST_FURNACE,
+            Blocks.SMOKER,
+            Blocks.CARTOGRAPHY_TABLE,
+            Blocks.BREWING_STAND,
+            Blocks.COMPOSTER,
+            Blocks.BARREL,
+            Blocks.FLETCHING_TABLE,
+            Blocks.LECTERN,
+            Blocks.CAULDRON,
+            Blocks.STONECUTTER,
+            Blocks.LOOM,
+            Blocks.SMITHING_TABLE,
+            Blocks.GRINDSTONE
+    );
     /**
      * Runtime-only active quartermaster registry, keyed by world + anchor chest position.
      *
@@ -100,6 +119,7 @@ public class QuartermasterGoal extends Goal {
      */
     private static final Map<net.minecraft.registry.RegistryKey<net.minecraft.world.World>, Map<BlockPos, Set<UUID>>>
             ACTIVE_QM_BY_WORLD_ANCHOR = new HashMap<>();
+    private static final Map<QmBootstrapKey, Boolean> BOOTSTRAP_COMPLETE_BY_QM = new HashMap<>();
 
     /**
      * Item whitelist for Priority-3 surplus haul.
@@ -160,6 +180,8 @@ public class QuartermasterGoal extends Goal {
     private boolean candidateCacheStale = true;
     private long nextCandidateCacheRefreshTick = 0L;
     private SurplusScanMetrics lastSurplusScanMetrics = SurplusScanMetrics.empty();
+    private final Deque<TransferLeg> bootstrapTransferQueue = new ArrayDeque<>();
+    private int bootstrapDiscoveryRuns = 0;
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -208,6 +230,10 @@ public class QuartermasterGoal extends Goal {
         if (byAnchor.isEmpty()) {
             ACTIVE_QM_BY_WORLD_ANCHOR.remove(world.getRegistryKey());
         }
+    }
+
+    public static void clearBootstrapState(ServerWorld world, UUID villagerId) {
+        BOOTSTRAP_COMPLETE_BY_QM.remove(new QmBootstrapKey(world.getRegistryKey(), villagerId));
     }
 
     /**
@@ -376,6 +402,20 @@ public class QuartermasterGoal extends Goal {
 
     private boolean tryPlanTransfer(ServerWorld world) {
         BlockPos bellChestPos = resolveBellChestPos(world);
+        if (bellChestPos != null) {
+            if (!isBootstrapComplete(world)) {
+                bootstrapTransferQueue.clear();
+                queueBootstrapTransferLegs(world, bellChestPos);
+                setBootstrapComplete(world);
+            }
+            if (!bootstrapTransferQueue.isEmpty()) {
+                TransferLeg leg = bootstrapTransferQueue.pollFirst();
+                sourcePos = leg.sourcePos();
+                destPos = leg.destPos();
+                transferStack = leg.transferStack().copy();
+                return true;
+            }
+        }
 
         // Priority 1: mason is building (low on stone) → top up from bell chest
         Optional<MasonGuardEntity> masonNeedingStone = findMasonNeedingStone(world);
@@ -524,6 +564,81 @@ public class QuartermasterGoal extends Goal {
             return Optional.of(new LumberjackFurnaceStoneNeed(lj, ljChest));
         }
         return Optional.empty();
+    }
+
+    private void queueBootstrapTransferLegs(ServerWorld world, BlockPos bellChestPos) {
+        bootstrapDiscoveryRuns++;
+        List<BlockPos> discovered = discoverBootstrapSourceChests(world, bellChestPos);
+        for (BlockPos source : discovered) {
+            if (source.equals(bellChestPos)) continue;
+            ItemStack stack = findTopTransferableItem(world, source);
+            if (stack.isEmpty()) continue;
+            bootstrapTransferQueue.addLast(new TransferLeg(
+                    source,
+                    bellChestPos,
+                    stack.copyWithCount(Math.min(HAUL_AMOUNT, stack.getCount()))
+            ));
+        }
+    }
+
+    private List<BlockPos> discoverBootstrapSourceChests(ServerWorld world, BlockPos bellChestPos) {
+        Set<BlockPos> pairedChests = new HashSet<>();
+        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+            BlockPos pairingChest = pairing.chestPos();
+            if (pairingChest == null) continue;
+            pairedChests.add(pairingChest.toImmutable());
+            findDoubleChestOtherHalf(world, pairingChest).ifPresent(pairedChests::add);
+        }
+
+        Set<BlockPos> excluded = new HashSet<>(pairedChests);
+        excluded.add(chestPos.toImmutable());
+        findDoubleChestOtherHalf(world, chestPos).ifPresent(excluded::add);
+
+        Set<BlockPos> deduplicated = new HashSet<>();
+        List<BlockPos> discovered = new ArrayList<>();
+        int range = (int) Math.ceil(getScanRange());
+        for (BlockPos scanPos : BlockPos.iterate(bellChestPos.add(-range, -range, -range), bellChestPos.add(range, range, range))) {
+            if (!bellChestPos.isWithinDistance(scanPos, getScanRange())) continue;
+            BlockState state = world.getBlockState(scanPos);
+            if (!(state.getBlock() instanceof ChestBlock)) continue;
+            BlockPos candidate = canonicalChestPos(world, scanPos.toImmutable());
+            if (excluded.contains(candidate)) continue;
+            if (!isNaturalVillageChest(world, candidate)) continue;
+            if (deduplicated.add(candidate)) {
+                discovered.add(candidate);
+            }
+        }
+        return discovered;
+    }
+
+    private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {
+        Optional<BlockPos> other = findDoubleChestOtherHalf(world, chestCandidate);
+        if (other.isEmpty()) return chestCandidate;
+        return chestCandidate.asLong() <= other.get().asLong() ? chestCandidate : other.get();
+    }
+
+    private boolean isNaturalVillageChest(ServerWorld world, BlockPos chestCandidate) {
+        int r = NATURAL_VILLAGE_POI_SCAN_RADIUS;
+        boolean nearBell = false;
+        boolean nearBedOrJobSite = false;
+        BlockPos.Mutable cursor = new BlockPos.Mutable();
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    cursor.set(chestCandidate.getX() + dx, chestCandidate.getY() + dy, chestCandidate.getZ() + dz);
+                    if (!chestCandidate.isWithinDistance(cursor, r)) continue;
+                    BlockState nearbyState = world.getBlockState(cursor);
+                    if (nearbyState.isOf(Blocks.BELL)) {
+                        nearBell = true;
+                    }
+                    if (nearbyState.getBlock() instanceof BedBlock || NATURAL_VILLAGE_JOB_SITE_BLOCKS.contains(nearbyState.getBlock())) {
+                        nearBedOrJobSite = true;
+                    }
+                    if (nearBell && nearBedOrJobSite) return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** Returns true if a furnace or blast furnace exists within FURNACE_CHECK_RADIUS of center. */
@@ -895,6 +1010,19 @@ public class QuartermasterGoal extends Goal {
         return best.isEmpty() ? ItemStack.EMPTY : best.copy();
     }
 
+    private ItemStack findTopTransferableItem(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inv = getInventory(world, pos);
+        if (inv.isEmpty()) return ItemStack.EMPTY;
+        ItemStack best = ItemStack.EMPTY;
+        for (int i = 0; i < inv.get().size(); i++) {
+            ItemStack stack = inv.get().getStack(i);
+            if (!stack.isEmpty() && stack.getCount() > best.getCount()) {
+                best = stack;
+            }
+        }
+        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
+    }
+
     /**
      * If the chest at {@code pos} is one half of a double-chest, returns the position of the
      * other half. Returns empty for single chests or non-chest blocks.
@@ -1044,6 +1172,21 @@ public class QuartermasterGoal extends Goal {
         int cachedCandidates() { return cachedCandidates; }
         boolean cacheStale() { return cacheStale; }
     }
+
+    static int getBootstrapDiscoveryRunsForTest(QuartermasterGoal goal) {
+        return goal.bootstrapDiscoveryRuns;
+    }
+
+    private boolean isBootstrapComplete(ServerWorld world) {
+        return BOOTSTRAP_COMPLETE_BY_QM.getOrDefault(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()), false);
+    }
+
+    private void setBootstrapComplete(ServerWorld world) {
+        BOOTSTRAP_COMPLETE_BY_QM.put(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()), true);
+    }
+
+    private record TransferLeg(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
+    private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
 
     private static final class SurplusScanBudget {
         private final int maxCandidates;

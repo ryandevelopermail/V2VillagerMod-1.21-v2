@@ -242,6 +242,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         if (pairedChestPos != null) {
             QuartermasterGoal.unregisterActiveQuartermaster(world, pairedChestPos, villager.getUuid());
         }
+        QuartermasterGoal.clearBootstrapState(world, villager.getUuid());
         if (pairedChestPos != null && world.getServer() != null) {
             VillageAnchorState.get(world.getServer()).unregister(world, pairedChestPos);
         }
