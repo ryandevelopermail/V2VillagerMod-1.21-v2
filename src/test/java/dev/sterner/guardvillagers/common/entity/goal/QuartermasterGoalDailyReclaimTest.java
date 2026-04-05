@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -18,7 +19,9 @@ import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -125,6 +128,81 @@ class QuartermasterGoalDailyReclaimTest {
         JobBlockPairingHelper.clearWorldCaches(world);
     }
 
+    @Test
+    void lumberjackChestReclaim_respectsStrictReserveFloorsAndActiveDemandInputs() {
+        ServerWorld world = mock(ServerWorld.class);
+        when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
+        when(world.getTime()).thenReturn(24_000L);
+        JobBlockPairingHelper.clearWorldCaches(world);
+
+        BlockPos qmJob = new BlockPos(0, 64, 0);
+        BlockPos qmChest = new BlockPos(1, 64, 0);
+        VillagerEntity quartermaster = villagerWithJobSite(world, UUID.randomUUID(), VillagerProfession.LIBRARIAN, qmJob, qmChest);
+
+        LumberjackGuardEntity lumberjack = mock(LumberjackGuardEntity.class);
+        BlockPos lumberjackChestPos = new BlockPos(8, 64, 8);
+        when(lumberjack.isAlive()).thenReturn(true);
+        when(lumberjack.getPairedChestPos()).thenReturn(lumberjackChestPos);
+        when(lumberjack.getPairedFurnaceModifierPos()).thenReturn(null);
+
+        SimpleInventory lumberjackChest = new SimpleInventory(8);
+        lumberjackChest.setStack(0, new ItemStack(Items.OAK_LOG, 80));
+        lumberjackChest.setStack(1, new ItemStack(Items.OAK_PLANKS, 40));
+        lumberjackChest.setStack(2, new ItemStack(Items.STICK, 32));
+
+        TestQuartermasterGoal goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
+        goal.setInventory(qmChest, new SimpleInventory(5));
+        goal.setInventory(lumberjackChestPos, lumberjackChest);
+        goal.addNearbyLumberjack(lumberjack);
+        goal.setDemand(lumberjack, LumberjackChestTriggerController.UpgradeDemand.v3FenceGate());
+
+        assertTrue(goal.tryPlanDailyReclaimTransferIfDue(world));
+        QuartermasterGoal.PlannedTransfer plan = QuartermasterGoal.getPlannedTransferForTest(goal);
+        assertEquals(lumberjackChestPos, plan.sourcePos());
+        assertEquals(qmChest, plan.destPos());
+        assertEquals(Items.OAK_LOG, plan.transferStack().getItem());
+        assertEquals(16, plan.transferStack().getCount());
+
+        JobBlockPairingHelper.clearWorldCaches(world);
+    }
+
+    @Test
+    void lumberjackFurnaceReclaim_collectsOverflowOutputWithoutBreachingFuelOrCharcoalReserve() {
+        ServerWorld world = mock(ServerWorld.class);
+        when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
+        when(world.getTime()).thenReturn(24_000L);
+        JobBlockPairingHelper.clearWorldCaches(world);
+
+        BlockPos qmJob = new BlockPos(0, 64, 0);
+        BlockPos qmChest = new BlockPos(1, 64, 0);
+        VillagerEntity quartermaster = villagerWithJobSite(world, UUID.randomUUID(), VillagerProfession.LIBRARIAN, qmJob, qmChest);
+
+        LumberjackGuardEntity lumberjack = mock(LumberjackGuardEntity.class);
+        BlockPos furnacePos = new BlockPos(9, 64, 9);
+        when(lumberjack.isAlive()).thenReturn(true);
+        when(lumberjack.getPairedChestPos()).thenReturn(null);
+        when(lumberjack.getPairedFurnaceModifierPos()).thenReturn(furnacePos);
+
+        SimpleInventory furnaceInventory = new SimpleInventory(3);
+        furnaceInventory.setStack(1, new ItemStack(Items.OAK_LOG, 20));
+        furnaceInventory.setStack(2, new ItemStack(Items.CHARCOAL, 28));
+
+        TestQuartermasterGoal goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
+        goal.setInventory(qmChest, new SimpleInventory(5));
+        goal.setInventory(furnacePos, furnaceInventory);
+        goal.addNearbyLumberjack(lumberjack);
+        goal.setDemand(lumberjack, null);
+
+        assertTrue(goal.tryPlanDailyReclaimTransferIfDue(world));
+        QuartermasterGoal.PlannedTransfer plan = QuartermasterGoal.getPlannedTransferForTest(goal);
+        assertEquals(furnacePos, plan.sourcePos());
+        assertEquals(qmChest, plan.destPos());
+        assertEquals(Items.CHARCOAL, plan.transferStack().getItem());
+        assertEquals(12, plan.transferStack().getCount());
+
+        JobBlockPairingHelper.clearWorldCaches(world);
+    }
+
     @SuppressWarnings("unchecked")
     private static VillagerEntity villagerWithJobSite(ServerWorld world,
                                                       UUID uuid,
@@ -153,6 +231,8 @@ class QuartermasterGoalDailyReclaimTest {
 
     private static final class TestQuartermasterGoal extends QuartermasterGoal {
         private final Map<BlockPos, Inventory> inventories = new HashMap<>();
+        private final List<LumberjackGuardEntity> nearbyLumberjacks = new ArrayList<>();
+        private final Map<LumberjackGuardEntity, LumberjackChestTriggerController.UpgradeDemand> demandByLumberjack = new HashMap<>();
 
         private TestQuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
             super(villager, jobPos, chestPos);
@@ -162,9 +242,27 @@ class QuartermasterGoalDailyReclaimTest {
             inventories.put(pos, inventory);
         }
 
+        void addNearbyLumberjack(LumberjackGuardEntity lumberjack) {
+            nearbyLumberjacks.add(lumberjack);
+        }
+
+        void setDemand(LumberjackGuardEntity lumberjack, LumberjackChestTriggerController.UpgradeDemand demand) {
+            demandByLumberjack.put(lumberjack, demand);
+        }
+
         @Override
         protected Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
             return Optional.ofNullable(inventories.get(pos));
+        }
+
+        @Override
+        protected List<LumberjackGuardEntity> getNearbyLumberjacks(ServerWorld world) {
+            return nearbyLumberjacks;
+        }
+
+        @Override
+        protected LumberjackChestTriggerController.UpgradeDemand resolveLumberjackUpgradeDemand(ServerWorld world, LumberjackGuardEntity lumberjack) {
+            return demandByLumberjack.get(lumberjack);
         }
     }
 }
