@@ -115,6 +115,15 @@ public final class RecipeDemandIndex {
                 false);
         add(aggregate, DemandMaterial.PLANKS, VillagerProfession.MASON, 1, MASON_PLANK_COMPONENT_CAP, 1.4D, false, true);
         add(aggregate, DemandMaterial.STICK, VillagerProfession.MASON, 1, MASON_STICK_COMPONENT_CAP, 1.4D, false, true);
+        add(aggregate, DemandMaterial.PAPER, VillagerProfession.CARTOGRAPHER, 1, 24, 1.1D, false, false);
+        add(aggregate, DemandMaterial.COMPASS, VillagerProfession.CARTOGRAPHER, 1, 4, 1.3D, false, false);
+        add(aggregate, DemandMaterial.EMPTY_MAP, VillagerProfession.CARTOGRAPHER, 1, 4, 1.2D, false, false);
+        add(aggregate, DemandMaterial.DIAMOND, VillagerProfession.TOOLSMITH, 1, 4, 1.35D, false, false);
+        add(aggregate, DemandMaterial.DIAMOND, VillagerProfession.WEAPONSMITH, 1, 4, 1.3D, false, false);
+        add(aggregate, DemandMaterial.DIAMOND, VillagerProfession.ARMORER, 1, 4, 1.25D, false, false);
+        add(aggregate, DemandMaterial.IRON, VillagerProfession.TOOLSMITH, 1, 24, 1.2D, false, false);
+        add(aggregate, DemandMaterial.IRON, VillagerProfession.WEAPONSMITH, 1, 24, 1.15D, false, false);
+        add(aggregate, DemandMaterial.IRON, VillagerProfession.ARMORER, 1, 24, 1.1D, false, false);
     }
 
     private static void scanDynamic(ServerWorld world,
@@ -299,7 +308,12 @@ public final class RecipeDemandIndex {
         PLANKS("planks", new ItemStack(Items.OAK_PLANKS), stack -> stack.isIn(ItemTags.PLANKS)),
         FENCES("fences", new ItemStack(Items.OAK_FENCE), stack -> stack.isIn(ItemTags.FENCES)),
         FENCE_GATES("fence_gates", new ItemStack(Items.OAK_FENCE_GATE), stack -> stack.isIn(ItemTags.FENCE_GATES)),
-        LOGS("logs", new ItemStack(Items.OAK_LOG), stack -> stack.isIn(ItemTags.LOGS));
+        LOGS("logs", new ItemStack(Items.OAK_LOG), stack -> stack.isIn(ItemTags.LOGS)),
+        PAPER("paper", new ItemStack(Items.PAPER), stack -> stack.isOf(Items.PAPER)),
+        COMPASS("compass", new ItemStack(Items.COMPASS), stack -> stack.isOf(Items.COMPASS)),
+        EMPTY_MAP("empty_map", new ItemStack(Items.MAP), stack -> stack.isOf(Items.MAP)),
+        DIAMOND("diamond", new ItemStack(Items.DIAMOND), stack -> stack.isOf(Items.DIAMOND)),
+        IRON("iron", new ItemStack(Items.IRON_INGOT), stack -> stack.isOf(Items.IRON_INGOT));
 
         private final String id;
         private final ItemStack probe;
