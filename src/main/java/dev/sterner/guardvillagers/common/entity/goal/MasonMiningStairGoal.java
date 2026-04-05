@@ -9,6 +9,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
@@ -28,6 +29,8 @@ import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 
 public class MasonMiningStairGoal extends Goal {
@@ -50,6 +53,9 @@ public class MasonMiningStairGoal extends Goal {
     private static final int FAILURE_REASON_RESET_THRESHOLD = 3;
     private static final int MIN_RESERVED_COBBLESTONE = 8;
     private static final int MIN_RESERVED_DIRT = 8;
+    private static final int BOOTSTRAP_STAGING_RADIUS_MIN = 5;
+    private static final int BOOTSTRAP_STAGING_RADIUS_MAX = 10;
+    private static final int BOOTSTRAP_STAGING_MAX_ATTEMPTS = 48;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -87,6 +93,7 @@ public class MasonMiningStairGoal extends Goal {
     private int adaptiveFailedSessionWindow;
     private int adaptiveForcedRecoveryWindow;
     private int adaptiveSessionCount;
+    private int bootstrapRetryCount;
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -172,6 +179,27 @@ public class MasonMiningStairGoal extends Goal {
             this.rejoinStepTarget = null;
             this.rejoinDeepTarget = null;
         }
+
+        if (stepIndex == 0 && isBootstrapObstructedAtOrigin(world, origin, miningDirection)) {
+            BlockPos stagingOrigin = findBootstrapStagingOrigin(world, origin, miningDirection);
+            if (stagingOrigin == null) {
+                bootstrapRetryCount = 0;
+                LOGGER.warn("Mason guard {} mining bootstrap failed after {} staging attempts (origin={}, direction={}); deferring to normal workflow",
+                        guard.getUuidAsString(),
+                        BOOTSTRAP_STAGING_MAX_ATTEMPTS,
+                        origin == null ? "none" : origin.toShortString(),
+                        miningDirection);
+                return false;
+            }
+
+            this.origin = stagingOrigin;
+            this.stepIndex = 0;
+            this.rejoinStepTarget = stagingOrigin;
+            this.rejoinDeepTarget = null;
+            guard.setMiningProgress(this.origin, this.stepIndex, this.miningDirection.getId());
+            guard.setMiningPathAnchors(this.origin, null);
+        }
+
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -717,6 +745,93 @@ public class MasonMiningStairGoal extends Goal {
 
     private BlockPos computeStepTarget(int index) {
         return origin.offset(miningDirection, index + 1).down(index + 1);
+    }
+
+    private BlockPos computeStepTarget(BlockPos stepOrigin, Direction direction, int index) {
+        return stepOrigin.offset(direction, index + 1).down(index + 1);
+    }
+
+    private boolean isBootstrapObstructedAtOrigin(ServerWorld world, BlockPos stepOrigin, Direction direction) {
+        if (stepOrigin == null || direction == null || !direction.getAxis().isHorizontal()) {
+            return true;
+        }
+
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos jobPos = guard.getPairedJobPos();
+        for (Direction scanDirection : Direction.Type.HORIZONTAL) {
+            BlockPos scanPos = stepOrigin.offset(scanDirection);
+            if ((chestPos != null && chestPos.equals(scanPos)) || (jobPos != null && jobPos.equals(scanPos))) {
+                return true;
+            }
+        }
+
+        BlockPos firstStepTarget = computeStepTarget(stepOrigin, direction, 0);
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            BlockPos samplePos = firstStepTarget.up(i);
+            BlockState sampleState = world.getBlockState(samplePos);
+            if (sampleState.isAir() || sampleState.getCollisionShape(world, samplePos).isEmpty()) {
+                continue;
+            }
+            if (sampleState.getBlock() instanceof ChestBlock || isProtectedJobBlock(samplePos, sampleState)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private BlockPos findBootstrapStagingOrigin(ServerWorld world, BlockPos blockedOrigin, Direction direction) {
+        if (blockedOrigin == null || direction == null || !direction.getAxis().isHorizontal()) {
+            return null;
+        }
+
+        List<BlockPos> candidates = buildBootstrapCandidateOffsets(blockedOrigin);
+        bootstrapRetryCount = 0;
+        for (BlockPos candidate : candidates) {
+            if (bootstrapRetryCount >= BOOTSTRAP_STAGING_MAX_ATTEMPTS) {
+                break;
+            }
+            bootstrapRetryCount++;
+            if (!isCandidateValidStagingOrigin(world, candidate, direction)) {
+                continue;
+            }
+            return candidate;
+        }
+        return null;
+    }
+
+    private List<BlockPos> buildBootstrapCandidateOffsets(BlockPos blockedOrigin) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int radius = BOOTSTRAP_STAGING_RADIUS_MIN; radius <= BOOTSTRAP_STAGING_RADIUS_MAX; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
+                        continue;
+                    }
+                    candidates.add(blockedOrigin.add(dx, 0, dz));
+                }
+            }
+        }
+        return candidates;
+    }
+
+    private boolean isCandidateValidStagingOrigin(ServerWorld world, BlockPos candidateOrigin, Direction direction) {
+        if (!world.isChunkLoaded(candidateOrigin)) {
+            return false;
+        }
+        if (!hasSafeSupport(world, candidateOrigin)) {
+            return false;
+        }
+        if (!world.getBlockState(candidateOrigin).getCollisionShape(world, candidateOrigin).isEmpty()
+                || !world.getBlockState(candidateOrigin.up()).getCollisionShape(world, candidateOrigin.up()).isEmpty()) {
+            return false;
+        }
+        if (isBootstrapObstructedAtOrigin(world, candidateOrigin, direction)) {
+            return false;
+        }
+
+        BlockPos firstStep = computeStepTarget(candidateOrigin, direction, 0);
+        Path preflight = guard.getNavigation().findPathTo(firstStep, 0);
+        return preflight != null;
     }
 
     private void activateMiningStage(ServerWorld world) {
