@@ -33,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.EnumMap;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -69,6 +70,7 @@ public class QuartermasterGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(QuartermasterGoal.class);
 
     private static final int CHECK_INTERVAL_TICKS = 300;
+    private static final long DAILY_RECLAIM_INTERVAL_TICKS = 24_000L;
     private static final int STRUCTURAL_CHECK_INTERVAL_TICKS = 20;
     private static final double DEFAULT_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
@@ -95,6 +97,8 @@ public class QuartermasterGoal extends Goal {
     private static final int MAX_PAIRINGS_SCANNED_PER_CYCLE = 24;
     /** Candidate chest cache refresh cadence. */
     private static final int CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS = 20 * 30;
+    private static final int MASON_COBBLESTONE_RESERVE = 8;
+    private static final int MASON_MINING_DIRT_BUFFER = 8;
     private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 8;
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
@@ -154,12 +158,49 @@ public class QuartermasterGoal extends Goal {
                 || item == Items.CHARCOAL
                 || item == Items.STICK;
     };
+    private static final Map<VillagerProfession, ProfessionReclaimPolicy> PROFESSION_RECLAIM_POLICIES = buildProfessionReclaimPolicies();
+
+    private static Map<VillagerProfession, ProfessionReclaimPolicy> buildProfessionReclaimPolicies() {
+        Map<VillagerProfession, ProfessionReclaimPolicy> policies = new EnumMap<>(VillagerProfession.class);
+        policies.put(VillagerProfession.FARMER, ProfessionReclaimPolicy.of(
+                stack -> stack.isOf(Items.WHEAT) || stack.isOf(Items.WHEAT_SEEDS) || stack.isOf(Items.HAY_BLOCK),
+                Map.of(
+                        Items.WHEAT, 32,
+                        Items.WHEAT_SEEDS, 32,
+                        Items.HAY_BLOCK, 8
+                )));
+        policies.put(VillagerProfession.SHEPHERD, ProfessionReclaimPolicy.of(
+                stack -> stack.isIn(net.minecraft.registry.tag.ItemTags.WOOL),
+                Map.of()));
+        policies.put(VillagerProfession.FLETCHER, ProfessionReclaimPolicy.of(
+                stack -> stack.isOf(Items.STICK),
+                Map.of(Items.STICK, 32)));
+        policies.put(VillagerProfession.LIBRARIAN, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.CLERIC, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.ARMORER, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.BUTCHER, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.CARTOGRAPHER, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.LEATHERWORKER, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.TOOLSMITH, ProfessionReclaimPolicy.none());
+        policies.put(VillagerProfession.WEAPONSMITH, ProfessionReclaimPolicy.of(
+                stack -> stack.isIn(ItemTags.PLANKS),
+                Map.of()));
+        policies.put(VillagerProfession.MASON, ProfessionReclaimPolicy.of(
+                stack -> stack.isIn(ItemTags.STAIRS) || stack.isIn(ItemTags.SLABS) || stack.isOf(Items.STONE),
+                Map.of(
+                        Items.COBBLESTONE, MASON_COBBLESTONE_RESERVE,
+                        Items.DIRT, MASON_MINING_DIRT_BUFFER
+                )));
+        policies.put(VillagerProfession.FISHERMAN, ProfessionReclaimPolicy.none());
+        return policies;
+    }
 
     private final VillagerEntity villager;
     private final BlockPos jobPos;
     private final BlockPos chestPos;  // librarian's paired chest (double-chest second half)
 
     private long nextCheckTick = 0L;
+    private long nextDailyReclaimTick = 0L;
     private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
@@ -401,6 +442,10 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private boolean tryPlanTransfer(ServerWorld world) {
+        if (tryPlanDailyReclaimTransferIfDue(world)) {
+            return true;
+        }
+
         BlockPos bellChestPos = resolveBellChestPos(world);
         if (bellChestPos != null) {
             if (!isBootstrapComplete(world)) {
@@ -514,6 +559,71 @@ public class QuartermasterGoal extends Goal {
         }
 
         return false;
+    }
+
+    boolean tryPlanDailyReclaimTransferIfDue(ServerWorld world) {
+        long worldTime = world.getTime();
+        if (worldTime < nextDailyReclaimTick) {
+            return false;
+        }
+        nextDailyReclaimTick = worldTime + DAILY_RECLAIM_INTERVAL_TICKS;
+        Optional<TransferLeg> plannedLeg = planDailyReclaimTransfer(world);
+        if (plannedLeg.isEmpty()) {
+            return false;
+        }
+        TransferLeg leg = plannedLeg.get();
+        sourcePos = leg.sourcePos();
+        destPos = leg.destPos();
+        transferStack = leg.transferStack().copy();
+        return true;
+    }
+
+    private Optional<TransferLeg> planDailyReclaimTransfer(ServerWorld world) {
+        List<ProfessionChestSnapshot> snapshots = buildProfessionChestSnapshots(world);
+        TransferLeg bestLeg = null;
+        int bestCount = 0;
+        for (ProfessionChestSnapshot snapshot : snapshots) {
+            ProfessionReclaimPolicy policy = PROFESSION_RECLAIM_POLICIES.getOrDefault(snapshot.profession(), ProfessionReclaimPolicy.none());
+            for (int i = 0; i < snapshot.inventory().size(); i++) {
+                ItemStack stack = snapshot.inventory().getStack(i);
+                if (stack.isEmpty() || !policy.canReclaim(stack)) {
+                    continue;
+                }
+                int totalItemCount = snapshot.totalByItem().getOrDefault(stack.getItem(), 0);
+                int reclaimable = Math.max(0, totalItemCount - policy.reserveCount(stack.getItem()));
+                if (reclaimable <= 0) {
+                    continue;
+                }
+                int toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
+                if (toMove > bestCount) {
+                    bestCount = toMove;
+                    bestLeg = new TransferLeg(snapshot.chestPos(), chestPos, stack.copyWithCount(toMove));
+                }
+            }
+        }
+        return Optional.ofNullable(bestLeg);
+    }
+
+    private List<ProfessionChestSnapshot> buildProfessionChestSnapshots(ServerWorld world) {
+        List<ProfessionChestSnapshot> snapshots = new ArrayList<>();
+        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+            BlockPos pairedChestPos = pairing.chestPos();
+            if (pairedChestPos == null || pairing.villagerUuid().equals(villager.getUuid()) || pairedChestPos.equals(chestPos)) {
+                continue;
+            }
+            Optional<Inventory> inventory = getInventory(world, pairedChestPos);
+            if (inventory.isEmpty()) {
+                continue;
+            }
+            Map<net.minecraft.item.Item, Integer> totalsByItem = new HashMap<>();
+            for (int i = 0; i < inventory.get().size(); i++) {
+                ItemStack stack = inventory.get().getStack(i);
+                if (stack.isEmpty()) continue;
+                totalsByItem.merge(stack.getItem(), stack.getCount(), Integer::sum);
+            }
+            snapshots.add(new ProfessionChestSnapshot(pairing.profession(), pairedChestPos.toImmutable(), inventory.get(), totalsByItem));
+        }
+        return snapshots;
     }
 
     // -------------------------------------------------------------------------
@@ -1046,7 +1156,7 @@ public class QuartermasterGoal extends Goal {
         return Optional.empty();
     }
 
-    private Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
+    protected Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
         if (pos == null) return Optional.empty();
         BlockState state = world.getBlockState(pos);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
@@ -1177,12 +1287,42 @@ public class QuartermasterGoal extends Goal {
         return goal.bootstrapDiscoveryRuns;
     }
 
+    static PlannedTransfer getPlannedTransferForTest(QuartermasterGoal goal) {
+        return new PlannedTransfer(goal.sourcePos, goal.destPos, goal.transferStack.copy());
+    }
+
     private boolean isBootstrapComplete(ServerWorld world) {
         return BOOTSTRAP_COMPLETE_BY_QM.getOrDefault(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()), false);
     }
 
     private void setBootstrapComplete(ServerWorld world) {
         BOOTSTRAP_COMPLETE_BY_QM.put(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()), true);
+    }
+
+    record PlannedTransfer(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
+    private record ProfessionChestSnapshot(
+            VillagerProfession profession,
+            BlockPos chestPos,
+            Inventory inventory,
+            Map<net.minecraft.item.Item, Integer> totalByItem
+    ) {}
+
+    private record ProfessionReclaimPolicy(Predicate<ItemStack> reclaimable, Map<net.minecraft.item.Item, Integer> reserveByItem) {
+        static ProfessionReclaimPolicy of(Predicate<ItemStack> reclaimable, Map<net.minecraft.item.Item, Integer> reserveByItem) {
+            return new ProfessionReclaimPolicy(reclaimable, reserveByItem);
+        }
+
+        static ProfessionReclaimPolicy none() {
+            return new ProfessionReclaimPolicy(stack -> false, Map.of());
+        }
+
+        boolean canReclaim(ItemStack stack) {
+            return reclaimable.test(stack);
+        }
+
+        int reserveCount(net.minecraft.item.Item item) {
+            return reserveByItem.getOrDefault(item, 0);
+        }
     }
 
     private record TransferLeg(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
