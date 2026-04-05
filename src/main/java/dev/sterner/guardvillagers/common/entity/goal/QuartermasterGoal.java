@@ -103,6 +103,8 @@ public class QuartermasterGoal extends Goal {
     private static final int MASON_MINING_DIRT_BUFFER = 8;
     private static final int LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR = 20;
     private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 8;
+    private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
+    private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
             Blocks.SMOKER,
@@ -244,6 +246,9 @@ public class QuartermasterGoal extends Goal {
     private final Deque<BlockPos> bootstrapSourceQueue = new ArrayDeque<>();
     private final Deque<QuartermasterDemandPlanner.QueueEntry> demandQueue = new ArrayDeque<>();
     private int bootstrapDiscoveryRuns = 0;
+    private int bootstrapEmptyDiscoveryRetries = 0;
+    private long nextBootstrapDiscoveryTick = 0L;
+    private boolean discoveredBootstrapSourceAtLeastOnce = false;
     private boolean demandQueueDirty = true;
     private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
 
@@ -1015,6 +1020,10 @@ public class QuartermasterGoal extends Goal {
     }
 
     private List<BlockPos> discoverBootstrapSourceChests(ServerWorld world, BlockPos bellChestPos) {
+        return discoverBootstrapSourceChestsWithStats(world, bellChestPos).discovered();
+    }
+
+    private BootstrapDiscoveryResult discoverBootstrapSourceChestsWithStats(ServerWorld world, BlockPos bellChestPos) {
         Set<BlockPos> pairedChests = new HashSet<>();
         for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
             BlockPos pairingChest = pairing.chestPos();
@@ -1029,21 +1038,33 @@ public class QuartermasterGoal extends Goal {
 
         Set<BlockPos> deduplicated = new HashSet<>();
         List<BlockPos> discovered = new ArrayList<>();
+        int filteredPaired = 0;
+        int filteredNotNatural = 0;
+        int filteredEmpty = 0;
         int range = (int) Math.ceil(getScanRange());
         for (BlockPos scanPos : BlockPos.iterate(bellChestPos.add(-range, -range, -range), bellChestPos.add(range, range, range))) {
             if (!bellChestPos.isWithinDistance(scanPos, getScanRange())) continue;
             BlockState state = world.getBlockState(scanPos);
             if (!(state.getBlock() instanceof ChestBlock)) continue;
             BlockPos candidate = canonicalChestPos(world, scanPos.toImmutable());
-            if (excluded.contains(candidate)) continue;
-            if (!isNaturalVillageChest(world, candidate)) continue;
-            if (countAllItems(world, candidate) <= 0) continue;
+            if (excluded.contains(candidate)) {
+                filteredPaired++;
+                continue;
+            }
+            if (!isNaturalVillageChest(world, candidate)) {
+                filteredNotNatural++;
+                continue;
+            }
+            if (countAllItems(world, candidate) <= 0) {
+                filteredEmpty++;
+                continue;
+            }
             if (deduplicated.add(candidate)) {
                 discovered.add(candidate);
             }
         }
         discovered.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
-        return discovered;
+        return new BootstrapDiscoveryResult(discovered, filteredPaired, filteredNotNatural, filteredEmpty);
     }
 
     private boolean tryPlanBootstrapConsolidationTransfer(ServerWorld world, BlockPos bellChestPos) {
@@ -1052,12 +1073,38 @@ public class QuartermasterGoal extends Goal {
             bootstrapSourceQueue.clear();
             return false;
         }
-        if (bootstrapConsolidationState == BootstrapConsolidationState.NOT_STARTED) {
+        long now = world.getTime();
+        if (bootstrapConsolidationState == BootstrapConsolidationState.NOT_STARTED
+                || (bootstrapSourceQueue.isEmpty() && now >= nextBootstrapDiscoveryTick)) {
             bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
             bootstrapDiscoveryRuns++;
             bootstrapSourceQueue.clear();
-            bootstrapSourceQueue.addAll(discoverBootstrapSourceChests(world, bellChestPos));
+            BootstrapDiscoveryResult discovery = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
+            bootstrapSourceQueue.addAll(discovery.discovered());
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("QM {} bootstrap discovery: discovered={} filtered_paired={} filtered_not_natural={} filtered_empty={}",
+                        villager.getUuidAsString(),
+                        discovery.discovered().size(),
+                        discovery.filteredPaired(),
+                        discovery.filteredNotNatural(),
+                        discovery.filteredEmpty());
+            }
             bootstrapConsolidationState = BootstrapConsolidationState.CONSOLIDATING;
+            if (bootstrapSourceQueue.isEmpty()) {
+                bootstrapEmptyDiscoveryRetries++;
+                nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
+                if (bootstrapEmptyDiscoveryRetries >= BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES) {
+                    completeBootstrap(world, "discovered_none_terminal_after_retries=" + bootstrapEmptyDiscoveryRetries);
+                } else if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap completion_reason=discovered_none retry={} next_discovery_tick={}",
+                            villager.getUuidAsString(),
+                            bootstrapEmptyDiscoveryRetries,
+                            nextBootstrapDiscoveryTick);
+                }
+                return false;
+            }
+            discoveredBootstrapSourceAtLeastOnce = true;
+            bootstrapEmptyDiscoveryRetries = 0;
         }
 
         while (!bootstrapSourceQueue.isEmpty()) {
@@ -1077,9 +1124,26 @@ public class QuartermasterGoal extends Goal {
             return true;
         }
 
-        bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
-        setBootstrapComplete(world);
+        if (discoveredBootstrapSourceAtLeastOnce) {
+            completeBootstrap(world, "discovered_and_drained");
+        } else if (now >= nextBootstrapDiscoveryTick) {
+            nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("QM {} bootstrap completion_reason=discovered_none retry_scheduled next_discovery_tick={}",
+                        villager.getUuidAsString(),
+                        nextBootstrapDiscoveryTick);
+            }
+        }
         return false;
+    }
+
+    private void completeBootstrap(ServerWorld world, String reason) {
+        bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
+        bootstrapSourceQueue.clear();
+        setBootstrapComplete(world);
+        if (LOGGER.isDebugEnabled()) {
+            LOGGER.debug("QM {} bootstrap completion_reason={}", villager.getUuidAsString(), reason);
+        }
     }
 
     private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {
@@ -1696,6 +1760,7 @@ public class QuartermasterGoal extends Goal {
     }
 
     record PlannedTransfer(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
+    private record BootstrapDiscoveryResult(List<BlockPos> discovered, int filteredPaired, int filteredNotNatural, int filteredEmpty) {}
     private record ProfessionChestSnapshot(
             VillagerProfession profession,
             BlockPos chestPos,
