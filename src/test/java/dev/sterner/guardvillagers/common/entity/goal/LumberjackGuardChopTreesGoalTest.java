@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -179,6 +180,54 @@ class LumberjackGuardChopTreesGoalTest {
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(6));
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(7));
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(8));
+    }
+
+    @Test
+    void midpointMissingChestFallback_refreshesPairingsAndTransitionsToRecipientsChosen() {
+        AtomicInteger distributionCalls = new AtomicInteger();
+        Supplier<List<String>> distributionAfterRefresh = () -> {
+            distributionCalls.incrementAndGet();
+            return List.of("stick->TOOLSMITH@abc");
+        };
+
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        4,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 4, 4, true),
+                        distributionAfterRefresh,
+                        () -> {
+                            throw new AssertionError("Retry should not be scheduled when recipients are recovered");
+                        }
+                );
+
+        assertEquals(List.of("stick->TOOLSMITH@abc"), result.recipientsChosen());
+        assertTrue(result.pairingRefreshTriggered());
+        assertTrue(result.pairedAfterRefresh());
+        assertFalse(result.upgradeRetryScheduled());
+        assertEquals(1, distributionCalls.get());
+    }
+
+    @Test
+    void midpointMissingChestFallback_schedulesRetryWhenRefreshDoesNotRecoverPairing() {
+        AtomicInteger retryCalls = new AtomicInteger();
+
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        3,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 2, 2, false),
+                        List::of,
+                        retryCalls::incrementAndGet
+                );
+
+        assertTrue(result.recipientsChosen().isEmpty());
+        assertTrue(result.pairingRefreshTriggered());
+        assertFalse(result.pairedAfterRefresh());
+        assertTrue(result.upgradeRetryScheduled());
+        assertEquals(1, retryCalls.get());
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {
