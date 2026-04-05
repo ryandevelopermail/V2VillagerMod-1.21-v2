@@ -11,6 +11,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -305,7 +306,7 @@ public final class QuartermasterDemandPlanner {
     }
 
     private static Map<VillagerProfession, EnumMap<RecipeDemandIndex.DemandMaterial, Integer>> buildExplicitCaps() {
-        Map<VillagerProfession, EnumMap<RecipeDemandIndex.DemandMaterial, Integer>> caps = new EnumMap<>(VillagerProfession.class);
+        Map<VillagerProfession, EnumMap<RecipeDemandIndex.DemandMaterial, Integer>> caps = new HashMap<>();
 
         EnumMap<RecipeDemandIndex.DemandMaterial, Integer> masonCaps = new EnumMap<>(RecipeDemandIndex.DemandMaterial.class);
         masonCaps.put(RecipeDemandIndex.DemandMaterial.PLANKS, 24);
