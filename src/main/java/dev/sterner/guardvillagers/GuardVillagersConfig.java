@@ -213,6 +213,12 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=1)
     public static int weaponsmithAdaptiveSummaryLogIntervalSessions = 10;
     @Entry
+    public static boolean fishermanRequireSkyVisibleWater = true;
+    @Entry
+    public static boolean fishermanAllowSurfaceQualifiedWater = true;
+    @Entry(min=20)
+    public static int fishermanInvalidWaterRescanCooldownTicks = 20 * 15;
+    @Entry
     public static int quartermasterScanRange = 128;
     @Entry
     public static int armorerFallbackScanRange = 128;
@@ -290,6 +296,7 @@ public class GuardVillagersConfig extends MidnightConfig {
         weaponsmithAdaptiveThrottleDeferTicks = clamp(weaponsmithAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         weaponsmithAdaptiveThrottleJitterTicks = clamp(weaponsmithAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
         weaponsmithAdaptiveSummaryLogIntervalSessions = clamp(weaponsmithAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        fishermanInvalidWaterRescanCooldownTicks = clamp(fishermanInvalidWaterRescanCooldownTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         shepherdFenceBatchMin = clamp(shepherdFenceBatchMin, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
         shepherdFenceBatchMax = clamp(shepherdFenceBatchMax, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
         if (shepherdFenceBatchMax < shepherdFenceBatchMin) {
