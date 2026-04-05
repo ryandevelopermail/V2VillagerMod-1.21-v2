@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import dev.sterner.guardvillagers.common.util.QuartermasterDemandPlanner;
 import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -200,6 +201,7 @@ public class QuartermasterGoal extends Goal {
     private final BlockPos chestPos;  // librarian's paired chest (double-chest second half)
 
     private long nextCheckTick = 0L;
+    private long nextDemandQueueRebuildTick = 0L;
     private long nextDailyReclaimTick = 0L;
     private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
@@ -222,7 +224,9 @@ public class QuartermasterGoal extends Goal {
     private long nextCandidateCacheRefreshTick = 0L;
     private SurplusScanMetrics lastSurplusScanMetrics = SurplusScanMetrics.empty();
     private final Deque<TransferLeg> bootstrapTransferQueue = new ArrayDeque<>();
+    private final Deque<QuartermasterDemandPlanner.QueueEntry> demandQueue = new ArrayDeque<>();
     private int bootstrapDiscoveryRuns = 0;
+    private boolean demandQueueDirty = true;
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -284,6 +288,17 @@ public class QuartermasterGoal extends Goal {
     public void requestImmediatePrerequisiteRevalidation() {
         forceStructuralRevalidation = true;
         nextStructuralCheckTick = 0L;
+        requestImmediateDemandReplan();
+    }
+
+    /**
+     * Signals that demand queue planning should run immediately on the next goal check.
+     * Used by inventory mutation listeners.
+     */
+    public void requestImmediateDemandReplan() {
+        demandQueueDirty = true;
+        nextDemandQueueRebuildTick = 0L;
+        nextCheckTick = 0L;
     }
 
     private void ensureAnchorUnregistered(ServerWorld world) {
@@ -463,6 +478,11 @@ public class QuartermasterGoal extends Goal {
         }
 
         // Priority 1: mason is building (low on stone) → top up from bell chest
+        if (tryPlanDemandQueueTransfer(world, bellChestPos)) {
+            return true;
+        }
+
+        // Priority 1: mason is building (low on stone) → top up from bell chest
         Optional<MasonGuardEntity> masonNeedingStone = findMasonNeedingStone(world);
         if (masonNeedingStone.isPresent() && bellChestPos != null) {
             int stoneInBell = countItem(world, bellChestPos, Items.COBBLESTONE);
@@ -565,6 +585,88 @@ public class QuartermasterGoal extends Goal {
         }
 
         return false;
+    }
+
+    private boolean tryPlanDemandQueueTransfer(ServerWorld world, BlockPos bellChestPos) {
+        if (bellChestPos == null) {
+            return false;
+        }
+        if (demandQueueDirty || world.getTime() >= nextDemandQueueRebuildTick || demandQueue.isEmpty()) {
+            rebuildDemandQueue(world, bellChestPos);
+        }
+
+        while (!demandQueue.isEmpty()) {
+            QuartermasterDemandPlanner.QueueEntry entry = demandQueue.pollFirst();
+            int available = countItem(world, bellChestPos, entry.requestedStack().getItem());
+            if (available <= 0) {
+                continue;
+            }
+            int amount = Math.min(HAUL_AMOUNT, Math.min(available, entry.requestedStack().getCount()));
+            if (amount <= 0) {
+                continue;
+            }
+            sourcePos = bellChestPos;
+            destPos = entry.recipientChestPos();
+            transferStack = entry.requestedStack().copyWithCount(amount);
+            return true;
+        }
+        return false;
+    }
+
+    private void rebuildDemandQueue(ServerWorld world, BlockPos bellChestPos) {
+        List<QuartermasterDemandPlanner.ChestSnapshot> snapshots = buildDemandPlannerSnapshots(world, bellChestPos);
+        List<QuartermasterDemandPlanner.QueueEntry> planned =
+                QuartermasterDemandPlanner.plan(world, bellChestPos, snapshots, HAUL_AMOUNT);
+        demandQueue.clear();
+        demandQueue.addAll(planned);
+        demandQueueDirty = false;
+        nextDemandQueueRebuildTick = world.getTime() + CHECK_INTERVAL_TICKS;
+    }
+
+    private List<QuartermasterDemandPlanner.ChestSnapshot> buildDemandPlannerSnapshots(ServerWorld world, BlockPos bellChestPos) {
+        List<QuartermasterDemandPlanner.ChestSnapshot> snapshots = new ArrayList<>();
+        Map<net.minecraft.item.Item, Integer> qmTotals = inventoryTotals(world, bellChestPos);
+        if (!qmTotals.isEmpty()) {
+            snapshots.add(new QuartermasterDemandPlanner.ChestSnapshot(
+                    VillagerProfession.LIBRARIAN,
+                    bellChestPos.toImmutable(),
+                    qmTotals
+            ));
+        }
+
+        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+            BlockPos pairedChestPos = pairing.chestPos();
+            if (pairedChestPos == null || pairedChestPos.equals(bellChestPos) || pairing.villagerUuid().equals(villager.getUuid())) {
+                continue;
+            }
+            Map<net.minecraft.item.Item, Integer> totals = inventoryTotals(world, pairedChestPos);
+            if (totals.isEmpty()) {
+                continue;
+            }
+            snapshots.add(new QuartermasterDemandPlanner.ChestSnapshot(
+                    pairing.profession(),
+                    pairedChestPos.toImmutable(),
+                    totals
+            ));
+        }
+        snapshots.sort(Comparator
+                .comparing((QuartermasterDemandPlanner.ChestSnapshot snapshot) -> snapshot.profession().toString())
+                .thenComparingLong(snapshot -> snapshot.chestPos().asLong()));
+        return snapshots;
+    }
+
+    private Map<net.minecraft.item.Item, Integer> inventoryTotals(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inventory = getInventory(world, pos);
+        if (inventory.isEmpty()) {
+            return Map.of();
+        }
+        Map<net.minecraft.item.Item, Integer> totalsByItem = new HashMap<>();
+        for (int i = 0; i < inventory.get().size(); i++) {
+            ItemStack stack = inventory.get().getStack(i);
+            if (stack.isEmpty()) continue;
+            totalsByItem.merge(stack.getItem(), stack.getCount(), Integer::sum);
+        }
+        return totalsByItem;
     }
 
     boolean tryPlanDailyReclaimTransferIfDue(ServerWorld world) {
@@ -1356,6 +1458,10 @@ public class QuartermasterGoal extends Goal {
 
     static PlannedTransfer getPlannedTransferForTest(QuartermasterGoal goal) {
         return new PlannedTransfer(goal.sourcePos, goal.destPos, goal.transferStack.copy());
+    }
+
+    static List<QuartermasterDemandPlanner.QueueEntry> getDemandQueueForTest(QuartermasterGoal goal) {
+        return List.copyOf(goal.demandQueue);
     }
 
     private boolean isBootstrapComplete(ServerWorld world) {

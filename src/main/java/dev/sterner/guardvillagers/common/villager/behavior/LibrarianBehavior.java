@@ -193,6 +193,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
         if (quartermasterGoal != null) {
             quartermasterGoal.requestImmediatePrerequisiteRevalidation();
+            quartermasterGoal.requestImmediateDemandReplan();
         }
         LAST_IMMEDIATE_REQUEST_TICK.put(villager, currentTick);
         INVENTORY_DIRTY_FLAGS.put(villager, false);
