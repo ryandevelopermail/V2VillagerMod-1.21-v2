@@ -160,22 +160,20 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private List<MasonRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory, WallProjectPolicyResolver.PolicyDecision wallPolicy) {
         List<MasonRecipe> recipes = new ArrayList<>();
         boolean reserveCobblestone = requiresCobblestoneReserve(world);
-        boolean projectActive = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY;
-        boolean suppressWallOutput = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.BLOCK_WALLS;
-        int suppressedNonWallRecipeCount = 0;
-        int suppressedWallRecipeCount = 0;
+        boolean cobblestoneWallLock = wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY;
+        int suppressedCobblestoneNonWallRecipeCount = 0;
+        LOGGER.debug("MasonStonecutting {}: cobble_wall_lock={} mode={}",
+                guard.getUuidAsString(), cobblestoneWallLock, wallPolicy.mode());
         for (RecipeEntry<StonecuttingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.STONECUTTING)) {
             StonecuttingRecipe recipe = entry.value();
             ItemStack result = recipe.craft(new net.minecraft.recipe.input.SingleStackRecipeInput(ItemStack.EMPTY), world.getRegistryManager());
             if (result.isEmpty()) {
                 continue;
             }
-            if (suppressWallOutput && result.getItem() == Items.COBBLESTONE_WALL) {
-                suppressedWallRecipeCount++;
-                continue;
-            }
-            if (projectActive && result.getItem() != Items.COBBLESTONE_WALL) {
-                suppressedNonWallRecipeCount++;
+
+            Ingredient ingredient = getPrimaryIngredient(recipe);
+            if (shouldSuppressForCobblestoneWallLock(ingredient, result.getItem(), cobblestoneWallLock)) {
+                suppressedCobblestoneNonWallRecipeCount++;
                 continue;
             }
 
@@ -187,13 +185,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
             int batchOutputCount = result.getCount() * batchInputCount;
             recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
         }
-        if (projectActive && suppressedNonWallRecipeCount > 0) {
-            LOGGER.info("MasonStonecutting {}: suppressed {} non-wall outputs while wall project is active",
-                    guard.getUuidAsString(), suppressedNonWallRecipeCount);
-        }
-        if (suppressWallOutput && suppressedWallRecipeCount > 0) {
-            LOGGER.info("MasonStonecutting {}: suppressed {} cobblestone wall outputs inside completed wall perimeter",
-                    guard.getUuidAsString(), suppressedWallRecipeCount);
+        if (cobblestoneWallLock && suppressedCobblestoneNonWallRecipeCount > 0) {
+            LOGGER.info("MasonStonecutting {}: suppressed {} cobblestone slab/stair outputs while wall project is active",
+                    guard.getUuidAsString(), suppressedCobblestoneNonWallRecipeCount);
         }
         return recipes;
     }
@@ -203,7 +197,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 craftableRecipes.stream().map(recipe -> recipe.output().getItem()).collect(Collectors.toList()),
                 this.lastCraftedOutputItem,
                 guard.getRandom().nextInt(Math.max(1, craftableRecipes.size())),
-                wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY
+                false
         );
         if (selectedIndex >= 0) {
             return craftableRecipes.get(selectedIndex);
@@ -263,7 +257,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     static int getEligibleIngredientCount(Inventory inventory, Ingredient ingredient, boolean reserveCobblestone) {
         int availableIngredients = countMatchingItems(inventory, ingredient);
-        if (!reserveCobblestone || !ingredient.test(new ItemStack(Items.COBBLESTONE))) {
+        if (!reserveCobblestone || !isCobblestoneIngredient(ingredient)) {
             return availableIngredients;
         }
 
@@ -294,6 +288,17 @@ public class MasonGuardStonecuttingGoal extends Goal {
             count += stack.getCount();
         }
         return count;
+    }
+
+    static boolean shouldSuppressForCobblestoneWallLock(Ingredient ingredient, Item outputItem, boolean cobblestoneWallLock) {
+        if (!cobblestoneWallLock || !isCobblestoneIngredient(ingredient)) {
+            return false;
+        }
+        return outputItem == Items.COBBLESTONE_SLAB || outputItem == Items.COBBLESTONE_STAIRS;
+    }
+
+    private static boolean isCobblestoneIngredient(Ingredient ingredient) {
+        return ingredient != null && !ingredient.isEmpty() && ingredient.test(new ItemStack(Items.COBBLESTONE));
     }
 
     private boolean requiresCobblestoneReserve(ServerWorld world) {
