@@ -230,6 +230,59 @@ class LumberjackGuardChopTreesGoalTest {
         assertEquals(1, retryCalls.get());
     }
 
+    @Test
+    void shouldSkipBackpressureDeferRestart_activeDeferWithSubstantialRemaining_skipsRestart() {
+        long requestedDeferTicks = 240L;
+        long substantialRemaining = LumberjackGuardChopTreesGoal.getSubstantialBackpressureRemainingTicks(requestedDeferTicks);
+
+        boolean shouldSkip = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                true,
+                substantialRemaining,
+                requestedDeferTicks,
+                1_000L,
+                -1L,
+                200L
+        );
+
+        assertTrue(shouldSkip);
+    }
+
+    @Test
+    void shouldSkipBackpressureDeferRestart_retriggerCooldownBlocksImmediateRescheduleAfterExpiry() {
+        long requestedDeferTicks = 240L;
+        long now = 1_000L;
+        long cooldown = 200L;
+
+        boolean shouldSkipDuringCooldown = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now,
+                now - 50L,
+                cooldown
+        );
+        boolean shouldAllowAfterCooldown = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now + cooldown,
+                now - 50L,
+                cooldown
+        );
+
+        assertTrue(shouldSkipDuringCooldown);
+        assertFalse(shouldAllowAfterCooldown);
+    }
+
+    @Test
+    void shouldLogDeferredMidpointAudit_rateLimitsDeferOnlyMidpointAuditLogs() {
+        long minInterval = 1_200L;
+
+        assertTrue(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(5_000L, -1L, minInterval));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(5_500L, 5_000L, minInterval));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(6_200L, 5_000L, minInterval));
+    }
+
     private List<BlockPos> adjacent(BlockPos pos) {
         return List.of(
                 pos.up(),

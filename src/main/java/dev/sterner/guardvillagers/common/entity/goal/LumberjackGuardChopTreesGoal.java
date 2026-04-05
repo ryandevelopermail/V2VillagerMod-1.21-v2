@@ -115,6 +115,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int GOVERNOR_LOAD_VISITED_WEIGHT = 350;
     private static final int GOVERNOR_LOAD_RETRY_WEIGHT = 90;
     private static final int GOVERNOR_LOAD_FORCED_WEIGHT = 220;
+    private static final String COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE = "governor backpressure";
+    private static final long BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS = 20L * 10L;
+    private static final long MIDPOINT_AUDIT_DEFER_ONLY_LOG_MIN_INTERVAL_TICKS = 20L * 60L;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -137,6 +140,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int adaptiveFailedSessionWindow;
     private int adaptiveForcedRecoveryWindow;
     private int adaptiveSessionCount;
+    private long lastBackpressureDeferTick = Long.MIN_VALUE;
+    private long lastMidpointAuditLogTick = Long.MIN_VALUE;
+    private String activeCountdownReason = "";
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -353,6 +359,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         if (this.guard.isChopCountdownActive() && world.getTime() >= this.guard.getNextChopTick()) {
             this.guard.clearChopCountdown();
+            this.activeCountdownReason = "";
             continueOrStartTreeTargetScan(world);
         }
     }
@@ -367,10 +374,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
             if (WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
                 int deferTicks = getConfiguredGovernorHighLoadDeferTicks();
+                long remainingCountdownTicks = Math.max(0L, this.guard.getNextChopTick() - world.getTime());
+                if (shouldSkipBackpressureDeferRestart(
+                        this.guard.isChopCountdownActive(),
+                        remainingCountdownTicks,
+                        deferTicks,
+                        world.getTime(),
+                        this.lastBackpressureDeferTick,
+                        BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
+                    return;
+                }
                 LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
                         this.guard.getUuidAsString(),
                         deferTicks);
-                startChopCountdown(world, deferTicks, "governor backpressure");
+                startChopCountdown(world, deferTicks, COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE);
+                this.lastBackpressureDeferTick = world.getTime();
                 return;
             }
             this.pendingTreeTargetScan = createTreeTargetScanSession(world);
@@ -836,6 +854,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startChopCountdown(ServerWorld world, long totalTicks, String reason) {
         this.guard.startChopCountdown(world.getTime(), totalTicks);
+        this.activeCountdownReason = reason == null ? "" : reason;
         LOGGER.info("Lumberjack Guard {} chop countdown started ({} ticks) {}",
                 this.guard.getUuidAsString(),
                 totalTicks,
@@ -863,6 +882,41 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 && (noTreeFailures - NO_TREE_ESCALATION_HIGH_WATER_MARK) % NO_TREE_ESCALATION_REPEAT_INTERVAL == 0;
     }
 
+    static boolean shouldSkipBackpressureDeferRestart(boolean countdownActive,
+                                                      long countdownRemainingTicks,
+                                                      long requestedDeferTicks,
+                                                      long currentTick,
+                                                      long lastBackpressureDeferTick,
+                                                      long retriggerCooldownTicks) {
+        if (countdownActive && countdownRemainingTicks >= getSubstantialBackpressureRemainingTicks(requestedDeferTicks)) {
+            return true;
+        }
+        return hasBackpressureDeferCooldown(currentTick, lastBackpressureDeferTick, retriggerCooldownTicks);
+    }
+
+    static long getSubstantialBackpressureRemainingTicks(long requestedDeferTicks) {
+        long normalizedDeferTicks = Math.max(requestedDeferTicks, 0L);
+        return Math.max(40L, normalizedDeferTicks / 3L);
+    }
+
+    static boolean hasBackpressureDeferCooldown(long currentTick, long lastBackpressureDeferTick, long retriggerCooldownTicks) {
+        if (lastBackpressureDeferTick < 0L || retriggerCooldownTicks <= 0L) {
+            return false;
+        }
+        return currentTick - lastBackpressureDeferTick < retriggerCooldownTicks;
+    }
+
+    static boolean shouldLogDeferredMidpointAudit(long currentTick, long lastAuditLogTick, long minimumIntervalTicks) {
+        if (minimumIntervalTicks <= 0L || lastAuditLogTick < 0L) {
+            return true;
+        }
+        return currentTick - lastAuditLogTick >= minimumIntervalTicks;
+    }
+
+    private static boolean isDeferredBackpressureCountdown(String reason) {
+        return COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE.equals(reason);
+    }
+
     private void logCountdownProgress(ServerWorld world) {
         if (this.guard.getChopCountdownTotalTicks() <= 0L) {
             return;
@@ -876,6 +930,14 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setChopCountdownLastLogStep(step);
 
         if (step == 2) {
+            if (isDeferredBackpressureCountdown(this.activeCountdownReason)
+                    && !shouldLogDeferredMidpointAudit(
+                    world.getTime(),
+                    this.lastMidpointAuditLogTick,
+                    MIDPOINT_AUDIT_DEFER_ONLY_LOG_MIN_INTERVAL_TICKS)) {
+                return;
+            }
+            this.lastMidpointAuditLogTick = world.getTime();
             LumberjackVillageDemandAudit.AuditSnapshot auditSnapshot = LumberjackVillageDemandAudit.run(world, this.guard);
             List<String> recipientsChosen = LumberjackGuardDepositLogsGoal.runMidpointAuditedDemandDistribution(
                     world,
