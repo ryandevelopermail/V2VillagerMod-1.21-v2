@@ -122,11 +122,11 @@ public final class QuartermasterDemandPlanner {
             entries.addAll(allocateForMaterial(material, sourceMaterialStock, materialCandidates));
         }
 
-        entries.sort(Comparator
-                .comparing(QueueEntry::completesCraftNow).reversed()
-                .comparingDouble(QueueEntry::urgencyScore).reversed()
+        Comparator<QueueEntry> queueOrder = Comparator.comparing(QueueEntry::completesCraftNow).reversed()
+                .thenComparing(Comparator.comparingDouble(QueueEntry::urgencyScore).reversed())
                 .thenComparing(Comparator.comparingInt(QueueEntry::deficit).reversed())
-                .thenComparing(QueueEntry::tieBreakKey));
+                .thenComparing(QueueEntry::tieBreakKey);
+        entries.sort(queueOrder);
 
         return List.copyOf(entries);
     }
