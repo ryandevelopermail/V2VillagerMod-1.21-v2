@@ -283,6 +283,64 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(6_200L, 5_000L, minInterval));
     }
 
+    @Test
+    void backpressureDefer_oneEventCreatesOneConfiguredCountdownAndNoRepeatedRestartWhileActive() {
+        long requestedDeferTicks = 300L;
+        long now = 10_000L;
+
+        boolean shouldStartFirstDefer = !LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now,
+                -1L,
+                200L
+        );
+        boolean shouldKeepExisting = LumberjackGuardChopTreesGoal.shouldKeepExistingBackpressureCountdown(
+                true,
+                requestedDeferTicks - 1L,
+                "governor backpressure"
+        );
+
+        assertTrue(shouldStartFirstDefer);
+        assertEquals(300L, requestedDeferTicks);
+        assertTrue(shouldKeepExisting);
+    }
+
+    @Test
+    void backpressureDefer_scanResumesAfterCountdownExpiryWhenCooldownElapsed() {
+        long requestedDeferTicks = 300L;
+        long cooldown = 200L;
+        long deferStartedAt = 2_000L;
+        long afterExpiryAndCooldown = deferStartedAt + requestedDeferTicks + cooldown + 1L;
+
+        boolean shouldKeepExisting = LumberjackGuardChopTreesGoal.shouldKeepExistingBackpressureCountdown(
+                true,
+                0L,
+                "governor backpressure"
+        );
+        boolean shouldSkipRestart = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                afterExpiryAndCooldown,
+                deferStartedAt,
+                cooldown
+        );
+
+        assertFalse(shouldKeepExisting);
+        assertFalse(shouldSkipRestart);
+    }
+
+    @Test
+    void shouldRunMidpointAuditForCountdown_onlyOncePerCountdownStartTick() {
+        long countdownStartTick = 4_000L;
+
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, -1L));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, countdownStartTick));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick + 300L, countdownStartTick));
+    }
+
     private List<BlockPos> adjacent(BlockPos pos) {
         return List.of(
                 pos.up(),
