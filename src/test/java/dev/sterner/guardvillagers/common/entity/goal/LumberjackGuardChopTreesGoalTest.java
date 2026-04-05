@@ -196,10 +196,12 @@ class LumberjackGuardChopTreesGoalTest {
                         List.of(),
                         3,
                         () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 4, 4, true),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(false, 0, 0, 0, 0),
                         distributionAfterRefresh,
+                        () -> new LumberjackChestTriggerController.MidpointRetryPlan(false, 0, 0L, 0L, false),
                         () -> {
-                            throw new AssertionError("Retry should not be scheduled when recipients are recovered");
-                        }
+                        },
+                        "guard-1"
                 );
 
         assertEquals(List.of("stick->TOOLSMITH@abc"), result.recipientsChosen());
@@ -219,15 +221,54 @@ class LumberjackGuardChopTreesGoalTest {
                         List.of(),
                         3,
                         () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 2, 2, false),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(false, 2, 0, 2, 3),
                         List::of,
-                        retryCalls::incrementAndGet
+                        () -> {
+                            retryCalls.incrementAndGet();
+                            return new LumberjackChestTriggerController.MidpointRetryPlan(true, 1, 600L, 1_600L, false);
+                        },
+                        () -> {
+                        },
+                        "guard-2"
                 );
 
         assertTrue(result.recipientsChosen().isEmpty());
         assertTrue(result.pairingRefreshTriggered());
         assertFalse(result.pairedAfterRefresh());
         assertTrue(result.upgradeRetryScheduled());
+        assertEquals(1, result.retryAttempt());
+        assertEquals(600L, result.retryDelayTicks());
+        assertFalse(result.retryThrottled());
         assertEquals(1, retryCalls.get());
+    }
+
+    @Test
+    void midpointMissingChestFallback_placesChestThenTransitionsToRecipientsChosen() {
+        AtomicInteger distributionCalls = new AtomicInteger();
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        5,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 5, 5, false),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(true, 2, 1, 2, 1),
+                        () -> {
+                            distributionCalls.incrementAndGet();
+                            return List.of("plank->FARMER@xyz");
+                        },
+                        () -> {
+                            throw new AssertionError("Retry should not be scheduled after successful placement recovery");
+                        },
+                        () -> {
+                        },
+                        "guard-3"
+                );
+
+        assertEquals(List.of("plank->FARMER@xyz"), result.recipientsChosen());
+        assertTrue(result.pairingRefreshTriggered());
+        assertTrue(result.pairedAfterRefresh());
+        assertFalse(result.upgradeRetryScheduled());
+        assertEquals(1, distributionCalls.get());
     }
 
     @Test
