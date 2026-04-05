@@ -3,7 +3,10 @@ package dev.sterner.guardvillagers.common.util;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.item.AxeItem;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.item.SwordItem;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -40,19 +43,27 @@ public final class WeaponsmithStandManager {
 
         return stands.stream()
                 .sorted(distanceComparator)
-                .filter(stand -> isStandAvailableForHand(stand, memory, slot))
+                .filter(stand -> isStandAvailableForHand(stand, memory, slot, stack))
                 .findFirst();
     }
 
     public static boolean isStandAvailableForHand(VillagerEntity villager, ArmorStandEntity stand, EquipmentSlot slot) {
-        return isStandAvailableForHand(stand, getStandMemory(villager), slot);
+        return isStandAvailableForHand(stand, getStandMemory(villager), slot, ItemStack.EMPTY);
     }
 
-    private static boolean isStandAvailableForHand(ArmorStandEntity stand, Map<UUID, StandProgress> memory, EquipmentSlot slot) {
+    public static boolean isStandAvailableForWeapon(VillagerEntity villager, ArmorStandEntity stand, EquipmentSlot slot, ItemStack candidate) {
+        return isStandAvailableForHand(stand, getStandMemory(villager), slot, candidate);
+    }
+
+    private static boolean isStandAvailableForHand(ArmorStandEntity stand, Map<UUID, StandProgress> memory, EquipmentSlot slot, ItemStack candidate) {
         if (!isHandSlot(slot)) {
             return false;
         }
         StandProgress progress = syncProgressWithStand(stand, memory);
+        ItemStack equipped = stand.getEquippedStack(slot);
+        if (!equipped.isEmpty()) {
+            return canReplaceWeapon(candidate, equipped, slot);
+        }
         if (progress.isComplete()) {
             return false;
         }
@@ -85,21 +96,74 @@ public final class WeaponsmithStandManager {
         if (!stand.isAlive() || stand.getWorld() != world) {
             return false;
         }
-        if (!stand.getEquippedStack(slot).isEmpty()) {
-            markSlotPlaced(villager, stand.getUuid(), slot);
-            return false;
+        ItemStack equipped = stand.getEquippedStack(slot);
+        if (!equipped.isEmpty()) {
+            if (!canReplaceWeapon(stack, equipped, slot)) {
+                markSlotPlaced(villager, stand.getUuid(), slot);
+                return false;
+            }
         }
 
         StandProgress progress = syncProgressWithStand(stand, getStandMemory(villager));
-        if (progress.hasSlot(slot)) {
+        if (equipped.isEmpty() && progress.hasSlot(slot)) {
             return false;
         }
 
         ItemStack toPlace = stack.copy();
         toPlace.setCount(1);
+        if (!equipped.isEmpty()) {
+            stand.dropStack(equipped.copy());
+        }
         stand.equipStack(slot, toPlace);
         markSlotPlaced(villager, stand.getUuid(), slot);
         return true;
+    }
+
+    private static boolean canReplaceWeapon(ItemStack candidate, ItemStack current, EquipmentSlot slot) {
+        if (candidate.isEmpty() || current.isEmpty()) {
+            return false;
+        }
+
+        int tierComparison = compareMaterialTier(candidate, current);
+        if (tierComparison != 0) {
+            return tierComparison > 0;
+        }
+
+        return GearGradeComparator.isUpgrade(candidate, current, slot);
+    }
+
+    private static int compareMaterialTier(ItemStack candidate, ItemStack current) {
+        boolean bothSwords = candidate.getItem() instanceof SwordItem && current.getItem() instanceof SwordItem;
+        boolean bothAxes = candidate.getItem() instanceof AxeItem && current.getItem() instanceof AxeItem;
+        if (!bothSwords && !bothAxes) {
+            return 0;
+        }
+
+        int candidateTier = resolveWeaponTier(candidate);
+        int currentTier = resolveWeaponTier(current);
+        if (candidateTier < 0 || currentTier < 0) {
+            return 0;
+        }
+        return Integer.compare(candidateTier, currentTier);
+    }
+
+    private static int resolveWeaponTier(ItemStack stack) {
+        if (stack.isOf(Items.WOODEN_SWORD) || stack.isOf(Items.WOODEN_AXE) || stack.isOf(Items.GOLDEN_SWORD) || stack.isOf(Items.GOLDEN_AXE)) {
+            return 0;
+        }
+        if (stack.isOf(Items.STONE_SWORD) || stack.isOf(Items.STONE_AXE)) {
+            return 1;
+        }
+        if (stack.isOf(Items.IRON_SWORD) || stack.isOf(Items.IRON_AXE)) {
+            return 2;
+        }
+        if (stack.isOf(Items.DIAMOND_SWORD) || stack.isOf(Items.DIAMOND_AXE)) {
+            return 3;
+        }
+        if (stack.isOf(Items.NETHERITE_SWORD) || stack.isOf(Items.NETHERITE_AXE)) {
+            return 4;
+        }
+        return -1;
     }
 
     public static Map<UUID, StandProgress> getStandMemory(VillagerEntity villager) {

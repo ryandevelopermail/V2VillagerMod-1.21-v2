@@ -185,6 +185,9 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
         if (!villager.isAlive() || villager.getVillagerData().getProfession() != VillagerProfession.BUTCHER) {
             return;
         }
+        if (isAlreadyArmed(villager.getMainHandStack())) {
+            return;
+        }
 
         ButcherGuardEntity guard = GuardVillagers.BUTCHER_GUARD_VILLAGER.create(world);
         if (guard == null) {
@@ -245,6 +248,10 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
         }
 
         return ItemStack.EMPTY;
+    }
+
+    private static boolean isAlreadyArmed(ItemStack stack) {
+        return isConvertibleWeapon(stack);
     }
 
     private static boolean isConvertibleWeapon(ItemStack stack) {

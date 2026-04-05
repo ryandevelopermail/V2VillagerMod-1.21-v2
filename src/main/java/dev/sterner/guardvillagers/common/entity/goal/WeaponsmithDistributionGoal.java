@@ -80,7 +80,7 @@ public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGo
 
     @Override
     protected boolean isStandAvailableForPendingItem(ServerWorld world, ArmorStandEntity stand) {
-        return WeaponsmithStandManager.isStandAvailableForHand(villager, stand, EquipmentSlot.MAINHAND);
+        return WeaponsmithStandManager.isStandAvailableForWeapon(villager, stand, EquipmentSlot.MAINHAND, pendingItem);
     }
 
     @Override
