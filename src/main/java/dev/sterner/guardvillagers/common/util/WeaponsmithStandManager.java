@@ -28,6 +28,11 @@ public final class WeaponsmithStandManager {
     }
 
     public static Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, VillagerEntity villager, BlockPos center, EquipmentSlot slot) {
+        return findPlacementStand(world, villager, center, slot, ItemStack.EMPTY);
+    }
+
+    public static Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, VillagerEntity villager, BlockPos center, EquipmentSlot slot,
+                                                                 ItemStack candidate) {
         List<ArmorStandEntity> stands = world.getEntitiesByClass(ArmorStandEntity.class, new Box(center).expand(STAND_SCAN_RANGE),
                 stand -> stand.isAlive() && stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG));
         if (stands.isEmpty()) {
@@ -43,7 +48,7 @@ public final class WeaponsmithStandManager {
 
         return stands.stream()
                 .sorted(distanceComparator)
-                .filter(stand -> isStandAvailableForHand(stand, memory, slot, stack))
+                .filter(stand -> isStandAvailableForHand(stand, memory, slot, candidate))
                 .findFirst();
     }
 

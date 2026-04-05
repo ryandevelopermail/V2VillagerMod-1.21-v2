@@ -75,7 +75,7 @@ public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGo
 
     @Override
     protected Optional<ArmorStandEntity> findPlacementStand(ServerWorld world, ItemStack stack) {
-        return WeaponsmithStandManager.findPlacementStand(world, villager, getDistributionCenter(), EquipmentSlot.MAINHAND);
+        return WeaponsmithStandManager.findPlacementStand(world, villager, getDistributionCenter(), EquipmentSlot.MAINHAND, stack);
     }
 
     @Override
