@@ -30,7 +30,9 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
@@ -58,15 +60,25 @@ public class FarmerHarvestGoal extends Goal {
     private static final int SEED_FORAGE_RETRY_BASE_COOLDOWN_TICKS = 100;
     private static final int SEED_FORAGE_RETRY_MAX_COOLDOWN_TICKS = 600;
     private static final int SEED_FORAGE_LOW_YIELD_COOLDOWN_TICKS = 100;
-    private static final int DEFAULT_WHEAT_SEED_RESERVE_CAP = 64;
     private static final int DEFAULT_WHEAT_SEED_BOOTSTRAP_FLOOR = 0;
-    private static final int FULL_WHEAT_SEED_STACK = 64;
     /** Seeds pulled from chest per incremental pickup cycle (no-hoe, no-seeds idle mode). */
     private static final int SEED_INCREMENT_BATCH = 5;
     /** How often to attempt incremental seed pickup when no seeds and no hoe are available. */
     private static final int SEED_INCREMENT_INTERVAL_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
     private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
+    private static final int BOOTSTRAP_SCAN_RADIUS = 16;
+    private static final int BOOTSTRAP_SCAN_MIN_Y_OFFSET = -1;
+    private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
+    private static final int BOOTSTRAP_SCAN_BLOCK_BUDGET = 900;
+    private static final int BOOTSTRAP_SCAN_INTERVAL_TICKS = 200;
+    private static final int BOOTSTRAP_INVALIDATION_CHECK_INTERVAL_TICKS = 200;
+    private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
+    private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
+    private static final int BOOTSTRAP_RESCAN_COOLDOWN_TICKS = 100;
+    private static final int MIN_VIABLE_TERRITORY_PLOTS = 6;
+    private static final int SEED_TARGET_RESERVE_MARGIN_MIN = 2;
+    private static final int SEED_TARGET_RESERVE_MARGIN_DIVISOR = 5;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
 
     private final VillagerEntity villager;
@@ -138,6 +150,10 @@ public class FarmerHarvestGoal extends Goal {
      * Logged once per obligation cycle at DEBUG; subsequent polls remain DEBUG.
      */
     private boolean obligationLoggedThisCycle = false;
+    private final Set<BlockPos> eligibleTerritory = new HashSet<>();
+    private long nextBootstrapScanTick = 0L;
+    private int bootstrapScanCursor = 0;
+    private long lastTerritoryInvalidationTick = 0L;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -164,6 +180,12 @@ public class FarmerHarvestGoal extends Goal {
         this.hasUnseededFarmlandObligation = false;
         this.obligationLoggedThisCycle = false;
         this.nextIncrementalSeedPickupTick = 0L;
+        this.eligibleTerritory.clear();
+        this.bootstrapScanCursor = 0;
+        this.nextBootstrapScanTick = 0L;
+        this.lastTerritoryInvalidationTick = 0L;
+        this.cachedCoverage = null;
+        this.coverageCacheTime = -1L;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -199,6 +221,12 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         if (shouldThrottleFarmlandExpansionChecks(world)) {
+            return false;
+        }
+        ensureEligibleTerritoryCache(world, false);
+        int eligibleTerritoryCount = getEligibleTerritoryCount(world);
+        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
+            nextCheckTime = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
             return false;
         }
 
@@ -1352,16 +1380,10 @@ public class FarmerHarvestGoal extends Goal {
 
     private void populateHoeTargets(ServerWorld world) {
         hoeTargets.clear();
+        ensureEligibleTerritoryCache(world, false);
 
         List<BlockPos> hoeableTargets = new ArrayList<>();
-        int radius = HOE_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -1, -radius);
-        BlockPos end = jobPos.add(radius, 1, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
-                continue;
-            }
+        for (BlockPos pos : eligibleTerritory) {
             if (!isHoeTarget(world, pos)) {
                 continue;
             }
@@ -1377,16 +1399,8 @@ public class FarmerHarvestGoal extends Goal {
 
     private void populatePlantTargets(ServerWorld world) {
         plantTargets.clear();
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        long scanned = 0L;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            scanned++;
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
-                continue;
-            }
+        ensureEligibleTerritoryCache(world, false);
+        for (BlockPos pos : eligibleTerritory) {
             if (!world.getBlockState(pos).isOf(Blocks.FARMLAND)) {
                 continue;
             }
@@ -1395,7 +1409,6 @@ public class FarmerHarvestGoal extends Goal {
             }
             plantTargets.add(pos.toImmutable());
         }
-        adaptiveScanVolumeWindow += scanned;
     }
 
     private Block getCropBlockForItem(Item item) {
@@ -1470,14 +1483,8 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean hasHoeableGroundInRange(ServerWorld world) {
-        int radius = HOE_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -1, -radius);
-        BlockPos end = jobPos.add(radius, 1, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
-                continue;
-            }
+        ensureEligibleTerritoryCache(world, false);
+        for (BlockPos pos : eligibleTerritory) {
             if (isHoeTarget(world, pos) && hasNearbyWater(world, pos)) {
                 return true;
             }
@@ -1573,10 +1580,6 @@ public class FarmerHarvestGoal extends Goal {
         return findFirstPlantableInInventory(false) != null;
     }
 
-    private int getConfiguredWheatSeedReserveCap() {
-        return Math.max(1, GuardVillagersConfig.farmerWheatSeedReserveCap > 0 ? GuardVillagersConfig.farmerWheatSeedReserveCap : DEFAULT_WHEAT_SEED_RESERVE_CAP);
-    }
-
     private int getConfiguredWheatSeedBootstrapFloor() {
         return Math.max(0, GuardVillagersConfig.farmerWheatSeedBootstrapFloor >= 0 ? GuardVillagersConfig.farmerWheatSeedBootstrapFloor : DEFAULT_WHEAT_SEED_BOOTSTRAP_FLOOR);
     }
@@ -1614,21 +1617,13 @@ public class FarmerHarvestGoal extends Goal {
         if (cachedCoverage != null && (now - coverageCacheTime) < COVERAGE_CACHE_TTL) {
             return cachedCoverage;
         }
+        ensureEligibleTerritoryCache(world, false);
         int accessible = 0;
         int seeded = 0;
-        long scanned = 0L;
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -1, -radius);
-        BlockPos end = jobPos.add(radius, 1, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            scanned++;
-            if (horizontalDistanceSquared(pos, jobPos) > radiusSquared) {
-                continue;
-            }
-
-            boolean hoeable = isHoeTarget(world, pos);
-            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND) && world.getBlockState(pos.up()).isAir();
+        for (BlockPos pos : eligibleTerritory) {
+            boolean hoeable = isHoeTarget(world, pos) && hasNearbyWater(world, pos);
+            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND)
+                    && (world.getBlockState(pos.up()).isAir() || world.getBlockState(pos.up()).getBlock() instanceof CropBlock);
             if (!hoeable && !plantableFarmland) {
                 continue;
             }
@@ -1637,25 +1632,18 @@ public class FarmerHarvestGoal extends Goal {
                 seeded++;
             }
         }
-        adaptiveScanVolumeWindow += scanned;
         cachedCoverage = new FarmlandCoverageStats(accessible, seeded);
         coverageCacheTime = now;
         return cachedCoverage;
     }
 
     private boolean hasRequiredWheatSeedReserve(ServerWorld world) {
-        FarmlandCoverageStats coverageStats = getFarmlandCoverageStats(world);
-        if (coverageStats.hasFullCoverage()) {
+        int targetSeedReserve = computeWheatSeedTarget(world);
+        if (targetSeedReserve <= 0) {
             return true;
         }
-
-        int chestSeeds = countWheatSeedsInChestInventory(world);
-        if (chestSeeds >= FULL_WHEAT_SEED_STACK) {
-            return true;
-        }
-
         int combinedReserve = getCombinedWheatSeedReserve(world);
-        return combinedReserve >= getConfiguredWheatSeedReserveCap();
+        return combinedReserve >= targetSeedReserve;
     }
 
     private boolean requiresWheatSeedStartup() {
@@ -1768,9 +1756,9 @@ public class FarmerHarvestGoal extends Goal {
 
     private void logWheatSeedThresholdReached(ServerWorld world, int netSeedGain) {
         FarmlandCoverageStats stats = getFarmlandCoverageStats(world);
-        LOGGER.debug("Farmer {} reached dynamic seed reserve policy villagerSeeds={} chestSeeds={} combined={} cap={} chestFullStack={} coverage={}/{} ({}) netGain={}",
+        LOGGER.debug("Farmer {} reached dynamic seed reserve policy villagerSeeds={} chestSeeds={} combined={} target={} bootstrapFloor={} coverage={}/{} ({}) netGain={}",
                 villager.getUuidAsString(), countWheatSeedsInVillagerInventory(), countWheatSeedsInChestInventory(world), getCombinedWheatSeedReserve(world),
-                getConfiguredWheatSeedReserveCap(), FULL_WHEAT_SEED_STACK, stats.seededCells(), stats.accessibleCells(), stats.coverageLabel(), netSeedGain);
+                computeWheatSeedTarget(world), getConfiguredWheatSeedBootstrapFloor(), stats.seededCells(), stats.accessibleCells(), stats.coverageLabel(), netSeedGain);
     }
 
     private int getGatherStageNetSeedGain(ServerWorld world) {
@@ -1838,9 +1826,23 @@ public class FarmerHarvestGoal extends Goal {
 
     private void logSeedReserveStatus(ServerWorld world, String context) {
         FarmlandCoverageStats stats = getFarmlandCoverageStats(world);
-        LOGGER.debug("Farmer {} {} villagerSeeds={} chestSeeds={} combined={} cap={} bootstrapFloor={} chestFullStack={} coverage={}/{} ({})",
+        LOGGER.debug("Farmer {} {} villagerSeeds={} chestSeeds={} combined={} target={} bootstrapFloor={} coverage={}/{} ({})",
                 villager.getUuidAsString(), context, countWheatSeedsInVillagerInventory(), countWheatSeedsInChestInventory(world), getCombinedWheatSeedReserve(world),
-                getConfiguredWheatSeedReserveCap(), getConfiguredWheatSeedBootstrapFloor(), FULL_WHEAT_SEED_STACK, stats.seededCells(), stats.accessibleCells(), stats.coverageLabel());
+                computeWheatSeedTarget(world), getConfiguredWheatSeedBootstrapFloor(), stats.seededCells(), stats.accessibleCells(), stats.coverageLabel());
+    }
+
+    static int computeSeedTargetFromEligibleArea(int eligibleAreaPlots) {
+        if (eligibleAreaPlots <= 0) {
+            return 0;
+        }
+        int reserveMargin = Math.max(SEED_TARGET_RESERVE_MARGIN_MIN, (eligibleAreaPlots + (SEED_TARGET_RESERVE_MARGIN_DIVISOR - 1)) / SEED_TARGET_RESERVE_MARGIN_DIVISOR);
+        return eligibleAreaPlots + reserveMargin;
+    }
+
+    private int computeWheatSeedTarget(ServerWorld world) {
+        int eligibleArea = getEligibleTerritoryCount(world);
+        int areaBasedTarget = computeSeedTargetFromEligibleArea(eligibleArea);
+        return Math.max(areaBasedTarget, getConfiguredWheatSeedBootstrapFloor());
     }
 
     private record FarmlandCoverageStats(int accessibleCells, int seededCells) {
@@ -1944,6 +1946,101 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         return world.getBlockState(pos.up()).isAir();
+    }
+
+    private void ensureEligibleTerritoryCache(ServerWorld world, boolean forceScan) {
+        maybeInvalidateEligibleTerritory(world);
+        if (!forceScan && world.getTime() < nextBootstrapScanTick) {
+            return;
+        }
+        if (!forceScan && !eligibleTerritory.isEmpty() && bootstrapScanCursor == 0) {
+            return;
+        }
+        runBootstrapTerritoryScan(world);
+    }
+
+    private void maybeInvalidateEligibleTerritory(ServerWorld world) {
+        if (eligibleTerritory.isEmpty()) {
+            return;
+        }
+        long now = world.getTime();
+        if (now - lastTerritoryInvalidationTick < BOOTSTRAP_INVALIDATION_CHECK_INTERVAL_TICKS) {
+            return;
+        }
+        lastTerritoryInvalidationTick = now;
+        int sampled = 0;
+        int invalid = 0;
+        for (BlockPos pos : eligibleTerritory) {
+            if (sampled >= BOOTSTRAP_INVALIDATION_SAMPLE_SIZE) {
+                break;
+            }
+            sampled++;
+            if (!isEligibleTerritoryCell(world, pos)) {
+                invalid++;
+            }
+        }
+        if (sampled == 0) {
+            return;
+        }
+        int invalidPercent = (invalid * 100) / sampled;
+        if (invalidPercent >= BOOTSTRAP_INVALIDATION_PERCENT) {
+            eligibleTerritory.clear();
+            bootstrapScanCursor = 0;
+            nextBootstrapScanTick = now + BOOTSTRAP_RESCAN_COOLDOWN_TICKS;
+            cachedCoverage = null;
+            coverageCacheTime = -1L;
+            LOGGER.debug("Farmer {} territory cache invalidated (invalidPercent={} sampled={})",
+                    villager.getUuidAsString(), invalidPercent, sampled);
+        }
+    }
+
+    private void runBootstrapTerritoryScan(ServerWorld world) {
+        int diameter = BOOTSTRAP_SCAN_RADIUS * 2 + 1;
+        int layers = BOOTSTRAP_SCAN_MAX_Y_OFFSET - BOOTSTRAP_SCAN_MIN_Y_OFFSET + 1;
+        int total = diameter * diameter * layers;
+        int scanned = 0;
+        while (scanned < BOOTSTRAP_SCAN_BLOCK_BUDGET && bootstrapScanCursor < total) {
+            int index = bootstrapScanCursor++;
+            int layerSize = diameter * diameter;
+            int yIndex = index / layerSize;
+            int layerOffset = index % layerSize;
+            int zIndex = layerOffset / diameter;
+            int xIndex = layerOffset % diameter;
+
+            int x = jobPos.getX() - BOOTSTRAP_SCAN_RADIUS + xIndex;
+            int y = jobPos.getY() + BOOTSTRAP_SCAN_MIN_Y_OFFSET + yIndex;
+            int z = jobPos.getZ() - BOOTSTRAP_SCAN_RADIUS + zIndex;
+            BlockPos pos = new BlockPos(x, y, z);
+
+            if (horizontalDistanceSquared(pos, jobPos) <= BOOTSTRAP_SCAN_RADIUS * BOOTSTRAP_SCAN_RADIUS) {
+                if (isEligibleTerritoryCell(world, pos)) {
+                    eligibleTerritory.add(pos.toImmutable());
+                } else {
+                    eligibleTerritory.remove(pos);
+                }
+            }
+            scanned++;
+        }
+        adaptiveScanVolumeWindow += scanned;
+        cachedCoverage = null;
+        coverageCacheTime = -1L;
+        if (bootstrapScanCursor >= total) {
+            bootstrapScanCursor = 0;
+        }
+        nextBootstrapScanTick = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
+    }
+
+    private int getEligibleTerritoryCount(ServerWorld world) {
+        ensureEligibleTerritoryCache(world, false);
+        return eligibleTerritory.size();
+    }
+
+    private boolean isEligibleTerritoryCell(ServerWorld world, BlockPos pos) {
+        if (world.getBlockState(pos).isOf(Blocks.FARMLAND)) {
+            BlockState above = world.getBlockState(pos.up());
+            return above.isAir() || above.getBlock() instanceof CropBlock;
+        }
+        return isHoeTarget(world, pos) && hasNearbyWater(world, pos);
     }
 
 
