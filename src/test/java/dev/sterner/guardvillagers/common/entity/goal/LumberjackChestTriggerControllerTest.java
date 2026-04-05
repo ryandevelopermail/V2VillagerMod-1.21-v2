@@ -141,4 +141,14 @@ class LumberjackChestTriggerControllerTest {
         assertEquals(LumberjackChestTriggerController.UpgradeDemand.v3FenceGate(), demand);
     }
 
+    @Test
+    void computeCappedRetryDelay_doublesUntilCap() {
+        long base = 600L;
+        long cap = 2_400L;
+        assertEquals(600L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 1));
+        assertEquals(1_200L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 2));
+        assertEquals(2_400L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 3));
+        assertEquals(2_400L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 5));
+    }
+
 }

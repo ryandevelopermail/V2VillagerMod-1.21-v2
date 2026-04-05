@@ -47,10 +47,13 @@ public final class LumberjackChestTriggerController {
     private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 400L;
     private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
     private static final double MIDPOINT_PAIRING_REFRESH_RADIUS = 32.0D;
+    private static final long MIDPOINT_RETRY_MAX_DELAY_TICKS = 20L * 60L * 8L;
+    private static final int MIDPOINT_RETRY_MAX_ATTEMPTS = 5;
     private static final Map<UUID, UpgradeStage> UPGRADE_STAGE_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, UpgradeStage> UPGRADE_STAGE_BY_JOB_SITE = new HashMap<>();
     private static final Map<UUID, Long> CHEST_PAIRED_TICKS_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, Long> CHEST_PAIRED_TICKS_BY_JOB_SITE = new HashMap<>();
+    private static final Map<UUID, MidpointRetryBackoffState> MIDPOINT_RETRY_STATE_BY_GUARD = new HashMap<>();
     private static final Set<VillagerProfession> CHECKED_JOB_PROFESSIONS = Set.of(
             VillagerProfession.NONE,
             VillagerProfession.ARMORER,
@@ -172,10 +175,108 @@ public final class LumberjackChestTriggerController {
         );
     }
 
+    public static MidpointPairingRefreshResult runTargetedMidpointPairingRefreshPass(ServerWorld world, LumberjackGuardEntity guard) {
+        List<VillagerEntity> missingCandidates = collectEligibleV1MissingChestVillagers(world, guard);
+        if (missingCandidates.isEmpty()) {
+            return new MidpointPairingRefreshResult(false, 0, 0, false);
+        }
+
+        int missingBefore = missingCandidates.size();
+        int refreshedCount = 0;
+        for (VillagerEntity villager : missingCandidates) {
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null) {
+                continue;
+            }
+            JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos)
+                    .ifPresent(chestPos -> JobBlockPairingHelper.cacheVillagerChestPairing(world, villager, jobPos, chestPos));
+            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+            refreshedCount++;
+        }
+
+        int missingAfter = countEligibleV1VillagersMissingPairedChest(world, guard);
+        return new MidpointPairingRefreshResult(
+                refreshedCount > 0,
+                missingCandidates.size(),
+                refreshedCount,
+                missingAfter < missingBefore
+        );
+    }
+
+    public static MidpointChestPlacementResult runTargetedMidpointChestPlacementPass(ServerWorld world, LumberjackGuardEntity guard) {
+        List<VillagerEntity> missingCandidates = collectEligibleV1MissingChestVillagers(world, guard);
+        if (missingCandidates.isEmpty()) {
+            return new MidpointChestPlacementResult(false, 0, 0, 0, 0);
+        }
+
+        TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
+        int attempted = 0;
+        int placed = 0;
+        int refreshed = 0;
+        for (VillagerEntity villager : missingCandidates) {
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()) {
+                continue;
+            }
+            attempted++;
+            if (tryPlaceChestNearJobForVillager(context, villager, jobPos)) {
+                placed++;
+            }
+            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+            refreshed++;
+        }
+
+        int stillMissing = countEligibleV1VillagersMissingPairedChest(world, guard);
+        return new MidpointChestPlacementResult(placed > 0, attempted, placed, refreshed, stillMissing);
+    }
+
     public static void scheduleMidpointUpgradeRetry(ServerWorld world, LumberjackGuardEntity guard, long retryDelayTicks) {
-        long retryTick = world.getTime() + Math.max(retryDelayTicks, 1L);
+        scheduleMidpointUpgradeRetryWithBackoff(world, guard, retryDelayTicks);
+    }
+
+    public static MidpointRetryPlan scheduleMidpointUpgradeRetryWithBackoff(ServerWorld world,
+                                                                             LumberjackGuardEntity guard,
+                                                                             long retryDelayTicks) {
+        return scheduleMidpointUpgradeRetryWithBackoff(world, guard, retryDelayTicks, MIDPOINT_RETRY_MAX_DELAY_TICKS, MIDPOINT_RETRY_MAX_ATTEMPTS);
+    }
+
+    static MidpointRetryPlan scheduleMidpointUpgradeRetryWithBackoff(ServerWorld world,
+                                                                     LumberjackGuardEntity guard,
+                                                                     long retryDelayTicks,
+                                                                     long maxRetryDelayTicks,
+                                                                     int maxAttempts) {
+        long now = world.getTime();
+        UUID guardId = guard.getUuid();
+        MidpointRetryBackoffState previous = MIDPOINT_RETRY_STATE_BY_GUARD.get(guardId);
+        if (previous != null && now < previous.nextAllowedScheduleTick()) {
+            return new MidpointRetryPlan(false, previous.attempt(), previous.delayTicks(), previous.nextAllowedScheduleTick(), true);
+        }
+
+        int attempt = previous == null ? 1 : Math.min(previous.attempt() + 1, Math.max(maxAttempts, 1));
+        long computedDelay = computeCappedRetryDelay(retryDelayTicks, maxRetryDelayTicks, attempt);
+        long retryTick = now + computedDelay;
         guard.setNextTriggerEvaluationTick(retryTick);
         guard.clearTriggerEvaluationRequest();
+        MIDPOINT_RETRY_STATE_BY_GUARD.put(guardId, new MidpointRetryBackoffState(attempt, computedDelay, retryTick));
+        return new MidpointRetryPlan(true, attempt, computedDelay, retryTick, false);
+    }
+
+    public static void resetMidpointUpgradeRetryBackoff(LumberjackGuardEntity guard) {
+        MIDPOINT_RETRY_STATE_BY_GUARD.remove(guard.getUuid());
+    }
+
+    static long computeCappedRetryDelay(long retryDelayTicks, long maxRetryDelayTicks, int attempt) {
+        long baseDelay = Math.max(retryDelayTicks, 1L);
+        long maxDelay = Math.max(baseDelay, maxRetryDelayTicks);
+        int safeAttempt = Math.max(attempt, 1);
+        long scaledDelay = baseDelay;
+        for (int i = 1; i < safeAttempt; i++) {
+            if (scaledDelay >= maxDelay) {
+                return maxDelay;
+            }
+            scaledDelay = Math.min(maxDelay, scaledDelay * 2L);
+        }
+        return scaledDelay;
     }
 
     public static UpgradeDemand resolveNextUpgradeDemand(ServerWorld world, LumberjackGuardEntity guard) {
@@ -534,6 +635,40 @@ public final class LumberjackChestTriggerController {
         return false;
     }
 
+    private static boolean tryPlaceChestNearJobForVillager(TriggerContext context, VillagerEntity villager, BlockPos jobPos) {
+        if (context.guard().getPairedChestPos() == null) {
+            return false;
+        }
+        if (countByItem(context, Items.CHEST) <= 0 && countByItem(context, Items.TRAPPED_CHEST) <= 0) {
+            return false;
+        }
+
+        BlockPos placePos = findPlacementNearJob(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        if (placePos == null) {
+            return false;
+        }
+
+        if (countByItem(context, Items.CHEST) > 0 && consumeByItem(context, Items.CHEST, 1)) {
+            if (context.world().setBlockState(placePos, Blocks.CHEST.getDefaultState())) {
+                JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                transitionUpgradeStageToChestPaired(context.world(), villager.getUuid(), jobPos);
+                return true;
+            }
+            addToInventoryOrBuffer(context, new ItemStack(Items.CHEST));
+        }
+
+        if (countByItem(context, Items.TRAPPED_CHEST) > 0 && consumeByItem(context, Items.TRAPPED_CHEST, 1)) {
+            if (context.world().setBlockState(placePos, Blocks.TRAPPED_CHEST.getDefaultState())) {
+                JobBlockPairingHelper.handlePairingBlockPlacement(context.world(), placePos, context.world().getBlockState(placePos));
+                transitionUpgradeStageToChestPaired(context.world(), villager.getUuid(), jobPos);
+                return true;
+            }
+            addToInventoryOrBuffer(context, new ItemStack(Items.TRAPPED_CHEST));
+        }
+
+        return false;
+    }
+
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
         V2BlockReason v2BlockReason = resolveV2BlockReason(context.world(), context.guard());
         if (v2BlockReason != null) {
@@ -860,6 +995,21 @@ public final class LumberjackChestTriggerController {
                 new Box(anchor).expand(radius),
                 VillagerEntity::isAlive
         ));
+    }
+
+    private static List<VillagerEntity> collectEligibleV1MissingChestVillagers(ServerWorld world, LumberjackGuardEntity guard) {
+        List<VillagerEntity> missing = new ArrayList<>();
+        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+            if (!isEligibleV1Villager(world, villager)) {
+                continue;
+            }
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null || JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isPresent()) {
+                continue;
+            }
+            missing.add(villager);
+        }
+        return missing;
     }
 
     private static BlockPos resolveMidpointPairingRefreshAnchor(LumberjackGuardEntity guard) {
@@ -1671,5 +1821,22 @@ public final class LumberjackChestTriggerController {
                                                int candidateCount,
                                                int refreshedCount,
                                                boolean pairedAfterRefresh) {
+    }
+
+    public record MidpointChestPlacementResult(boolean placementTriggered,
+                                               int attemptedCount,
+                                               int placedCount,
+                                               int refreshedCount,
+                                               int stillMissingCount) {
+    }
+
+    public record MidpointRetryPlan(boolean scheduled,
+                                    int attempt,
+                                    long delayTicks,
+                                    long retryTick,
+                                    boolean throttled) {
+    }
+
+    private record MidpointRetryBackoffState(int attempt, long delayTicks, long nextAllowedScheduleTick) {
     }
 }
