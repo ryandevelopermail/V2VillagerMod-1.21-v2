@@ -13,6 +13,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.BedBlock;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
@@ -100,6 +101,7 @@ public class QuartermasterGoal extends Goal {
     private static final int CANDIDATE_CACHE_REFRESH_INTERVAL_TICKS = 20 * 30;
     private static final int MASON_COBBLESTONE_RESERVE = 8;
     private static final int MASON_MINING_DIRT_BUFFER = 8;
+    private static final int LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR = 20;
     private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 8;
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
@@ -159,6 +161,22 @@ public class QuartermasterGoal extends Goal {
                 || item == Items.CHARCOAL
                 || item == Items.STICK;
     };
+    private static final ProfessionReclaimPolicy LUMBERJACK_RECLAIM_POLICY = ProfessionReclaimPolicy.of(
+            stack -> stack.isIn(ItemTags.LOGS)
+                    || stack.isIn(ItemTags.PLANKS)
+                    || stack.isOf(Items.CHARCOAL)
+                    || stack.isOf(Items.STICK)
+                    || stack.isIn(ItemTags.FENCES)
+                    || stack.isIn(ItemTags.FENCE_GATES)
+                    || stack.isOf(Items.CHEST)
+                    || stack.isOf(Items.TRAPPED_CHEST)
+                    || stack.isOf(Items.CRAFTING_TABLE),
+            Map.of(
+                    Items.STICK, 4,
+                    Items.CHEST, 1,
+                    Items.TRAPPED_CHEST, 1,
+                    Items.CRAFTING_TABLE, 1
+            ));
     private static final Map<VillagerProfession, ProfessionReclaimPolicy> PROFESSION_RECLAIM_POLICIES = buildProfessionReclaimPolicies();
 
     private static Map<VillagerProfession, ProfessionReclaimPolicy> buildProfessionReclaimPolicies() {
@@ -687,6 +705,10 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<TransferLeg> planDailyReclaimTransfer(ServerWorld world) {
+        Optional<TransferLeg> lumberjackLeg = planLumberjackReclaimTransfer(world);
+        if (lumberjackLeg.isPresent()) {
+            return lumberjackLeg;
+        }
         List<ProfessionChestSnapshot> snapshots = buildProfessionChestSnapshots(world);
         Optional<TransferLeg> masonCompletedLeg = planMasonCompletedMaterialReclaim(snapshots);
         if (masonCompletedLeg.isPresent()) {
@@ -720,6 +742,187 @@ public class QuartermasterGoal extends Goal {
             }
         }
         return Optional.ofNullable(bestLeg);
+    }
+
+    private Optional<TransferLeg> planLumberjackReclaimTransfer(ServerWorld world) {
+        TransferLeg bestLeg = null;
+        int bestCount = 0;
+        for (LumberjackGuardEntity lumberjack : getNearbyLumberjacks(world)) {
+            if (!lumberjack.isAlive()) {
+                continue;
+            }
+            LumberjackChestTriggerController.UpgradeDemand activeDemand = resolveLumberjackUpgradeDemand(world, lumberjack);
+            Set<net.minecraft.item.Item> excludedItems = buildLumberjackActiveRecipeExclusions(activeDemand);
+            BlockPos lumberjackChestPos = lumberjack.getPairedChestPos();
+            if (lumberjackChestPos != null && !lumberjackChestPos.equals(chestPos)) {
+                Optional<Inventory> inventory = getInventory(world, lumberjackChestPos);
+                if (inventory.isPresent()) {
+                    TransferLeg candidate = planLumberjackChestReclaim(lumberjackChestPos, inventory.get(), excludedItems);
+                    if (candidate != null && candidate.transferStack().getCount() > bestCount) {
+                        bestCount = candidate.transferStack().getCount();
+                        bestLeg = candidate;
+                    }
+                }
+            }
+
+            BlockPos furnacePos = lumberjack.getPairedFurnaceModifierPos();
+            if (furnacePos != null) {
+                Optional<Inventory> furnaceInventory = getInventory(world, furnacePos);
+                if (furnaceInventory.isPresent()) {
+                    TransferLeg candidate = planLumberjackFurnaceReclaim(furnacePos, furnaceInventory.get(), excludedItems);
+                    if (candidate != null && candidate.transferStack().getCount() > bestCount) {
+                        bestCount = candidate.transferStack().getCount();
+                        bestLeg = candidate;
+                    }
+                }
+            }
+        }
+        return Optional.ofNullable(bestLeg);
+    }
+
+    private TransferLeg planLumberjackChestReclaim(BlockPos sourceChestPos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
+        ProfessionReclaimPolicy policy = LUMBERJACK_RECLAIM_POLICY;
+        Map<net.minecraft.item.Item, Integer> totals = totalsByItem(inventory);
+        int totalLogs = countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS));
+        int totalPlanks = countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS));
+        int totalCharcoal = totals.getOrDefault(Items.CHARCOAL, 0);
+        TransferLeg bestLeg = null;
+        int bestCount = 0;
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (stack.isEmpty() || !policy.canReclaim(stack) || excludedItems.contains(stack.getItem())) {
+                continue;
+            }
+            int reclaimable = switch (reserveGrouping(stack)) {
+                case LOGS -> Math.max(0, totalLogs - getLumberjackLogReserveFloor());
+                case PLANKS -> Math.max(0, totalPlanks - getLumberjackPlankReserveFloor());
+                case CHARCOAL -> Math.max(0, totalCharcoal - getLumberjackCharcoalReserveFloor());
+                case ITEM -> Math.max(0, totals.getOrDefault(stack.getItem(), 0) - policy.reserveCount(stack.getItem()));
+            };
+            if (reclaimable <= 0) {
+                continue;
+            }
+            int toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
+            if (toMove > bestCount) {
+                bestCount = toMove;
+                bestLeg = new TransferLeg(sourceChestPos, chestPos, stack.copyWithCount(toMove));
+            }
+        }
+        return bestLeg;
+    }
+
+    private TransferLeg planLumberjackFurnaceReclaim(BlockPos sourceFurnacePos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
+        if (inventory.size() < 3) {
+            return null;
+        }
+        TransferLeg bestLeg = null;
+        int bestCount = 0;
+        ItemStack output = inventory.getStack(2);
+        if (!output.isEmpty() && output.isOf(Items.CHARCOAL) && !excludedItems.contains(Items.CHARCOAL)) {
+            int reclaimable = Math.max(0, output.getCount() - getLumberjackCharcoalReserveFloor());
+            int toMove = Math.min(Math.min(reclaimable, output.getCount()), HAUL_AMOUNT);
+            if (toMove > bestCount) {
+                bestCount = toMove;
+                bestLeg = new TransferLeg(sourceFurnacePos, chestPos, output.copyWithCount(toMove));
+            }
+        }
+
+        ItemStack fuel = inventory.getStack(1);
+        if (!fuel.isEmpty() && !excludedItems.contains(fuel.getItem()) && (fuel.isIn(ItemTags.LOGS) || fuel.isOf(Items.CHARCOAL))) {
+            int reserve = fuel.isIn(ItemTags.LOGS) ? getLumberjackFurnaceFuelReserveFloor() : getLumberjackCharcoalReserveFloor();
+            int reclaimable = Math.max(0, fuel.getCount() - reserve);
+            int toMove = Math.min(Math.min(reclaimable, fuel.getCount()), HAUL_AMOUNT);
+            if (toMove > bestCount) {
+                bestLeg = new TransferLeg(sourceFurnacePos, chestPos, fuel.copyWithCount(toMove));
+            }
+        }
+        return bestLeg;
+    }
+
+    private static Map<net.minecraft.item.Item, Integer> totalsByItem(Inventory inventory) {
+        Map<net.minecraft.item.Item, Integer> totals = new HashMap<>();
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (!stack.isEmpty()) {
+                totals.merge(stack.getItem(), stack.getCount(), Integer::sum);
+            }
+        }
+        return totals;
+    }
+
+    private static int countMatching(Inventory inventory, Predicate<ItemStack> predicate) {
+        int total = 0;
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private Set<net.minecraft.item.Item> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
+        Set<net.minecraft.item.Item> exclusions = new HashSet<>();
+        if (demand == null) {
+            return exclusions;
+        }
+        if (demand.planksCost() > 0) {
+            exclusions.add(Items.OAK_PLANKS);
+            exclusions.add(Items.SPRUCE_PLANKS);
+            exclusions.add(Items.BIRCH_PLANKS);
+            exclusions.add(Items.JUNGLE_PLANKS);
+            exclusions.add(Items.ACACIA_PLANKS);
+            exclusions.add(Items.DARK_OAK_PLANKS);
+            exclusions.add(Items.MANGROVE_PLANKS);
+            exclusions.add(Items.CHERRY_PLANKS);
+            exclusions.add(Items.BAMBOO_PLANKS);
+            exclusions.add(Items.CRIMSON_PLANKS);
+            exclusions.add(Items.WARPED_PLANKS);
+        }
+        if (demand.stickCost() > 0) {
+            exclusions.add(Items.STICK);
+        }
+        exclusions.add(demand.outputItem());
+        return exclusions;
+    }
+
+    protected LumberjackChestTriggerController.UpgradeDemand resolveLumberjackUpgradeDemand(ServerWorld world, LumberjackGuardEntity lumberjack) {
+        return LumberjackChestTriggerController.resolveNextUpgradeDemand(world, lumberjack);
+    }
+
+    protected List<LumberjackGuardEntity> getNearbyLumberjacks(ServerWorld world) {
+        Box box = new Box(jobPos).expand(getScanRange());
+        return world.getEntitiesByClass(LumberjackGuardEntity.class, box, LumberjackGuardEntity::isAlive);
+    }
+
+    private int getLumberjackLogReserveFloor() {
+        return Math.max(0, GuardVillagersConfig.quartermasterLumberjackReserveLogs);
+    }
+
+    private int getLumberjackPlankReserveFloor() {
+        int configured = Math.max(0, GuardVillagersConfig.quartermasterLumberjackReservePlanks);
+        return Math.max(configured, LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR);
+    }
+
+    private int getLumberjackCharcoalReserveFloor() {
+        return Math.max(0, GuardVillagersConfig.quartermasterLumberjackReserveCharcoal);
+    }
+
+    private int getLumberjackFurnaceFuelReserveFloor() {
+        return Math.max(0, GuardVillagersConfig.quartermasterLumberjackFurnaceFuelReserve);
+    }
+
+    private ReserveGrouping reserveGrouping(ItemStack stack) {
+        if (stack.isIn(ItemTags.LOGS)) {
+            return ReserveGrouping.LOGS;
+        }
+        if (stack.isIn(ItemTags.PLANKS)) {
+            return ReserveGrouping.PLANKS;
+        }
+        if (stack.isOf(Items.CHARCOAL)) {
+            return ReserveGrouping.CHARCOAL;
+        }
+        return ReserveGrouping.ITEM;
     }
 
     private Optional<TransferLeg> planMasonCompletedMaterialReclaim(List<ProfessionChestSnapshot> snapshots) {
@@ -1328,9 +1531,14 @@ public class QuartermasterGoal extends Goal {
     protected Optional<Inventory> getInventory(ServerWorld world, BlockPos pos) {
         if (pos == null) return Optional.empty();
         BlockState state = world.getBlockState(pos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
-        // open=false: programmatic access must not trigger chest open-sound / lid animation.
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, false));
+        if (state.getBlock() instanceof ChestBlock chestBlock) {
+            // open=false: programmatic access must not trigger chest open-sound / lid animation.
+            return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, pos, false));
+        }
+        if (world.getBlockEntity(pos) instanceof AbstractFurnaceBlockEntity furnace) {
+            return Optional.of(furnace);
+        }
+        return Optional.empty();
     }
 
     private BlockPos resolveBellChestPos(ServerWorld world) {
@@ -1500,6 +1708,7 @@ public class QuartermasterGoal extends Goal {
 
     private record TransferLeg(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
     private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
+    private enum ReserveGrouping { LOGS, PLANKS, CHARCOAL, ITEM }
 
     private static final class SurplusScanBudget {
         private final int maxCandidates;

@@ -184,6 +184,14 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackAdaptiveThrottleJitterTicks = 40;
     @Entry(min=1)
     public static int lumberjackAdaptiveSummaryLogIntervalSessions = 8;
+    @Entry(min=0)
+    public static int quartermasterLumberjackReserveLogs = 64;
+    @Entry(min=0)
+    public static int quartermasterLumberjackReservePlanks = 32;
+    @Entry(min=0)
+    public static int quartermasterLumberjackReserveCharcoal = 16;
+    @Entry(min=0)
+    public static int quartermasterLumberjackFurnaceFuelReserve = 8;
     @Entry(min=1)
     public static int masonAdaptiveThrottleLoadThreshold = 180;
     @Entry(min=20)
