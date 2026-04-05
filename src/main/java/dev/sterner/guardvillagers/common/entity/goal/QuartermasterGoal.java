@@ -518,14 +518,20 @@ public class QuartermasterGoal extends Goal {
         Optional<LumberjackFurnaceStoneNeed> lumberjackNeedingFurnaceStone = findLumberjackNeedingFurnaceStone(world);
         if (lumberjackNeedingFurnaceStone.isPresent()) {
             LumberjackFurnaceStoneNeed need = lumberjackNeedingFurnaceStone.get();
-            // Prefer mason chest as source; fall back to QM's own chest
-            BlockPos stoneSource = findMasonChestWithCobblestone(world, LUMBERJACK_FURNACE_STONE_AMOUNT);
-            if (stoneSource == null && countItem(world, chestPos, Items.COBBLESTONE) >= LUMBERJACK_FURNACE_STONE_AMOUNT) {
-                stoneSource = chestPos;
+            // Prefer QM stock first; fall back to mason chest using reserve-safe extraction limits.
+            BlockPos stoneSource = countItem(world, chestPos, Items.COBBLESTONE) >= LUMBERJACK_FURNACE_STONE_AMOUNT ? chestPos : null;
+            if (stoneSource == null) {
+                stoneSource = findMasonChestWithCobblestone(world, LUMBERJACK_FURNACE_STONE_AMOUNT);
             }
             if (stoneSource != null) {
                 int available = countItem(world, stoneSource, Items.COBBLESTONE);
-                int toDeliver = Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT, available);
+                int toDeliver = stoneSource.equals(chestPos)
+                        ? Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT, available)
+                        : Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT,
+                        computeMasonCobblestoneExtractionCount(available, MASON_COBBLESTONE_RESERVE));
+                if (toDeliver <= 0) {
+                    return false;
+                }
                 sourcePos = stoneSource;
                 destPos = need.chestPos();
                 transferStack = new ItemStack(Items.COBBLESTONE, toDeliver);
@@ -580,6 +586,10 @@ public class QuartermasterGoal extends Goal {
 
     private Optional<TransferLeg> planDailyReclaimTransfer(ServerWorld world) {
         List<ProfessionChestSnapshot> snapshots = buildProfessionChestSnapshots(world);
+        Optional<TransferLeg> masonCompletedLeg = planMasonCompletedMaterialReclaim(snapshots);
+        if (masonCompletedLeg.isPresent()) {
+            return masonCompletedLeg;
+        }
         TransferLeg bestLeg = null;
         int bestCount = 0;
         for (ProfessionChestSnapshot snapshot : snapshots) {
@@ -594,7 +604,38 @@ public class QuartermasterGoal extends Goal {
                 if (reclaimable <= 0) {
                     continue;
                 }
-                int toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
+                int toMove;
+                if (snapshot.profession() == VillagerProfession.MASON && stack.isOf(Items.COBBLESTONE)) {
+                    toMove = Math.min(stack.getCount(),
+                            computeMasonCobblestoneExtractionCount(totalItemCount, MASON_COBBLESTONE_RESERVE));
+                } else {
+                    toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
+                }
+                if (toMove > bestCount) {
+                    bestCount = toMove;
+                    bestLeg = new TransferLeg(snapshot.chestPos(), chestPos, stack.copyWithCount(toMove));
+                }
+            }
+        }
+        return Optional.ofNullable(bestLeg);
+    }
+
+    private Optional<TransferLeg> planMasonCompletedMaterialReclaim(List<ProfessionChestSnapshot> snapshots) {
+        TransferLeg bestLeg = null;
+        int bestCount = 0;
+        for (ProfessionChestSnapshot snapshot : snapshots) {
+            if (snapshot.profession() != VillagerProfession.MASON) {
+                continue;
+            }
+            for (int i = 0; i < snapshot.inventory().size(); i++) {
+                ItemStack stack = snapshot.inventory().getStack(i);
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                if (!stack.isIn(ItemTags.STAIRS) && !stack.isIn(ItemTags.SLABS)) {
+                    continue;
+                }
+                int toMove = Math.min(64, stack.getCount());
                 if (toMove > bestCount) {
                     bestCount = toMove;
                     bestLeg = new TransferLeg(snapshot.chestPos(), chestPos, stack.copyWithCount(toMove));
@@ -774,11 +815,37 @@ public class QuartermasterGoal extends Goal {
         Box box = new Box(jobPos).expand(getScanRange());
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
             BlockPos mc = mason.getPairedChestPos();
-            if (mc != null && countItem(world, mc, Items.COBBLESTONE) >= minAmount) {
-                return mc;
+            if (mc != null) {
+                int available = countItem(world, mc, Items.COBBLESTONE);
+                int extractable = computeMasonCobblestoneExtractionCount(available, MASON_COBBLESTONE_RESERVE);
+                if (extractable >= minAmount) {
+                    return mc;
+                }
             }
         }
         return null;
+    }
+
+    static int computeMasonCobblestoneExtractionCount(int availableCobblestone, int reserve) {
+        if (availableCobblestone <= 0) {
+            return 0;
+        }
+        int reclaimableByReserve = Math.max(0, availableCobblestone - Math.max(0, reserve));
+        if (reclaimableByReserve <= 0) {
+            return 0;
+        }
+        int reclaimableWithoutDrain = Math.max(0, availableCobblestone - 1);
+        int capped = Math.min(64, Math.min(reclaimableByReserve, reclaimableWithoutDrain));
+        if (capped >= 64) {
+            return 64;
+        }
+        if (capped >= 32) {
+            return 32;
+        }
+        if (capped >= 16) {
+            return 16;
+        }
+        return 0;
     }
 
     private record LumberjackFurnaceStoneNeed(LumberjackGuardEntity lumberjack, BlockPos chestPos) {}
