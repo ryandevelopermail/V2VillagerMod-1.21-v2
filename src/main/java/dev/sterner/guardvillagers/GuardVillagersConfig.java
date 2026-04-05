@@ -186,6 +186,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonAdaptiveThrottleJitterTicks = 60;
     @Entry(min=1)
     public static int masonAdaptiveSummaryLogIntervalSessions = 8;
+    @Entry(min=20)
+    public static int masonWaterBailoutBlacklistDurationTicks = 20 * 60 * 10;
+    @Entry(min=20)
+    public static int masonWaterBailoutBlacklistRadius = 20;
     @Entry(min=1)
     public static int farmerAdaptiveThrottleLoadThreshold = 32000;
     @Entry(min=20)
@@ -267,6 +271,11 @@ public class GuardVillagersConfig extends MidnightConfig {
         masonAdaptiveThrottleDeferTicks = clamp(masonAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         masonAdaptiveThrottleJitterTicks = clamp(masonAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
         masonAdaptiveSummaryLogIntervalSessions = clamp(masonAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        masonWaterBailoutBlacklistDurationTicks = clamp(
+                masonWaterBailoutBlacklistDurationTicks,
+                MIN_PROFESSION_THROTTLE_DEFER_TICKS,
+                MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        masonWaterBailoutBlacklistRadius = clamp(masonWaterBailoutBlacklistRadius, 20, 128);
         farmerAdaptiveThrottleLoadThreshold = clamp(farmerAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
         farmerAdaptiveThrottleDeferTicks = clamp(farmerAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         farmerAdaptiveThrottleJitterTicks = clamp(farmerAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);

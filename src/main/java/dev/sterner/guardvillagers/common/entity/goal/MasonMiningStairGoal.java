@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
@@ -56,6 +57,7 @@ public class MasonMiningStairGoal extends Goal {
     private static final int BOOTSTRAP_STAGING_RADIUS_MIN = 5;
     private static final int BOOTSTRAP_STAGING_RADIUS_MAX = 10;
     private static final int BOOTSTRAP_STAGING_MAX_ATTEMPTS = 48;
+    private static final int WATER_BLACKLIST_MIN_RADIUS = 20;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -94,6 +96,7 @@ public class MasonMiningStairGoal extends Goal {
     private int adaptiveForcedRecoveryWindow;
     private int adaptiveSessionCount;
     private int bootstrapRetryCount;
+    private final List<ShaftBlacklistEntry> waterBailoutBlacklist = new ArrayList<>();
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -126,6 +129,7 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         long worldTime = world.getTime();
+        expireBlacklistedShafts(worldTime);
         if (worldTime < guard.getNextMiningStartTick()) {
             maybeLogCooldownProgress(worldTime);
             return false;
@@ -198,6 +202,20 @@ public class MasonMiningStairGoal extends Goal {
             this.rejoinDeepTarget = null;
             guard.setMiningProgress(this.origin, this.stepIndex, this.miningDirection.getId());
             guard.setMiningPathAnchors(this.origin, null);
+        }
+
+        int blacklistRadius = getWaterBlacklistRadius();
+        if (isNearBlacklistedShaft(this.origin, blacklistRadius)) {
+            LOGGER.info("Mason guard {} mining session skipped: reasonCode=blacklisted_shaft origin={} radius={}",
+                    guard.getUuidAsString(),
+                    this.origin == null ? "none" : this.origin.toShortString(),
+                    blacklistRadius);
+            guard.clearMiningProgress();
+            this.origin = guard.getBlockPos();
+            this.stepIndex = 0;
+            this.rejoinStepTarget = null;
+            this.rejoinDeepTarget = null;
+            return false;
         }
 
         this.currentStepTarget = computeStepTarget(stepIndex);
@@ -344,6 +362,9 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private void tickRejoinLastStep(ServerWorld world) {
+        if (shouldAbortForWaterHazard(world, rejoinStepTarget)) {
+            return;
+        }
         if (rejoinStepTarget == null) {
             activateMiningStage(world);
             this.noProgressTicks = 0;
@@ -407,6 +428,10 @@ public class MasonMiningStairGoal extends Goal {
     private void tickMining(ServerWorld world) {
         if (miningSessionStartTick < 0L || miningSessionEndTick < 0L) {
             activateMiningStage(world);
+        }
+
+        if (shouldAbortForWaterHazard(world, currentStepTarget)) {
+            return;
         }
 
         if (!clearCurrentHeadBlock(world)) {
@@ -895,10 +920,16 @@ public class MasonMiningStairGoal extends Goal {
         this.cooldownProgressLoggedForStartTick = -1L;
 
         boolean forceSafeAnchorReset = protectedEarlyAbort ? false : trackFailureReason(reason);
+        if (reason == ReturnReason.WATER_BAILOUT) {
+            recordWaterBailoutOrigin();
+        } else if (reason == ReturnReason.BATCH_COMPLETE) {
+            clearBlacklistOnSuccessfulDistantSession();
+        }
 
-        LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
+        LOGGER.info("Mason guard {} ending mining session: reason={}, reasonCode={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
                 guard.getUuidAsString(),
                 reason,
+                reason.reasonCode,
                 minedBlockCount,
                 stepIndex,
                 guard.getMiningStartPos() == null ? "none" : guard.getMiningStartPos().toShortString(),
@@ -1132,11 +1163,109 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private int computeSessionBackoffTicks(ReturnReason reason) {
-        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE;
+        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE
+                || reason == ReturnReason.STUCK_30_SECONDS
+                || reason == ReturnReason.TOOL_BROKE
+                || reason == ReturnReason.WATER_BAILOUT;
         if (isFailureReason) {
             return MathHelper.nextInt(guard.getRandom(), FAILURE_BACKOFF_MIN_TICKS, FAILURE_BACKOFF_MAX_TICKS);
         }
         return MathHelper.nextInt(guard.getRandom(), SESSION_BACKOFF_MIN_TICKS, SESSION_BACKOFF_MAX_TICKS);
+    }
+
+    private boolean shouldAbortForWaterHazard(ServerWorld world, BlockPos forwardPathTarget) {
+        BlockPos feetPos = guard.getBlockPos();
+        if (isWaterAt(world, feetPos)) {
+            triggerWaterBailout("feet", feetPos);
+            return true;
+        }
+
+        BlockPos headPos = feetPos.up();
+        if (isWaterAt(world, headPos)) {
+            triggerWaterBailout("head", headPos);
+            return true;
+        }
+
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos adjacentHead = headPos.offset(direction);
+            if (isWaterAt(world, adjacentHead)) {
+                triggerWaterBailout("head_adjacent", adjacentHead);
+                return true;
+            }
+        }
+
+        if (forwardPathTarget != null) {
+            for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+                BlockPos pathSample = forwardPathTarget.up(i);
+                if (isWaterAt(world, pathSample)) {
+                    triggerWaterBailout("forward_path", pathSample);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isWaterAt(ServerWorld world, BlockPos pos) {
+        return world.getBlockState(pos).getFluidState().isIn(FluidTags.WATER);
+    }
+
+    private void triggerWaterBailout(String hazardZone, BlockPos waterPos) {
+        LOGGER.info("Mason guard {} mining water bailout: reasonCode=water_bailout zone={} waterPos={} origin={} stepIndex={}",
+                guard.getUuidAsString(),
+                hazardZone,
+                waterPos.toShortString(),
+                origin == null ? "none" : origin.toShortString(),
+                stepIndex);
+        beginReturn(ReturnReason.WATER_BAILOUT);
+    }
+
+    private void recordWaterBailoutOrigin() {
+        if (origin == null) {
+            return;
+        }
+        long expiresAt = guard.getWorld().getTime() + Math.max(20L, GuardVillagersConfig.masonWaterBailoutBlacklistDurationTicks);
+        waterBailoutBlacklist.removeIf(entry -> entry.origin().equals(origin));
+        waterBailoutBlacklist.add(new ShaftBlacklistEntry(origin.toImmutable(), expiresAt));
+    }
+
+    private void clearBlacklistOnSuccessfulDistantSession() {
+        if (origin == null || waterBailoutBlacklist.isEmpty()) {
+            return;
+        }
+        int blacklistRadius = getWaterBlacklistRadius();
+        int minDistanceSquared = blacklistRadius * blacklistRadius;
+        waterBailoutBlacklist.removeIf(entry -> entry.origin().getSquaredDistance(origin) >= minDistanceSquared);
+    }
+
+    private boolean isNearBlacklistedShaft(BlockPos targetOrigin, int radius) {
+        if (targetOrigin == null || waterBailoutBlacklist.isEmpty()) {
+            return false;
+        }
+        int radiusSquared = radius * radius;
+        for (ShaftBlacklistEntry entry : waterBailoutBlacklist) {
+            if (entry.origin().getSquaredDistance(targetOrigin) < radiusSquared) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int getWaterBlacklistRadius() {
+        return Math.max(WATER_BLACKLIST_MIN_RADIUS, GuardVillagersConfig.masonWaterBailoutBlacklistRadius);
+    }
+
+    private void expireBlacklistedShafts(long worldTime) {
+        if (waterBailoutBlacklist.isEmpty()) {
+            return;
+        }
+        Iterator<ShaftBlacklistEntry> iterator = waterBailoutBlacklist.iterator();
+        while (iterator.hasNext()) {
+            ShaftBlacklistEntry entry = iterator.next();
+            if (entry.expiresAtTick() <= worldTime) {
+                iterator.remove();
+            }
+        }
     }
 
     private void clearTemporaryMiningState() {
@@ -1340,6 +1469,7 @@ public class MasonMiningStairGoal extends Goal {
             case TOOL_BROKE -> "TOOL_BROKE";
             case CANNOT_ADVANCE -> "CANNOT_ADVANCE";
             case STUCK_30_SECONDS -> "STUCK_30_SECONDS";
+            case WATER_BAILOUT -> "WATER_BAILOUT";
             default -> "NONE";
         };
 
@@ -1422,17 +1552,23 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private enum ReturnReason {
-        NONE(false),
-        BATCH_COMPLETE(false),
-        MINING_TIME_LIMIT_REACHED(false),
-        TOOL_BROKE(false),
-        CANNOT_ADVANCE(true),
-        STUCK_30_SECONDS(true);
+        NONE(false, "none"),
+        BATCH_COMPLETE(false, "batch_complete"),
+        MINING_TIME_LIMIT_REACHED(false, "time_limit"),
+        TOOL_BROKE(false, "tool_broke"),
+        CANNOT_ADVANCE(true, "cannot_advance"),
+        STUCK_30_SECONDS(true, "stuck_30s"),
+        WATER_BAILOUT(true, "water_bailout");
 
         private final boolean resetsMiningProgress;
+        private final String reasonCode;
 
-        ReturnReason(boolean resetsMiningProgress) {
+        ReturnReason(boolean resetsMiningProgress, String reasonCode) {
             this.resetsMiningProgress = resetsMiningProgress;
+            this.reasonCode = reasonCode;
         }
+    }
+
+    private record ShaftBlacklistEntry(BlockPos origin, long expiresAtTick) {
     }
 }
