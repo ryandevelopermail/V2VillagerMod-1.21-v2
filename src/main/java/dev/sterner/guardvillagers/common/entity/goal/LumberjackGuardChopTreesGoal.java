@@ -141,7 +141,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int adaptiveForcedRecoveryWindow;
     private int adaptiveSessionCount;
     private long lastBackpressureDeferTick = Long.MIN_VALUE;
+    private long lastBackpressureDeferLogTick = Long.MIN_VALUE;
     private long lastMidpointAuditLogTick = Long.MIN_VALUE;
+    private long lastMidpointAuditCountdownStartTick = Long.MIN_VALUE;
     private String activeCountdownReason = "";
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
@@ -375,6 +377,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             if (WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
                 int deferTicks = getConfiguredGovernorHighLoadDeferTicks();
                 long remainingCountdownTicks = Math.max(0L, this.guard.getNextChopTick() - world.getTime());
+                if (shouldKeepExistingBackpressureCountdown(
+                        this.guard.isChopCountdownActive(),
+                        remainingCountdownTicks,
+                        this.activeCountdownReason)) {
+                    return;
+                }
                 if (shouldSkipBackpressureDeferRestart(
                         this.guard.isChopCountdownActive(),
                         remainingCountdownTicks,
@@ -384,9 +392,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                         BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
                     return;
                 }
-                LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
-                        this.guard.getUuidAsString(),
-                        deferTicks);
+                if (shouldLogBackpressureDeferStart(world.getTime(), this.lastBackpressureDeferLogTick, BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
+                    LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
+                            this.guard.getUuidAsString(),
+                            deferTicks);
+                    this.lastBackpressureDeferLogTick = world.getTime();
+                }
                 startChopCountdown(world, deferTicks, COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE);
                 this.lastBackpressureDeferTick = world.getTime();
                 return;
@@ -913,6 +924,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return currentTick - lastAuditLogTick >= minimumIntervalTicks;
     }
 
+    static boolean shouldKeepExistingBackpressureCountdown(boolean countdownActive,
+                                                           long countdownRemainingTicks,
+                                                           String activeCountdownReason) {
+        return countdownActive
+                && countdownRemainingTicks > 0L
+                && isDeferredBackpressureCountdown(activeCountdownReason);
+    }
+
+    static boolean shouldLogBackpressureDeferStart(long currentTick, long lastBackpressureDeferLogTick, long minimumIntervalTicks) {
+        if (minimumIntervalTicks <= 0L || lastBackpressureDeferLogTick < 0L) {
+            return true;
+        }
+        return currentTick - lastBackpressureDeferLogTick >= minimumIntervalTicks;
+    }
+
+    static boolean shouldRunMidpointAuditForCountdown(long countdownStartTick, long lastMidpointAuditCountdownStartTick) {
+        return countdownStartTick >= 0L && countdownStartTick != lastMidpointAuditCountdownStartTick;
+    }
+
     private static boolean isDeferredBackpressureCountdown(String reason) {
         return COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE.equals(reason);
     }
@@ -930,6 +960,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setChopCountdownLastLogStep(step);
 
         if (step == 2) {
+            if (!shouldRunMidpointAuditForCountdown(this.guard.getChopCountdownStartTick(), this.lastMidpointAuditCountdownStartTick)) {
+                return;
+            }
             if (isDeferredBackpressureCountdown(this.activeCountdownReason)
                     && !shouldLogDeferredMidpointAudit(
                     world.getTime(),
@@ -937,6 +970,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     MIDPOINT_AUDIT_DEFER_ONLY_LOG_MIN_INTERVAL_TICKS)) {
                 return;
             }
+            this.lastMidpointAuditCountdownStartTick = this.guard.getChopCountdownStartTick();
             this.lastMidpointAuditLogTick = world.getTime();
             LumberjackVillageDemandAudit.AuditSnapshot auditSnapshot = LumberjackVillageDemandAudit.run(world, this.guard);
             List<String> recipientsChosen = LumberjackGuardDepositLogsGoal.runMidpointAuditedDemandDistribution(
