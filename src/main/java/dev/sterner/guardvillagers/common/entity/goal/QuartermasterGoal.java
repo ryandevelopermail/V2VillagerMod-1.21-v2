@@ -35,7 +35,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
-import java.util.EnumMap;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -181,7 +180,7 @@ public class QuartermasterGoal extends Goal {
     private static final Map<VillagerProfession, ProfessionReclaimPolicy> PROFESSION_RECLAIM_POLICIES = buildProfessionReclaimPolicies();
 
     private static Map<VillagerProfession, ProfessionReclaimPolicy> buildProfessionReclaimPolicies() {
-        Map<VillagerProfession, ProfessionReclaimPolicy> policies = new EnumMap<>(VillagerProfession.class);
+        Map<VillagerProfession, ProfessionReclaimPolicy> policies = new HashMap<>();
         policies.put(VillagerProfession.FARMER, ProfessionReclaimPolicy.of(
                 stack -> stack.isOf(Items.WHEAT) || stack.isOf(Items.WHEAT_SEEDS) || stack.isOf(Items.HAY_BLOCK),
                 Map.of(
