@@ -105,6 +105,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int NO_TREE_ESCALATION_RETRY_DELAY_TICKS = 20 * 60 * 12;
     private static final int TREE_SCAN_METRICS_INFO_ELAPSED_MS = 20;
     private static final int TREE_SCAN_METRICS_INFO_INTERVAL = 5;
+    private static final int MIDPOINT_MISSING_CHEST_REFRESH_THRESHOLD = 3;
+    private static final long MIDPOINT_UPGRADE_RETRY_DELAY_TICKS = 20L * 30L;
     private static final double GOVERNOR_EMA_ALPHA = 0.20D;
     private static final int GOVERNOR_PRESSURE_STEP = 120;
     private static final int GOVERNOR_RECOVERY_STEP = 80;
@@ -879,14 +881,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     world,
                     this.guard,
                     auditSnapshot);
+            MidpointUpgradeRecoveryResult midpointRecoveryResult = recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                    auditSnapshot.eligibleV1VillagersMissingChest(),
+                    recipientsChosen,
+                    MIDPOINT_MISSING_CHEST_REFRESH_THRESHOLD,
+                    () -> LumberjackChestTriggerController.runMidpointPairingRefreshPass(world, this.guard),
+                    () -> LumberjackGuardDepositLogsGoal.runMidpointAuditedDemandDistribution(world, this.guard, auditSnapshot),
+                    () -> LumberjackChestTriggerController.scheduleMidpointUpgradeRetry(world, this.guard, MIDPOINT_UPGRADE_RETRY_DELAY_TICKS)
+            );
             boolean midpointUpgradeApplied = runMidpointUpgradeNeedPass(world, this.guard);
-            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}, midpoint upgrade applied={}",
+            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}, midpoint upgrade applied={}, pairing_refresh_triggered={}, paired_after_refresh={}, upgrade_retry_scheduled={}",
                     this.guard.getUuidAsString(),
                     auditSnapshot.eligibleV1VillagersMissingChest(),
                     auditSnapshot.eligibleV2VillagersMissingCraftingTable(),
                     auditSnapshot.eligibleV2ProfessionalsUnderToolMaterialThreshold(),
-                    recipientsChosen,
-                    midpointUpgradeApplied);
+                    midpointRecoveryResult.recipientsChosen(),
+                    midpointUpgradeApplied,
+                    midpointRecoveryResult.pairingRefreshTriggered(),
+                    midpointRecoveryResult.pairedAfterRefresh(),
+                    midpointRecoveryResult.upgradeRetryScheduled());
         }
 
         long remaining = this.guard.getNextChopTick() - world.getTime();
@@ -928,6 +941,45 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         return runImmediateUpgradePass.getAsBoolean();
+    }
+
+    static MidpointUpgradeRecoveryResult recoverMidpointRecipientsWhenMissingChestDemandHigh(
+            int eligibleV1MissingChestCount,
+            List<String> recipientsChosen,
+            int missingChestRefreshThreshold,
+            Supplier<LumberjackChestTriggerController.MidpointPairingRefreshResult> runPairingRefreshPass,
+            Supplier<List<String>> rerunRecipientDistribution,
+            Runnable scheduleUpgradeRetry) {
+        if (eligibleV1MissingChestCount < missingChestRefreshThreshold || !recipientsChosen.isEmpty()) {
+            return new MidpointUpgradeRecoveryResult(recipientsChosen, false, false, false);
+        }
+
+        LumberjackChestTriggerController.MidpointPairingRefreshResult pairingRefreshResult = runPairingRefreshPass.get();
+        List<String> refreshedRecipients = recipientsChosen;
+        boolean pairedAfterRefresh = false;
+        if (pairingRefreshResult.pairedAfterRefresh()) {
+            refreshedRecipients = rerunRecipientDistribution.get();
+            pairedAfterRefresh = !refreshedRecipients.isEmpty();
+        }
+
+        boolean upgradeRetryScheduled = false;
+        if (!pairedAfterRefresh) {
+            scheduleUpgradeRetry.run();
+            upgradeRetryScheduled = true;
+        }
+
+        return new MidpointUpgradeRecoveryResult(
+                refreshedRecipients,
+                pairingRefreshResult.pairingRefreshTriggered(),
+                pairedAfterRefresh,
+                upgradeRetryScheduled
+        );
+    }
+
+    record MidpointUpgradeRecoveryResult(List<String> recipientsChosen,
+                                         boolean pairingRefreshTriggered,
+                                         boolean pairedAfterRefresh,
+                                         boolean upgradeRetryScheduled) {
     }
 
     private static int countByItemForMidpoint(Inventory inventory, Item item) {

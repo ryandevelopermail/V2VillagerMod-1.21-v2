@@ -46,6 +46,7 @@ public final class LumberjackChestTriggerController {
     private static final double VILLAGE_EXPANSION_SCAN_RADIUS = 300.0D;
     private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 400L;
     private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
+    private static final double MIDPOINT_PAIRING_REFRESH_RADIUS = 32.0D;
     private static final Map<UUID, UpgradeStage> UPGRADE_STAGE_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, UpgradeStage> UPGRADE_STAGE_BY_JOB_SITE = new HashMap<>();
     private static final Map<UUID, Long> CHEST_PAIRED_TICKS_BY_VILLAGER = new HashMap<>();
@@ -136,6 +137,45 @@ public final class LumberjackChestTriggerController {
             return true;
         }
         return false;
+    }
+
+    public static MidpointPairingRefreshResult runMidpointPairingRefreshPass(ServerWorld world, LumberjackGuardEntity guard) {
+        BlockPos anchor = resolveMidpointPairingRefreshAnchor(guard);
+        if (anchor == null) {
+            return new MidpointPairingRefreshResult(false, 0, 0, false);
+        }
+
+        int missingBefore = countEligibleV1VillagersMissingPairedChest(world, guard);
+        int candidateCount = 0;
+        int refreshedCount = 0;
+        for (VillagerEntity villager : collectVillagersNearAnchor(world, anchor, MIDPOINT_PAIRING_REFRESH_RADIUS)) {
+            if (!isEligibleV1Villager(world, villager)) {
+                continue;
+            }
+
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null || !jobPos.isWithinDistance(anchor, MIDPOINT_PAIRING_REFRESH_RADIUS)) {
+                continue;
+            }
+
+            candidateCount++;
+            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+            refreshedCount++;
+        }
+
+        int missingAfter = countEligibleV1VillagersMissingPairedChest(world, guard);
+        return new MidpointPairingRefreshResult(
+                refreshedCount > 0,
+                candidateCount,
+                refreshedCount,
+                missingAfter < missingBefore
+        );
+    }
+
+    public static void scheduleMidpointUpgradeRetry(ServerWorld world, LumberjackGuardEntity guard, long retryDelayTicks) {
+        long retryTick = world.getTime() + Math.max(retryDelayTicks, 1L);
+        guard.setNextTriggerEvaluationTick(retryTick);
+        guard.clearTriggerEvaluationRequest();
     }
 
     public static UpgradeDemand resolveNextUpgradeDemand(ServerWorld world, LumberjackGuardEntity guard) {
@@ -812,6 +852,24 @@ public final class LumberjackChestTriggerController {
                 villageExpansionScanBox(guard.getPairedJobPos(), guard.getBlockPos()),
                 VillagerEntity::isAlive
         ));
+    }
+
+    private static ArrayList<VillagerEntity> collectVillagersNearAnchor(ServerWorld world, BlockPos anchor, double radius) {
+        return new ArrayList<>(world.getEntitiesByClass(
+                VillagerEntity.class,
+                new Box(anchor).expand(radius),
+                VillagerEntity::isAlive
+        ));
+    }
+
+    private static BlockPos resolveMidpointPairingRefreshAnchor(LumberjackGuardEntity guard) {
+        if (guard.getPairedJobPos() != null) {
+            return guard.getPairedJobPos();
+        }
+        if (guard.getPairedChestPos() != null) {
+            return guard.getPairedChestPos();
+        }
+        return guard.getBlockPos();
     }
 
     static Box villageExpansionScanBox(BlockPos pairedJobPos, BlockPos fallbackGuardPos) {
@@ -1607,5 +1665,11 @@ public final class LumberjackChestTriggerController {
             }
             return "eligible V1 villagers still missing chest=" + eligibleV1MissingChestCount;
         }
+    }
+
+    public record MidpointPairingRefreshResult(boolean pairingRefreshTriggered,
+                                               int candidateCount,
+                                               int refreshedCount,
+                                               boolean pairedAfterRefresh) {
     }
 }
