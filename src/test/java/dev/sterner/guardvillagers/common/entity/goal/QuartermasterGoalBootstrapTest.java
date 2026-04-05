@@ -30,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -251,6 +252,65 @@ class QuartermasterGoalBootstrapTest {
         assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
         assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
         assertEquals(1, QuartermasterGoal.getBootstrapDiscoveryRunsForTest(goal));
+        QuartermasterGoal.clearBootstrapState(world, qmUuid);
+    }
+
+    @Test
+    void bootstrapConsolidation_retriesAfterEmptyDiscoveryAndCollectsWhenChestsAppearLater() throws Exception {
+        ServerWorld world = mock(ServerWorld.class);
+        when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
+        when(world.getEntitiesByClass(any(), any(), any())).thenReturn(List.of());
+        AtomicLong worldTime = new AtomicLong(0L);
+        when(world.getTime()).thenAnswer(invocation -> worldTime.get());
+
+        BlockPos qmJob = new BlockPos(0, 64, 0);
+        BlockPos qmChest = new BlockPos(1, 64, 0);
+        UUID qmUuid = UUID.randomUUID();
+        VillagerEntity quartermaster = villagerWithJobSite(world, qmUuid, VillagerProfession.LIBRARIAN, qmJob, qmChest);
+        TestQuartermasterGoal goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
+        GuardVillagersConfig.quartermasterScanRange = 16;
+
+        BlockPos delayedSource = new BlockPos(6, 64, 0);
+        Map<BlockPos, BlockState> states = new HashMap<>();
+        states.put(qmChest, chestState(ChestType.SINGLE));
+        when(world.getBlockState(any(BlockPos.class))).thenAnswer(invocation ->
+                states.getOrDefault(invocation.getArgument(0), Blocks.AIR.getDefaultState()));
+
+        SimpleInventory qmInventory = new SimpleInventory(9);
+        goal.putInventory(qmChest, qmInventory);
+
+        Method tryPlanTransfer = QuartermasterGoal.class.getDeclaredMethod("tryPlanTransfer", ServerWorld.class);
+        tryPlanTransfer.setAccessible(true);
+
+        // Promotion tick with no eligible source chests discovered.
+        assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
+        assertEquals(1, QuartermasterGoal.getBootstrapDiscoveryRunsForTest(goal));
+
+        // Before retry window, still no re-discovery.
+        worldTime.set(1199L);
+        assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
+        assertEquals(1, QuartermasterGoal.getBootstrapDiscoveryRunsForTest(goal));
+
+        // Chest appears later and should be picked up on next retry window.
+        states.put(delayedSource, chestState(ChestType.SINGLE));
+        states.put(delayedSource.north(), Blocks.BELL.getDefaultState());
+        states.put(delayedSource.south(), Blocks.WHITE_BED.getDefaultState());
+        SimpleInventory delayedSourceInv = new SimpleInventory(new ItemStack(Items.BREAD, 7));
+        goal.putInventory(delayedSource, delayedSourceInv);
+
+        worldTime.set(1200L);
+        assertTrue((boolean) tryPlanTransfer.invoke(goal, world));
+        QuartermasterGoal.PlannedTransfer plan = QuartermasterGoal.getPlannedTransferForTest(goal);
+        assertEquals(delayedSource, plan.sourcePos());
+        invokeTakeFromInventory(goal, world, plan.sourcePos());
+        invokeInsertToInventory(goal, world, plan.destPos());
+
+        // Follow-up planning marks bootstrap complete after discovered sources are drained.
+        assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
+        assertFalse((boolean) tryPlanTransfer.invoke(goal, world));
+        assertEquals(0, totalItems(delayedSourceInv));
+        assertEquals(7, totalItems(qmInventory));
+        assertEquals(2, QuartermasterGoal.getBootstrapDiscoveryRunsForTest(goal));
         QuartermasterGoal.clearBootstrapState(world, qmUuid);
     }
 
