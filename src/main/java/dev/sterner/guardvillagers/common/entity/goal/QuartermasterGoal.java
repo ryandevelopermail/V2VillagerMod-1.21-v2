@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Comparator;
 import java.util.function.Predicate;
 
 /**
@@ -241,10 +242,11 @@ public class QuartermasterGoal extends Goal {
     private boolean candidateCacheStale = true;
     private long nextCandidateCacheRefreshTick = 0L;
     private SurplusScanMetrics lastSurplusScanMetrics = SurplusScanMetrics.empty();
-    private final Deque<TransferLeg> bootstrapTransferQueue = new ArrayDeque<>();
+    private final Deque<BlockPos> bootstrapSourceQueue = new ArrayDeque<>();
     private final Deque<QuartermasterDemandPlanner.QueueEntry> demandQueue = new ArrayDeque<>();
     private int bootstrapDiscoveryRuns = 0;
     private boolean demandQueueDirty = true;
+    private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -481,16 +483,7 @@ public class QuartermasterGoal extends Goal {
 
         BlockPos bellChestPos = resolveBellChestPos(world);
         if (bellChestPos != null) {
-            if (!isBootstrapComplete(world)) {
-                bootstrapTransferQueue.clear();
-                queueBootstrapTransferLegs(world, bellChestPos);
-                setBootstrapComplete(world);
-            }
-            if (!bootstrapTransferQueue.isEmpty()) {
-                TransferLeg leg = bootstrapTransferQueue.pollFirst();
-                sourcePos = leg.sourcePos();
-                destPos = leg.destPos();
-                transferStack = leg.transferStack().copy();
+            if (tryPlanBootstrapConsolidationTransfer(world, bellChestPos)) {
                 return true;
             }
         }
@@ -1022,21 +1015,6 @@ public class QuartermasterGoal extends Goal {
         return Optional.empty();
     }
 
-    private void queueBootstrapTransferLegs(ServerWorld world, BlockPos bellChestPos) {
-        bootstrapDiscoveryRuns++;
-        List<BlockPos> discovered = discoverBootstrapSourceChests(world, bellChestPos);
-        for (BlockPos source : discovered) {
-            if (source.equals(bellChestPos)) continue;
-            ItemStack stack = findTopTransferableItem(world, source);
-            if (stack.isEmpty()) continue;
-            bootstrapTransferQueue.addLast(new TransferLeg(
-                    source,
-                    bellChestPos,
-                    stack.copyWithCount(Math.min(HAUL_AMOUNT, stack.getCount()))
-            ));
-        }
-    }
-
     private List<BlockPos> discoverBootstrapSourceChests(ServerWorld world, BlockPos bellChestPos) {
         Set<BlockPos> pairedChests = new HashSet<>();
         for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
@@ -1060,11 +1038,49 @@ public class QuartermasterGoal extends Goal {
             BlockPos candidate = canonicalChestPos(world, scanPos.toImmutable());
             if (excluded.contains(candidate)) continue;
             if (!isNaturalVillageChest(world, candidate)) continue;
+            if (countAllItems(world, candidate) <= 0) continue;
             if (deduplicated.add(candidate)) {
                 discovered.add(candidate);
             }
         }
+        discovered.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
         return discovered;
+    }
+
+    private boolean tryPlanBootstrapConsolidationTransfer(ServerWorld world, BlockPos bellChestPos) {
+        if (isBootstrapComplete(world)) {
+            bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
+            bootstrapSourceQueue.clear();
+            return false;
+        }
+        if (bootstrapConsolidationState == BootstrapConsolidationState.NOT_STARTED) {
+            bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
+            bootstrapDiscoveryRuns++;
+            bootstrapSourceQueue.clear();
+            bootstrapSourceQueue.addAll(discoverBootstrapSourceChests(world, bellChestPos));
+            bootstrapConsolidationState = BootstrapConsolidationState.CONSOLIDATING;
+        }
+
+        while (!bootstrapSourceQueue.isEmpty()) {
+            BlockPos source = bootstrapSourceQueue.peekFirst();
+            if (source == null || source.equals(bellChestPos)) {
+                bootstrapSourceQueue.pollFirst();
+                continue;
+            }
+            ItemStack stack = findTopTransferableItem(world, source);
+            if (stack.isEmpty()) {
+                bootstrapSourceQueue.pollFirst();
+                continue;
+            }
+            sourcePos = source;
+            destPos = bellChestPos;
+            transferStack = stack.copyWithCount(Math.min(HAUL_AMOUNT, stack.getCount()));
+            return true;
+        }
+
+        bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
+        setBootstrapComplete(world);
+        return false;
     }
 
     private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {
@@ -1709,6 +1725,7 @@ public class QuartermasterGoal extends Goal {
     private record TransferLeg(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
     private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
     private enum ReserveGrouping { LOGS, PLANKS, CHARCOAL, ITEM }
+    private enum BootstrapConsolidationState { NOT_STARTED, DISCOVERING, CONSOLIDATING, COMPLETE }
 
     private static final class SurplusScanBudget {
         private final int maxCandidates;
