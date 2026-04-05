@@ -27,6 +27,8 @@ class GuardVillagersConfigRangeValidationTest {
         GuardVillagersConfig.weaponsmithAdaptiveThrottleDeferTicks = 0;
         GuardVillagersConfig.weaponsmithAdaptiveThrottleJitterTicks = 999999;
         GuardVillagersConfig.weaponsmithAdaptiveSummaryLogIntervalSessions = 0;
+        GuardVillagersConfig.shepherdFenceBatchMin = 0;
+        GuardVillagersConfig.shepherdFenceBatchMax = 999;
 
         GuardVillagersConfig.validateClampedRanges();
 
@@ -49,5 +51,7 @@ class GuardVillagersConfigRangeValidationTest {
         assertEquals(GuardVillagersConfig.MIN_PROFESSION_THROTTLE_DEFER_TICKS, GuardVillagersConfig.weaponsmithAdaptiveThrottleDeferTicks);
         assertEquals(GuardVillagersConfig.MAX_PROFESSION_THROTTLE_JITTER_TICKS, GuardVillagersConfig.weaponsmithAdaptiveThrottleJitterTicks);
         assertEquals(GuardVillagersConfig.MIN_PROFESSION_SUMMARY_LOG_INTERVAL, GuardVillagersConfig.weaponsmithAdaptiveSummaryLogIntervalSessions);
+        assertEquals(GuardVillagersConfig.MIN_SHEPHERD_FENCE_BATCH, GuardVillagersConfig.shepherdFenceBatchMin);
+        assertEquals(GuardVillagersConfig.MAX_SHEPHERD_FENCE_BATCH, GuardVillagersConfig.shepherdFenceBatchMax);
     }
 }

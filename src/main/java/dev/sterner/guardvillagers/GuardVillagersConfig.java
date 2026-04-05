@@ -36,6 +36,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_PROFESSION_THROTTLE_JITTER_TICKS = 20 * 60;
     public static final int MIN_PROFESSION_SUMMARY_LOG_INTERVAL = 1;
     public static final int MAX_PROFESSION_SUMMARY_LOG_INTERVAL = 1000;
+    public static final int MIN_SHEPHERD_FENCE_BATCH = 1;
+    public static final int MAX_SHEPHERD_FENCE_BATCH = 16;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -115,6 +117,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int bellChestBedSearchRadius = 6;
     @Entry(min=1)
     public static int masonTableDailyCraftLimit = 4;
+    @Entry(min=1)
+    public static int shepherdFenceBatchMin = 2;
+    @Entry(min=1)
+    public static int shepherdFenceBatchMax = 3;
     @Entry
     public static MasonWallPoiMode masonWallPoiMode = MasonWallPoiMode.JOBS_AND_BEDS;
     @Entry(min=0)
@@ -284,6 +290,11 @@ public class GuardVillagersConfig extends MidnightConfig {
         weaponsmithAdaptiveThrottleDeferTicks = clamp(weaponsmithAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         weaponsmithAdaptiveThrottleJitterTicks = clamp(weaponsmithAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
         weaponsmithAdaptiveSummaryLogIntervalSessions = clamp(weaponsmithAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        shepherdFenceBatchMin = clamp(shepherdFenceBatchMin, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
+        shepherdFenceBatchMax = clamp(shepherdFenceBatchMax, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
+        if (shepherdFenceBatchMax < shepherdFenceBatchMin) {
+            shepherdFenceBatchMax = shepherdFenceBatchMin;
+        }
     }
 
     private static int clamp(int value, int min, int max) {
