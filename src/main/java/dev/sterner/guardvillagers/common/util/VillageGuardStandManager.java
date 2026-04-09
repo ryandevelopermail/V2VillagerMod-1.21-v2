@@ -74,6 +74,22 @@ public final class VillageGuardStandManager {
             return;
         }
 
+        // Resolve the nearest QM-chest anchor for this player first — this is a cheap
+        // persistent-state lookup. If no anchor is within range, skip the entity scan entirely.
+        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
+        Optional<BlockPos> nearbyAnchor = anchorState.getNearestQmChest(world, player.getBlockPos(), PLAYER_APPROACH_RANGE + BELL_EFFECT_RANGE);
+        if (nearbyAnchor.isEmpty()) {
+            return;
+        }
+
+        GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), nearbyAnchor.get());
+
+        // If this anchor is already fully initialized, no entity scan is needed this tick.
+        if (INITIALIZED_ANCHORS.contains(globalAnchorPos)) {
+            return;
+        }
+
+        // First time this player is near an uninitialized anchor — do the full scan.
         Box searchBox = player.getBoundingBox().expand(PLAYER_APPROACH_RANGE);
         List<GuardEntity> guards = world.getEntitiesByClass(GuardEntity.class, searchBox, Entity::isAlive);
         for (GuardEntity guard : guards) {
@@ -82,14 +98,11 @@ public final class VillageGuardStandManager {
                 continue;
             }
 
-            GlobalPos globalAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos.get());
-            // INITIALIZED_ANCHORS.add() returns true only on first insertion.
-            // If already initialized, skip the expensive countVillageGuards + pairGuardsWithStands
-            // entirely — no need to re-evaluate the stand pairing every 40 ticks.
-            if (!INITIALIZED_ANCHORS.contains(globalAnchorPos)) {
-                INITIALIZED_ANCHORS.add(globalAnchorPos);
+            GlobalPos guardAnchorPos = GlobalPos.create(world.getRegistryKey(), anchorPos.get());
+            if (!INITIALIZED_ANCHORS.contains(guardAnchorPos)) {
+                INITIALIZED_ANCHORS.add(guardAnchorPos);
                 int guardCount = countVillageGuards(world, anchorPos.get());
-                GUARD_COUNTS.put(globalAnchorPos, guardCount);
+                GUARD_COUNTS.put(guardAnchorPos, guardCount);
                 pairGuardsWithStands(world, anchorPos.get());
             }
         }
