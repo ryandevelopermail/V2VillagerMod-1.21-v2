@@ -34,6 +34,8 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
+import net.minecraft.registry.tag.BlockTags;
+
 /**
  * Periodically ensures enough lumberjacks exist relative to village population.
  *
@@ -99,6 +101,35 @@ public final class VillageLumberjackSpawnManager {
 
     /** Ratio: one lumberjack per N total villagers (lower bound). */
     private static final int RATIO_TOTAL = 6;
+
+    /**
+     * Fix 1 — stale-table guard.
+     *
+     * A crafting table that has been sitting unclaimed for longer than one full maintenance
+     * cycle (SCAN_INTERVAL_TICKS) has clearly failed to attract a villager.  Don't let it
+     * keep suppressing new spawns.  We approximate "stale" by checking whether any unemployed
+     * villager is reachable within UNEMPLOYED_SCAN_RANGE of the table at the time of the
+     * pending-count query.  If nobody is there to claim it, it is treated as stale and is
+     * excluded from the effective-existing count, allowing the spawn manager to try again.
+     */
+    // (no extra constant needed — reuses UNEMPLOYED_SCAN_RANGE)
+
+    /**
+     * Fix 3 — tree-supply gate.
+     *
+     * Before spawning a new lumberjack, check whether the local forest can sustain one more.
+     * We count harvestable trees (blocks tagged {@code #logs}) and young saplings (tagged
+     * {@code #saplings}) within {@code lumberjackBaseTreeSearchRadius} of the bell.
+     * Each lumberjack needs at least {@value TREES_NEEDED_PER_LUMBERJACK} log-sources or
+     * planted saplings to stay meaningfully busy.  If the supply falls short, the spawn is
+     * deferred; the retry timer will re-check after foresters have had time to plant.
+     *
+     * <p>A "log-source" is counted as one tree trunk column: we count only the bottommost log
+     * block (y == surface level or the log directly above a non-log block) to avoid
+     * over-counting multi-log tall trees.  Saplings count at half weight because they haven't
+     * grown yet.
+     */
+    private static final int TREES_NEEDED_PER_LUMBERJACK = 4;
 
     private VillageLumberjackSpawnManager() {
     }
@@ -173,6 +204,18 @@ public final class VillageLumberjackSpawnManager {
             NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
             LOGGER.info("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
                     attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
+            return;
+        }
+
+        // Fix 3: tree-supply gate — don't spawn a lumberjack when the forest can't keep them busy.
+        // Count harvestable log-roots and planted saplings near the bell; if there aren't enough
+        // to sustain the desired lumberjack count, defer until the forester has done more planting.
+        int nextDesired = effectiveExisting + 1; // we're about to place one more
+        if (!hasEnoughTreeSupplyForLumberjackCount(world, bellPos, nextDesired)) {
+            long retryIntervalTicks = Math.max(20L, GuardVillagersConfig.lumberjackSpawnRetryIntervalTicks);
+            NEXT_RETRY_TICK_BY_BELL.put(bellPos, now + retryIntervalTicks);
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — tree supply insufficient for {} lumberjack(s); deferring {}t",
+                    attemptType, bellPos.toShortString(), nextDesired, retryIntervalTicks);
             return;
         }
 
@@ -446,7 +489,13 @@ public final class VillageLumberjackSpawnManager {
 
     /**
      * Returns true when this table is eligible as pending supply:
-     * block exists, not reserved for converted workers, and not already paired to a living lumberjack.
+     * block exists, not reserved for converted workers, not already paired to a living lumberjack,
+     * AND at least one unemployed villager is within {@link #UNEMPLOYED_SCAN_RANGE} of the table.
+     *
+     * <p>Fix 1 — stale-table guard: if no unemployed villager is nearby, the table has clearly
+     * failed to attract anyone and should not keep suppressing further spawn attempts.  Without
+     * this check a table placed during a period of zero unemployed villagers would count forever
+     * as "pending supply", blocking the spawn manager from ever trying again.
      */
     private static boolean isPendingLumberjackConversionTable(ServerWorld world, BlockPos tablePos, Set<BlockPos> pairedToLivingLumberjacks) {
         if (!world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)) {
@@ -455,7 +504,21 @@ public final class VillageLumberjackSpawnManager {
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
             return false;
         }
-        return !pairedToLivingLumberjacks.contains(tablePos);
+        if (pairedToLivingLumberjacks.contains(tablePos)) {
+            return false;
+        }
+        // Stale-table check: only count this table as pending if an unemployed villager is
+        // close enough to actually claim it.  A table with nobody nearby is stale and
+        // should not suppress new placement attempts.
+        Box scanBox = new Box(tablePos).expand(UNEMPLOYED_SCAN_RANGE);
+        List<VillagerEntity> nearby = world.getEntitiesByClass(
+                VillagerEntity.class, scanBox, VillageLumberjackSpawnManager::isUnemployed);
+        if (nearby.isEmpty()) {
+            LOGGER.debug("lumberjack-spawn stale-table detected at {} (no unemployed villager within {} blocks) — not counting as pending supply",
+                    tablePos.toShortString(), UNEMPLOYED_SCAN_RANGE);
+            return false;
+        }
+        return true;
     }
 
     private static VillagerEntity findNearestUnemployed(ServerWorld world, BlockPos tablePos) {
@@ -566,6 +629,58 @@ public final class VillageLumberjackSpawnManager {
         double dy = a.getY() - b.getY();
         double dz = a.getZ() - b.getZ();
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    // -------------------------------------------------------------------------
+    // Tree-supply gate (Fix 3)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns {@code true} if the local forest around {@code bellPos} has enough
+     * harvestable log-roots and planted saplings to keep {@code desiredLumberjackCount}
+     * lumberjacks meaningfully busy.
+     *
+     * <p>A "tree unit" is:
+     * <ul>
+     *   <li>1.0 for each distinct harvestable tree trunk — counted as the bottommost log block
+     *       in a vertical log column (i.e. the block below is not also a log).  This avoids
+     *       inflating the count for tall trees.</li>
+     *   <li>0.5 for each planted sapling (half weight — it hasn't grown yet).</li>
+     * </ul>
+     *
+     * <p>The scan radius matches {@code lumberjackBaseTreeSearchRadius} from config, which is
+     * the same radius the lumberjack itself uses when looking for trees to chop.
+     */
+    private static boolean hasEnoughTreeSupplyForLumberjackCount(ServerWorld world, BlockPos bellPos, int desiredLumberjackCount) {
+        if (desiredLumberjackCount <= 0) return true;
+        int needed = desiredLumberjackCount * TREES_NEEDED_PER_LUMBERJACK;
+
+        int scanRadius = Math.max(GuardVillagersConfig.MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
+                GuardVillagersConfig.lumberjackBaseTreeSearchRadius);
+        // Scan a 2D horizontal footprint around the bell at all relevant Y levels.
+        int yRange = 16;
+
+        double treeUnits = 0.0;
+        for (BlockPos pos : BlockPos.iterate(
+                bellPos.add(-scanRadius, -yRange, -scanRadius),
+                bellPos.add(scanRadius, yRange, scanRadius))) {
+            if (!bellPos.isWithinDistance(pos, scanRadius)) continue;
+            BlockState state = world.getBlockState(pos);
+            if (state.isIn(BlockTags.LOGS)) {
+                // Count only the bottom of each log column to avoid multi-counting tall trunks.
+                BlockState below = world.getBlockState(pos.down());
+                if (!below.isIn(BlockTags.LOGS)) {
+                    treeUnits += 1.0;
+                    if (treeUnits >= needed) return true; // early exit
+                }
+            } else if (state.isIn(BlockTags.SAPLINGS)) {
+                treeUnits += 0.5;
+            }
+        }
+
+        LOGGER.debug("lumberjack-spawn tree-supply bell={} scanRadius={} treeUnits={} needed={} (for {} lumberjack(s))",
+                bellPos.toShortString(), scanRadius, treeUnits, needed, desiredLumberjackCount);
+        return treeUnits >= needed;
     }
 
     // -------------------------------------------------------------------------
