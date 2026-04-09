@@ -4,7 +4,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.entity.passive.VillagerType;
+import net.minecraft.village.VillagerType;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
