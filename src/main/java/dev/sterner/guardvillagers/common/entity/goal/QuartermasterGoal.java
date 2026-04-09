@@ -756,18 +756,15 @@ public class QuartermasterGoal extends Goal {
             return false;
         }
         nextLumberjackDrainSweepTick = worldTime + getLumberjackDrainSweepIntervalTicks();
-        Optional<Inventory> quartermasterInventory = getInventory(world, chestPos);
-        if (quartermasterInventory.isPresent()) {
-            double fullness = computeInventoryFullness(quartermasterInventory.get());
-            double threshold = getLumberjackReclaimChestFullnessThreshold();
-            if (fullness >= threshold) {
-                LOGGER.info("QM {}: skip lumberjack reclaim cycle (reason=qm_chest_fullness_gate fullness={} threshold={} next_recheck_tick={})",
-                        villager.getUuidAsString(),
-                        String.format("%.3f", fullness),
-                        String.format("%.3f", threshold),
-                        nextLumberjackDrainSweepTick);
-                return false;
-            }
+        double qmChestFullness = getChestFullness(world, chestPos);
+        double fullnessThreshold = getLumberjackReclaimQmChestFullnessThreshold();
+        if (qmChestFullness >= fullnessThreshold) {
+            LOGGER.info("QM {}: skipping lumberjack reclaim cycle (reason=qm_chest_fullness_gate fullness={} threshold={} recheck_tick={})",
+                    villager.getUuidAsString(),
+                    String.format("%.3f", qmChestFullness),
+                    String.format("%.3f", fullnessThreshold),
+                    nextLumberjackDrainSweepTick);
+            return false;
         }
         if (!rebuildLumberjackDrainQueue(world)) {
             return false;
@@ -918,34 +915,34 @@ public class QuartermasterGoal extends Goal {
                 : DEFAULT_LUMBERJACK_DRAIN_SWEEP_INTERVAL_TICKS);
     }
 
-    private double getLumberjackReclaimChestFullnessThreshold() {
-        double configured = GuardVillagersConfig.quartermasterLumberjackReclaimFullnessThreshold;
-        if (Double.isNaN(configured)) {
-            return 0.85D;
-        }
-        return Math.max(0.0D, Math.min(1.0D, configured));
+    private double getLumberjackReclaimQmChestFullnessThreshold() {
+        return Math.max(0.0D, Math.min(1.0D, GuardVillagersConfig.quartermasterLumberjackReclaimQmChestFullnessThreshold));
     }
 
-    private double computeInventoryFullness(Inventory inventory) {
-        if (inventory.size() <= 0) {
+    private double getChestFullness(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inventory = getInventory(world, pos);
+        if (inventory.isEmpty()) {
             return 0.0D;
         }
+        Inventory inv = inventory.get();
+        if (inv.size() <= 0) {
+            return 0.0D;
+        }
+        double usedCapacity = 0.0D;
         double totalCapacity = 0.0D;
-        double totalItems = 0.0D;
-        int maxPerStack = Math.max(1, inventory.getMaxCountPerStack());
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack stack = inventory.getStack(i);
-            int slotCapacity = maxPerStack;
-            if (!stack.isEmpty()) {
-                slotCapacity = Math.max(1, Math.min(maxPerStack, stack.getMaxCount()));
-                totalItems += stack.getCount();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            int slotCapacity = stack.isEmpty() ? inv.getMaxCountPerStack() : Math.min(inv.getMaxCountPerStack(), stack.getMaxCount());
+            if (slotCapacity <= 0) {
+                continue;
             }
             totalCapacity += slotCapacity;
+            usedCapacity += Math.min(stack.getCount(), slotCapacity);
         }
         if (totalCapacity <= 0.0D) {
             return 0.0D;
         }
-        return totalItems / totalCapacity;
+        return usedCapacity / totalCapacity;
     }
 
     private Set<net.minecraft.item.Item> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
