@@ -26,6 +26,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS = 20 * 60 * 10;
     public static final int MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 1;
     public static final int MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL = 500;
+    public static final int MIN_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE = 0;
+    public static final int MAX_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE = 900;
     public static final int MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 8;
     public static final int MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 31;
     public static final int MIN_PROFESSION_THROTTLE_THRESHOLD = 1;
@@ -180,6 +182,18 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackGovernorHighLoadDeferTicks = 20 * 15;
     @Entry(min=1)
     public static int lumberjackGovernorMetricsLogInterval = 10;
+    @Entry(min=0)
+    public static int lumberjackGovernorDeferBackpressureThresholdPermille = 700;
+    @Entry(min=0)
+    public static int lumberjackGovernorPassiveBackpressureDecayPermillePerSlice = 35;
+    @Entry(min=1)
+    public static int lumberjackGovernorPassiveBackpressureDecayIntervalTicks = 20 * 10;
+    @Entry(min=20)
+    public static int lumberjackGovernorForcedProbeIntervalTicks = 20 * 45;
+    @Entry(min=0)
+    public static int lumberjackGovernorBackpressureDeferLogMinIntervalTicks = 20 * 20;
+    @Entry(min=1)
+    public static int lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold = 3;
     @Entry
     public static boolean lumberjackVerboseLogging = false;
     @Entry(min=1)
@@ -303,6 +317,30 @@ public class GuardVillagersConfig extends MidnightConfig {
                 lumberjackGovernorMetricsLogInterval,
                 MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL,
                 MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL);
+        lumberjackGovernorDeferBackpressureThresholdPermille = clamp(
+                lumberjackGovernorDeferBackpressureThresholdPermille,
+                MIN_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE,
+                MAX_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE);
+        lumberjackGovernorPassiveBackpressureDecayPermillePerSlice = clamp(
+                lumberjackGovernorPassiveBackpressureDecayPermillePerSlice,
+                MIN_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE,
+                MAX_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE);
+        lumberjackGovernorPassiveBackpressureDecayIntervalTicks = clamp(
+                lumberjackGovernorPassiveBackpressureDecayIntervalTicks,
+                1,
+                MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+        lumberjackGovernorForcedProbeIntervalTicks = clamp(
+                lumberjackGovernorForcedProbeIntervalTicks,
+                MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
+                MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+        lumberjackGovernorBackpressureDeferLogMinIntervalTicks = clamp(
+                lumberjackGovernorBackpressureDeferLogMinIntervalTicks,
+                0,
+                MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+        lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold = clamp(
+                lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold,
+                1,
+                MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL * 10);
         lumberjackBaseTreeSearchRadius = clamp(
                 lumberjackBaseTreeSearchRadius,
                 MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,

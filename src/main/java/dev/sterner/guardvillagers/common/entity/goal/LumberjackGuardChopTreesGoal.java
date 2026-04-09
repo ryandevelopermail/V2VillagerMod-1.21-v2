@@ -142,6 +142,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int adaptiveSessionCount;
     private long lastBackpressureDeferTick = Long.MIN_VALUE;
     private long lastBackpressureDeferLogTick = Long.MIN_VALUE;
+    private int consecutiveBackpressureDefers;
     private long lastMidpointAuditLogTick = Long.MIN_VALUE;
     private long lastMidpointAuditCountdownStartTick = Long.MIN_VALUE;
     private String activeCountdownReason = "";
@@ -374,7 +375,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             if (shouldThrottleAdaptiveScan(world)) {
                 return;
             }
-            if (WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
+            boolean forcedProbe = WorldLumberjackGovernor.tryConsumeForcedProbePermit(world);
+            if (!forcedProbe && WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
                 int deferTicks = getConfiguredGovernorHighLoadDeferTicks();
                 long remainingCountdownTicks = Math.max(0L, this.guard.getNextChopTick() - world.getTime());
                 if (shouldKeepExistingBackpressureCountdown(
@@ -392,16 +394,27 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                         BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
                     return;
                 }
-                if (shouldLogBackpressureDeferStart(world.getTime(), this.lastBackpressureDeferLogTick, BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
+                this.consecutiveBackpressureDefers++;
+                if (shouldLogBackpressureDeferStart(
+                        world.getTime(),
+                        this.lastBackpressureDeferLogTick,
+                        getConfiguredGovernorBackpressureDeferLogMinIntervalTicks())) {
                     LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
                             this.guard.getUuidAsString(),
                             deferTicks);
                     this.lastBackpressureDeferLogTick = world.getTime();
                 }
+                maybeLogBackpressureDeferLoopSnapshot(world);
                 startChopCountdown(world, deferTicks, COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE);
                 this.lastBackpressureDeferTick = world.getTime();
                 return;
             }
+            if (forcedProbe) {
+                LOGGER.info("Lumberjack Guard {} bypassing governor defer via forced probe (consecutiveBackpressureDefers={})",
+                        this.guard.getUuidAsString(),
+                        this.consecutiveBackpressureDefers);
+            }
+            this.consecutiveBackpressureDefers = 0;
             this.pendingTreeTargetScan = createTreeTargetScanSession(world);
             this.adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
             this.lastObservedScanElapsedMs = 0L;
@@ -446,6 +459,20 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.pendingGovernorForcedRemovals = 0;
         this.pendingTreeTargetScan = null;
         startSession(world, targets);
+    }
+
+    private void maybeLogBackpressureDeferLoopSnapshot(ServerWorld world) {
+        int threshold = getConfiguredGovernorConsecutiveBackpressureDefersSnapshotThreshold();
+        if (threshold <= 0 || this.consecutiveBackpressureDefers < threshold) {
+            return;
+        }
+        if ((this.consecutiveBackpressureDefers - threshold) % threshold != 0) {
+            return;
+        }
+        LOGGER.warn("Lumberjack Guard {} consecutive_backpressure_defers={} governor_snapshot={}",
+                this.guard.getUuidAsString(),
+                this.consecutiveBackpressureDefers,
+                WorldLumberjackGovernor.describeStateSnapshot(world));
     }
 
     private void adaptPerGuardScanBudgetFromElapsed(long cumulativeElapsedMs) {
@@ -1701,11 +1728,29 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         private static boolean shouldDeferNewScanSession(ServerWorld world) {
             GovernorState state = getState(world);
-            return state.backpressurePermille >= 700;
+            applyPassiveBackpressureDecay(world, state);
+            return state.backpressurePermille >= getConfiguredGovernorDeferBackpressureThresholdPermille();
+        }
+
+        private static boolean tryConsumeForcedProbePermit(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            int deferThreshold = getConfiguredGovernorDeferBackpressureThresholdPermille();
+            if (state.backpressurePermille < deferThreshold) {
+                return false;
+            }
+            int interval = getConfiguredGovernorForcedProbeIntervalTicks();
+            long tick = world.getTime();
+            if (state.lastForcedProbePermitTick >= 0L && tick - state.lastForcedProbePermitTick < interval) {
+                return false;
+            }
+            state.lastForcedProbePermitTick = tick;
+            return true;
         }
 
         private static boolean tryAcquireHeavyScanToken(ServerWorld world) {
             GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
             long tick = world.getTime();
             if (state.tokenTick != tick) {
                 state.tokenTick = tick;
@@ -1721,6 +1766,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         private static int getBudgetScalePermille(ServerWorld world) {
             GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
             return Math.max(150, 1000 - state.backpressurePermille);
         }
 
@@ -1730,6 +1776,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                                               int retryEvents,
                                               int forcedRemovals) {
             GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
             state.scanSessions++;
             state.emaElapsedMs = ema(state.emaElapsedMs, elapsedMs);
             state.emaVisitedBlocks = ema(state.emaVisitedBlocks, visitedBlocks);
@@ -1779,6 +1826,44 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return STATE_BY_WORLD.computeIfAbsent(world.getRegistryKey(), key -> new GovernorState());
         }
 
+        private static void applyPassiveBackpressureDecay(ServerWorld world, GovernorState state) {
+            long decayIntervalTicks = getConfiguredGovernorPassiveBackpressureDecayIntervalTicks();
+            int decayPermillePerSlice = getConfiguredGovernorPassiveBackpressureDecayPermillePerSlice();
+            if (decayIntervalTicks <= 0L || decayPermillePerSlice <= 0) {
+                state.lastPassiveDecayTick = world.getTime();
+                return;
+            }
+            long tick = world.getTime();
+            if (state.lastPassiveDecayTick < 0L) {
+                state.lastPassiveDecayTick = tick;
+                return;
+            }
+            long elapsedTicks = tick - state.lastPassiveDecayTick;
+            if (elapsedTicks < decayIntervalTicks) {
+                return;
+            }
+            long slices = elapsedTicks / decayIntervalTicks;
+            long decay = slices * decayPermillePerSlice;
+            state.backpressurePermille = Math.max(0, state.backpressurePermille - (int) Math.min(Integer.MAX_VALUE, decay));
+            state.lastPassiveDecayTick += slices * decayIntervalTicks;
+        }
+
+        private static String describeStateSnapshot(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            return String.format("world=%s sessions=%d backpressure=%d loadPermille=%d budgetScalePermille=%d emaElapsedMs=%d emaVisited=%d emaRetry=%d emaForced=%d lastForcedProbeTick=%d",
+                    world.getRegistryKey().getValue(),
+                    state.scanSessions,
+                    state.backpressurePermille,
+                    computeLoadPermille(state),
+                    getBudgetScalePermille(world),
+                    round(state.emaElapsedMs),
+                    round(state.emaVisitedBlocks),
+                    round(state.emaRetryEvents),
+                    round(state.emaForcedRemovals),
+                    state.lastForcedProbePermitTick);
+        }
+
         private static double ema(double current, double sample) {
             return current <= 0.0D ? sample : (current * (1.0D - GOVERNOR_EMA_ALPHA)) + (sample * GOVERNOR_EMA_ALPHA);
         }
@@ -1796,6 +1881,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             private double emaVisitedBlocks;
             private double emaRetryEvents;
             private double emaForcedRemovals;
+            private long lastPassiveDecayTick = Long.MIN_VALUE;
+            private long lastForcedProbePermitTick = Long.MIN_VALUE;
         }
     }
 
@@ -2467,6 +2554,48 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 GuardVillagersConfig.lumberjackGovernorHighLoadDeferTicks,
                 GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
                 GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorDeferBackpressureThresholdPermille() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorDeferBackpressureThresholdPermille,
+                0,
+                GOVERNOR_MAX_BACKPRESSURE);
+    }
+
+    private static int getConfiguredGovernorPassiveBackpressureDecayPermillePerSlice() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorPassiveBackpressureDecayPermillePerSlice,
+                0,
+                GOVERNOR_MAX_BACKPRESSURE);
+    }
+
+    private static int getConfiguredGovernorPassiveBackpressureDecayIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorPassiveBackpressureDecayIntervalTicks,
+                1,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorForcedProbeIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorForcedProbeIntervalTicks,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorBackpressureDeferLogMinIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorBackpressureDeferLogMinIntervalTicks,
+                0,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorConsecutiveBackpressureDefersSnapshotThreshold() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold,
+                1,
+                500);
     }
 
     private static int getConfiguredGovernorMetricsLogInterval() {
