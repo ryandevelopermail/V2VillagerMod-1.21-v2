@@ -21,12 +21,12 @@ import java.util.WeakHashMap;
  *
  * <p>Registered behaviors (active once a chest is paired):
  * <ol>
- *   <li><b>ForesterSaplingProvisionGoal</b> (priority 3) — each day, places 4
+ *   <li><b>ForesterSaplingProvisionGoal</b> (priority 3) – each day, places 4
  *       biome-appropriate saplings in the paired chest.</li>
- *   <li><b>ForesterSaplingPlantingGoal</b> (priority 4) — fetches those saplings
+ *   <li><b>ForesterSaplingPlantingGoal</b> (priority 4) – fetches those saplings
  *       from the chest and plants them at the village outskirts (16–64 blocks from
  *       the QM anchor), spaced at least 5 blocks apart.</li>
- *   <li><b>ForesterTreeDropPickupGoal</b> (priority 5) — scans a 100-block radius
+ *   <li><b>ForesterTreeDropPickupGoal</b> (priority 5) – scans a 100-block radius
  *       for tree drops (saplings, sticks, apples, logs) left by Lumberjacks and
  *       deposits them in the paired chest.</li>
  * </ol>
@@ -48,7 +48,7 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ForesterTreeDropPickupGoal> PICKUP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
 
-    // V1 goals (no chest — provision into own inventory, plant from inventory)
+    // V1 goals (no chest – provision into own inventory, plant from inventory)
     private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> V1_PROVISION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> V1_PLANTING_GOALS = new WeakHashMap<>();
 
@@ -63,17 +63,26 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
         LOGGER.info("[morevillagers-compat] Forester {} paired chest at {} for job site {}",
                 villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
 
-        // Sapling provision goal — stocks the chest with 4 biome-appropriate saplings each dawn
+        // Remove any lingering V1 goals before registering V2 goals
+        ForesterSaplingProvisionGoal v1Prov = V1_PROVISION_GOALS.remove(villager);
+        if (v1Prov != null) villager.goalSelector.remove(v1Prov);
+        ForesterSaplingPlantingGoal v1Plant = V1_PLANTING_GOALS.remove(villager);
+        if (v1Plant != null) villager.goalSelector.remove(v1Plant);
+
+        // Sapling provision goal – stocks the chest with 4 biome-appropriate saplings each dawn
         ForesterSaplingProvisionGoal provisionGoal = upsertGoal(PROVISION_GOALS, villager, PROVISION_GOAL_PRIORITY,
                 () -> new ForesterSaplingProvisionGoal(villager, jobPos, chestPos));
         provisionGoal.setTargets(jobPos, chestPos);
 
-        // Planting goal — fetches saplings from chest and plants at outskirts
+        // Planting goal – fetches saplings from chest and plants at outskirts
         ForesterSaplingPlantingGoal plantingGoal = upsertGoal(PLANTING_GOALS, villager, PLANTING_GOAL_PRIORITY,
                 () -> new ForesterSaplingPlantingGoal(villager, jobPos, chestPos));
         plantingGoal.setTargets(jobPos, chestPos);
 
-        // Pickup goal — scans 100 blocks for tree drops and deposits them in chest
+        // Wire provision↔planting feedback
+        plantingGoal.linkProvisionGoal(provisionGoal);
+
+        // Pickup goal – scans 100 blocks for tree drops and deposits them in chest
         ForesterTreeDropPickupGoal pickupGoal = upsertGoal(PICKUP_GOALS, villager, PICKUP_GOAL_PRIORITY,
                 () -> new ForesterTreeDropPickupGoal(villager, jobPos, chestPos));
         pickupGoal.setTargets(jobPos, chestPos);
@@ -92,26 +101,29 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
     public void onJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
         if (!isForesterJobBlock(world, jobPos)) return;
 
-        // Skip if this villager already has v2 (chest-paired) goals — those are richer and take precedence
+        // Skip if this villager already has v2 (chest-paired) goals – those are richer and take precedence
         if (PROVISION_GOALS.containsKey(villager) || PLANTING_GOALS.containsKey(villager)) return;
 
         LOGGER.info("[morevillagers-compat] Forester {} registered v1 (chestless) planting goals for job site {}",
                 villager.getUuidAsString(), jobPos.toShortString());
 
-        // Provision goal — stocks the villager's own inventory with 4 biome-appropriate saplings each dawn
+        // Provision goal – stocks the villager's own inventory with 4 biome-appropriate saplings each dawn
         ForesterSaplingProvisionGoal provisionGoal = upsertGoal(V1_PROVISION_GOALS, villager, PROVISION_GOAL_PRIORITY,
                 () -> new ForesterSaplingProvisionGoal(villager, jobPos, null));
         provisionGoal.setTargets(jobPos, null);
 
-        // Planting goal — plants from villager inventory
+        // Planting goal – plants from villager inventory
         ForesterSaplingPlantingGoal plantingGoal = upsertGoal(V1_PLANTING_GOALS, villager, PLANTING_GOAL_PRIORITY,
                 () -> new ForesterSaplingPlantingGoal(villager, jobPos, null));
         plantingGoal.setTargets(jobPos, null);
+
+        // Wire provision↔planting feedback
+        plantingGoal.linkProvisionGoal(provisionGoal);
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Job block detection
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     private static boolean isForesterJobBlock(ServerWorld world, BlockPos pos) {
         return Registries.BLOCK.getId(world.getBlockState(pos).getBlock())
