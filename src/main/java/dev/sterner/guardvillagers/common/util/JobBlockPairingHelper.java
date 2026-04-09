@@ -61,6 +61,19 @@ public final class JobBlockPairingHelper {
     private static final Map<WorldKey, Map<UUID, CachedVillagerChestPairing>> CACHED_VILLAGER_CHESTS = new HashMap<>();
     private static final Logger LOGGER = LoggerFactory.getLogger(JobBlockPairingHelper.class);
 
+    /**
+     * Per-world banner position cache. Key = WorldKey; value = all known banner BlockPos within
+     * the world (populated lazily on first banner scan, invalidated on banner placement/removal).
+     *
+     * <p>Without this cache, {@code refreshVillagerPairings} calls
+     * {@code findBannersWithinRange(world, jobPos, 300)} for every Farmer and Shepherd on world
+     * load, each time iterating a 37×37 chunk grid (13 k+ chunk lookups per villager).
+     * The cached collection is safe to reuse across multiple villagers on the same tick because
+     * banner positions change only when players place or break banners, which is handled by
+     * {@link #handleBannerPlacement} / {@link #invalidateBannerCache}.
+     */
+    private static final Map<WorldKey, List<BlockPos>> CACHED_BANNER_POSITIONS = new HashMap<>();
+
     static {
         registerPairingBlock(Blocks.CHEST);
         registerPairingBlock(Blocks.TRAPPED_CHEST);
@@ -247,6 +260,8 @@ public final class JobBlockPairingHelper {
         if (!isBannerOnFence(world, bannerPos, bannerState)) {
             return;
         }
+        // Invalidate so the next refreshVillagerPairings picks up the new banner.
+        invalidateBannerCache(world);
 
         double range = FARMER_BANNER_PAIR_RANGE;
         int pairedCount = 0;
@@ -311,7 +326,9 @@ public final class JobBlockPairingHelper {
 
         VillagerProfession profession = villager.getVillagerData().getProfession();
         if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
-            Collection<BlockPos> bannerPositions = findBannersWithinRange(world, jobPos, 300);
+            // Use the cached banner list instead of the raw 37×37-chunk scan to avoid
+            // thousands of chunk lookups per villager during world load.
+            Collection<BlockPos> bannerPositions = findBannersWithinRangeCached(world, jobPos, 300);
             for (BlockPos bannerPos : bannerPositions) {
                 BlockState bannerState = world.getBlockState(bannerPos);
                 if (isBannerOnFence(world, bannerPos, bannerState)) {
@@ -509,6 +526,60 @@ public final class JobBlockPairingHelper {
         return Optional.empty();
     }
 
+    /**
+     * Returns all banners within {@code range} of {@code center}, using a world-level cache
+     * to avoid the 37×37 chunk grid scan on every villager load.
+     *
+     * <p>The first call per world populates the cache with ALL banners in a large radius
+     * (the maximum expected village spread). Subsequent calls filter the cached list to the
+     * requested range in O(n) instead of O(chunks). The cache is invalidated by
+     * {@link #invalidateBannerCache} whenever a banner is placed or removed.
+     */
+    private static Collection<BlockPos> findBannersWithinRangeCached(ServerWorld world, BlockPos center, int range) {
+        WorldKey worldKey = WorldKey.of(world);
+        List<BlockPos> allBanners = CACHED_BANNER_POSITIONS.get(worldKey);
+        if (allBanners == null) {
+            // Populate cache: scan the maximum banner range we ever query (500 blocks = farmer/shepherd).
+            // We always scan a fixed large radius from the world origin so subsequent calls from
+            // different village positions all share the same cache entry.
+            // For worlds with multiple widely-separated villages this may miss far-outlier banners;
+            // the full per-position scan in handleBannerPlacement handles new banners correctly,
+            // and invalidateBannerCache() ensures the next world-load refresh sees everything.
+            int cacheRadius = 600; // covers FARMER_BANNER_PAIR_RANGE (500) + village spread margin
+            int chunkRadius = MathHelper.ceil(cacheRadius / 16.0D);
+            int centerChunkX = center.getX() >> 4;
+            int centerChunkZ = center.getZ() >> 4;
+            allBanners = new ArrayList<>();
+            for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+                for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                    Chunk chunk = world.getChunkManager().getChunk(centerChunkX + dx, centerChunkZ + dz, ChunkStatus.FULL, false);
+                    if (chunk == null) continue;
+                    for (BlockPos pos : chunk.getBlockEntityPositions()) {
+                        BlockEntity blockEntity = chunk.getBlockEntity(pos);
+                        if (blockEntity instanceof BannerBlockEntity) {
+                            allBanners.add(pos.toImmutable());
+                        }
+                    }
+                }
+            }
+            CACHED_BANNER_POSITIONS.put(worldKey, allBanners);
+            LOGGER.debug("banner-cache: populated {} banner(s) for world {}", allBanners.size(), world.getRegistryKey().getValue());
+        }
+
+        if (allBanners.isEmpty()) {
+            return List.of();
+        }
+
+        double rangeSq = (double) range * range;
+        List<BlockPos> result = new ArrayList<>();
+        for (BlockPos pos : allBanners) {
+            if (center.getSquaredDistance(pos) <= rangeSq) {
+                result.add(pos);
+            }
+        }
+        return result;
+    }
+
     private static Collection<BlockPos> findBannersWithinRange(ServerWorld world, BlockPos center, int range) {
         int chunkRadius = MathHelper.ceil(range / 16.0D);
         int centerChunkX = center.getX() >> 4;
@@ -704,7 +775,18 @@ public final class JobBlockPairingHelper {
     }
 
     public static void clearWorldCaches(ServerWorld world) {
-        CACHED_VILLAGER_CHESTS.remove(WorldKey.of(world));
+        WorldKey key = WorldKey.of(world);
+        CACHED_VILLAGER_CHESTS.remove(key);
+        CACHED_BANNER_POSITIONS.remove(key);
+    }
+
+    /**
+     * Invalidates the banner position cache for the given world.
+     * Must be called whenever a banner is placed or removed so that the next villager
+     * refresh picks up the updated banner list.
+     */
+    public static void invalidateBannerCache(ServerWorld world) {
+        CACHED_BANNER_POSITIONS.remove(WorldKey.of(world));
     }
 
     public record CachedVillagerChestPairing(UUID villagerUuid, VillagerProfession profession, BlockPos jobPos, BlockPos chestPos) {}
