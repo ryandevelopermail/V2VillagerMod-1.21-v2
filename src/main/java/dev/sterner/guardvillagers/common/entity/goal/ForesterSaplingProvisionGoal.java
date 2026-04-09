@@ -9,6 +9,7 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import org.slf4j.Logger;
@@ -25,6 +26,12 @@ import java.util.Optional;
  * used by {@code GuardEntity.getRandomTypeForBiome}) plus a supplementary
  * registry-key check for cherry, birch, and dark-oak biomes that VillagerType
  * doesn't distinguish.
+ *
+ * <p>V1 mode (null chestPos): saplings are placed directly into the villager's
+ * own inventory. A cap of {@link #V1_SAPLING_CAP} prevents unbounded accumulation.
+ * Feedback from {@link ForesterSaplingPlantingGoal} via {@link #reportNoPlantingSpots()}
+ * and {@link #reportPlantingSucceeded()} further throttles provisioning when the
+ * forester is unable to find planting sites.
  */
 public class ForesterSaplingProvisionGoal extends Goal {
 
@@ -35,6 +42,9 @@ public class ForesterSaplingProvisionGoal extends Goal {
     private static final int SAPLINGS_PER_DAY = 4;
     private static final int PATH_RETRY_TICKS = 20;
 
+    /** Maximum saplings kept in villager inventory in V1 (chestless) mode. */
+    private static final int V1_SAPLING_CAP = 8;
+
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
@@ -43,6 +53,9 @@ public class ForesterSaplingProvisionGoal extends Goal {
     private long lastProvisionDay = -1L;
     private BlockPos currentNavTarget = null;
     private long lastPathRequestTick = Long.MIN_VALUE;
+
+    /** Number of consecutive days the linked planting goal found no spots. */
+    private int consecutiveNullDays = 0;
 
     private enum Stage { IDLE, MOVE_TO_CHEST, INSERT, DONE }
 
@@ -59,9 +72,36 @@ public class ForesterSaplingProvisionGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
+    // Feedback callbacks (called by ForesterSaplingPlantingGoal)
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * Called by the linked planting goal when it found no valid planting spots.
+     * After 2 consecutive null days, skip provisioning the next day too.
+     */
+    public void reportNoPlantingSpots() {
+        consecutiveNullDays++;
+        if (consecutiveNullDays >= 2 && villager.getWorld() instanceof ServerWorld world) {
+            // Suppress provisioning tomorrow by advancing lastProvisionDay to current day
+            long currentDay = world.getTimeOfDay() / 24000L;
+            lastProvisionDay = currentDay;
+            LOGGER.debug("[forester] {} suppressing provisioning (no spots {} days in a row)",
+                    villager.getUuidAsString(), consecutiveNullDays);
+        }
+    }
+
+    /**
+     * Called by the linked planting goal when at least one sapling was successfully planted.
+     * Resets the no-spots streak.
+     */
+    public void reportPlantingSucceeded() {
+        consecutiveNullDays = 0;
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Goal lifecycle
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     @Override
     public boolean canStart() {
@@ -73,12 +113,18 @@ public class ForesterSaplingProvisionGoal extends Goal {
         if (currentDay == lastProvisionDay) return false;
 
         if (chestPos == null) {
-            // V1 mode: provision directly into villager inventory
+            // V1 mode: only provision if villager has room and is under the cap
+            int currentSaplings = countSaplingsInInventory(villager.getInventory());
+            if (currentSaplings >= V1_SAPLING_CAP) return false;
             return hasEmptySlot(villager.getInventory());
         }
 
+        // V2 mode: only provision if chest exists, has room, and is under the cap
         Optional<Inventory> inv = getChestInventory(world);
-        return inv.isPresent() && hasEmptySlot(inv.get());
+        if (inv.isEmpty()) return false;
+        int chestSaplings = countSaplingsInInventory(inv.get());
+        if (chestSaplings >= V1_SAPLING_CAP) return false;
+        return hasEmptySlot(inv.get());
     }
 
     @Override
@@ -148,9 +194,9 @@ public class ForesterSaplingProvisionGoal extends Goal {
         }
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Biome selection
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     /**
      * Selects the most appropriate sapling type for the villager's current biome.
@@ -195,9 +241,9 @@ public class ForesterSaplingProvisionGoal extends Goal {
         return Items.OAK_SAPLING;
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Inventory helpers
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
@@ -213,6 +259,15 @@ public class ForesterSaplingProvisionGoal extends Goal {
             if (inv.getStack(i).isEmpty()) return true;
         }
         return false;
+    }
+
+    private int countSaplingsInInventory(Inventory inv) {
+        int count = 0;
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack s = inv.getStack(i);
+            if (s.isIn(ItemTags.SAPLINGS)) count += s.getCount();
+        }
+        return count;
     }
 
     /** Inserts {@code stack} into the first available slot(s) of {@code inv}. */
@@ -240,9 +295,9 @@ public class ForesterSaplingProvisionGoal extends Goal {
         }
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Nav helpers
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     private void moveTo(BlockPos target) {
         if (target == null) return;
