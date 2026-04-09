@@ -58,6 +58,12 @@ public final class VillagerProfessionBehaviorRegistry {
         }
     }
 
+    public static void notifyJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        ensureUniversalJobBlockGoal(villager, jobPos);
+        getBehavior(villager.getVillagerData().getProfession())
+                .ifPresent(behavior -> behavior.onJobSiteReady(world, villager, jobPos));
+    }
+
     public static void notifyChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         ensureUniversalJobBlockGoal(villager, jobPos);
         getBehavior(villager.getVillagerData().getProfession())

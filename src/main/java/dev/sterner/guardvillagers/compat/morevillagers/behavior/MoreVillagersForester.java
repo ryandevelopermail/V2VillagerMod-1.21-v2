@@ -42,10 +42,15 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
     private static final int PLANTING_GOAL_PRIORITY = 4;
     private static final int PICKUP_GOAL_PRIORITY = 5;
 
+    // V2 goals (chest-paired)
     private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> PROVISION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> PLANTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterTreeDropPickupGoal> PICKUP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
+
+    // V1 goals (no chest — provision into own inventory, plant from inventory)
+    private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> V1_PROVISION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> V1_PLANTING_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -81,6 +86,27 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
                         planting.requestImmediateWorkCheck();
                     }
                 });
+    }
+
+    @Override
+    public void onJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        if (!isForesterJobBlock(world, jobPos)) return;
+
+        // Skip if this villager already has v2 (chest-paired) goals — those are richer and take precedence
+        if (PROVISION_GOALS.containsKey(villager) || PLANTING_GOALS.containsKey(villager)) return;
+
+        LOGGER.info("[morevillagers-compat] Forester {} registered v1 (chestless) planting goals for job site {}",
+                villager.getUuidAsString(), jobPos.toShortString());
+
+        // Provision goal — stocks the villager's own inventory with 4 biome-appropriate saplings each dawn
+        ForesterSaplingProvisionGoal provisionGoal = upsertGoal(V1_PROVISION_GOALS, villager, PROVISION_GOAL_PRIORITY,
+                () -> new ForesterSaplingProvisionGoal(villager, jobPos, null));
+        provisionGoal.setTargets(jobPos, null);
+
+        // Planting goal — plants from villager inventory
+        ForesterSaplingPlantingGoal plantingGoal = upsertGoal(V1_PLANTING_GOALS, villager, PLANTING_GOAL_PRIORITY,
+                () -> new ForesterSaplingPlantingGoal(villager, jobPos, null));
+        plantingGoal.setTargets(jobPos, null);
     }
 
     // -------------------------------------------------------------------------

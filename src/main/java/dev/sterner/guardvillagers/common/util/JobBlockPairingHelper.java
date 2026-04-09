@@ -298,7 +298,11 @@ public final class JobBlockPairingHelper {
                     cacheVillagerChestPairing(world, villager, jobPos, chestPos);
                     VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos);
                 },
-                () -> invalidateVillagerChestPairing(world, villager.getUuid()));
+                () -> {
+                    invalidateVillagerChestPairing(world, villager.getUuid());
+                    // No chest present — give behaviors a chance to run in chestless (v1) mode
+                    VillagerProfessionBehaviorRegistry.notifyJobSiteReady(world, villager, jobPos);
+                });
 
         if (nearbyChest.isPresent()) {
             Optional<BlockPos> craftingTablePos = findNearbyCraftingTable(world, jobPos);

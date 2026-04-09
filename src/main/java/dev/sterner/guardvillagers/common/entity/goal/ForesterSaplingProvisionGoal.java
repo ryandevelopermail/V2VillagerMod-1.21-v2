@@ -49,13 +49,13 @@ public class ForesterSaplingProvisionGoal extends Goal {
     public ForesterSaplingProvisionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         setControls(EnumSet.of(Control.MOVE));
     }
 
     public void setTargets(BlockPos jobPos, BlockPos chestPos) {
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         this.stage = Stage.IDLE;
     }
 
@@ -67,10 +67,15 @@ public class ForesterSaplingProvisionGoal extends Goal {
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive() || !world.isDay()) return false;
-        if (jobPos == null || chestPos == null) return false;
+        if (jobPos == null) return false;
 
         long currentDay = world.getTimeOfDay() / 24000L;
         if (currentDay == lastProvisionDay) return false;
+
+        if (chestPos == null) {
+            // V1 mode: provision directly into villager inventory
+            return hasEmptySlot(villager.getInventory());
+        }
 
         Optional<Inventory> inv = getChestInventory(world);
         return inv.isPresent() && hasEmptySlot(inv.get());
@@ -83,9 +88,14 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.MOVE_TO_CHEST;
-        moveTo(chestPos);
-        LOGGER.debug("[forester] {} starting sapling provision run", villager.getUuidAsString());
+        if (chestPos == null) {
+            // V1 mode: no chest, insert directly into inventory without walking anywhere
+            stage = Stage.INSERT;
+        } else {
+            stage = Stage.MOVE_TO_CHEST;
+            moveTo(chestPos);
+        }
+        LOGGER.debug("[forester] {} starting sapling provision run (chestless={})", villager.getUuidAsString(), chestPos == null);
     }
 
     @Override
@@ -112,18 +122,25 @@ public class ForesterSaplingProvisionGoal extends Goal {
                 }
             }
             case INSERT -> {
-                Optional<Inventory> invOpt = getChestInventory(world);
-                if (invOpt.isEmpty()) {
-                    LOGGER.debug("[forester] {} chest gone during provision", villager.getUuidAsString());
-                    stage = Stage.DONE;
-                    return;
-                }
                 Item sapling = selectSaplingForBiome(world);
                 ItemStack toInsert = new ItemStack(sapling, SAPLINGS_PER_DAY);
-                insertIntoInventory(invOpt.get(), toInsert);
+                if (chestPos == null) {
+                    // V1 mode: place saplings directly into villager inventory
+                    insertIntoInventory(villager.getInventory(), toInsert);
+                    LOGGER.debug("[forester] {} provisioned {}x {} into own inventory",
+                            villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling);
+                } else {
+                    Optional<Inventory> invOpt = getChestInventory(world);
+                    if (invOpt.isEmpty()) {
+                        LOGGER.debug("[forester] {} chest gone during provision", villager.getUuidAsString());
+                        stage = Stage.DONE;
+                        return;
+                    }
+                    insertIntoInventory(invOpt.get(), toInsert);
+                    LOGGER.debug("[forester] {} provisioned {}x {} into chest at {}",
+                            villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling, chestPos.toShortString());
+                }
                 lastProvisionDay = world.getTimeOfDay() / 24000L;
-                LOGGER.debug("[forester] {} provisioned {}x {} into chest at {}",
-                        villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling, chestPos.toShortString());
                 stage = Stage.DONE;
             }
             case DONE -> stage = Stage.IDLE;

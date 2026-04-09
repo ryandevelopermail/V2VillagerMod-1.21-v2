@@ -85,13 +85,13 @@ public class ForesterSaplingPlantingGoal extends Goal {
     public ForesterSaplingPlantingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         setControls(EnumSet.of(Control.MOVE));
     }
 
     public void setTargets(BlockPos jobPos, BlockPos chestPos) {
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         this.stage = Stage.IDLE;
     }
 
@@ -107,16 +107,21 @@ public class ForesterSaplingPlantingGoal extends Goal {
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive() || !world.isDay()) return false;
-        if (jobPos == null || chestPos == null) return false;
+        if (jobPos == null) return false;
 
         long currentDay = world.getTimeOfDay() / 24000L;
         if (currentDay == lastPlantingDay && !needsWorkCheck) return false;
         needsWorkCheck = false;
 
-        // Need saplings in the chest
-        Optional<Inventory> invOpt = getChestInventory(world);
-        if (invOpt.isEmpty()) return false;
-        if (countSaplingsInInventory(invOpt.get()) == 0) return false;
+        if (chestPos == null) {
+            // V1 mode: saplings must already be in the villager's inventory (placed by provision goal)
+            if (!hasSaplingInVillagerInventory()) return false;
+        } else {
+            // V2 mode: fetch from chest
+            Optional<Inventory> invOpt = getChestInventory(world);
+            if (invOpt.isEmpty()) return false;
+            if (countSaplingsInInventory(invOpt.get()) == 0) return false;
+        }
 
         // Need at least one valid planting spot
         List<BlockPos> targets = findPlantingTargets(world);
@@ -137,9 +142,17 @@ public class ForesterSaplingPlantingGoal extends Goal {
 
     @Override
     public void start() {
-        stage = Stage.FETCH_FROM_CHEST;
-        moveTo(chestPos);
-        LOGGER.debug("[forester] {} starting planting run ({} targets)", villager.getUuidAsString(), plantTargets.size());
+        if (chestPos == null) {
+            // V1 mode: saplings already in inventory — skip fetch step
+            heldSaplingItem = findFirstSaplingInVillagerInventory();
+            stage = Stage.MOVE_TO_SITE;
+            if (!plantTargets.isEmpty()) moveTo(plantTargets.peek());
+        } else {
+            stage = Stage.FETCH_FROM_CHEST;
+            moveTo(chestPos);
+        }
+        LOGGER.debug("[forester] {} starting planting run ({} targets, chestless={})",
+                villager.getUuidAsString(), plantTargets.size(), chestPos == null);
     }
 
     @Override
@@ -147,8 +160,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
         villager.getNavigation().stop();
         currentNavTarget = null;
         lastPathRequestTick = Long.MIN_VALUE;
-        // Return any held sapling back to the chest if we stopped mid-run
-        if (heldSaplingItem != null && villager.getWorld() instanceof ServerWorld world) {
+        // Return any held sapling back to the chest if we stopped mid-run (v2 mode only)
+        if (heldSaplingItem != null && chestPos != null && villager.getWorld() instanceof ServerWorld world) {
             Optional<Inventory> invOpt = getChestInventory(world);
             invOpt.ifPresent(inv -> depositAllSaplingsFromVillager(world, inv));
         }
@@ -204,6 +217,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 if (tryPlantSapling(world, target)) {
                     consumeOneFromVillagerInventory(heldSaplingItem);
                     LOGGER.debug("[forester] {} planted {} at {}", villager.getUuidAsString(), heldSaplingItem, target.toShortString());
+                    // Refresh held item in case this type is now exhausted (e.g. mixed types in inventory)
+                    if (!hasSaplingOfTypeInVillagerInventory(heldSaplingItem)) {
+                        heldSaplingItem = findFirstSaplingInVillagerInventory();
+                    }
                 }
                 // Check if we can continue planting
                 boolean hasSapling = hasSaplingInVillagerInventory();
@@ -216,8 +233,11 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 }
             }
             case RETURN_TO_CHEST -> {
-                // Deposit any leftovers back into the chest
-                if (hasSaplingInVillagerInventory()) {
+                if (chestPos == null) {
+                    // V1 mode: no chest to return to; leftover saplings stay in inventory for next cycle
+                    stage = Stage.DONE;
+                } else if (hasSaplingInVillagerInventory()) {
+                    // V2 mode: deposit leftovers back into the chest
                     if (isNear(chestPos, CHEST_REACH_SQ)) {
                         Optional<Inventory> invOpt = getChestInventory(world);
                         invOpt.ifPresent(inv -> depositAllSaplingsFromVillager(world, inv));
@@ -402,6 +422,25 @@ public class ForesterSaplingPlantingGoal extends Goal {
             if (villagerInv.getStack(i).isIn(ItemTags.SAPLINGS)) return true;
         }
         return false;
+    }
+
+    private boolean hasSaplingOfTypeInVillagerInventory(Item item) {
+        if (item == null) return false;
+        Inventory villagerInv = villager.getInventory();
+        for (int i = 0; i < villagerInv.size(); i++) {
+            ItemStack s = villagerInv.getStack(i);
+            if (!s.isEmpty() && s.isOf(item)) return true;
+        }
+        return false;
+    }
+
+    private Item findFirstSaplingInVillagerInventory() {
+        Inventory villagerInv = villager.getInventory();
+        for (int i = 0; i < villagerInv.size(); i++) {
+            ItemStack s = villagerInv.getStack(i);
+            if (!s.isEmpty() && s.isIn(ItemTags.SAPLINGS)) return s.getItem();
+        }
+        return null;
     }
 
     private int countSaplingsInInventory(Inventory inv) {
