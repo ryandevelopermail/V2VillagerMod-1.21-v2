@@ -153,6 +153,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackVillageMinLargeVillage = 2;
     @Entry(min=1)
     public static int lumberjackVillageMinLargeVillagePopulation = 12;
+    @Entry(min=20)
+    public static int lumberjackSpawnRetryIntervalTicks = 300;
     @Entry(min=1)
     public static int lumberjackNaturalLeafSearchRadius = 3;
     @Entry(min=1)
