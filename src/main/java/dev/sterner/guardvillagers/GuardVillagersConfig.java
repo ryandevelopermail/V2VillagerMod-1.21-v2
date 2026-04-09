@@ -192,6 +192,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int quartermasterLumberjackReserveCharcoal = 16;
     @Entry(min=0)
     public static int quartermasterLumberjackFurnaceFuelReserve = 8;
+    @Entry(min=20)
+    public static int quartermasterLumberjackDrainSweepIntervalTicks = 12_000;
+    @Entry
+    public static boolean quartermasterLumberjackDrainProtectUpgradeRecipeInputs = true;
     @Entry(min=1)
     public static int masonAdaptiveThrottleLoadThreshold = 180;
     @Entry(min=20)
