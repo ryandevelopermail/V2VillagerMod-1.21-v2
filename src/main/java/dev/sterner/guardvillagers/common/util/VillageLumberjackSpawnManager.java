@@ -210,7 +210,12 @@ public final class VillageLumberjackSpawnManager {
                 LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
         int existing = activeLumberjacks.size();
 
-        int pendingUnclaimedTables = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
+        // Compute the table list once here and pass it through to avoid a duplicate scan
+        // in tryPlaceTableAndConvert (P3 fix — findExistingTablesNear was called twice per tick).
+        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
+        List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
+
+        int pendingUnclaimedTables = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks, nearbyTables);
         int effectiveExisting = existing + pendingUnclaimedTables;
 
         if (effectiveExisting >= desired) {
@@ -236,7 +241,8 @@ public final class VillageLumberjackSpawnManager {
                 attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
 
         // Attempt one table + conversion per scan cycle (pace ourselves).
-        tryPlaceTableAndConvert(world, bellPos, attemptType);
+        // Pass the pre-computed table list so tryPlaceTableAndConvert doesn't re-scan.
+        tryPlaceTableAndConvert(world, bellPos, attemptType, nearbyTables, activeLumberjacks, desired);
         long retryIntervalTicks = Math.max(20L, GuardVillagersConfig.lumberjackSpawnRetryIntervalTicks);
         NEXT_RETRY_TICK_BY_BELL.put(bellPos, now + retryIntervalTicks);
     }
@@ -245,9 +251,11 @@ public final class VillageLumberjackSpawnManager {
     // Table placement + immediate conversion
     // -------------------------------------------------------------------------
 
-    private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType) {
-        // Gather existing tables so we can enforce spacing.
-        List<BlockPos> existingTables = findExistingTablesNear(world, bellPos, CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2);
+    private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType,
+                                                List<BlockPos> existingTables,
+                                                List<LumberjackGuardEntity> activeLumberjacks,
+                                                int desiredLumberjackCount) {
+        // existingTables is pre-computed by processBell — no duplicate scan needed.
 
         // Find all chests near the bell and shuffle them for variety.
         List<BlockPos> chests = findChestsNearBell(world, bellPos);
@@ -255,7 +263,7 @@ public final class VillageLumberjackSpawnManager {
             LOGGER.debug("lumberjack-spawn attempt={} bell={} — no chests found within {} blocks; cannot place table",
                     attemptType, bellPos.toShortString(), CHEST_SCAN_RANGE);
             // Fallback: try a free surface spot near the bell itself
-            tryPlaceTableNearBellFallback(world, bellPos, existingTables, attemptType);
+            tryPlaceTableNearBellFallbackInner(world, bellPos, existingTables, attemptType, activeLumberjacks, desiredLumberjackCount);
             return;
         }
 
@@ -267,7 +275,7 @@ public final class VillageLumberjackSpawnManager {
                 continue;
             }
 
-            placeTableAndConvert(world, bellPos, tablePos, attemptType);
+            placeTableAndConvert(world, bellPos, tablePos, attemptType, activeLumberjacks, desiredLumberjackCount);
             return;
         }
 
@@ -275,15 +283,20 @@ public final class VillageLumberjackSpawnManager {
                 attemptType, bellPos.toShortString(), chests.size());
 
         // Fallback: open surface near bell
-        tryPlaceTableNearBellFallback(world, bellPos, existingTables, attemptType);
+        tryPlaceTableNearBellFallbackInner(world, bellPos, existingTables, attemptType, activeLumberjacks, desiredLumberjackCount);
     }
 
     /**
      * Place table at {@code tablePos} and immediately force-convert the nearest
      * unemployed villager. If none is found the table still stays — the conversion
      * hook will pick it up later.
+     *
+     * <p>{@code activeLumberjacks} and {@code desiredLumberjackCount} are passed in from
+     * {@code processBell} so {@link #shouldSpawnFallbackUnemployed} doesn't need to
+     * re-query the entity list or re-scan tables.
      */
-    private static void placeTableAndConvert(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType) {
+    private static void placeTableAndConvert(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType,
+                                             List<LumberjackGuardEntity> activeLumberjacks, int desiredLumberjackCount) {
         world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
         LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} near bell {}",
                 attemptType, tablePos.toShortString(), bellPos.toShortString());
@@ -293,7 +306,7 @@ public final class VillageLumberjackSpawnManager {
         if (candidate != null) {
             forceConvert(world, candidate, tablePos);
         } else {
-            if (!shouldSpawnFallbackUnemployed(world, bellPos, tablePos, attemptType)) {
+            if (!shouldSpawnFallbackUnemployed(world, bellPos, tablePos, attemptType, activeLumberjacks, desiredLumberjackCount)) {
                 LOGGER.debug("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
                         attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
                 // Nudge the hook for the next tick just in case.
@@ -322,7 +335,10 @@ public final class VillageLumberjackSpawnManager {
      * Fallback: place table on open surface within a small ring around the bell.
      * Less ideal but better than nothing.
      */
-    private static void tryPlaceTableNearBellFallback(ServerWorld world, BlockPos bellPos, List<BlockPos> existingTables, String attemptType) {
+    private static void tryPlaceTableNearBellFallbackInner(ServerWorld world, BlockPos bellPos, List<BlockPos> existingTables,
+                                                            String attemptType,
+                                                            List<LumberjackGuardEntity> activeLumberjacks,
+                                                            int desiredLumberjackCount) {
         for (int radius = 3; radius <= 12; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
@@ -337,7 +353,7 @@ public final class VillageLumberjackSpawnManager {
                     if (!world.getBlockState(candidate).isReplaceable()) continue;
                     if (isTooCloseToExistingTable(candidate, existingTables)) continue;
 
-                    placeTableAndConvert(world, bellPos, candidate, attemptType);
+                    placeTableAndConvert(world, bellPos, candidate, attemptType, activeLumberjacks, desiredLumberjackCount);
                     return;
                 }
             }
@@ -471,10 +487,13 @@ public final class VillageLumberjackSpawnManager {
     /**
      * Counts nearby crafting tables that are present but not already accounted for by active
      * lumberjacks. These represent pending supply that can convert unemployed villagers later.
+     *
+     * <p>This overload accepts a pre-computed table list to avoid a duplicate block scan when
+     * the caller already has it (P3 fix).
      */
-    private static int countPendingUnclaimedCraftingTablesNearBell(ServerWorld world, BlockPos bellPos, List<LumberjackGuardEntity> activeLumberjacks) {
-        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
-        List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
+    private static int countPendingUnclaimedCraftingTablesNearBell(ServerWorld world, BlockPos bellPos,
+                                                                    List<LumberjackGuardEntity> activeLumberjacks,
+                                                                    List<BlockPos> nearbyTables) {
         if (nearbyTables.isEmpty()) {
             return 0;
         }
@@ -498,6 +517,14 @@ public final class VillageLumberjackSpawnManager {
         LOGGER.debug("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
                 bellPos.toShortString(), nearbyTables.size(), pending);
         return pending;
+    }
+
+    /** Overload that performs the table scan itself (used by shouldSpawnFallbackUnemployed). */
+    private static int countPendingUnclaimedCraftingTablesNearBell(ServerWorld world, BlockPos bellPos,
+                                                                    List<LumberjackGuardEntity> activeLumberjacks) {
+        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
+        List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
+        return countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks, nearbyTables);
     }
 
     /**
@@ -545,7 +572,16 @@ public final class VillageLumberjackSpawnManager {
         return candidates.get(0);
     }
 
-    private static boolean shouldSpawnFallbackUnemployed(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType) {
+    /**
+     * Decides whether a fallback unemployed villager should be spawned.
+     *
+     * <p>Accepts the already-computed {@code activeLumberjacks} list and {@code desiredLumberjackCount}
+     * from {@code processBell} so we don't repeat entity queries or table scans (P3 fix).
+     */
+    private static boolean shouldSpawnFallbackUnemployed(ServerWorld world, BlockPos bellPos, BlockPos tablePos,
+                                                          String attemptType,
+                                                          List<LumberjackGuardEntity> activeLumberjacks,
+                                                          int desiredLumberjackCount) {
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
             LOGGER.debug("lumberjack-spawn attempt={} table {} already reserved — fallback spawn skipped",
                     attemptType, tablePos.toShortString());
@@ -557,21 +593,12 @@ public final class VillageLumberjackSpawnManager {
             return false;
         }
 
-        Box bellBox = new Box(bellPos).expand(BELL_EFFECT_RANGE);
-        List<VillagerEntity> allVillagers = world.getEntitiesByClass(
-                VillagerEntity.class, bellBox, VillageLumberjackSpawnManager::isEligibleVillager);
-        int totalVillagers = allVillagers.size();
-        int professionals = (int) allVillagers.stream()
-                .filter(VillageLumberjackSpawnManager::isProfessional)
-                .count();
-        int desired = desiredLumberjackCount(professionals, totalVillagers, totalVillagers > 0);
-        List<LumberjackGuardEntity> activeLumberjacks = world.getEntitiesByClass(
-                LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
+        // Use the lumberjack list and desired count already computed by processBell.
         int pending = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
         int effective = activeLumberjacks.size() + pending;
-        if (effective >= desired) {
+        if (effective >= desiredLumberjackCount) {
             LOGGER.debug("lumberjack-spawn attempt={} desired reached before fallback spawn (bell={} desired={} active={} pending={} effective={})",
-                    attemptType, bellPos.toShortString(), desired, activeLumberjacks.size(), pending, effective);
+                    attemptType, bellPos.toShortString(), desiredLumberjackCount, activeLumberjacks.size(), pending, effective);
             return false;
         }
         return true;
