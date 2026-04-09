@@ -24,8 +24,10 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
@@ -55,6 +57,15 @@ public final class VillageLumberjackSpawnManager {
 
     /** How often (ticks) the bell scan runs. 6000 ticks = 5 minutes at 20 TPS. */
     private static final long SCAN_INTERVAL_TICKS = 6000L;
+    private static final long SCAN_PHASE_OFFSET = 3L;
+    private static final String ATTEMPT_MAINTENANCE_SCAN = "maintenance_scan";
+    private static final String ATTEMPT_UNDER_PROVISION_RETRY = "under_provision_retry";
+
+    /**
+     * Per-bell retry scheduling for under-provisioned villages.
+     * Only bells in this map are revisited between maintenance scans.
+     */
+    private static final Map<BlockPos, Long> NEXT_RETRY_TICK_BY_BELL = new HashMap<>();
 
     /** Bell effect radius. */
     private static final int BELL_EFFECT_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
@@ -98,17 +109,37 @@ public final class VillageLumberjackSpawnManager {
         if (!world.getRegistryKey().equals(net.minecraft.world.World.OVERWORLD)) {
             return;
         }
-        if (world.getTime() % SCAN_INTERVAL_TICKS != 3L) {
+
+        long now = world.getTime();
+        boolean maintenanceDue = now % SCAN_INTERVAL_TICKS == SCAN_PHASE_OFFSET;
+
+        if (maintenanceDue) {
+            java.util.Set<BlockPos> bellPositions = BellChestMappingState.get(world.getServer()).getBellPositions(world);
+            if (!bellPositions.isEmpty()) {
+                Set<BlockPos> normalizedBells = new HashSet<>();
+                for (BlockPos bellPos : bellPositions) {
+                    BlockPos immutableBellPos = bellPos.toImmutable();
+                    normalizedBells.add(immutableBellPos);
+                    processBell(world, immutableBellPos, ATTEMPT_MAINTENANCE_SCAN, now);
+                }
+                NEXT_RETRY_TICK_BY_BELL.keySet().removeIf(pos -> !normalizedBells.contains(pos));
+            } else {
+                NEXT_RETRY_TICK_BY_BELL.clear();
+            }
+        }
+
+        if (NEXT_RETRY_TICK_BY_BELL.isEmpty()) {
             return;
         }
 
-        java.util.Set<BlockPos> bellPositions = BellChestMappingState.get(world.getServer()).getBellPositions(world);
-        if (bellPositions.isEmpty()) {
-            return;
+        List<BlockPos> dueRetryBells = new ArrayList<>();
+        for (Map.Entry<BlockPos, Long> entry : NEXT_RETRY_TICK_BY_BELL.entrySet()) {
+            if (entry.getValue() <= now) {
+                dueRetryBells.add(entry.getKey());
+            }
         }
-
-        for (BlockPos bellPos : bellPositions) {
-            processBell(world, bellPos);
+        for (BlockPos bellPos : dueRetryBells) {
+            processBell(world, bellPos, ATTEMPT_UNDER_PROVISION_RETRY, now);
         }
     }
 
@@ -116,7 +147,7 @@ public final class VillageLumberjackSpawnManager {
     // Per-bell logic
     // -------------------------------------------------------------------------
 
-    private static void processBell(ServerWorld world, BlockPos bellPos) {
+    private static void processBell(ServerWorld world, BlockPos bellPos, String attemptType, long now) {
         Box bellBox = new Box(bellPos).expand(BELL_EFFECT_RANGE);
 
         List<VillagerEntity> allVillagers = world.getEntitiesByClass(
@@ -136,33 +167,36 @@ public final class VillageLumberjackSpawnManager {
         int effectiveExisting = existing + pendingUnclaimedTables;
 
         if (effectiveExisting >= desired) {
-            LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
-                    bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
+            NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            LOGGER.info("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
+                    attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
             return;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} professionals={} total={} desired={} active={} pending={} effective={} — placing table",
-                bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
+        LOGGER.info("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — placing table",
+                attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
 
         // Attempt one table + conversion per scan cycle (pace ourselves).
-        tryPlaceTableAndConvert(world, bellPos);
+        tryPlaceTableAndConvert(world, bellPos, attemptType);
+        long retryIntervalTicks = Math.max(20L, GuardVillagersConfig.lumberjackSpawnRetryIntervalTicks);
+        NEXT_RETRY_TICK_BY_BELL.put(bellPos, now + retryIntervalTicks);
     }
 
     // -------------------------------------------------------------------------
     // Table placement + immediate conversion
     // -------------------------------------------------------------------------
 
-    private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos) {
+    private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType) {
         // Gather existing tables so we can enforce spacing.
         List<BlockPos> existingTables = findExistingTablesNear(world, bellPos, CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2);
 
         // Find all chests near the bell and shuffle them for variety.
         List<BlockPos> chests = findChestsNearBell(world, bellPos);
         if (chests.isEmpty()) {
-            LOGGER.info("lumberjack-spawn bell={} — no chests found within {} blocks; cannot place table",
-                    bellPos.toShortString(), CHEST_SCAN_RANGE);
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — no chests found within {} blocks; cannot place table",
+                    attemptType, bellPos.toShortString(), CHEST_SCAN_RANGE);
             // Fallback: try a free surface spot near the bell itself
-            tryPlaceTableNearBellFallback(world, bellPos, existingTables);
+            tryPlaceTableNearBellFallback(world, bellPos, existingTables, attemptType);
             return;
         }
 
@@ -174,15 +208,15 @@ public final class VillageLumberjackSpawnManager {
                 continue;
             }
 
-            placeTableAndConvert(world, bellPos, tablePos);
+            placeTableAndConvert(world, bellPos, tablePos, attemptType);
             return;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} — {} chest(s) found but none had a free adjacent floor slot",
-                bellPos.toShortString(), chests.size());
+        LOGGER.info("lumberjack-spawn attempt={} bell={} — {} chest(s) found but none had a free adjacent floor slot",
+                attemptType, bellPos.toShortString(), chests.size());
 
         // Fallback: open surface near bell
-        tryPlaceTableNearBellFallback(world, bellPos, existingTables);
+        tryPlaceTableNearBellFallback(world, bellPos, existingTables, attemptType);
     }
 
     /**
@@ -190,18 +224,18 @@ public final class VillageLumberjackSpawnManager {
      * unemployed villager. If none is found the table still stays — the conversion
      * hook will pick it up later.
      */
-    private static void placeTableAndConvert(ServerWorld world, BlockPos bellPos, BlockPos tablePos) {
+    private static void placeTableAndConvert(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType) {
         world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
-        LOGGER.info("lumberjack-spawn placed crafting table at {} near bell {}",
-                tablePos.toShortString(), bellPos.toShortString());
+        LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} near bell {}",
+                attemptType, tablePos.toShortString(), bellPos.toShortString());
 
         // Immediately find and convert the closest unemployed villager.
         VillagerEntity candidate = findNearestUnemployed(world, tablePos);
         if (candidate != null) {
             forceConvert(world, candidate, tablePos);
         } else {
-            LOGGER.info("lumberjack-spawn no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
-                    UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
+            LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
+                    attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
             // Nudge the hook for the next tick just in case.
             if (!world.getPlayers().isEmpty()) {
                 UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
@@ -213,7 +247,7 @@ public final class VillageLumberjackSpawnManager {
      * Fallback: place table on open surface within a small ring around the bell.
      * Less ideal but better than nothing.
      */
-    private static void tryPlaceTableNearBellFallback(ServerWorld world, BlockPos bellPos, List<BlockPos> existingTables) {
+    private static void tryPlaceTableNearBellFallback(ServerWorld world, BlockPos bellPos, List<BlockPos> existingTables, String attemptType) {
         for (int radius = 3; radius <= 12; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
@@ -228,12 +262,12 @@ public final class VillageLumberjackSpawnManager {
                     if (!world.getBlockState(candidate).isReplaceable()) continue;
                     if (isTooCloseToExistingTable(candidate, existingTables)) continue;
 
-                    placeTableAndConvert(world, bellPos, candidate);
+                    placeTableAndConvert(world, bellPos, candidate, attemptType);
                     return;
                 }
             }
         }
-        LOGGER.info("lumberjack-spawn bell={} — fallback surface scan also found no placement slot", bellPos.toShortString());
+        LOGGER.info("lumberjack-spawn attempt={} bell={} — fallback surface scan also found no placement slot", attemptType, bellPos.toShortString());
     }
 
     // -------------------------------------------------------------------------
