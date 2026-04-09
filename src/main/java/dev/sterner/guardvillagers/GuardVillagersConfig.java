@@ -268,6 +268,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int quartermasterNaturalVillagePoiScanRadius = 32;
     @Entry(min=1)
     public static int quartermasterNaturalVillageChestLocalPoiRadius = 10;
+    @Entry
+    public static boolean quartermasterBootstrapStrictVillageOnly = true;
 
     public static void validateClampedRanges() {
         quartermasterScanRange = clamp(quartermasterScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
