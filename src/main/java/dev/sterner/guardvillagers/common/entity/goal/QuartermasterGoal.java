@@ -40,6 +40,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -252,6 +253,8 @@ public class QuartermasterGoal extends Goal {
     private int bootstrapEmptyDiscoveryRetries = 0;
     private long nextBootstrapDiscoveryTick = 0L;
     private boolean discoveredBootstrapSourceAtLeastOnce = false;
+    private final Set<BlockPos> bootstrapVisitedThisCycle = new HashSet<>();
+    private BootstrapCycleMetrics activeBootstrapCycleMetrics = null;
     private boolean demandQueueDirty = true;
     private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
     private final Deque<TransferLeg> lumberjackDrainQueue = new ArrayDeque<>();
@@ -1144,11 +1147,13 @@ public class QuartermasterGoal extends Goal {
         findDoubleChestOtherHalf(world, chestPos).ifPresent(excluded::add);
 
         Set<BlockPos> deduplicated = new HashSet<>();
-        List<BlockPos> discovered = new ArrayList<>();
+        List<BlockPos> tierA = new ArrayList<>();
+        List<BlockPos> tierB = new ArrayList<>();
         int filteredPaired = 0;
-        int filteredNotNatural = 0;
         int filteredEmpty = 0;
+        int strictTierBSkipped = 0;
         int range = (int) Math.ceil(getScanRange());
+        boolean strictVillageOnly = GuardVillagersConfig.quartermasterBootstrapStrictVillageOnly;
         for (BlockPos scanPos : BlockPos.iterate(bellChestPos.add(-range, -range, -range), bellChestPos.add(range, range, range))) {
             if (!bellChestPos.isWithinDistance(scanPos, getScanRange())) continue;
             BlockState state = world.getBlockState(scanPos);
@@ -1163,17 +1168,6 @@ public class QuartermasterGoal extends Goal {
                 }
                 continue;
             }
-            if (!isNaturalVillageChest(world, bellChestPos, candidate)) {
-                filteredNotNatural++;
-                if (LOGGER.isDebugEnabled()) {
-                    String naturalRejectReason = getNaturalVillageChestRejectReason(world, bellChestPos, candidate);
-                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason={}",
-                            villager.getUuidAsString(),
-                            candidate,
-                            naturalRejectReason);
-                }
-                continue;
-            }
             int candidateItemCount = countAllItems(world, candidate);
             if (candidateItemCount <= 0) {
                 filteredEmpty++;
@@ -1185,17 +1179,38 @@ public class QuartermasterGoal extends Goal {
                 continue;
             }
             if (deduplicated.add(candidate)) {
-                discovered.add(candidate);
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap discovered_natural_chest={} items={}",
-                            villager.getUuidAsString(),
-                            candidate,
-                            candidateItemCount);
+                boolean naturalVillageMember = isNaturalVillageChest(world, bellChestPos, candidate);
+                if (naturalVillageMember) {
+                    tierA.add(candidate);
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("QM {} bootstrap discovered_tier=A candidate={} items={}",
+                                villager.getUuidAsString(),
+                                candidate,
+                                candidateItemCount);
+                    }
+                } else if (strictVillageOnly) {
+                    strictTierBSkipped++;
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("QM {} bootstrap candidate={} skipped_reason=strict_village_mode reject_reason={}",
+                                villager.getUuidAsString(),
+                                candidate,
+                                getNaturalVillageChestRejectReason(world, bellChestPos, candidate));
+                    }
+                } else {
+                    tierB.add(candidate);
+                    if (LOGGER.isDebugEnabled()) {
+                        LOGGER.debug("QM {} bootstrap discovered_tier=B candidate={} items={} reject_reason={}",
+                                villager.getUuidAsString(),
+                                candidate,
+                                candidateItemCount,
+                                getNaturalVillageChestRejectReason(world, bellChestPos, candidate));
+                    }
                 }
             }
         }
-        discovered.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
-        return new BootstrapDiscoveryResult(discovered, filteredPaired, filteredNotNatural, filteredEmpty);
+        tierA.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
+        tierB.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
+        return new BootstrapDiscoveryResult(tierA, tierB, filteredPaired, filteredEmpty, strictTierBSkipped, strictVillageOnly);
     }
 
     private boolean tryPlanBootstrapConsolidationTransfer(ServerWorld world, BlockPos bellChestPos) {
@@ -1204,6 +1219,8 @@ public class QuartermasterGoal extends Goal {
             if (now < nextBootstrapDiscoveryTick) {
                 bootstrapConsolidationState = BootstrapConsolidationState.DRAINED_COMPLETE;
                 bootstrapSourceQueue.clear();
+                bootstrapVisitedThisCycle.clear();
+                activeBootstrapCycleMetrics = null;
                 return false;
             }
             clearBootstrapComplete(world);
@@ -1216,15 +1233,27 @@ public class QuartermasterGoal extends Goal {
             bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
             bootstrapDiscoveryRuns++;
             bootstrapSourceQueue.clear();
+            bootstrapVisitedThisCycle.clear();
             BootstrapDiscoveryResult discovery = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
-            bootstrapSourceQueue.addAll(discovery.discovered());
+            activeBootstrapCycleMetrics = BootstrapCycleMetrics.start(discovery);
+            for (BlockPos source : discovery.tierA()) {
+                if (bootstrapVisitedThisCycle.contains(source)) continue;
+                bootstrapSourceQueue.addLast(source);
+            }
+            for (BlockPos source : discovery.tierB()) {
+                if (bootstrapVisitedThisCycle.contains(source)) continue;
+                bootstrapSourceQueue.addLast(source);
+            }
             if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap discovery: discovered={} filtered_paired={} filtered_not_natural={} filtered_empty={}",
+                LOGGER.debug("QM {} bootstrap discovery: strict_mode={} tier_a={} tier_b={} discovered={} filtered_paired={} filtered_empty={} skipped_strict_tier_b={}",
                         villager.getUuidAsString(),
-                        discovery.discovered().size(),
+                        discovery.strictVillageOnly(),
+                        discovery.tierA().size(),
+                        discovery.tierB().size(),
+                        discovery.discoveredCount(),
                         discovery.filteredPaired(),
-                        discovery.filteredNotNatural(),
-                        discovery.filteredEmpty());
+                        discovery.filteredEmpty(),
+                        discovery.skippedStrictTierB());
             }
             bootstrapConsolidationState = BootstrapConsolidationState.CONSOLIDATING;
             if (bootstrapSourceQueue.isEmpty()) {
@@ -1247,15 +1276,26 @@ public class QuartermasterGoal extends Goal {
         while (!bootstrapSourceQueue.isEmpty()) {
             BlockPos source = bootstrapSourceQueue.peekFirst();
             if (source == null || source.equals(bellChestPos)) {
+                if (activeBootstrapCycleMetrics != null) {
+                    activeBootstrapCycleMetrics.recordSkipped("invalid_source");
+                }
                 bootstrapSourceQueue.pollFirst();
                 continue;
             }
+            if (activeBootstrapCycleMetrics != null) {
+                activeBootstrapCycleMetrics.recordAttempt(source);
+            }
+            bootstrapVisitedThisCycle.add(source.toImmutable());
             ItemStack stack = findTopTransferableItem(world, source);
             if (stack.isEmpty()) {
                 if (LOGGER.isDebugEnabled()) {
                     LOGGER.debug("QM {} bootstrap source={} drained_or_no_transferable_items",
                             villager.getUuidAsString(),
                             source);
+                }
+                bootstrapVisitedThisCycle.add(source.toImmutable());
+                if (activeBootstrapCycleMetrics != null) {
+                    activeBootstrapCycleMetrics.recordDrained(source);
                 }
                 bootstrapSourceQueue.pollFirst();
                 continue;
@@ -1275,6 +1315,7 @@ public class QuartermasterGoal extends Goal {
         }
 
         if (discoveredBootstrapSourceAtLeastOnce) {
+            logBootstrapCycleSummary();
             completeBootstrap(world, "drained_complete", BootstrapConsolidationState.DRAINED_COMPLETE, now + BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS);
         } else if (now >= nextBootstrapDiscoveryTick) {
             nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
@@ -1293,11 +1334,27 @@ public class QuartermasterGoal extends Goal {
     private void completeBootstrap(ServerWorld world, String reason, BootstrapConsolidationState completionState, long nextRecheckTick) {
         bootstrapConsolidationState = completionState;
         bootstrapSourceQueue.clear();
+        bootstrapVisitedThisCycle.clear();
+        activeBootstrapCycleMetrics = null;
         nextBootstrapDiscoveryTick = Math.max(nextBootstrapDiscoveryTick, nextRecheckTick);
         setBootstrapComplete(world);
         if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("QM {} bootstrap completion_reason={}", villager.getUuidAsString(), reason);
         }
+    }
+
+    private void logBootstrapCycleSummary() {
+        if (activeBootstrapCycleMetrics == null || !LOGGER.isInfoEnabled()) {
+            return;
+        }
+        LOGGER.info("QM {} bootstrap cycle summary: strict_mode={} discovered={} attempted={} drained={} skipped={} skip_reasons={}",
+                villager.getUuidAsString(),
+                activeBootstrapCycleMetrics.strictVillageOnly,
+                activeBootstrapCycleMetrics.discoveredCount,
+                activeBootstrapCycleMetrics.attemptedSources.size(),
+                activeBootstrapCycleMetrics.drainedSources.size(),
+                activeBootstrapCycleMetrics.totalSkipped(),
+                activeBootstrapCycleMetrics.skippedReasons);
     }
 
     private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {
@@ -1948,7 +2005,18 @@ public class QuartermasterGoal extends Goal {
     }
 
     record PlannedTransfer(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
-    private record BootstrapDiscoveryResult(List<BlockPos> discovered, int filteredPaired, int filteredNotNatural, int filteredEmpty) {}
+    private record BootstrapDiscoveryResult(
+            List<BlockPos> tierA,
+            List<BlockPos> tierB,
+            int filteredPaired,
+            int filteredEmpty,
+            int skippedStrictTierB,
+            boolean strictVillageOnly
+    ) {
+        int discoveredCount() {
+            return tierA.size() + tierB.size();
+        }
+    }
     private record ProfessionChestSnapshot(
             VillagerProfession profession,
             BlockPos chestPos,
@@ -2001,6 +2069,56 @@ public class QuartermasterGoal extends Goal {
         int eligibleChestCount() { return eligibleChestCount; }
         int totalStacksMoved() { return totalStacksMoved; }
         Set<BlockPos> visitedChests() { return visitedChests; }
+    }
+
+    private static final class BootstrapCycleMetrics {
+        private final int discoveredCount;
+        private final boolean strictVillageOnly;
+        private final Set<BlockPos> attemptedSources = new HashSet<>();
+        private final Set<BlockPos> drainedSources = new HashSet<>();
+        private final Map<String, Integer> skippedReasons = new LinkedHashMap<>();
+
+        private BootstrapCycleMetrics(BootstrapDiscoveryResult discovery) {
+            this.discoveredCount = discovery.discoveredCount();
+            this.strictVillageOnly = discovery.strictVillageOnly();
+            if (discovery.filteredPaired() > 0) {
+                skippedReasons.put("paired_chest_excluded", discovery.filteredPaired());
+            }
+            if (discovery.filteredEmpty() > 0) {
+                skippedReasons.put("empty_chest", discovery.filteredEmpty());
+            }
+            if (discovery.skippedStrictTierB() > 0) {
+                skippedReasons.put("strict_village_mode", discovery.skippedStrictTierB());
+            }
+        }
+
+        static BootstrapCycleMetrics start(BootstrapDiscoveryResult discovery) {
+            return new BootstrapCycleMetrics(discovery);
+        }
+
+        void recordAttempt(BlockPos source) {
+            if (source != null) {
+                attemptedSources.add(source.toImmutable());
+            }
+        }
+
+        void recordDrained(BlockPos source) {
+            if (source != null) {
+                drainedSources.add(source.toImmutable());
+            }
+        }
+
+        void recordSkipped(String reason) {
+            skippedReasons.merge(reason, 1, Integer::sum);
+        }
+
+        int totalSkipped() {
+            int total = 0;
+            for (Integer count : skippedReasons.values()) {
+                total += count;
+            }
+            return total;
+        }
     }
 
     private static final class SurplusScanBudget {
