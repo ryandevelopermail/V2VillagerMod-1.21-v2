@@ -104,8 +104,6 @@ public class QuartermasterGoal extends Goal {
     private static final int MASON_COBBLESTONE_RESERVE = 8;
     private static final int MASON_MINING_DIRT_BUFFER = 8;
     private static final int LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR = 20;
-    private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 24;
-    private static final int NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 3;
     private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
     private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
     private static final long BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS = 24_000L;
@@ -1122,6 +1120,16 @@ public class QuartermasterGoal extends Goal {
         return discoverBootstrapSourceChestsWithStats(world, bellChestPos).discovered();
     }
 
+    private int getNaturalVillagePoiScanRadius() {
+        return Math.max(GuardVillagersConfig.MIN_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS,
+                GuardVillagersConfig.quartermasterNaturalVillagePoiScanRadius);
+    }
+
+    private int getNaturalVillageChestLocalPoiRadius() {
+        return Math.max(GuardVillagersConfig.MIN_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS,
+                GuardVillagersConfig.quartermasterNaturalVillageChestLocalPoiRadius);
+    }
+
     private BootstrapDiscoveryResult discoverBootstrapSourceChestsWithStats(ServerWorld world, BlockPos bellChestPos) {
         Set<BlockPos> pairedChests = new HashSet<>();
         for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
@@ -1148,6 +1156,11 @@ public class QuartermasterGoal extends Goal {
             BlockPos candidate = canonicalChestPos(world, scanPos.toImmutable());
             if (excluded.contains(candidate)) {
                 filteredPaired++;
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason=paired_chest_excluded",
+                            villager.getUuidAsString(),
+                            candidate);
+                }
                 continue;
             }
             if (!isNaturalVillageChest(world, bellChestPos, candidate)) {
@@ -1161,12 +1174,24 @@ public class QuartermasterGoal extends Goal {
                 }
                 continue;
             }
-            if (countAllItems(world, candidate) <= 0) {
+            int candidateItemCount = countAllItems(world, candidate);
+            if (candidateItemCount <= 0) {
                 filteredEmpty++;
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason=empty_chest",
+                            villager.getUuidAsString(),
+                            candidate);
+                }
                 continue;
             }
             if (deduplicated.add(candidate)) {
                 discovered.add(candidate);
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap discovered_natural_chest={} items={}",
+                            villager.getUuidAsString(),
+                            candidate,
+                            candidateItemCount);
+                }
             }
         }
         discovered.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
@@ -1227,12 +1252,25 @@ public class QuartermasterGoal extends Goal {
             }
             ItemStack stack = findTopTransferableItem(world, source);
             if (stack.isEmpty()) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap source={} drained_or_no_transferable_items",
+                            villager.getUuidAsString(),
+                            source);
+                }
                 bootstrapSourceQueue.pollFirst();
                 continue;
             }
             sourcePos = source;
             destPos = bellChestPos;
             transferStack = stack.copyWithCount(Math.min(HAUL_AMOUNT, stack.getCount()));
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("QM {} bootstrap draining_source={} dest={} stack={}x{}",
+                        villager.getUuidAsString(),
+                        sourcePos,
+                        destPos,
+                        transferStack.getItem(),
+                        transferStack.getCount());
+            }
             return true;
         }
 
@@ -1273,10 +1311,11 @@ public class QuartermasterGoal extends Goal {
     }
 
     private String getNaturalVillageChestRejectReason(ServerWorld world, BlockPos bellChestPos, BlockPos chestCandidate) {
-        if (!bellChestPos.isWithinDistance(chestCandidate, NATURAL_VILLAGE_POI_SCAN_RADIUS)) {
+        int villageZoneRadius = getNaturalVillagePoiScanRadius();
+        int localPoiRadius = getNaturalVillageChestLocalPoiRadius();
+        if (!bellChestPos.isWithinDistance(chestCandidate, villageZoneRadius)) {
             return "not_in_village_zone";
         }
-        int villageZoneRadius = NATURAL_VILLAGE_POI_SCAN_RADIUS;
         boolean villageHasBell = false;
         boolean villageHasBedOrJobSite = false;
         boolean chestNearVillagePoi = false;
@@ -1289,13 +1328,13 @@ public class QuartermasterGoal extends Goal {
                     BlockState nearbyState = world.getBlockState(cursor);
                     if (nearbyState.isOf(Blocks.BELL)) {
                         villageHasBell = true;
-                        if (cursor.isWithinDistance(chestCandidate, NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS)) {
+                        if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
                             chestNearVillagePoi = true;
                         }
                     }
                     if (nearbyState.getBlock() instanceof BedBlock || NATURAL_VILLAGE_JOB_SITE_BLOCKS.contains(nearbyState.getBlock())) {
                         villageHasBedOrJobSite = true;
-                        if (cursor.isWithinDistance(chestCandidate, NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS)) {
+                        if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
                             chestNearVillagePoi = true;
                         }
                     }

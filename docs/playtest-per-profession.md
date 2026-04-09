@@ -146,6 +146,22 @@ Use `/time set 6000` to skip to midday and prevent guards from sleeping.
 
 ---
 
+### C-4 · Quartermaster — Natural Village Chest Bootstrap Discovery + Drain Logs
+**Preconditions:** Quartermaster promoted. At least one naturally generated village chest exists within quartermaster natural village scan range and is not a paired profession chest.
+**Steps:**
+1. Ensure debug logging is enabled for `dev.sterner.guardvillagers.common.entity.goal`.
+2. Put mixed starter items (for example planks/cobblestone/wheat) in one naturally generated village chest.
+3. Wait for bootstrap discovery (up to one poll/retry window), then observe quartermaster hauling to the Bell Chest.
+4. Keep watching until the source chest is drained of transferable items.
+
+**Pass:**
+- Logs show candidate-level reject reasons (for example `paired_chest_excluded`, `empty_chest`, or natural POI reject reasons).
+- Logs show at least one `bootstrap discovered_natural_chest=... items=...` entry.
+- Logs show `bootstrap draining_source=... dest=... stack=...` while transfers are scheduled.
+- Logs show `bootstrap source=... drained_or_no_transferable_items` once a source chest is exhausted.
+
+---
+
 ## D — Cartographer
 
 ### D-1 · Map Exploration Workflow
@@ -366,5 +382,9 @@ Key log markers to grep for:
 | `LumberjackPen …: ran out of fences` | Pen builder ran dry mid-build |
 | `Stop lumberjack furnace service: … reason=` | Furnace goal stopped, see reason |
 | `Librarian promoted to Quartermaster` | QM promotion succeeded |
+| `QM … bootstrap candidate=… reject_reason=…` | Natural chest candidate was rejected (position + reason) |
+| `QM … bootstrap discovered_natural_chest=… items=…` | Natural village chest candidate accepted into bootstrap queue |
+| `QM … bootstrap draining_source=… dest=… stack=…` | Quartermaster is draining a discovered natural chest |
+| `QM … bootstrap source=… drained_or_no_transferable_items` | Source chest was exhausted or had no transferable items |
 | `Cartographer … wrote mapped bounds` | Lumberjack bounds unlocked |
 | `Cartographer … all 4 tiles already mapped — resetting` | Starting next cycle |
