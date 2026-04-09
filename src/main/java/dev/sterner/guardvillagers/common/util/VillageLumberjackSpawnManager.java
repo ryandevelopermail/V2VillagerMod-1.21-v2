@@ -12,6 +12,8 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.EntityType;
+import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.item.ItemStack;
@@ -19,6 +21,7 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
+import net.minecraft.world.ServerWorldAccess;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -234,11 +237,27 @@ public final class VillageLumberjackSpawnManager {
         if (candidate != null) {
             forceConvert(world, candidate, tablePos);
         } else {
-            LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
-                    attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
-            // Nudge the hook for the next tick just in case.
-            if (!world.getPlayers().isEmpty()) {
-                UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
+            if (!shouldSpawnFallbackUnemployed(world, bellPos, tablePos, attemptType)) {
+                LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
+                        attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
+                // Nudge the hook for the next tick just in case.
+                if (!world.getPlayers().isEmpty()) {
+                    UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
+                }
+                return;
+            }
+
+            VillagerEntity spawned = spawnUnemployedVillagerNearTable(world, tablePos);
+            if (spawned != null) {
+                LOGGER.info("lumberjack-spawn attempt={} event=spawned_unemployed_for_lumberjack_conversion villager={} table={}",
+                        attemptType, spawned.getUuidAsString(), tablePos.toShortString());
+                forceConvert(world, spawned, tablePos);
+            } else {
+                LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} and fallback spawn failed — table placed, conversion hook will fire later",
+                        attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
+                if (!world.getPlayers().isEmpty()) {
+                    UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
+                }
             }
         }
     }
@@ -448,6 +467,105 @@ public final class VillageLumberjackSpawnManager {
                 a.squaredDistanceTo(tablePos.getX() + 0.5, tablePos.getY() + 0.5, tablePos.getZ() + 0.5),
                 b.squaredDistanceTo(tablePos.getX() + 0.5, tablePos.getY() + 0.5, tablePos.getZ() + 0.5)));
         return candidates.get(0);
+    }
+
+    private static boolean shouldSpawnFallbackUnemployed(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType) {
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+            LOGGER.info("lumberjack-spawn attempt={} table {} already reserved — fallback spawn skipped",
+                    attemptType, tablePos.toShortString());
+            return false;
+        }
+        if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "spawn-unemployed-fallback")) {
+            LOGGER.info("lumberjack-spawn attempt={} population balancer blocked fallback spawn at {}",
+                    attemptType, tablePos.toShortString());
+            return false;
+        }
+
+        Box bellBox = new Box(bellPos).expand(BELL_EFFECT_RANGE);
+        List<VillagerEntity> allVillagers = world.getEntitiesByClass(
+                VillagerEntity.class, bellBox, VillageLumberjackSpawnManager::isEligibleVillager);
+        int totalVillagers = allVillagers.size();
+        int professionals = (int) allVillagers.stream()
+                .filter(VillageLumberjackSpawnManager::isProfessional)
+                .count();
+        int desired = desiredLumberjackCount(professionals, totalVillagers, totalVillagers > 0);
+        List<LumberjackGuardEntity> activeLumberjacks = world.getEntitiesByClass(
+                LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
+        int pending = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
+        int effective = activeLumberjacks.size() + pending;
+        if (effective >= desired) {
+            LOGGER.info("lumberjack-spawn attempt={} desired reached before fallback spawn (bell={} desired={} active={} pending={} effective={})",
+                    attemptType, bellPos.toShortString(), desired, activeLumberjacks.size(), pending, effective);
+            return false;
+        }
+        return true;
+    }
+
+    private static VillagerEntity spawnUnemployedVillagerNearTable(ServerWorld world, BlockPos tablePos) {
+        BlockPos spawnPos = findSafeVillagerSpawnNearTable(world, tablePos);
+        if (spawnPos == null) {
+            return null;
+        }
+
+        VillagerEntity villager = EntityType.VILLAGER.create(world);
+        if (villager == null) {
+            return null;
+        }
+        villager.refreshPositionAndAngles(
+                spawnPos.getX() + 0.5D,
+                spawnPos.getY(),
+                spawnPos.getZ() + 0.5D,
+                world.random.nextFloat() * 360.0F,
+                0.0F);
+        villager.initialize((ServerWorldAccess) world, world.getLocalDifficulty(spawnPos), SpawnReason.MOB_SUMMONED, null);
+        villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+        villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
+        return world.spawnEntity(villager) ? villager : null;
+    }
+
+    private static BlockPos findSafeVillagerSpawnNearTable(ServerWorld world, BlockPos tablePos) {
+        int maxHorizontal = Math.max(1, (int) Math.floor(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE));
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -maxHorizontal; dx <= maxHorizontal; dx++) {
+            for (int dz = -maxHorizontal; dz <= maxHorizontal; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                if (dx * dx + dz * dz > JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE * JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) {
+                    continue;
+                }
+                int wx = tablePos.getX() + dx;
+                int wz = tablePos.getZ() + dz;
+                for (int dy = -2; dy <= 2; dy++) {
+                    BlockPos candidate = new BlockPos(wx, tablePos.getY() + dy, wz);
+                    if (isSafeVillagerSpawnPos(world, candidate)) {
+                        candidates.add(candidate.toImmutable());
+                    }
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        candidates.sort((a, b) -> Double.compare(
+                squaredDistance(a, tablePos),
+                squaredDistance(b, tablePos)));
+        return candidates.get(0);
+    }
+
+    private static boolean isSafeVillagerSpawnPos(ServerWorld world, BlockPos pos) {
+        BlockPos below = pos.down();
+        if (!world.getBlockState(below).isSolidBlock(world, below)) {
+            return false;
+        }
+        return world.getBlockState(pos).isReplaceable() && world.getBlockState(pos.up()).isReplaceable();
+    }
+
+    private static double squaredDistance(BlockPos a, BlockPos b) {
+        double dx = a.getX() - b.getX();
+        double dy = a.getY() - b.getY();
+        double dz = a.getZ() - b.getZ();
+        return dx * dx + dy * dy + dz * dz;
     }
 
     // -------------------------------------------------------------------------
