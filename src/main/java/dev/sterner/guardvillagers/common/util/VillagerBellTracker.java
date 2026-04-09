@@ -521,7 +521,12 @@ public final class VillagerBellTracker {
             villager.getMoveControl().strafeTo(0.0F, 0.0F);
             villager.getLookControl().lookAt(jobCenter.getX(), jobCenter.getY(), jobCenter.getZ());
         } else {
-            villager.getNavigation().startMovingTo(jobCenter.getX(), jobCenter.getY(), jobCenter.getZ(), JOB_REPORT_SPEED);
+            // Only re-issue the navigation command when the villager is not already moving —
+            // calling startMovingTo every tick for 30 s (600 ticks) is redundant and wastes
+            // pathfinding budget. The brain WALK_TARGET set above keeps the intent persistent.
+            if (villager.getNavigation().isIdle()) {
+                villager.getNavigation().startMovingTo(jobCenter.getX(), jobCenter.getY(), jobCenter.getZ(), JOB_REPORT_SPEED);
+            }
         }
     }
 
