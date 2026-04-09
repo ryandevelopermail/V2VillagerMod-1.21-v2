@@ -106,6 +106,7 @@ public class QuartermasterGoal extends Goal {
     private static final int NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 3;
     private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
     private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
+    private static final long BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS = 24_000L;
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
             Blocks.SMOKER,
@@ -1076,13 +1077,19 @@ public class QuartermasterGoal extends Goal {
     }
 
     private boolean tryPlanBootstrapConsolidationTransfer(ServerWorld world, BlockPos bellChestPos) {
-        if (isBootstrapComplete(world)) {
-            bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
-            bootstrapSourceQueue.clear();
-            return false;
-        }
         long now = world.getTime();
+        if (isBootstrapComplete(world)) {
+            if (now < nextBootstrapDiscoveryTick) {
+                bootstrapConsolidationState = BootstrapConsolidationState.DRAINED_COMPLETE;
+                bootstrapSourceQueue.clear();
+                return false;
+            }
+            clearBootstrapComplete(world);
+            bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
+        }
+
         if (bootstrapConsolidationState == BootstrapConsolidationState.NOT_STARTED
+                || bootstrapConsolidationState == BootstrapConsolidationState.WAITING_RECHECK
                 || (bootstrapSourceQueue.isEmpty() && now >= nextBootstrapDiscoveryTick)) {
             bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
             bootstrapDiscoveryRuns++;
@@ -1101,12 +1108,12 @@ public class QuartermasterGoal extends Goal {
             if (bootstrapSourceQueue.isEmpty()) {
                 bootstrapEmptyDiscoveryRetries++;
                 nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
-                if (bootstrapEmptyDiscoveryRetries >= BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES) {
-                    completeBootstrap(world, "discovered_none_terminal_after_retries=" + bootstrapEmptyDiscoveryRetries);
-                } else if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap completion_reason=discovered_none retry={} next_discovery_tick={}",
+                bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
                             villager.getUuidAsString(),
                             bootstrapEmptyDiscoveryRetries,
+                            BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
                             nextBootstrapDiscoveryTick);
                 }
                 return false;
@@ -1133,21 +1140,25 @@ public class QuartermasterGoal extends Goal {
         }
 
         if (discoveredBootstrapSourceAtLeastOnce) {
-            completeBootstrap(world, "discovered_and_drained");
+            completeBootstrap(world, "drained_complete", BootstrapConsolidationState.DRAINED_COMPLETE, now + BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS);
         } else if (now >= nextBootstrapDiscoveryTick) {
             nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
+            bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
             if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap completion_reason=discovered_none retry_scheduled next_discovery_tick={}",
+                LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
                         villager.getUuidAsString(),
+                        bootstrapEmptyDiscoveryRetries,
+                        BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
                         nextBootstrapDiscoveryTick);
             }
         }
         return false;
     }
 
-    private void completeBootstrap(ServerWorld world, String reason) {
-        bootstrapConsolidationState = BootstrapConsolidationState.COMPLETE;
+    private void completeBootstrap(ServerWorld world, String reason, BootstrapConsolidationState completionState, long nextRecheckTick) {
+        bootstrapConsolidationState = completionState;
         bootstrapSourceQueue.clear();
+        nextBootstrapDiscoveryTick = Math.max(nextBootstrapDiscoveryTick, nextRecheckTick);
         setBootstrapComplete(world);
         if (LOGGER.isDebugEnabled()) {
             LOGGER.debug("QM {} bootstrap completion_reason={}", villager.getUuidAsString(), reason);
@@ -1789,6 +1800,10 @@ public class QuartermasterGoal extends Goal {
         BOOTSTRAP_COMPLETE_BY_QM.put(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()), true);
     }
 
+    private void clearBootstrapComplete(ServerWorld world) {
+        BOOTSTRAP_COMPLETE_BY_QM.remove(new QmBootstrapKey(world.getRegistryKey(), villager.getUuid()));
+    }
+
     record PlannedTransfer(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
     private record BootstrapDiscoveryResult(List<BlockPos> discovered, int filteredPaired, int filteredNotNatural, int filteredEmpty) {}
     private record ProfessionChestSnapshot(
@@ -1819,7 +1834,7 @@ public class QuartermasterGoal extends Goal {
     private record TransferLeg(BlockPos sourcePos, BlockPos destPos, ItemStack transferStack) {}
     private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
     private enum ReserveGrouping { LOGS, PLANKS, CHARCOAL, ITEM }
-    private enum BootstrapConsolidationState { NOT_STARTED, DISCOVERING, CONSOLIDATING, COMPLETE }
+    private enum BootstrapConsolidationState { NOT_STARTED, DISCOVERING, CONSOLIDATING, WAITING_RECHECK, DRAINED_COMPLETE }
 
     private static final class SurplusScanBudget {
         private final int maxCandidates;
