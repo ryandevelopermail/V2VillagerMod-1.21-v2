@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
+import dev.sterner.guardvillagers.common.util.VillageAnchorState;
+import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -15,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public final class LumberjackPopulationBalancingService {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackPopulationBalancingService.class);
@@ -116,15 +119,12 @@ public final class LumberjackPopulationBalancingService {
         Map<Long, RegionSnapshot> worldSnapshots = LATEST_SNAPSHOTS.computeIfAbsent(world.getRegistryKey(), ignored -> new HashMap<>());
         worldSnapshots.clear();
 
-        for (AxeGuardEntity guard : world.getEntitiesByClass(AxeGuardEntity.class,
-                new Box(world.getWorldBorder().getBoundWest(), world.getBottomY(), world.getWorldBorder().getBoundNorth(), world.getWorldBorder().getBoundEast(), world.getTopY(), world.getWorldBorder().getBoundSouth()),
-                LumberjackPopulationBalancingService::isActiveLumberjackGuard)) {
-            RegionSnapshot snapshot = buildSnapshot(world, guard.getBlockPos());
-            worldSnapshots.put(snapshot.regionKey(), snapshot);
-        }
-
-        LAST_REFRESH_TICK.put(world.getRegistryKey(), world.getTime());
-        if (worldSnapshots.isEmpty()) {
+        // Scan only within BELL_EFFECT_RANGE of each known village anchor instead of
+        // using a world-border-sized Box, which would iterate all loaded entities.
+        // If no anchors are registered we fall back to a single ORIGIN snapshot so the
+        // service degrades gracefully in un-anchored worlds.
+        Set<BlockPos> anchors = VillageAnchorState.get(world.getServer()).getAllQmChests(world);
+        if (anchors.isEmpty()) {
             RegionSnapshot fallback = buildSnapshot(world, BlockPos.ORIGIN);
             worldSnapshots.put(fallback.regionKey(), fallback);
             LOGGER.debug("lumberjack-balance snapshot source={} region={} villagers={} activeGuards={} unemployed={} ratioThreshold=1:{}",
@@ -134,8 +134,24 @@ public final class LumberjackPopulationBalancingService {
                     fallback.activeLumberjackGuards(),
                     fallback.unemployedCandidates(),
                     MIN_VILLAGERS_PER_GUARD);
+            LAST_REFRESH_TICK.put(world.getRegistryKey(), world.getTime());
             return;
         }
+
+        int anchorScanRadius = VillageGuardStandManager.BELL_EFFECT_RANGE;
+        for (BlockPos anchor : anchors) {
+            Box anchorBox = new Box(anchor).expand(anchorScanRadius);
+            for (AxeGuardEntity guard : world.getEntitiesByClass(AxeGuardEntity.class, anchorBox,
+                    LumberjackPopulationBalancingService::isActiveLumberjackGuard)) {
+                RegionSnapshot snapshot = buildSnapshot(world, guard.getBlockPos());
+                worldSnapshots.put(snapshot.regionKey(), snapshot);
+            }
+            // Always ensure at least one snapshot covers each anchor region.
+            long anchorRegionKey = toRegionKey(anchor);
+            worldSnapshots.computeIfAbsent(anchorRegionKey, ignored -> buildSnapshot(world, anchor));
+        }
+
+        LAST_REFRESH_TICK.put(world.getRegistryKey(), world.getTime());
 
         for (RegionSnapshot snapshot : worldSnapshots.values()) {
             LOGGER.debug("lumberjack-balance snapshot source={} region={} villagers={} activeGuards={} unemployed={} ratioThreshold=1:{}",
