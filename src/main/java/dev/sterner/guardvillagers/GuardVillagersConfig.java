@@ -196,6 +196,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int quartermasterLumberjackDrainSweepIntervalTicks = 12_000;
     @Entry
     public static boolean quartermasterLumberjackDrainProtectUpgradeRecipeInputs = true;
+    @Entry(min=0.0, max=1.0)
+    public static double quartermasterLumberjackReclaimFullnessThreshold = 0.85D;
     @Entry(min=1)
     public static int masonAdaptiveThrottleLoadThreshold = 180;
     @Entry(min=20)
@@ -309,6 +311,7 @@ public class GuardVillagersConfig extends MidnightConfig {
         weaponsmithAdaptiveThrottleJitterTicks = clamp(weaponsmithAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
         weaponsmithAdaptiveSummaryLogIntervalSessions = clamp(weaponsmithAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
         fishermanInvalidWaterRescanCooldownTicks = clamp(fishermanInvalidWaterRescanCooldownTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
+        quartermasterLumberjackReclaimFullnessThreshold = clamp(quartermasterLumberjackReclaimFullnessThreshold, 0.0D, 1.0D);
         shepherdFenceBatchMin = clamp(shepherdFenceBatchMin, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
         shepherdFenceBatchMax = clamp(shepherdFenceBatchMax, MIN_SHEPHERD_FENCE_BATCH, MAX_SHEPHERD_FENCE_BATCH);
         if (shepherdFenceBatchMax < shepherdFenceBatchMin) {
@@ -317,6 +320,13 @@ public class GuardVillagersConfig extends MidnightConfig {
     }
 
     private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private static double clamp(double value, double min, double max) {
+        if (Double.isNaN(value)) {
+            return min;
+        }
         return Math.max(min, Math.min(max, value));
     }
 }
