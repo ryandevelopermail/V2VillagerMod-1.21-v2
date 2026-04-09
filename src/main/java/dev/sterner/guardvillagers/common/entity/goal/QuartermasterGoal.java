@@ -102,7 +102,8 @@ public class QuartermasterGoal extends Goal {
     private static final int MASON_COBBLESTONE_RESERVE = 8;
     private static final int MASON_MINING_DIRT_BUFFER = 8;
     private static final int LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR = 20;
-    private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 8;
+    private static final int NATURAL_VILLAGE_POI_SCAN_RADIUS = 24;
+    private static final int NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 3;
     private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
     private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
@@ -1051,8 +1052,15 @@ public class QuartermasterGoal extends Goal {
                 filteredPaired++;
                 continue;
             }
-            if (!isNaturalVillageChest(world, candidate)) {
+            if (!isNaturalVillageChest(world, bellChestPos, candidate)) {
                 filteredNotNatural++;
+                if (LOGGER.isDebugEnabled()) {
+                    String naturalRejectReason = getNaturalVillageChestRejectReason(world, bellChestPos, candidate);
+                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason={}",
+                            villager.getUuidAsString(),
+                            candidate,
+                            naturalRejectReason);
+                }
                 continue;
             }
             if (countAllItems(world, candidate) <= 0) {
@@ -1152,28 +1160,50 @@ public class QuartermasterGoal extends Goal {
         return chestCandidate.asLong() <= other.get().asLong() ? chestCandidate : other.get();
     }
 
-    private boolean isNaturalVillageChest(ServerWorld world, BlockPos chestCandidate) {
-        int r = NATURAL_VILLAGE_POI_SCAN_RADIUS;
-        boolean nearBell = false;
-        boolean nearBedOrJobSite = false;
+    private boolean isNaturalVillageChest(ServerWorld world, BlockPos bellChestPos, BlockPos chestCandidate) {
+        return getNaturalVillageChestRejectReason(world, bellChestPos, chestCandidate) == null;
+    }
+
+    private String getNaturalVillageChestRejectReason(ServerWorld world, BlockPos bellChestPos, BlockPos chestCandidate) {
+        if (!bellChestPos.isWithinDistance(chestCandidate, NATURAL_VILLAGE_POI_SCAN_RADIUS)) {
+            return "not_in_village_zone";
+        }
+        int villageZoneRadius = NATURAL_VILLAGE_POI_SCAN_RADIUS;
+        boolean villageHasBell = false;
+        boolean villageHasBedOrJobSite = false;
+        boolean chestNearVillagePoi = false;
         BlockPos.Mutable cursor = new BlockPos.Mutable();
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    cursor.set(chestCandidate.getX() + dx, chestCandidate.getY() + dy, chestCandidate.getZ() + dz);
-                    if (!chestCandidate.isWithinDistance(cursor, r)) continue;
+        for (int dx = -villageZoneRadius; dx <= villageZoneRadius; dx++) {
+            for (int dy = -villageZoneRadius; dy <= villageZoneRadius; dy++) {
+                for (int dz = -villageZoneRadius; dz <= villageZoneRadius; dz++) {
+                    cursor.set(bellChestPos.getX() + dx, bellChestPos.getY() + dy, bellChestPos.getZ() + dz);
+                    if (!bellChestPos.isWithinDistance(cursor, villageZoneRadius)) continue;
                     BlockState nearbyState = world.getBlockState(cursor);
                     if (nearbyState.isOf(Blocks.BELL)) {
-                        nearBell = true;
+                        villageHasBell = true;
+                        if (cursor.isWithinDistance(chestCandidate, NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS)) {
+                            chestNearVillagePoi = true;
+                        }
                     }
                     if (nearbyState.getBlock() instanceof BedBlock || NATURAL_VILLAGE_JOB_SITE_BLOCKS.contains(nearbyState.getBlock())) {
-                        nearBedOrJobSite = true;
+                        villageHasBedOrJobSite = true;
+                        if (cursor.isWithinDistance(chestCandidate, NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS)) {
+                            chestNearVillagePoi = true;
+                        }
                     }
-                    if (nearBell && nearBedOrJobSite) return true;
                 }
             }
         }
-        return false;
+        if (!villageHasBell) {
+            return "village_zone_missing_bell";
+        }
+        if (!villageHasBedOrJobSite) {
+            return "village_zone_missing_bed_or_job_site";
+        }
+        if (!chestNearVillagePoi) {
+            return "no_local_village_poi";
+        }
+        return null;
     }
 
     /** Returns true if a furnace or blast furnace exists within FURNACE_CHECK_RADIUS of center. */

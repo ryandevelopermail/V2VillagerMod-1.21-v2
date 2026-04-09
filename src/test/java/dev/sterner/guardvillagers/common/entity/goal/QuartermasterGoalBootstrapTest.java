@@ -62,9 +62,9 @@ class QuartermasterGoalBootstrapTest {
         VillagerEntity quartermaster = villagerWithJobSite(world, UUID.randomUUID(), VillagerProfession.LIBRARIAN, qmJob, qmChest);
         TestQuartermasterGoal goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
 
-        BlockPos unpairedChest = new BlockPos(4, 64, 0);
+        BlockPos unpairedChest = new BlockPos(10, 64, 0);
         BlockPos pairedChest = new BlockPos(6, 64, 0);
-        BlockPos wildernessChest = new BlockPos(8, 64, 0);
+        BlockPos wildernessChest = new BlockPos(30, 64, 0);
         BlockPos workerJob = new BlockPos(6, 64, 1);
 
         JobBlockPairingHelper.clearWorldCaches(world);
@@ -77,11 +77,11 @@ class QuartermasterGoalBootstrapTest {
         states.put(unpairedChest, chestState(ChestType.SINGLE));
         states.put(pairedChest, chestState(ChestType.SINGLE));
         states.put(wildernessChest, chestState(ChestType.SINGLE));
-        // POI cluster for village chest candidates.
-        states.put(unpairedChest.north(), Blocks.BELL.getDefaultState());
-        states.put(unpairedChest.south(), Blocks.WHITE_BED.getDefaultState());
-        states.put(pairedChest.north(), Blocks.BELL.getDefaultState());
-        states.put(pairedChest.south(), Blocks.WHITE_BED.getDefaultState());
+        // Village anchor area POI cluster near the quartermaster chest.
+        states.put(qmChest.north(), Blocks.BELL.getDefaultState());
+        states.put(qmChest.south(), Blocks.WHITE_BED.getDefaultState());
+        states.put(unpairedChest.south(), Blocks.CARTOGRAPHY_TABLE.getDefaultState());
+        states.put(pairedChest.south(), Blocks.SMOKER.getDefaultState());
         // wildernessChest intentionally has no nearby POI cluster
         when(world.getBlockState(any(BlockPos.class))).thenAnswer(invocation -> states.getOrDefault(invocation.getArgument(0), Blocks.AIR.getDefaultState()));
         goal.putInventory(unpairedChest, new SimpleInventory(new ItemStack(Items.BREAD, 8)));
@@ -95,6 +95,37 @@ class QuartermasterGoalBootstrapTest {
         assertFalse(discovered.contains(pairedChest));
         assertFalse(discovered.contains(wildernessChest));
         JobBlockPairingHelper.clearWorldCaches(world);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void bootstrapDiscovery_acceptsVillageChestBeyondEightBlocksFromBell() throws Exception {
+        ServerWorld world = mock(ServerWorld.class);
+        when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
+        when(world.getEntitiesByClass(any(), any(), any())).thenReturn(List.of());
+
+        BlockPos qmJob = new BlockPos(0, 64, 0);
+        BlockPos qmChest = new BlockPos(1, 64, 0);
+        VillagerEntity quartermaster = villagerWithJobSite(world, UUID.randomUUID(), VillagerProfession.LIBRARIAN, qmJob, qmChest);
+        TestQuartermasterGoal goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
+        GuardVillagersConfig.quartermasterScanRange = 24;
+
+        BlockPos distantVillageChest = new BlockPos(12, 64, 0); // 11 blocks from bell.
+        Map<BlockPos, BlockState> states = new HashMap<>();
+        states.put(qmChest, chestState(ChestType.SINGLE));
+        states.put(distantVillageChest, chestState(ChestType.SINGLE));
+        states.put(qmChest.north(), Blocks.BELL.getDefaultState());
+        states.put(qmChest.south(), Blocks.WHITE_BED.getDefaultState());
+        states.put(distantVillageChest.south(), Blocks.CARTOGRAPHY_TABLE.getDefaultState());
+        when(world.getBlockState(any(BlockPos.class))).thenAnswer(invocation ->
+                states.getOrDefault(invocation.getArgument(0), Blocks.AIR.getDefaultState()));
+        goal.putInventory(distantVillageChest, new SimpleInventory(new ItemStack(Items.BREAD, 8)));
+
+        Method discover = QuartermasterGoal.class.getDeclaredMethod("discoverBootstrapSourceChests", ServerWorld.class, BlockPos.class);
+        discover.setAccessible(true);
+        List<BlockPos> discovered = (List<BlockPos>) discover.invoke(goal, world, qmChest);
+
+        assertTrue(discovered.contains(distantVillageChest));
     }
 
     @Test
