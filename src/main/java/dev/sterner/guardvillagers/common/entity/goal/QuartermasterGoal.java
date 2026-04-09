@@ -92,7 +92,7 @@ public class QuartermasterGoal extends Goal {
     /** Radius around lumberjack job site to check for an existing furnace. */
     private static final int FURNACE_CHECK_RADIUS = 5;
     /** Bell chest is considered "low" if total items < this. */
-    private static final int BELL_CHEST_LOW_THRESHOLD = 32;
+    private static final int BELL_CHEST_LOW_THRESHOLD = 128;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
     /** Hard cap of cached candidate chests checked in one planning cycle. */
@@ -503,64 +503,66 @@ public class QuartermasterGoal extends Goal {
             return true;
         }
 
-        BlockPos bellChestPos = resolveBellChestPos(world);
-        if (bellChestPos != null) {
-            if (tryPlanBootstrapConsolidationTransfer(world, bellChestPos)) {
+        // qmChestPos is the QM's own paired chest — it doubles as the village bank/hub.
+        // (Previously misnamed bellChestPos; there is no separate "bell chest".)
+        BlockPos qmChestPos = resolveBellChestPos(world);
+        if (qmChestPos != null) {
+            if (tryPlanBootstrapConsolidationTransfer(world, qmChestPos)) {
                 return true;
             }
         }
 
-        // Priority 1: mason is building (low on stone) → top up from bell chest
-        if (tryPlanDemandQueueTransfer(world, bellChestPos)) {
+        // Priority 1: mason is building (low on stone) → top up from QM chest
+        if (tryPlanDemandQueueTransfer(world, qmChestPos)) {
             return true;
         }
 
-        // Priority 1: mason is building (low on stone) → top up from bell chest
+        // Priority 1: mason is building (low on stone) → top up from QM chest
         Optional<MasonGuardEntity> masonNeedingStone = findMasonNeedingStone(world);
-        if (masonNeedingStone.isPresent() && bellChestPos != null) {
-            int stoneInBell = countItem(world, bellChestPos, Items.COBBLESTONE);
-            if (stoneInBell > 0) {
-                sourcePos = bellChestPos;
+        if (masonNeedingStone.isPresent() && qmChestPos != null) {
+            int stoneInQm = countItem(world, qmChestPos, Items.COBBLESTONE);
+            if (stoneInQm > 0) {
+                sourcePos = qmChestPos;
                 destPos = masonNeedingStone.get().getPairedChestPos();
-                transferStack = new ItemStack(Items.COBBLESTONE, Math.min(HAUL_AMOUNT, stoneInBell));
-                LOGGER.debug("QM {}: hauling stone from bell chest to mason {}", villager.getUuidAsString(), destPos.toShortString());
+                transferStack = new ItemStack(Items.COBBLESTONE, Math.min(HAUL_AMOUNT, stoneInQm));
+                LOGGER.debug("QM {}: hauling stone from QM chest to mason {}", villager.getUuidAsString(), destPos.toShortString());
                 return destPos != null;
             }
         }
 
-        // Priority 2a: lumberjack crafting (low on planks) → top up from bell chest.
-        // Use any plank type (tag-based), pick the most abundant stack in the bell chest
+        // Priority 2a: lumberjack crafting (low on planks) → top up from QM chest.
+        // Use any plank type (tag-based), pick the most abundant stack in the QM chest
         // so we don't artificially lock onto oak when e.g. birch is available.
         Optional<LumberjackGuardEntity> lumberjackNeedingPlanks = findLumberjackNeedingPlanks(world);
-        if (lumberjackNeedingPlanks.isPresent() && bellChestPos != null) {
-            ItemStack bestPlanks = findBestTagItem(world, bellChestPos, ItemTags.PLANKS);
+        if (lumberjackNeedingPlanks.isPresent() && qmChestPos != null) {
+            ItemStack bestPlanks = findBestTagItem(world, qmChestPos, ItemTags.PLANKS);
             if (!bestPlanks.isEmpty()) {
-                sourcePos = bellChestPos;
+                sourcePos = qmChestPos;
                 destPos = lumberjackNeedingPlanks.get().getPairedChestPos();
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                LOGGER.debug("QM {}: hauling {} planks from bell chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
+                LOGGER.debug("QM {}: hauling {} planks from QM chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
                 return destPos != null;
             }
         }
 
-        // Priority 2b: weaponsmith low on planks → top up from bell chest (for wood weapon crafting).
+        // Priority 2b: weaponsmith low on planks → top up from QM chest (for wood weapon crafting).
         Optional<BlockPos> weaponsmithChestNeedingPlanks = findWeaponsmithChestNeedingPlanks(world);
-        if (weaponsmithChestNeedingPlanks.isPresent() && bellChestPos != null) {
-            ItemStack bestPlanks = findBestTagItem(world, bellChestPos, ItemTags.PLANKS);
+        if (weaponsmithChestNeedingPlanks.isPresent() && qmChestPos != null) {
+            ItemStack bestPlanks = findBestTagItem(world, qmChestPos, ItemTags.PLANKS);
             if (!bestPlanks.isEmpty()) {
-                sourcePos = bellChestPos;
+                sourcePos = qmChestPos;
                 destPos = weaponsmithChestNeedingPlanks.get();
                 transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
                 if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {}: hauling {} planks from bell chest to weaponsmith at {}",
+                    LOGGER.debug("QM {}: hauling {} planks from QM chest to weaponsmith at {}",
                             villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
                 }
                 return true;
             } else {
                 if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {}: weaponsmith at {} needs planks but bell chest at {} has none",
+                    LOGGER.debug("QM {}: weaponsmith at {} needs planks but QM chest at {} has none",
                             villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
-                            bellChestPos.toShortString());
+                            qmChestPos.toShortString());
                 }
             }
         }
@@ -612,21 +614,21 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
-        // Priority 3: bell chest is low → find any profession chest with surplus and haul to bell chest.
+        // Priority 3: QM chest is low → find any profession chest with surplus and haul to QM chest.
         // IMPORTANT: only haul whitelisted bulk materials (logs, planks, wool, cobble, wheat, coal, etc.)
         // to avoid draining specialist profession chests of their unique trade goods (arrows, potions,
         // enchanted books, iron gear, fish, maps, meat, etc.). EC-NEW-EC-8 resolution.
-        if (bellChestPos != null) {
-            int bellTotal = countAllItems(world, bellChestPos);
-            if (bellTotal < BELL_CHEST_LOW_THRESHOLD) {
-                Optional<BlockPos> surplusChest = findSurplusChest(world, bellChestPos);
+        if (qmChestPos != null) {
+            int qmTotal = countAllItems(world, qmChestPos);
+            if (qmTotal < BELL_CHEST_LOW_THRESHOLD) {
+                Optional<BlockPos> surplusChest = findSurplusChest(world, qmChestPos);
                 if (surplusChest.isPresent()) {
                     ItemStack whitelistedItem = findTopWhitelistedItem(world, surplusChest.get());
                     if (!whitelistedItem.isEmpty()) {
                         sourcePos = surplusChest.get();
-                        destPos = bellChestPos;
+                        destPos = qmChestPos;
                         transferStack = whitelistedItem.copyWithCount(Math.min(HAUL_AMOUNT, whitelistedItem.getCount()));
-                        LOGGER.debug("QM {}: hauling {} surplus from {} to bell chest", villager.getUuidAsString(), whitelistedItem.getItem(), sourcePos.toShortString());
+                        LOGGER.debug("QM {}: hauling {} surplus from {} to QM chest", villager.getUuidAsString(), whitelistedItem.getItem(), sourcePos.toShortString());
                         return true;
                     }
                 }
@@ -1180,13 +1182,19 @@ public class QuartermasterGoal extends Goal {
         for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
             BlockPos pairingChest = pairing.chestPos();
             if (pairingChest == null) continue;
+            // Canonicalize so the excluded set matches what candidateChestPos() returns for double-chest halves.
+            BlockPos canonicalPairing = canonicalChestPos(world, pairingChest.toImmutable());
+            pairedChests.add(canonicalPairing);
+            // Also add the non-canonical half so either half is recognised as excluded.
             pairedChests.add(pairingChest.toImmutable());
-            findDoubleChestOtherHalf(world, pairingChest).ifPresent(pairedChests::add);
+            findDoubleChestOtherHalf(world, pairingChest).ifPresent(other -> pairedChests.add(other.toImmutable()));
         }
 
         Set<BlockPos> excluded = new HashSet<>(pairedChests);
+        // Exclude both canonical and raw positions of the QM's own chest.
         excluded.add(chestPos.toImmutable());
-        findDoubleChestOtherHalf(world, chestPos).ifPresent(excluded::add);
+        excluded.add(canonicalChestPos(world, chestPos.toImmutable()));
+        findDoubleChestOtherHalf(world, chestPos).ifPresent(other -> excluded.add(other.toImmutable()));
 
         Set<BlockPos> deduplicated = new HashSet<>();
         List<BlockPos> discovered = new ArrayList<>();
@@ -1361,33 +1369,32 @@ public class QuartermasterGoal extends Goal {
         if (!bellChestPos.isWithinDistance(chestCandidate, villageZoneRadius)) {
             return "not_in_village_zone";
         }
-        boolean villageHasBell = false;
+        // Scan the village zone with a single flat iterate — O(n) instead of the former O(n³) triple loop.
+        // Bell presence is treated as optional: modded / non-standard villages may have no bell, and we
+        // must not reject every chest solely because of a missing bell.  A chest qualifies as a natural
+        // village chest if the zone contains at least one bed or job-site block AND the candidate chest
+        // is within localPoiRadius of that bed/job-site (or of a bell, if one exists).
         boolean villageHasBedOrJobSite = false;
         boolean chestNearVillagePoi = false;
-        BlockPos.Mutable cursor = new BlockPos.Mutable();
-        for (int dx = -villageZoneRadius; dx <= villageZoneRadius; dx++) {
-            for (int dy = -villageZoneRadius; dy <= villageZoneRadius; dy++) {
-                for (int dz = -villageZoneRadius; dz <= villageZoneRadius; dz++) {
-                    cursor.set(bellChestPos.getX() + dx, bellChestPos.getY() + dy, bellChestPos.getZ() + dz);
-                    if (!bellChestPos.isWithinDistance(cursor, villageZoneRadius)) continue;
-                    BlockState nearbyState = world.getBlockState(cursor);
-                    if (nearbyState.isOf(Blocks.BELL)) {
-                        villageHasBell = true;
-                        if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
-                            chestNearVillagePoi = true;
-                        }
-                    }
-                    if (nearbyState.getBlock() instanceof BedBlock || NATURAL_VILLAGE_JOB_SITE_BLOCKS.contains(nearbyState.getBlock())) {
-                        villageHasBedOrJobSite = true;
-                        if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
-                            chestNearVillagePoi = true;
-                        }
-                    }
+        for (BlockPos cursor : BlockPos.iterate(
+                bellChestPos.add(-villageZoneRadius, -villageZoneRadius, -villageZoneRadius),
+                bellChestPos.add(villageZoneRadius, villageZoneRadius, villageZoneRadius))) {
+            if (!bellChestPos.isWithinDistance(cursor, villageZoneRadius)) continue;
+            BlockState nearbyState = world.getBlockState(cursor);
+            // Bell counts as a village POI anchor (optional — villages without bells are still valid).
+            if (nearbyState.isOf(Blocks.BELL)) {
+                if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
+                    chestNearVillagePoi = true;
                 }
             }
-        }
-        if (!villageHasBell) {
-            return "village_zone_missing_bell";
+            if (nearbyState.getBlock() instanceof BedBlock || NATURAL_VILLAGE_JOB_SITE_BLOCKS.contains(nearbyState.getBlock())) {
+                villageHasBedOrJobSite = true;
+                if (cursor.isWithinDistance(chestCandidate, localPoiRadius)) {
+                    chestNearVillagePoi = true;
+                }
+            }
+            // Early exit: both conditions satisfied, no need to keep scanning.
+            if (villageHasBedOrJobSite && chestNearVillagePoi) break;
         }
         if (!villageHasBedOrJobSite) {
             return "village_zone_missing_bed_or_job_site";
