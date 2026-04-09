@@ -89,7 +89,10 @@ public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
     private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
-    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
+    // 1200 ticks = 60 s. The previous value (300 = 15 s) caused 4× per-minute world-scale
+    // entity scans for all specialist guard types. 60 s is more than sufficient for
+    // workstation reconciliation to stay accurate.
+    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 1200L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
