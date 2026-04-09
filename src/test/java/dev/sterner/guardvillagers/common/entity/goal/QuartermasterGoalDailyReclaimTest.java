@@ -129,7 +129,7 @@ class QuartermasterGoalDailyReclaimTest {
     }
 
     @Test
-    void lumberjackChestReclaim_respectsStrictReserveFloorsAndActiveDemandInputs() {
+    void dailyReclaim_skipsLumberjackChestBecauseDrainSchedulerOwnsThatFlow() {
         ServerWorld world = mock(ServerWorld.class);
         when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
         when(world.getTime()).thenReturn(24_000L);
@@ -156,18 +156,13 @@ class QuartermasterGoalDailyReclaimTest {
         goal.addNearbyLumberjack(lumberjack);
         goal.setDemand(lumberjack, LumberjackChestTriggerController.UpgradeDemand.v3FenceGate());
 
-        assertTrue(goal.tryPlanDailyReclaimTransferIfDue(world));
-        QuartermasterGoal.PlannedTransfer plan = QuartermasterGoal.getPlannedTransferForTest(goal);
-        assertEquals(lumberjackChestPos, plan.sourcePos());
-        assertEquals(qmChest, plan.destPos());
-        assertEquals(Items.OAK_LOG, plan.transferStack().getItem());
-        assertEquals(16, plan.transferStack().getCount());
+        assertFalse(goal.tryPlanDailyReclaimTransferIfDue(world));
 
         JobBlockPairingHelper.clearWorldCaches(world);
     }
 
     @Test
-    void lumberjackFurnaceReclaim_collectsOverflowOutputWithoutBreachingFuelOrCharcoalReserve() {
+    void dailyReclaim_skipsLumberjackFurnaceBecauseDrainSchedulerOwnsThatFlow() {
         ServerWorld world = mock(ServerWorld.class);
         when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
         when(world.getTime()).thenReturn(24_000L);
@@ -193,12 +188,7 @@ class QuartermasterGoalDailyReclaimTest {
         goal.addNearbyLumberjack(lumberjack);
         goal.setDemand(lumberjack, null);
 
-        assertTrue(goal.tryPlanDailyReclaimTransferIfDue(world));
-        QuartermasterGoal.PlannedTransfer plan = QuartermasterGoal.getPlannedTransferForTest(goal);
-        assertEquals(furnacePos, plan.sourcePos());
-        assertEquals(qmChest, plan.destPos());
-        assertEquals(Items.CHARCOAL, plan.transferStack().getItem());
-        assertEquals(12, plan.transferStack().getCount());
+        assertFalse(goal.tryPlanDailyReclaimTransferIfDue(world));
 
         JobBlockPairingHelper.clearWorldCaches(world);
     }

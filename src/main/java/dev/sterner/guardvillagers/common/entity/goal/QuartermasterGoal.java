@@ -73,6 +73,8 @@ public class QuartermasterGoal extends Goal {
 
     private static final int CHECK_INTERVAL_TICKS = 300;
     private static final long DAILY_RECLAIM_INTERVAL_TICKS = 24_000L;
+    private static final int DEFAULT_LUMBERJACK_DRAIN_SWEEP_INTERVAL_TICKS = 12_000;
+    private static final int LUMBERJACK_DRAIN_ELIGIBLE_DISTINCT_ITEM_THRESHOLD = 3;
     private static final int STRUCTURAL_CHECK_INTERVAL_TICKS = 20;
     private static final double DEFAULT_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
     private static final double MOVE_SPEED = 0.55D;
@@ -225,6 +227,7 @@ public class QuartermasterGoal extends Goal {
     private long nextCheckTick = 0L;
     private long nextDemandQueueRebuildTick = 0L;
     private long nextDailyReclaimTick = 0L;
+    private long nextLumberjackDrainSweepTick = 0L;
     private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
@@ -253,6 +256,8 @@ public class QuartermasterGoal extends Goal {
     private boolean discoveredBootstrapSourceAtLeastOnce = false;
     private boolean demandQueueDirty = true;
     private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
+    private final Deque<TransferLeg> lumberjackDrainQueue = new ArrayDeque<>();
+    private LumberjackDrainCycleMetrics activeLumberjackDrainCycle = null;
 
     public QuartermasterGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -483,6 +488,12 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private boolean tryPlanTransfer(ServerWorld world) {
+        if (tryPlanActiveLumberjackDrainTransfer()) {
+            return true;
+        }
+        if (tryPlanLumberjackDrainSweepIfDue(world)) {
+            return true;
+        }
         if (tryPlanDailyReclaimTransferIfDue(world)) {
             return true;
         }
@@ -704,10 +715,6 @@ public class QuartermasterGoal extends Goal {
     }
 
     private Optional<TransferLeg> planDailyReclaimTransfer(ServerWorld world) {
-        Optional<TransferLeg> lumberjackLeg = planLumberjackReclaimTransfer(world);
-        if (lumberjackLeg.isPresent()) {
-            return lumberjackLeg;
-        }
         List<ProfessionChestSnapshot> snapshots = buildProfessionChestSnapshots(world);
         Optional<TransferLeg> masonCompletedLeg = planMasonCompletedMaterialReclaim(snapshots);
         if (masonCompletedLeg.isPresent()) {
@@ -743,99 +750,120 @@ public class QuartermasterGoal extends Goal {
         return Optional.ofNullable(bestLeg);
     }
 
-    private Optional<TransferLeg> planLumberjackReclaimTransfer(ServerWorld world) {
-        TransferLeg bestLeg = null;
-        int bestCount = 0;
+    private boolean tryPlanLumberjackDrainSweepIfDue(ServerWorld world) {
+        long worldTime = world.getTime();
+        if (worldTime < nextLumberjackDrainSweepTick) {
+            return false;
+        }
+        nextLumberjackDrainSweepTick = worldTime + getLumberjackDrainSweepIntervalTicks();
+        if (!rebuildLumberjackDrainQueue(world)) {
+            return false;
+        }
+        return tryPlanActiveLumberjackDrainTransfer();
+    }
+
+    private boolean tryPlanActiveLumberjackDrainTransfer() {
+        if (lumberjackDrainQueue.isEmpty()) {
+            finishActiveLumberjackDrainCycleIfNeeded();
+            return false;
+        }
+        TransferLeg leg = lumberjackDrainQueue.pollFirst();
+        sourcePos = leg.sourcePos();
+        destPos = leg.destPos();
+        transferStack = leg.transferStack().copy();
+        return true;
+    }
+
+    private boolean rebuildLumberjackDrainQueue(ServerWorld world) {
+        lumberjackDrainQueue.clear();
+        List<BlockPos> eligibleChests = new ArrayList<>();
+        int plannedStacks = 0;
         for (LumberjackGuardEntity lumberjack : getNearbyLumberjacks(world)) {
             if (!lumberjack.isAlive()) {
                 continue;
             }
-            LumberjackChestTriggerController.UpgradeDemand activeDemand = resolveLumberjackUpgradeDemand(world, lumberjack);
-            Set<net.minecraft.item.Item> excludedItems = buildLumberjackActiveRecipeExclusions(activeDemand);
             BlockPos lumberjackChestPos = lumberjack.getPairedChestPos();
-            if (lumberjackChestPos != null && !lumberjackChestPos.equals(chestPos)) {
-                Optional<Inventory> inventory = getInventory(world, lumberjackChestPos);
-                if (inventory.isPresent()) {
-                    TransferLeg candidate = planLumberjackChestReclaim(lumberjackChestPos, inventory.get(), excludedItems);
-                    if (candidate != null && candidate.transferStack().getCount() > bestCount) {
-                        bestCount = candidate.transferStack().getCount();
-                        bestLeg = candidate;
-                    }
-                }
+            if (lumberjackChestPos == null || lumberjackChestPos.equals(chestPos)) {
+                continue;
+            }
+            Optional<Inventory> inventory = getInventory(world, lumberjackChestPos);
+            if (inventory.isEmpty()) {
+                continue;
+            }
+            if (countDistinctNonEmptyItems(inventory.get()) <= LUMBERJACK_DRAIN_ELIGIBLE_DISTINCT_ITEM_THRESHOLD) {
+                continue;
             }
 
-            BlockPos furnacePos = lumberjack.getPairedFurnaceModifierPos();
-            if (furnacePos != null) {
-                Optional<Inventory> furnaceInventory = getInventory(world, furnacePos);
-                if (furnaceInventory.isPresent()) {
-                    TransferLeg candidate = planLumberjackFurnaceReclaim(furnacePos, furnaceInventory.get(), excludedItems);
-                    if (candidate != null && candidate.transferStack().getCount() > bestCount) {
-                        bestCount = candidate.transferStack().getCount();
-                        bestLeg = candidate;
-                    }
-                }
+            Set<net.minecraft.item.Item> excludedItems = Set.of();
+            if (GuardVillagersConfig.quartermasterLumberjackDrainProtectUpgradeRecipeInputs) {
+                LumberjackChestTriggerController.UpgradeDemand activeDemand = resolveLumberjackUpgradeDemand(world, lumberjack);
+                excludedItems = buildLumberjackActiveRecipeExclusions(activeDemand);
             }
+
+            List<TransferLeg> plannedLegs = planLumberjackChestDrainLegs(lumberjackChestPos, inventory.get(), excludedItems);
+            if (plannedLegs.isEmpty()) {
+                continue;
+            }
+            eligibleChests.add(lumberjackChestPos.toImmutable());
+            lumberjackDrainQueue.addAll(plannedLegs);
+            plannedStacks += plannedLegs.size();
         }
-        return Optional.ofNullable(bestLeg);
+
+        if (lumberjackDrainQueue.isEmpty()) {
+            activeLumberjackDrainCycle = null;
+            return false;
+        }
+        activeLumberjackDrainCycle = new LumberjackDrainCycleMetrics(eligibleChests);
+        LOGGER.info("QM {}: lumberjack drain cycle started (eligible_chests={} planned_stacks={} path={} -> {} -> {})",
+                villager.getUuidAsString(),
+                eligibleChests.size(),
+                plannedStacks,
+                chestPos.toShortString(),
+                eligibleChests.stream().map(BlockPos::toShortString).toList(),
+                chestPos.toShortString());
+        return true;
     }
 
-    private TransferLeg planLumberjackChestReclaim(BlockPos sourceChestPos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
+    private List<TransferLeg> planLumberjackChestDrainLegs(BlockPos sourceChestPos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
         ProfessionReclaimPolicy policy = LUMBERJACK_RECLAIM_POLICY;
         Map<net.minecraft.item.Item, Integer> totals = totalsByItem(inventory);
-        int totalLogs = countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS));
-        int totalPlanks = countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS));
-        int totalCharcoal = totals.getOrDefault(Items.CHARCOAL, 0);
-        TransferLeg bestLeg = null;
-        int bestCount = 0;
+        int remainingLogs = Math.max(0, countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS)) - getLumberjackLogReserveFloor());
+        int remainingPlanks = Math.max(0, countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) - getLumberjackPlankReserveFloor());
+        int remainingCharcoal = Math.max(0, totals.getOrDefault(Items.CHARCOAL, 0) - getLumberjackCharcoalReserveFloor());
+        Map<net.minecraft.item.Item, Integer> remainingByItem = new HashMap<>();
+        for (Map.Entry<net.minecraft.item.Item, Integer> entry : totals.entrySet()) {
+            int keep = policy.reserveCount(entry.getKey());
+            remainingByItem.put(entry.getKey(), Math.max(0, entry.getValue() - keep));
+        }
+
+        List<TransferLeg> planned = new ArrayList<>();
         for (int i = 0; i < inventory.size(); i++) {
             ItemStack stack = inventory.getStack(i);
             if (stack.isEmpty() || !policy.canReclaim(stack) || excludedItems.contains(stack.getItem())) {
                 continue;
             }
             int reclaimable = switch (reserveGrouping(stack)) {
-                case LOGS -> Math.max(0, totalLogs - getLumberjackLogReserveFloor());
-                case PLANKS -> Math.max(0, totalPlanks - getLumberjackPlankReserveFloor());
-                case CHARCOAL -> Math.max(0, totalCharcoal - getLumberjackCharcoalReserveFloor());
-                case ITEM -> Math.max(0, totals.getOrDefault(stack.getItem(), 0) - policy.reserveCount(stack.getItem()));
+                case LOGS -> remainingLogs;
+                case PLANKS -> remainingPlanks;
+                case CHARCOAL -> remainingCharcoal;
+                case ITEM -> remainingByItem.getOrDefault(stack.getItem(), 0);
             };
             if (reclaimable <= 0) {
                 continue;
             }
-            int toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
-            if (toMove > bestCount) {
-                bestCount = toMove;
-                bestLeg = new TransferLeg(sourceChestPos, chestPos, stack.copyWithCount(toMove));
+            int toMove = Math.min(reclaimable, stack.getCount());
+            if (toMove <= 0) {
+                continue;
+            }
+            planned.add(new TransferLeg(sourceChestPos, chestPos, stack.copyWithCount(toMove)));
+            switch (reserveGrouping(stack)) {
+                case LOGS -> remainingLogs -= toMove;
+                case PLANKS -> remainingPlanks -= toMove;
+                case CHARCOAL -> remainingCharcoal -= toMove;
+                case ITEM -> remainingByItem.merge(stack.getItem(), -toMove, Integer::sum);
             }
         }
-        return bestLeg;
-    }
-
-    private TransferLeg planLumberjackFurnaceReclaim(BlockPos sourceFurnacePos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
-        if (inventory.size() < 3) {
-            return null;
-        }
-        TransferLeg bestLeg = null;
-        int bestCount = 0;
-        ItemStack output = inventory.getStack(2);
-        if (!output.isEmpty() && output.isOf(Items.CHARCOAL) && !excludedItems.contains(Items.CHARCOAL)) {
-            int reclaimable = Math.max(0, output.getCount() - getLumberjackCharcoalReserveFloor());
-            int toMove = Math.min(Math.min(reclaimable, output.getCount()), HAUL_AMOUNT);
-            if (toMove > bestCount) {
-                bestCount = toMove;
-                bestLeg = new TransferLeg(sourceFurnacePos, chestPos, output.copyWithCount(toMove));
-            }
-        }
-
-        ItemStack fuel = inventory.getStack(1);
-        if (!fuel.isEmpty() && !excludedItems.contains(fuel.getItem()) && (fuel.isIn(ItemTags.LOGS) || fuel.isOf(Items.CHARCOAL))) {
-            int reserve = fuel.isIn(ItemTags.LOGS) ? getLumberjackFurnaceFuelReserveFloor() : getLumberjackCharcoalReserveFloor();
-            int reclaimable = Math.max(0, fuel.getCount() - reserve);
-            int toMove = Math.min(Math.min(reclaimable, fuel.getCount()), HAUL_AMOUNT);
-            if (toMove > bestCount) {
-                bestLeg = new TransferLeg(sourceFurnacePos, chestPos, fuel.copyWithCount(toMove));
-            }
-        }
-        return bestLeg;
+        return planned;
     }
 
     private static Map<net.minecraft.item.Item, Integer> totalsByItem(Inventory inventory) {
@@ -858,6 +886,23 @@ public class QuartermasterGoal extends Goal {
             }
         }
         return total;
+    }
+
+    private static int countDistinctNonEmptyItems(Inventory inventory) {
+        Set<net.minecraft.item.Item> distinct = new HashSet<>();
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack stack = inventory.getStack(i);
+            if (!stack.isEmpty()) {
+                distinct.add(stack.getItem());
+            }
+        }
+        return distinct.size();
+    }
+
+    private int getLumberjackDrainSweepIntervalTicks() {
+        return Math.max(20, GuardVillagersConfig.quartermasterLumberjackDrainSweepIntervalTicks > 0
+                ? GuardVillagersConfig.quartermasterLumberjackDrainSweepIntervalTicks
+                : DEFAULT_LUMBERJACK_DRAIN_SWEEP_INTERVAL_TICKS);
     }
 
     private Set<net.minecraft.item.Item> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
@@ -883,6 +928,18 @@ public class QuartermasterGoal extends Goal {
         }
         exclusions.add(demand.outputItem());
         return exclusions;
+    }
+
+    private void finishActiveLumberjackDrainCycleIfNeeded() {
+        if (activeLumberjackDrainCycle == null) {
+            return;
+        }
+        LOGGER.info("QM {}: lumberjack drain cycle complete (eligible_chests={} visited_chests={} total_stacks_moved={})",
+                villager.getUuidAsString(),
+                activeLumberjackDrainCycle.eligibleChestCount(),
+                activeLumberjackDrainCycle.visitedChests().stream().map(BlockPos::toShortString).toList(),
+                activeLumberjackDrainCycle.totalStacksMoved());
+        activeLumberjackDrainCycle = null;
     }
 
     protected LumberjackChestTriggerController.UpgradeDemand resolveLumberjackUpgradeDemand(ServerWorld world, LumberjackGuardEntity lumberjack) {
@@ -1519,6 +1576,13 @@ public class QuartermasterGoal extends Goal {
             drop.setPickupDelay(10);
             world.spawnEntity(drop);
         }
+        if (activeLumberjackDrainCycle != null && chestPos.equals(pos)) {
+            activeLumberjackDrainCycle.recordVisitedSource(sourcePos);
+            activeLumberjackDrainCycle.recordMovedStack();
+            if (lumberjackDrainQueue.isEmpty()) {
+                finishActiveLumberjackDrainCycleIfNeeded();
+            }
+        }
         transferStack = ItemStack.EMPTY;
         LOGGER.debug("QM {}: delivered to {}", villager.getUuidAsString(), pos.toShortString());
     }
@@ -1835,6 +1899,30 @@ public class QuartermasterGoal extends Goal {
     private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
     private enum ReserveGrouping { LOGS, PLANKS, CHARCOAL, ITEM }
     private enum BootstrapConsolidationState { NOT_STARTED, DISCOVERING, CONSOLIDATING, WAITING_RECHECK, DRAINED_COMPLETE }
+
+    private static final class LumberjackDrainCycleMetrics {
+        private final int eligibleChestCount;
+        private final Set<BlockPos> visitedChests = new HashSet<>();
+        private int totalStacksMoved = 0;
+
+        private LumberjackDrainCycleMetrics(List<BlockPos> eligibleChests) {
+            this.eligibleChestCount = eligibleChests.size();
+        }
+
+        void recordVisitedSource(BlockPos source) {
+            if (source != null) {
+                visitedChests.add(source.toImmutable());
+            }
+        }
+
+        void recordMovedStack() {
+            totalStacksMoved++;
+        }
+
+        int eligibleChestCount() { return eligibleChestCount; }
+        int totalStacksMoved() { return totalStacksMoved; }
+        Set<BlockPos> visitedChests() { return visitedChests; }
+    }
 
     private static final class SurplusScanBudget {
         private final int maxCandidates;
