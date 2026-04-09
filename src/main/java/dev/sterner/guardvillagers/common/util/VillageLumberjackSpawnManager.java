@@ -72,6 +72,16 @@ public final class VillageLumberjackSpawnManager {
      */
     private static final Map<BlockPos, Long> NEXT_RETRY_TICK_BY_BELL = new HashMap<>();
 
+    /**
+     * Tree-supply cache: maps bell position → expiry tick.
+     * A cached {@code true} (enough trees) is valid until TREE_SUPPLY_CACHE_TTL_TICKS have elapsed.
+     * We only cache the "sufficient" result — insufficient results are not cached so the system
+     * can recheck quickly after foresters plant more saplings.
+     */
+    private static final Map<BlockPos, Long> TREE_SUPPLY_CACHE_EXPIRY = new HashMap<>();
+    /** 1200 ticks = 60 s. Tree density doesn't change faster than this. */
+    private static final long TREE_SUPPLY_CACHE_TTL_TICKS = 1200L;
+
     /** Bell effect radius. */
     private static final int BELL_EFFECT_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -157,8 +167,11 @@ public final class VillageLumberjackSpawnManager {
                     processBell(world, immutableBellPos, ATTEMPT_MAINTENANCE_SCAN, now);
                 }
                 NEXT_RETRY_TICK_BY_BELL.keySet().removeIf(pos -> !normalizedBells.contains(pos));
+                // Evict tree-supply cache for bells that no longer exist.
+                TREE_SUPPLY_CACHE_EXPIRY.keySet().removeIf(pos -> !normalizedBells.contains(pos));
             } else {
                 NEXT_RETRY_TICK_BY_BELL.clear();
+                TREE_SUPPLY_CACHE_EXPIRY.clear();
             }
         }
 
@@ -202,7 +215,7 @@ public final class VillageLumberjackSpawnManager {
 
         if (effectiveExisting >= desired) {
             NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
-            LOGGER.info("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
                     attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
             return;
         }
@@ -239,7 +252,7 @@ public final class VillageLumberjackSpawnManager {
         // Find all chests near the bell and shuffle them for variety.
         List<BlockPos> chests = findChestsNearBell(world, bellPos);
         if (chests.isEmpty()) {
-            LOGGER.info("lumberjack-spawn attempt={} bell={} — no chests found within {} blocks; cannot place table",
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} — no chests found within {} blocks; cannot place table",
                     attemptType, bellPos.toShortString(), CHEST_SCAN_RANGE);
             // Fallback: try a free surface spot near the bell itself
             tryPlaceTableNearBellFallback(world, bellPos, existingTables, attemptType);
@@ -258,7 +271,7 @@ public final class VillageLumberjackSpawnManager {
             return;
         }
 
-        LOGGER.info("lumberjack-spawn attempt={} bell={} — {} chest(s) found but none had a free adjacent floor slot",
+        LOGGER.debug("lumberjack-spawn attempt={} bell={} — {} chest(s) found but none had a free adjacent floor slot",
                 attemptType, bellPos.toShortString(), chests.size());
 
         // Fallback: open surface near bell
@@ -281,7 +294,7 @@ public final class VillageLumberjackSpawnManager {
             forceConvert(world, candidate, tablePos);
         } else {
             if (!shouldSpawnFallbackUnemployed(world, bellPos, tablePos, attemptType)) {
-                LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
+                LOGGER.debug("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
                         attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
                 // Nudge the hook for the next tick just in case.
                 if (!world.getPlayers().isEmpty()) {
@@ -296,7 +309,7 @@ public final class VillageLumberjackSpawnManager {
                         attemptType, spawned.getUuidAsString(), tablePos.toShortString());
                 forceConvert(world, spawned, tablePos);
             } else {
-                LOGGER.info("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} and fallback spawn failed — table placed, conversion hook will fire later",
+                LOGGER.debug("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} and fallback spawn failed — table placed, conversion hook will fire later",
                         attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
                 if (!world.getPlayers().isEmpty()) {
                     UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
@@ -329,7 +342,7 @@ public final class VillageLumberjackSpawnManager {
                 }
             }
         }
-        LOGGER.info("lumberjack-spawn attempt={} bell={} — fallback surface scan also found no placement slot", attemptType, bellPos.toShortString());
+        LOGGER.debug("lumberjack-spawn attempt={} bell={} — fallback surface scan also found no placement slot", attemptType, bellPos.toShortString());
     }
 
     // -------------------------------------------------------------------------
@@ -338,11 +351,11 @@ public final class VillageLumberjackSpawnManager {
 
     private static void forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "force-convert")) {
-            LOGGER.info("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
+            LOGGER.debug("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
             return;
         }
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            LOGGER.info("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
+            LOGGER.debug("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
             return;
         }
 
@@ -482,7 +495,7 @@ public final class VillageLumberjackSpawnManager {
             pending++;
         }
 
-        LOGGER.info("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
+        LOGGER.debug("lumberjack-spawn bell={} nearbyTables={} pendingUnclaimed={}",
                 bellPos.toShortString(), nearbyTables.size(), pending);
         return pending;
     }
@@ -534,12 +547,12 @@ public final class VillageLumberjackSpawnManager {
 
     private static boolean shouldSpawnFallbackUnemployed(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType) {
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            LOGGER.info("lumberjack-spawn attempt={} table {} already reserved — fallback spawn skipped",
+            LOGGER.debug("lumberjack-spawn attempt={} table {} already reserved — fallback spawn skipped",
                     attemptType, tablePos.toShortString());
             return false;
         }
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "spawn-unemployed-fallback")) {
-            LOGGER.info("lumberjack-spawn attempt={} population balancer blocked fallback spawn at {}",
+            LOGGER.debug("lumberjack-spawn attempt={} population balancer blocked fallback spawn at {}",
                     attemptType, tablePos.toShortString());
             return false;
         }
@@ -557,7 +570,7 @@ public final class VillageLumberjackSpawnManager {
         int pending = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
         int effective = activeLumberjacks.size() + pending;
         if (effective >= desired) {
-            LOGGER.info("lumberjack-spawn attempt={} desired reached before fallback spawn (bell={} desired={} active={} pending={} effective={})",
+            LOGGER.debug("lumberjack-spawn attempt={} desired reached before fallback spawn (bell={} desired={} active={} pending={} effective={})",
                     attemptType, bellPos.toShortString(), desired, activeLumberjacks.size(), pending, effective);
             return false;
         }
@@ -653,6 +666,17 @@ public final class VillageLumberjackSpawnManager {
      */
     private static boolean hasEnoughTreeSupplyForLumberjackCount(ServerWorld world, BlockPos bellPos, int desiredLumberjackCount) {
         if (desiredLumberjackCount <= 0) return true;
+
+        // Return cached "sufficient" result without re-scanning.
+        // We only cache true: an insufficient result can flip quickly after foresters plant.
+        long now = world.getTime();
+        Long cacheExpiry = TREE_SUPPLY_CACHE_EXPIRY.get(bellPos);
+        if (cacheExpiry != null && now < cacheExpiry) {
+            LOGGER.debug("lumberjack-spawn tree-supply bell={} cache-hit (expires in {}t)",
+                    bellPos.toShortString(), cacheExpiry - now);
+            return true;
+        }
+
         int needed = desiredLumberjackCount * TREES_NEEDED_PER_LUMBERJACK;
 
         int scanRadius = Math.max(GuardVillagersConfig.MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
@@ -671,16 +695,26 @@ public final class VillageLumberjackSpawnManager {
                 BlockState below = world.getBlockState(pos.down());
                 if (!below.isIn(BlockTags.LOGS)) {
                     treeUnits += 1.0;
-                    if (treeUnits >= needed) return true; // early exit
+                    if (treeUnits >= needed) {
+                        // Cache the positive result so subsequent retries skip the scan.
+                        TREE_SUPPLY_CACHE_EXPIRY.put(bellPos.toImmutable(), now + TREE_SUPPLY_CACHE_TTL_TICKS);
+                        return true;
+                    }
                 }
             } else if (state.isIn(BlockTags.SAPLINGS)) {
                 treeUnits += 0.5;
+                if (treeUnits >= needed) {
+                    TREE_SUPPLY_CACHE_EXPIRY.put(bellPos.toImmutable(), now + TREE_SUPPLY_CACHE_TTL_TICKS);
+                    return true;
+                }
             }
         }
 
         LOGGER.debug("lumberjack-spawn tree-supply bell={} scanRadius={} treeUnits={} needed={} (for {} lumberjack(s))",
                 bellPos.toShortString(), scanRadius, treeUnits, needed, desiredLumberjackCount);
-        return treeUnits >= needed;
+        // Insufficient — don't cache, let the next retry re-scan.
+        TREE_SUPPLY_CACHE_EXPIRY.remove(bellPos);
+        return false;
     }
 
     // -------------------------------------------------------------------------
