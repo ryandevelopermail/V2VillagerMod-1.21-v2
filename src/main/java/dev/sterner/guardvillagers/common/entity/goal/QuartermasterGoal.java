@@ -756,6 +756,16 @@ public class QuartermasterGoal extends Goal {
             return false;
         }
         nextLumberjackDrainSweepTick = worldTime + getLumberjackDrainSweepIntervalTicks();
+        double qmChestFullness = getChestFullness(world, chestPos);
+        double fullnessThreshold = getLumberjackReclaimQmChestFullnessThreshold();
+        if (qmChestFullness >= fullnessThreshold) {
+            LOGGER.info("QM {}: skipping lumberjack reclaim cycle (reason=qm_chest_fullness_gate fullness={} threshold={} recheck_tick={})",
+                    villager.getUuidAsString(),
+                    String.format("%.3f", qmChestFullness),
+                    String.format("%.3f", fullnessThreshold),
+                    nextLumberjackDrainSweepTick);
+            return false;
+        }
         if (!rebuildLumberjackDrainQueue(world)) {
             return false;
         }
@@ -903,6 +913,36 @@ public class QuartermasterGoal extends Goal {
         return Math.max(20, GuardVillagersConfig.quartermasterLumberjackDrainSweepIntervalTicks > 0
                 ? GuardVillagersConfig.quartermasterLumberjackDrainSweepIntervalTicks
                 : DEFAULT_LUMBERJACK_DRAIN_SWEEP_INTERVAL_TICKS);
+    }
+
+    private double getLumberjackReclaimQmChestFullnessThreshold() {
+        return Math.max(0.0D, Math.min(1.0D, GuardVillagersConfig.quartermasterLumberjackReclaimQmChestFullnessThreshold));
+    }
+
+    private double getChestFullness(ServerWorld world, BlockPos pos) {
+        Optional<Inventory> inventory = getInventory(world, pos);
+        if (inventory.isEmpty()) {
+            return 0.0D;
+        }
+        Inventory inv = inventory.get();
+        if (inv.size() <= 0) {
+            return 0.0D;
+        }
+        double usedCapacity = 0.0D;
+        double totalCapacity = 0.0D;
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            int slotCapacity = stack.isEmpty() ? inv.getMaxCountPerStack() : Math.min(inv.getMaxCountPerStack(), stack.getMaxCount());
+            if (slotCapacity <= 0) {
+                continue;
+            }
+            totalCapacity += slotCapacity;
+            usedCapacity += Math.min(stack.getCount(), slotCapacity);
+        }
+        if (totalCapacity <= 0.0D) {
+            return 0.0D;
+        }
+        return usedCapacity / totalCapacity;
     }
 
     private Set<net.minecraft.item.Item> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
