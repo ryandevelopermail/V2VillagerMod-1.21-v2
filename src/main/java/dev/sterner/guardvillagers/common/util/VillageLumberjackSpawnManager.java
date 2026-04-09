@@ -82,6 +82,20 @@ public final class VillageLumberjackSpawnManager {
     /** 1200 ticks = 60 s. Tree density doesn't change faster than this. */
     private static final long TREE_SUPPLY_CACHE_TTL_TICKS = 1200L;
 
+    /**
+     * C2 fix — orphaned-table sweep.
+     *
+     * {@link UnemployedLumberjackConversionHook} only scans within 8 blocks of each online player,
+     * so crafting tables placed in areas without nearby players are never claimed.  This sweep runs
+     * independently of player proximity: every {@value #ORPHAN_SWEEP_INTERVAL_TICKS} ticks it
+     * finds unreserved, unpaired tables near each known bell and force-converts the nearest
+     * unemployed villager within {@link #UNEMPLOYED_SCAN_RANGE}.  The same population-balancer and
+     * reservation guards as the main spawn path apply.
+     */
+    private static final long ORPHAN_SWEEP_INTERVAL_TICKS = 1200L;
+    /** Phase offset keeps the sweep from firing on the same tick as the maintenance scan. */
+    private static final long ORPHAN_SWEEP_PHASE_OFFSET = 601L;
+
     /** Bell effect radius. */
     private static final int BELL_EFFECT_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -175,6 +189,14 @@ public final class VillageLumberjackSpawnManager {
             }
         }
 
+        // C2 fix: orphaned-table sweep — runs every 60 s regardless of player proximity.
+        if (now % ORPHAN_SWEEP_INTERVAL_TICKS == ORPHAN_SWEEP_PHASE_OFFSET) {
+            java.util.Set<BlockPos> bellPositions = BellChestMappingState.get(world.getServer()).getBellPositions(world);
+            if (!bellPositions.isEmpty()) {
+                sweepOrphanedTables(world, bellPositions);
+            }
+        }
+
         if (NEXT_RETRY_TICK_BY_BELL.isEmpty()) {
             return;
         }
@@ -187,6 +209,75 @@ public final class VillageLumberjackSpawnManager {
         }
         for (BlockPos bellPos : dueRetryBells) {
             processBell(world, bellPos, ATTEMPT_UNDER_PROVISION_RETRY, now);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // C2 — Orphaned-table sweep (player-proximity-independent conversion)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Scans all known bell positions for orphaned crafting tables — tables that exist in the world
+     * but are neither reserved for a converted worker nor paired to a living lumberjack.
+     *
+     * <p>For each orphaned table, the nearest unemployed villager within
+     * {@link #UNEMPLOYED_SCAN_RANGE} is force-converted (same path as the main spawn manager,
+     * same population-balancer and reservation guards).  This handles the edge case where the
+     * spawn manager placed a table but no player was nearby, so the
+     * {@link UnemployedLumberjackConversionHook} (8-block player-proximity scan) never fired.
+     */
+    private static void sweepOrphanedTables(ServerWorld world, java.util.Set<BlockPos> bellPositions) {
+        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
+
+        for (BlockPos bellPos : bellPositions) {
+            List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
+            if (nearbyTables.isEmpty()) {
+                continue;
+            }
+
+            Box bellBox = new Box(bellPos).expand(BELL_EFFECT_RANGE);
+            List<LumberjackGuardEntity> activeLumberjacks = world.getEntitiesByClass(
+                    LumberjackGuardEntity.class, bellBox, LumberjackGuardEntity::isAlive);
+
+            Set<BlockPos> pairedToLiving = new HashSet<>();
+            for (LumberjackGuardEntity lj : activeLumberjacks) {
+                BlockPos paired = lj.getPairedCraftingTablePos();
+                if (paired != null) {
+                    pairedToLiving.add(paired.toImmutable());
+                }
+            }
+
+            for (BlockPos tablePos : nearbyTables) {
+                if (!world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)) {
+                    continue;
+                }
+                if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+                    continue;
+                }
+                if (pairedToLiving.contains(tablePos)) {
+                    continue;
+                }
+
+                // Table is orphaned — try to claim it with a nearby unemployed villager.
+                VillagerEntity candidate = findNearestUnemployed(world, tablePos);
+                if (candidate == null) {
+                    LOGGER.debug("lumberjack-orphan-sweep bell={} table={} — no unemployed villager within {} blocks",
+                            bellPos.toShortString(), tablePos.toShortString(), UNEMPLOYED_SCAN_RANGE);
+                    continue;
+                }
+
+                if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "orphan-sweep")) {
+                    LOGGER.debug("lumberjack-orphan-sweep bell={} table={} — population balancer denied",
+                            bellPos.toShortString(), tablePos.toShortString());
+                    continue;
+                }
+
+                LOGGER.info("lumberjack-orphan-sweep bell={} table={} — converting orphaned table with villager {}",
+                        bellPos.toShortString(), tablePos.toShortString(), candidate.getUuidAsString());
+                forceConvert(world, candidate, tablePos);
+                // One conversion per bell per sweep to pace ourselves.
+                break;
+            }
         }
     }
 
