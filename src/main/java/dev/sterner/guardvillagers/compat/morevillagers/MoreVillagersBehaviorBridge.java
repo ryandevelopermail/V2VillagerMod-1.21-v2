@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegi
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEnderian;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEngineer;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersFlorist;
+import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersForester;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersHunter;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersMiner;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersNetherian;
@@ -46,6 +47,7 @@ public final class MoreVillagersBehaviorBridge {
         registerProfession("enderian",      MoreVillagersEnderian::new);
         registerProfession("engineer",      MoreVillagersEngineer::new);
         registerProfession("florist",       MoreVillagersFlorist::new);
+        registerProfession("forester",      MoreVillagersForester::new);
         registerProfession("hunter",        MoreVillagersHunter::new);
         registerProfession("miner",         MoreVillagersMiner::new);
     }

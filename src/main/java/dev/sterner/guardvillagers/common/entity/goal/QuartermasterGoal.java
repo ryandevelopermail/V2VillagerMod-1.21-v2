@@ -24,8 +24,10 @@ import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -107,6 +109,9 @@ public class QuartermasterGoal extends Goal {
     private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
     private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
     private static final long BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS = 24_000L;
+    /** Minimum saplings a Forester chest must hold before the QM stops topping it up. */
+    private static final int FORESTER_SAPLING_TOP_UP_THRESHOLD = 8;
+    private static final Identifier FORESTER_PROFESSION_ID = Identifier.of("morevillagers", "forester");
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
             Blocks.SMOKER,
@@ -152,6 +157,8 @@ public class QuartermasterGoal extends Goal {
         if (stack.isIn(ItemTags.PLANKS)) return true;
         // Accept any wool type
         if (stack.isIn(net.minecraft.registry.tag.ItemTags.WOOL)) return true;
+        // Accept saplings (routed to Forester chests)
+        if (stack.isIn(ItemTags.SAPLINGS)) return true;
         // Accept specific bulk construction/farming materials
         net.minecraft.item.Item item = stack.getItem();
         return item == Items.COBBLESTONE
@@ -585,6 +592,22 @@ public class QuartermasterGoal extends Goal {
                     LOGGER.debug("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
                             villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
                 }
+                return true;
+            }
+        }
+
+        // Priority 2d: QM chest has saplings → route to any nearby Forester chest that is running low.
+        // Saplings end up in the QM chest via the surplus-haul whitelist (lumberjack drops, overflow).
+        // The Forester's daily provision goal also produces saplings that may overflow here.
+        Optional<BlockPos> foresterChestNeedingSaplings = findForesterChestNeedingSaplings(world);
+        if (foresterChestNeedingSaplings.isPresent()) {
+            ItemStack bestSaplings = findBestTagItem(world, chestPos, ItemTags.SAPLINGS);
+            if (!bestSaplings.isEmpty()) {
+                sourcePos = chestPos;
+                destPos = foresterChestNeedingSaplings.get();
+                transferStack = bestSaplings.copyWithCount(Math.min(HAUL_AMOUNT, bestSaplings.getCount()));
+                LOGGER.debug("QM {}: routing {} saplings from QM chest to forester at {}",
+                        villager.getUuidAsString(), transferStack.getCount(), destPos.toShortString());
                 return true;
             }
         }
@@ -1069,6 +1092,28 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
     // Scouts
     // -------------------------------------------------------------------------
+
+    /**
+     * Finds a paired Forester chest that is low on saplings, if the QM chest
+     * currently holds any saplings to supply.
+     *
+     * <p>Safe to call when MoreVillagers is not loaded — the profession registry
+     * lookup returns empty and the method returns empty immediately.
+     */
+    private Optional<BlockPos> findForesterChestNeedingSaplings(ServerWorld world) {
+        if (countTagItems(world, chestPos, ItemTags.SAPLINGS) == 0) return Optional.empty();
+        Optional<VillagerProfession> foresterOpt = Registries.VILLAGER_PROFESSION.getOrEmpty(FORESTER_PROFESSION_ID);
+        if (foresterOpt.isEmpty()) return Optional.empty();
+        VillagerProfession foresterProfession = foresterOpt.get();
+        for (JobBlockPairingHelper.CachedVillagerChestPairing pairing : JobBlockPairingHelper.getCachedVillagerChestPairings(world)) {
+            if (pairing.profession() != foresterProfession) continue;
+            if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
+            if (countTagItems(world, pairing.chestPos(), ItemTags.SAPLINGS) < FORESTER_SAPLING_TOP_UP_THRESHOLD) {
+                return Optional.of(pairing.chestPos());
+            }
+        }
+        return Optional.empty();
+    }
 
     private Optional<MasonGuardEntity> findMasonNeedingStone(ServerWorld world) {
         Box box = new Box(jobPos).expand(getScanRange());
