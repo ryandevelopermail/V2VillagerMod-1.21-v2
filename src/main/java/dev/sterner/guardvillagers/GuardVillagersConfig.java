@@ -38,6 +38,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_PROFESSION_SUMMARY_LOG_INTERVAL = 1000;
     public static final int MIN_SHEPHERD_FENCE_BATCH = 1;
     public static final int MAX_SHEPHERD_FENCE_BATCH = 16;
+    public static final int MIN_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS = 16;
+    public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS = 128;
+    public static final int MIN_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 1;
+    public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 32;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -244,6 +248,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int professionalRecipientWideScanRange = 64;
     @Entry
     public static int overflowFallbackQmSearchRadius = 128;
+    @Entry(min=16)
+    public static int quartermasterNaturalVillagePoiScanRadius = 32;
+    @Entry(min=1)
+    public static int quartermasterNaturalVillageChestLocalPoiRadius = 10;
 
     public static void validateClampedRanges() {
         quartermasterScanRange = clamp(quartermasterScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
@@ -255,6 +263,14 @@ public class GuardVillagersConfig extends MidnightConfig {
             professionalRecipientWideScanRange = professionalRecipientScanRange;
         }
         overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
+        quartermasterNaturalVillagePoiScanRadius = clamp(
+                quartermasterNaturalVillagePoiScanRadius,
+                MIN_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS,
+                MAX_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS);
+        quartermasterNaturalVillageChestLocalPoiRadius = clamp(
+                quartermasterNaturalVillageChestLocalPoiRadius,
+                MIN_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS,
+                MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
         masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
         lumberjackTreeScanPerGuardBudgetCap = clamp(
