@@ -29,7 +29,7 @@ import java.util.Set;
 
 /**
  * Once per day the Forester fetches all saplings from their paired chest and
- * plants them at the village outskirts — between {@link #MIN_PLANT_DISTANCE} and
+ * plants them at the village outskirts – between {@link #MIN_PLANT_DISTANCE} and
  * {@link #MAX_PLANT_DISTANCE} blocks from the village anchor (QM chest), with at
  * least {@link #MIN_SAPLING_SPACING} blocks between each planted sapling.
  *
@@ -80,6 +80,9 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private long lastPathRequestTick = Long.MIN_VALUE;
     private boolean needsWorkCheck = false;
 
+    /** Linked provision goal – receives feedback when planting spots are exhausted or succeed. */
+    private ForesterSaplingProvisionGoal linkedProvisionGoal = null;
+
     private enum Stage { IDLE, FETCH_FROM_CHEST, MOVE_TO_SITE, PLANT, RETURN_TO_CHEST, DONE }
 
     public ForesterSaplingPlantingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -99,9 +102,14 @@ public class ForesterSaplingPlantingGoal extends Goal {
         needsWorkCheck = true;
     }
 
-    // -------------------------------------------------------------------------
+    /** Wire the provision goal so this goal can report back planting outcomes. */
+    public void linkProvisionGoal(ForesterSaplingProvisionGoal goal) {
+        this.linkedProvisionGoal = goal;
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Goal lifecycle
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     @Override
     public boolean canStart() {
@@ -127,6 +135,9 @@ public class ForesterSaplingPlantingGoal extends Goal {
         List<BlockPos> targets = findPlantingTargets(world);
         if (targets.isEmpty()) {
             LOGGER.debug("[forester] {} found no valid planting sites", villager.getUuidAsString());
+            if (linkedProvisionGoal != null) {
+                linkedProvisionGoal.reportNoPlantingSpots();
+            }
             return false;
         }
 
@@ -143,7 +154,7 @@ public class ForesterSaplingPlantingGoal extends Goal {
     @Override
     public void start() {
         if (chestPos == null) {
-            // V1 mode: saplings already in inventory — skip fetch step
+            // V1 mode: saplings already in inventory – skip fetch step
             heldSaplingItem = findFirstSaplingInVillagerInventory();
             stage = Stage.MOVE_TO_SITE;
             if (!plantTargets.isEmpty()) moveTo(plantTargets.peek());
@@ -217,6 +228,9 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 if (tryPlantSapling(world, target)) {
                     consumeOneFromVillagerInventory(heldSaplingItem);
                     LOGGER.debug("[forester] {} planted {} at {}", villager.getUuidAsString(), heldSaplingItem, target.toShortString());
+                    if (linkedProvisionGoal != null) {
+                        linkedProvisionGoal.reportPlantingSucceeded();
+                    }
                     // Refresh held item in case this type is now exhausted (e.g. mixed types in inventory)
                     if (!hasSaplingOfTypeInVillagerInventory(heldSaplingItem)) {
                         heldSaplingItem = findFirstSaplingInVillagerInventory();
@@ -259,9 +273,9 @@ public class ForesterSaplingPlantingGoal extends Goal {
         }
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Planting site discovery
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     private List<BlockPos> findPlantingTargets(ServerWorld world) {
         // Determine village center: prefer QM anchor, fall back to job block
@@ -335,9 +349,9 @@ public class ForesterSaplingPlantingGoal extends Goal {
         return true;
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Villager inventory helpers
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     /**
      * Moves all saplings from the chest into the villager's personal inventory.
@@ -459,9 +473,13 @@ public class ForesterSaplingPlantingGoal extends Goal {
         return true;
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Chest access
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
+
+    private Optional<Inventory> getChestInventory() {
+        return getChestInventory((ServerWorld) villager.getWorld());
+    }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
@@ -470,15 +488,15 @@ public class ForesterSaplingPlantingGoal extends Goal {
         return Optional.ofNullable(inv);
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
     // Nav helpers
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------------------
 
     private void moveTo(BlockPos target) {
         if (target == null) return;
         long now = villager.getWorld().getTime();
         boolean shouldPath = !target.equals(currentNavTarget)
-                || villager.getNavigation().isIdle()
+               || villager.getNavigation().isIdle()
                 || now - lastPathRequestTick >= PATH_RETRY_TICKS;
         if (!shouldPath) return;
         villager.getNavigation().startMovingTo(
