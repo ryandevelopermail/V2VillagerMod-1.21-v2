@@ -580,7 +580,15 @@ public class QuartermasterGoal extends Goal {
         }
 
         // qmChestPos is the QM's own paired chest — it doubles as the village bank/hub.
-        if (qmChestPos != null) {
+        // Only enter bootstrap from this non-sticky path when the sweep is NOT already active
+        // (that case was handled above) AND the state machine is in a phase that needs driving
+        // (NOT_STARTED, WAITING_RECHECK, or CONSOLIDATING with remaining queue entries).
+        // Specifically exclude DRAINED_COMPLETE so we never re-enter while sleeping in the
+        // post-drain cooldown — doing so caused the retry counter to double-increment per cycle
+        // and blow past BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES prematurely.
+        if (qmChestPos != null
+                && bootstrapConsolidationState != BootstrapConsolidationState.DRAINED_COMPLETE
+                && !isBootstrapComplete(world)) {
             if (tryPlanBootstrapConsolidationTransfer(world, qmChestPos)) {
                 return true;
             }
@@ -1255,33 +1263,27 @@ public class QuartermasterGoal extends Goal {
             }
             if (!isNaturalVillageChest(world, bellChestPos, candidate)) {
                 filteredNotNatural++;
-                if (LOGGER.isDebugEnabled()) {
-                    String naturalRejectReason = getNaturalVillageChestRejectReason(world, bellChestPos, candidate);
-                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason={}",
-                            villager.getUuidAsString(),
-                            candidate,
-                            naturalRejectReason);
-                }
+                String naturalRejectReason = getNaturalVillageChestRejectReason(world, bellChestPos, candidate);
+                LOGGER.info("QM {} bootstrap candidate={} reject_reason={}",
+                        villager.getUuidAsString(),
+                        candidate.toShortString(),
+                        naturalRejectReason);
                 continue;
             }
             int candidateItemCount = countAllItems(world, candidate);
             if (candidateItemCount <= 0) {
                 filteredEmpty++;
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap candidate={} reject_reason=empty_chest",
-                            villager.getUuidAsString(),
-                            candidate);
-                }
+                LOGGER.info("QM {} bootstrap candidate={} reject_reason=empty_chest",
+                        villager.getUuidAsString(),
+                        candidate.toShortString());
                 continue;
             }
             if (deduplicated.add(candidate)) {
                 discovered.add(candidate);
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap discovered_natural_chest={} items={}",
-                            villager.getUuidAsString(),
-                            candidate,
-                            candidateItemCount);
-                }
+                LOGGER.info("QM {} bootstrap discovered_natural_chest={} items={}",
+                        villager.getUuidAsString(),
+                        candidate.toShortString(),
+                        candidateItemCount);
             }
         }
         discovered.sort(Comparator.comparingDouble(candidate -> candidate.getSquaredDistance(bellChestPos)));
@@ -1309,14 +1311,15 @@ public class QuartermasterGoal extends Goal {
             bootstrapSourceQueue.clear();
             BootstrapDiscoveryResult discovery = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
             bootstrapSourceQueue.addAll(discovery.discovered());
-            if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap discovery: discovered={} filtered_paired={} filtered_not_natural={} filtered_empty={}",
-                        villager.getUuidAsString(),
-                        discovery.discovered().size(),
-                        discovery.filteredPaired(),
-                        discovery.filteredNotNatural(),
-                        discovery.filteredEmpty());
-            }
+            LOGGER.info("QM {} bootstrap discovery run #{}: discovered={} filtered_paired={} filtered_not_natural={} filtered_empty={} (zone_radius={} local_poi_radius={})",
+                    villager.getUuidAsString(),
+                    bootstrapDiscoveryRuns,
+                    discovery.discovered().size(),
+                    discovery.filteredPaired(),
+                    discovery.filteredNotNatural(),
+                    discovery.filteredEmpty(),
+                    getNaturalVillagePoiScanRadius(),
+                    getNaturalVillageChestLocalPoiRadius());
             bootstrapConsolidationState = BootstrapConsolidationState.CONSOLIDATING;
             if (bootstrapSourceQueue.isEmpty()) {
                 bootstrapEmptyDiscoveryRetries++;
@@ -1384,11 +1387,8 @@ public class QuartermasterGoal extends Goal {
                 armPostBootstrapTimers(now);
                 bootstrapConsolidationState = BootstrapConsolidationState.DRAINED_COMPLETE;
                 setBootstrapComplete(world);
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap state_reason=giving_up_no_natural_chests retries={}",
-                            villager.getUuidAsString(),
-                            bootstrapEmptyDiscoveryRetries);
-                }
+                LOGGER.info("QM {} bootstrap: giving up — no natural chests found after {} retries, arming post-bootstrap timers",
+                        villager.getUuidAsString(), bootstrapEmptyDiscoveryRetries);
             } else {
                 nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
                 bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
@@ -1422,10 +1422,8 @@ public class QuartermasterGoal extends Goal {
         // Both were deferred to Long.MAX_VALUE to ensure bootstrap always runs first.
         long now = world.getTime();
         armPostBootstrapTimers(now);
-        if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug("QM {} bootstrap completion_reason={} armed_reclaim_tick={} armed_drain_sweep_tick={}",
-                    villager.getUuidAsString(), reason, nextDailyReclaimTick, nextLumberjackDrainSweepTick);
-        }
+        LOGGER.info("QM {} bootstrap COMPLETE reason={} armed_reclaim_tick={} armed_drain_sweep_tick={} next_recheck_tick={}",
+                villager.getUuidAsString(), reason, nextDailyReclaimTick, nextLumberjackDrainSweepTick, nextBootstrapDiscoveryTick);
     }
 
     private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {

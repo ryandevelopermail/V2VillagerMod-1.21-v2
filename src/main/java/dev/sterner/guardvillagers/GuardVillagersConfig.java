@@ -43,7 +43,7 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MIN_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS = 16;
     public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS = 128;
     public static final int MIN_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 1;
-    public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 32;
+    public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 64;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -265,9 +265,9 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry
     public static int overflowFallbackQmSearchRadius = 128;
     @Entry(min=16)
-    public static int quartermasterNaturalVillagePoiScanRadius = 32;
+    public static int quartermasterNaturalVillagePoiScanRadius = 64;
     @Entry(min=1)
-    public static int quartermasterNaturalVillageChestLocalPoiRadius = 10;
+    public static int quartermasterNaturalVillageChestLocalPoiRadius = 20;
 
     public static void validateClampedRanges() {
         quartermasterScanRange = clamp(quartermasterScanRange, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
