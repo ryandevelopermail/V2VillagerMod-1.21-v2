@@ -111,7 +111,8 @@ public class QuartermasterGoal extends Goal {
     private static final long BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS = 24_000L;
     /** Minimum saplings a Forester chest must hold before the QM stops topping it up. */
     private static final int FORESTER_SAPLING_TOP_UP_THRESHOLD = 8;
-    private static final Identifier FORESTER_PROFESSION_ID = Identifier.of("morevillagers", "forester");
+    // The villager displayed as "Forester" in MoreVillagers has internal profession ID "woodworker"
+    private static final Identifier FORESTER_PROFESSION_ID = Identifier.of("morevillagers", "woodworker");
     private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
             Blocks.BLAST_FURNACE,
             Blocks.SMOKER,
