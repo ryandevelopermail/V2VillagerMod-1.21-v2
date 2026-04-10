@@ -1305,7 +1305,7 @@ public class QuartermasterGoal extends Goal {
 
         if (bootstrapConsolidationState == BootstrapConsolidationState.NOT_STARTED
                 || bootstrapConsolidationState == BootstrapConsolidationState.WAITING_RECHECK
-                || (bootstrapSourceQueue.isEmpty() && now >= nextBootstrapDiscoveryTick)) {
+                || (!discoveredBootstrapSourceAtLeastOnce && bootstrapSourceQueue.isEmpty() && now >= nextBootstrapDiscoveryTick)) {
             bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
             bootstrapDiscoveryRuns++;
             bootstrapSourceQueue.clear();

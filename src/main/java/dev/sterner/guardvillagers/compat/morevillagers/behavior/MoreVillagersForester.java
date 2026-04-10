@@ -54,9 +54,17 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
+        boolean isJobBlock = isForesterJobBlock(world, jobPos);
+        boolean isAlive = villager.isAlive();
+        boolean inRange = jobPos.isWithinDistance(chestPos, CHEST_PAIR_RANGE);
+        LOGGER.info("[morevillagers-compat] Forester {} onChestPaired called: jobPos={} chestPos={} isJobBlock={} isAlive={} inRange={} (range={})",
+                villager.getUuidAsString(), jobPos.toShortString(), chestPos.toShortString(),
+                isJobBlock, isAlive, inRange, CHEST_PAIR_RANGE);
         if (!checkPairingPreconditions(world, villager, jobPos, chestPos,
                 (w, p) -> isForesterJobBlock(w, p),
                 () -> clearChestListener(CHEST_LISTENERS, villager))) {
+            LOGGER.warn("[morevillagers-compat] Forester {} onChestPaired REJECTED by preconditions (isJobBlock={} isAlive={} inRange={})",
+                    villager.getUuidAsString(), isJobBlock, isAlive, inRange);
             return;
         }
 
@@ -99,10 +107,16 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
-        if (!isForesterJobBlock(world, jobPos)) return;
+        boolean isJobBlock = isForesterJobBlock(world, jobPos);
+        boolean hasV2 = PROVISION_GOALS.containsKey(villager) || PLANTING_GOALS.containsKey(villager);
+        LOGGER.info("[morevillagers-compat] Forester {} onJobSiteReady called: jobPos={} blockAt={} isJobBlock={} hasV2Goals={}",
+                villager.getUuidAsString(), jobPos.toShortString(),
+                net.minecraft.registry.Registries.BLOCK.getId(world.getBlockState(jobPos).getBlock()),
+                isJobBlock, hasV2);
+        if (!isJobBlock) return;
 
         // Skip if this villager already has v2 (chest-paired) goals – those are richer and take precedence
-        if (PROVISION_GOALS.containsKey(villager) || PLANTING_GOALS.containsKey(villager)) return;
+        if (hasV2) return;
 
         LOGGER.info("[morevillagers-compat] Forester {} registered v1 (chestless) planting goals for job site {}",
                 villager.getUuidAsString(), jobPos.toShortString());
