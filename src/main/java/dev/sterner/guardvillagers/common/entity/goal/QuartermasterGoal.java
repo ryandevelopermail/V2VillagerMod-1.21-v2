@@ -1323,13 +1323,11 @@ public class QuartermasterGoal extends Goal {
                 nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
                 bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
                 bootstrapSweepActive = false;
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
-                            villager.getUuidAsString(),
-                            bootstrapEmptyDiscoveryRetries,
-                            BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
-                            nextBootstrapDiscoveryTick);
-                }
+                LOGGER.info("QM {} bootstrap: no natural village chests found (retry={}/{}, next_check_in_ticks={})",
+                        villager.getUuidAsString(),
+                        bootstrapEmptyDiscoveryRetries,
+                        BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
+                        BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS);
                 return false;
             }
             // Found chests — mark sweep active so we hold priority over all other goals
@@ -1337,8 +1335,10 @@ public class QuartermasterGoal extends Goal {
             bootstrapSweepActive = true;
             discoveredBootstrapSourceAtLeastOnce = true;
             bootstrapEmptyDiscoveryRetries = 0;
-            LOGGER.info("QM {}: bootstrap sweep started — will visit {} natural chest(s) before distributing",
-                    villager.getUuidAsString(), bootstrapSourceQueue.size());
+            LOGGER.info("QM {}: bootstrap sweep started — identified {} natural chest(s) to drain: {}",
+                    villager.getUuidAsString(),
+                    bootstrapSourceQueue.size(),
+                    bootstrapSourceQueue.stream().map(BlockPos::toShortString).toList());
         }
 
         // Advance through the queue: skip nulls and already-empty chests,
@@ -1362,11 +1362,14 @@ public class QuartermasterGoal extends Goal {
             // Do NOT pop the source from the queue yet — it gets popped next cycle
             // once takePayloadFromInventory has drained it (countAllItems will be 0 then).
             bootstrapSourceQueue.pollFirst();
+            int itemsInSource = countAllItems(world, source);
             planFullChestHaul(source, bellChestPos);
-            if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap hauling full chest source={} dest={}",
-                        villager.getUuidAsString(), source, bellChestPos);
-            }
+            LOGGER.info("QM {}: bootstrap TARGETING chest={} items_to_load={} dest={} remaining_in_queue={}",
+                    villager.getUuidAsString(),
+                    source.toShortString(),
+                    itemsInSource,
+                    bellChestPos.toShortString(),
+                    bootstrapSourceQueue.size());
             return true;
         }
 
@@ -1792,8 +1795,20 @@ public class QuartermasterGoal extends Goal {
         }
         if (!transferPayload.isEmpty()) {
             inventory.markDirty();
+            int totalLoaded = transferPayload.stream().mapToInt(ItemStack::getCount).sum();
+            LOGGER.info("QM {}: LOADED {} total items from {} ({} stacks, mode={}): {}",
+                    villager.getUuidAsString(),
+                    totalLoaded,
+                    pos.toShortString(),
+                    transferPayload.size(),
+                    transferMode,
+                    transferPayload.stream()
+                            .map(s -> s.getCount() + "x" + s.getItem())
+                            .toList());
             return true;
         }
+        LOGGER.info("QM {}: LOAD attempted from {} but chest was empty (mode={})",
+                villager.getUuidAsString(), pos.toShortString(), transferMode);
         return false;
     }
 
@@ -1849,6 +1864,17 @@ public class QuartermasterGoal extends Goal {
 
         inventory.markDirty();
 
+        int totalDelivered = transferPayload.stream().mapToInt(ItemStack::getCount).sum();
+        LOGGER.info("QM {}: UNLOADED {} total items into {} ({} stacks, mode={}): {}",
+                villager.getUuidAsString(),
+                totalDelivered,
+                pos.toShortString(),
+                transferPayload.size(),
+                transferMode,
+                transferPayload.stream()
+                        .map(s -> s.getCount() + "x" + s.getItem())
+                        .toList());
+
         if (activeLumberjackDrainCycle != null && chestPos.equals(pos)) {
             activeLumberjackDrainCycle.recordVisitedSource(sourcePos);
             // Count each stack delivered as one moved-stack event.
@@ -1861,7 +1887,6 @@ public class QuartermasterGoal extends Goal {
         }
 
         transferPayload.clear();
-        LOGGER.debug("QM {}: delivered to {}", villager.getUuidAsString(), pos.toShortString());
     }
 
     /** Counts all items matching a tag across all slots in the chest at {@code pos}. */

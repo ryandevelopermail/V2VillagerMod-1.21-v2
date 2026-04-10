@@ -202,6 +202,7 @@ public class ForesterTreeDropPickupGoal extends Goal {
         if (entity == null || !entity.isAlive()) return;
         ItemStack stack = entity.getStack().copy();
         if (stack.isEmpty()) return;
+        ItemStack originalStack = stack.copy(); // snapshot before we mutate
         Inventory villagerInv = villager.getInventory();
         // Try to merge with existing stack
         for (int i = 0; i < villagerInv.size() && !stack.isEmpty(); i++) {
@@ -222,10 +223,20 @@ public class ForesterTreeDropPickupGoal extends Goal {
         }
         if (stack.isEmpty()) {
             entity.discard();
+            boolean isSapling = originalStack.isIn(net.minecraft.registry.tag.ItemTags.SAPLINGS);
+            LOGGER.info("[forester-pickup] {} ABSORBED {} x {} ({})",
+                    villager.getUuidAsString(),
+                    originalStack.getCount(),
+                    originalStack.getItem(),
+                    isSapling ? "SAPLING" : "tree-drop");
         } else {
             entity.setStack(stack);
+            LOGGER.info("[forester-pickup] {} PARTIAL absorb of {} — {} taken, {} left on ground",
+                    villager.getUuidAsString(),
+                    originalStack.getItem(),
+                    originalStack.getCount() - stack.getCount(),
+                    stack.getCount());
         }
-        LOGGER.debug("[forester] {} absorbed tree drop", villager.getUuidAsString());
     }
 
     private boolean hasInventorySpace() {
@@ -242,6 +253,15 @@ public class ForesterTreeDropPickupGoal extends Goal {
 
     private void dumpVillagerInventoryToChest(Inventory chestInv) {
         Inventory villagerInv = villager.getInventory();
+        // Tally what we're about to deposit before touching anything
+        int saplingsBefore = 0;
+        int otherBefore = 0;
+        for (int i = 0; i < villagerInv.size(); i++) {
+            ItemStack s = villagerInv.getStack(i);
+            if (s.isEmpty()) continue;
+            if (s.isIn(net.minecraft.registry.tag.ItemTags.SAPLINGS)) saplingsBefore += s.getCount();
+            else otherBefore += s.getCount();
+        }
         for (int i = 0; i < villagerInv.size(); i++) {
             ItemStack stack = villagerInv.getStack(i);
             if (stack.isEmpty()) continue;
@@ -270,6 +290,8 @@ public class ForesterTreeDropPickupGoal extends Goal {
                 villagerInv.setStack(i, stack);
             }
         }
+        LOGGER.info("[forester-pickup] {} DEPOSITED into chest at {} — saplings={} other={}",
+                villager.getUuidAsString(), chestPos.toShortString(), saplingsBefore, otherBefore);
     }
 
     // -------------------------------------------------------------------------

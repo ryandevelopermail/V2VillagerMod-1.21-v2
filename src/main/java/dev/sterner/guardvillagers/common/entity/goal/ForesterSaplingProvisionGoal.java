@@ -86,7 +86,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
             // Suppress provisioning tomorrow by advancing lastProvisionDay to current day
             long currentDay = world.getTimeOfDay() / 24000L;
             lastProvisionDay = currentDay;
-            LOGGER.debug("[forester] {} suppressing provisioning (no spots {} days in a row)",
+            LOGGER.info("[forester-provision] {} suppressing next provision — no planting spots found {} day(s) in a row",
                     villager.getUuidAsString(), consecutiveNullDays);
         }
     }
@@ -110,21 +110,54 @@ public class ForesterSaplingProvisionGoal extends Goal {
         if (jobPos == null) return false;
 
         long currentDay = world.getTimeOfDay() / 24000L;
-        if (currentDay == lastProvisionDay) return false;
+        if (currentDay == lastProvisionDay) {
+            // Log a countdown every 1200 ticks (~1 min) so you can see when the next provision is due.
+            long tickOfDay = world.getTimeOfDay() % 24000L;
+            if (tickOfDay % 1200 == 0) {
+                long ticksUntilNextDay = 24000L - tickOfDay;
+                LOGGER.info("[forester-provision] {} waiting for next day (day={} ticks_until_next_provision~={})",
+                        villager.getUuidAsString(), currentDay, ticksUntilNextDay);
+            }
+            return false;
+        }
 
         if (chestPos == null) {
             // V1 mode: only provision if villager has room and is under the cap
             int currentSaplings = countSaplingsInInventory(villager.getInventory());
-            if (currentSaplings >= V1_SAPLING_CAP) return false;
-            return hasEmptySlot(villager.getInventory());
+            if (currentSaplings >= V1_SAPLING_CAP) {
+                LOGGER.info("[forester-provision] {} skipping — villager inventory already at cap ({}/{})",
+                        villager.getUuidAsString(), currentSaplings, V1_SAPLING_CAP);
+                return false;
+            }
+            if (!hasEmptySlot(villager.getInventory())) {
+                LOGGER.info("[forester-provision] {} skipping — villager inventory full (no empty slots)",
+                        villager.getUuidAsString());
+                return false;
+            }
+            return true;
         }
 
         // V2 mode: only provision if chest exists, has room, and is under the cap
         Optional<Inventory> inv = getChestInventory(world);
-        if (inv.isEmpty()) return false;
+        if (inv.isEmpty()) {
+            LOGGER.info("[forester-provision] {} skipping — paired chest at {} not found",
+                    villager.getUuidAsString(), chestPos.toShortString());
+            return false;
+        }
         int chestSaplings = countSaplingsInInventory(inv.get());
-        if (chestSaplings >= V1_SAPLING_CAP) return false;
-        return hasEmptySlot(inv.get());
+        if (chestSaplings >= V1_SAPLING_CAP) {
+            LOGGER.info("[forester-provision] {} skipping — chest already at cap ({}/{} saplings) at {}",
+                    villager.getUuidAsString(), chestSaplings, V1_SAPLING_CAP, chestPos.toShortString());
+            return false;
+        }
+        if (!hasEmptySlot(inv.get())) {
+            LOGGER.info("[forester-provision] {} skipping — chest full (no empty slots) at {}",
+                    villager.getUuidAsString(), chestPos.toShortString());
+            return false;
+        }
+        LOGGER.info("[forester-provision] {} READY to provision — chest has {}/{} saplings, day={}",
+                villager.getUuidAsString(), chestSaplings, V1_SAPLING_CAP, currentDay);
+        return true;
     }
 
     @Override
@@ -173,7 +206,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
                 if (chestPos == null) {
                     // V1 mode: place saplings directly into villager inventory
                     insertIntoInventory(villager.getInventory(), toInsert);
-                    LOGGER.debug("[forester] {} provisioned {}x {} into own inventory",
+                    LOGGER.info("[forester-provision] {} INSERTED {}x {} into own inventory (V1 mode)",
                             villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling);
                 } else {
                     Optional<Inventory> invOpt = getChestInventory(world);
@@ -183,7 +216,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
                         return;
                     }
                     insertIntoInventory(invOpt.get(), toInsert);
-                    LOGGER.debug("[forester] {} provisioned {}x {} into chest at {}",
+                    LOGGER.info("[forester-provision] {} INSERTED {}x {} into paired chest at {}",
                             villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling, chestPos.toShortString());
                 }
                 lastProvisionDay = world.getTimeOfDay() / 24000L;

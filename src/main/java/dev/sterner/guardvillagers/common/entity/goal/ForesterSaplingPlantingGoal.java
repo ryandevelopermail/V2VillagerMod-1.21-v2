@@ -127,29 +127,58 @@ public class ForesterSaplingPlantingGoal extends Goal {
         if (jobPos == null) return false;
 
         long currentDay = world.getTimeOfDay() / 24000L;
-        if (currentDay == lastPlantingDay && !needsWorkCheck) return false;
+        if (currentDay == lastPlantingDay && !needsWorkCheck) {
+            // Log a countdown every 1200 ticks (~1 min) so you can see when planting will resume.
+            long tickOfDay = world.getTimeOfDay() % 24000L;
+            if (tickOfDay % 1200 == 0) {
+                long ticksUntilNextDay = 24000L - tickOfDay;
+                LOGGER.info("[forester-planting] {} already planted today (day={}) — next planting in ~{} ticks",
+                        villager.getUuidAsString(), currentDay, ticksUntilNextDay);
+            }
+            return false;
+        }
         needsWorkCheck = false;
 
         if (chestPos == null) {
             // V1 mode: saplings must already be in the villager's inventory (placed by provision goal)
-            if (!hasSaplingInVillagerInventory()) return false;
+            if (!hasSaplingInVillagerInventory()) {
+                LOGGER.info("[forester-planting] {} V1 mode — no saplings in villager inventory, skipping",
+                        villager.getUuidAsString());
+                return false;
+            }
         } else {
             // V2 mode: fetch from chest
             Optional<Inventory> invOpt = getChestInventory(world);
-            if (invOpt.isEmpty()) return false;
-            if (countSaplingsInInventory(invOpt.get()) == 0) return false;
+            if (invOpt.isEmpty()) {
+                LOGGER.info("[forester-planting] {} chest at {} not found, skipping",
+                        villager.getUuidAsString(), chestPos.toShortString());
+                return false;
+            }
+            int saplingCount = countSaplingsInInventory(invOpt.get());
+            if (saplingCount == 0) {
+                LOGGER.info("[forester-planting] {} chest at {} has 0 saplings — nothing to plant",
+                        villager.getUuidAsString(), chestPos.toShortString());
+                return false;
+            }
+            LOGGER.info("[forester-planting] {} DETECTED {} sapling(s) in paired chest at {}",
+                    villager.getUuidAsString(), saplingCount, chestPos.toShortString());
         }
 
         // Need at least one valid planting spot
         List<BlockPos> targets = findPlantingTargets(world);
         if (targets.isEmpty()) {
-            LOGGER.debug("[forester] {} found no valid planting sites", villager.getUuidAsString());
+            LOGGER.info("[forester-planting] {} found no valid planting sites (checked ring {}–{} blocks from anchor)",
+                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE);
             if (linkedProvisionGoal != null) {
                 linkedProvisionGoal.reportNoPlantingSpots();
             }
             return false;
         }
 
+        LOGGER.info("[forester-planting] {} found {} valid planting site(s): {}",
+                villager.getUuidAsString(),
+                targets.size(),
+                targets.stream().map(BlockPos::toShortString).toList());
         plantTargets.clear();
         plantTargets.addAll(targets);
         return true;
@@ -236,7 +265,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 }
                 if (tryPlantSapling(world, target)) {
                     consumeOneFromVillagerInventory(heldSaplingItem);
-                    LOGGER.debug("[forester] {} planted {} at {}", villager.getUuidAsString(), heldSaplingItem, target.toShortString());
+                    LOGGER.info("[forester-planting] {} PLANTED {} at {} (remaining targets={})",
+                            villager.getUuidAsString(), heldSaplingItem, target.toShortString(), plantTargets.size());
                     if (linkedProvisionGoal != null) {
                         linkedProvisionGoal.reportPlantingSucceeded();
                     }
@@ -274,6 +304,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
             }
             case DONE -> {
                 lastPlantingDay = world.getTimeOfDay() / 24000L;
+                LOGGER.info("[forester-planting] {} planting run COMPLETE for day={} — next planting in ~{} ticks",
+                        villager.getUuidAsString(), lastPlantingDay, 24000L - (world.getTimeOfDay() % 24000L));
                 heldSaplingItem = null;
                 plantTargets.clear();
                 stage = Stage.IDLE;
@@ -368,6 +400,7 @@ public class ForesterSaplingPlantingGoal extends Goal {
      * Sets {@link #heldSaplingItem} to the first sapling type encountered.
      */
     private void takeSaplingsFromChest(ServerWorld world, Inventory chestInv) {
+        int beforeCount = countSaplingsInInventory(chestInv);
         Inventory villagerInv = villager.getInventory();
         for (int i = 0; i < chestInv.size() && !isVillagerInventoryFull(villagerInv); i++) {
             ItemStack stack = chestInv.getStack(i);
@@ -397,6 +430,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 break;
             }
         }
+        int afterCount = countSaplingsInInventory(chestInv);
+        int fetched = beforeCount - afterCount;
+        LOGGER.info("[forester-planting] {} FETCHED {} sapling(s) from chest (chest had {}, now has {}, holding={})",
+                villager.getUuidAsString(), fetched, beforeCount, afterCount, heldSaplingItem);
     }
 
     private void depositAllSaplingsFromVillager(ServerWorld world, Inventory chestInv) {
