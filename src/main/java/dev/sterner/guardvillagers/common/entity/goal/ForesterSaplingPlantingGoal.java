@@ -51,8 +51,17 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final int SAPLINGS_PER_DAY = 4;
     /** Radius of the volume scanned for planting candidates. */
     private static final int PLANT_SCAN_RADIUS = 80;
-    /** Maximum candidates evaluated per canStart() to avoid tick stalls. */
-    private static final int SCAN_BUDGET = 256;
+    /**
+     * Maximum block positions evaluated per canStart() to avoid tick stalls.
+     *
+     * <p>The scan iterates a 160×16×160 box (~409K positions) but filters by
+     * horizontal distance band (16–64 blocks). A budget of 256 was far too low —
+     * the iterator starts in the bounding-box corner and the first ~hundreds of
+     * positions all fail the MIN_PLANT_DISTANCE check before we ever reach the
+     * valid ring. Raised to 8192 so the scan reliably reaches valid candidates.
+     * This goal fires at most once per day so the cost is negligible.
+     */
+    private static final int SCAN_BUDGET = 8192;
     /** Y range above/below the anchor to scan. */
     private static final int SCAN_Y_RANGE = 8;
 
@@ -290,10 +299,11 @@ public class ForesterSaplingPlantingGoal extends Goal {
         List<BlockPos> committed = new ArrayList<>();
 
         BlockPos.Mutable mut = new BlockPos.Mutable();
-        // Scan a bounding box, then filter by distance band
+        // Scan a bounding box bounded by MAX_PLANT_DISTANCE (not the wider PLANT_SCAN_RADIUS)
+        // so we don't waste budget iterating positions that are geometrically too far away.
         for (BlockPos candidate : BlockPos.iterate(
-                center.add(-PLANT_SCAN_RADIUS, -SCAN_Y_RANGE, -PLANT_SCAN_RADIUS),
-                center.add(PLANT_SCAN_RADIUS, SCAN_Y_RANGE, PLANT_SCAN_RADIUS))) {
+                center.add(-MAX_PLANT_DISTANCE, -SCAN_Y_RANGE, -MAX_PLANT_DISTANCE),
+                center.add(MAX_PLANT_DISTANCE, SCAN_Y_RANGE, MAX_PLANT_DISTANCE))) {
             if (checked >= SCAN_BUDGET) break;
             checked++;
 
