@@ -231,8 +231,15 @@ public class QuartermasterGoal extends Goal {
 
     private long nextCheckTick = 0L;
     private long nextDemandQueueRebuildTick = 0L;
-    private long nextDailyReclaimTick = 0L;
-    private long nextLumberjackDrainSweepTick = 0L;
+    /**
+     * Deferred until bootstrap completes — set to MAX_VALUE so the first reclaim never
+     * fires before the QM has finished draining natural village chests.
+     */
+    private long nextDailyReclaimTick = Long.MAX_VALUE;
+    /**
+     * Deferred until bootstrap completes — same reasoning as nextDailyReclaimTick.
+     */
+    private long nextLumberjackDrainSweepTick = Long.MAX_VALUE;
     private long nextStructuralCheckTick = 0L;
     private Stage stage = Stage.IDLE;
     private boolean anchorRegistered = false;
@@ -1330,17 +1337,38 @@ public class QuartermasterGoal extends Goal {
         if (discoveredBootstrapSourceAtLeastOnce) {
             completeBootstrap(world, "drained_complete", BootstrapConsolidationState.DRAINED_COMPLETE, now + BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS);
         } else if (now >= nextBootstrapDiscoveryTick) {
-            nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
-            bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
-            if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
-                        villager.getUuidAsString(),
-                        bootstrapEmptyDiscoveryRetries,
-                        BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
-                        nextBootstrapDiscoveryTick);
+            if (bootstrapEmptyDiscoveryRetries >= BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES) {
+                // Village has no natural chests after exhausting retries — arm timers and move on.
+                armPostBootstrapTimers(now);
+                bootstrapConsolidationState = BootstrapConsolidationState.DRAINED_COMPLETE;
+                setBootstrapComplete(world);
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap state_reason=giving_up_no_natural_chests retries={}",
+                            villager.getUuidAsString(),
+                            bootstrapEmptyDiscoveryRetries);
+                }
+            } else {
+                nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
+                bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
+                            villager.getUuidAsString(),
+                            bootstrapEmptyDiscoveryRetries,
+                            BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES,
+                            nextBootstrapDiscoveryTick);
+                }
             }
         }
         return false;
+    }
+
+    private void armPostBootstrapTimers(long now) {
+        if (nextDailyReclaimTick == Long.MAX_VALUE) {
+            nextDailyReclaimTick = now + DAILY_RECLAIM_INTERVAL_TICKS;
+        }
+        if (nextLumberjackDrainSweepTick == Long.MAX_VALUE) {
+            nextLumberjackDrainSweepTick = now + getLumberjackDrainSweepIntervalTicks();
+        }
     }
 
     private void completeBootstrap(ServerWorld world, String reason, BootstrapConsolidationState completionState, long nextRecheckTick) {
@@ -1348,8 +1376,13 @@ public class QuartermasterGoal extends Goal {
         bootstrapSourceQueue.clear();
         nextBootstrapDiscoveryTick = Math.max(nextBootstrapDiscoveryTick, nextRecheckTick);
         setBootstrapComplete(world);
+        // Arm the reclaim and drain-sweep timers now that bootstrap is done.
+        // Both were deferred to Long.MAX_VALUE to ensure bootstrap always runs first.
+        long now = world.getTime();
+        armPostBootstrapTimers(now);
         if (LOGGER.isDebugEnabled()) {
-            LOGGER.debug("QM {} bootstrap completion_reason={}", villager.getUuidAsString(), reason);
+            LOGGER.debug("QM {} bootstrap completion_reason={} armed_reclaim_tick={} armed_drain_sweep_tick={}",
+                    villager.getUuidAsString(), reason, nextDailyReclaimTick, nextLumberjackDrainSweepTick);
         }
     }
 
