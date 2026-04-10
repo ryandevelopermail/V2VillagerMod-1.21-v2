@@ -107,8 +107,20 @@ public final class JobBlockPairingHelper {
             return;
         }
 
-        findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE)
-                .forEach(villager -> tryPlayPairingAnimation(world, villager, placedPos));
+        Collection<VillagerEntity> nearby = findEmployedVillagersWithJobSiteNear(world, placedPos, JOB_BLOCK_PAIRING_RANGE);
+        LOGGER.info("[pairing] chest/barrel placed at {} — found {} employed villager(s) with job site within {} blocks",
+                placedPos.toShortString(), nearby.size(), JOB_BLOCK_PAIRING_RANGE);
+        nearby.forEach(villager -> {
+            VillagerProfession profession = villager.getVillagerData().getProfession();
+            Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            boolean hasBehavior = VillagerProfessionBehaviorRegistry.getBehavior(profession).isPresent();
+            LOGGER.info("[pairing]   villager={} profession={} jobSite={} hasBehavior={}",
+                    villager.getUuidAsString(),
+                    Registries.VILLAGER_PROFESSION.getId(profession),
+                    jobSite.map(g -> g.pos().toShortString()).orElse("none"),
+                    hasBehavior);
+            tryPlayPairingAnimation(world, villager, placedPos);
+        });
         VillagerConversionCandidateIndex.markCandidatesNear(world, placedPos, NEARBY_VILLAGER_SCAN_RANGE);
         ProfessionDefinitions.runConversionHooks(world);
     }
@@ -171,7 +183,7 @@ public final class JobBlockPairingHelper {
         }
 
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, globalPos.pos())) {
-            LOGGER.debug("pairing animation suppressed (reserved): villager={} jobSite={} trigger={}",
+            LOGGER.info("[pairing] animation suppressed (reserved for converted worker): villager={} jobSite={} trigger={}",
                     villager.getUuidAsString(),
                     globalPos.pos().toShortString(),
                     placedPos.toShortString());
@@ -182,6 +194,9 @@ public final class JobBlockPairingHelper {
             playPairingAnimation(world, placedPos, villager, globalPos.pos());
             cacheVillagerChestPairing(world, villager, globalPos.pos(), placedPos);
             VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, globalPos.pos(), placedPos);
+        } else {
+            LOGGER.info("[pairing] jobSite={} NOT within {} blocks of placed={} — no notify",
+                    globalPos.pos().toShortString(), JOB_BLOCK_PAIRING_RANGE, placedPos.toShortString());
         }
     }
 
@@ -306,9 +321,18 @@ public final class JobBlockPairingHelper {
         }
 
         BlockPos jobPos = globalPos.pos();
+        VillagerProfession profession = villager.getVillagerData().getProfession();
+        boolean hasBehavior = VillagerProfessionBehaviorRegistry.getBehavior(profession).isPresent();
         VillagerProfessionBehaviorRegistry.ensureUniversalJobBlockGoal(villager, jobPos);
         // Exclude jobPos itself so that a fisherman's barrel job block doesn't self-match as its chest.
         Optional<BlockPos> nearbyChest = findNearbyChest(world, jobPos, jobPos);
+        LOGGER.info("[pairing] refreshVillagerPairings: villager={} profession={} jobPos={} blockAtJob={} hasBehavior={} nearbyChest={}",
+                villager.getUuidAsString(),
+                Registries.VILLAGER_PROFESSION.getId(profession),
+                jobPos.toShortString(),
+                Registries.BLOCK.getId(world.getBlockState(jobPos).getBlock()),
+                hasBehavior,
+                nearbyChest.map(BlockPos::toShortString).orElse("none"));
         nearbyChest.ifPresentOrElse(chestPos -> {
                     cacheVillagerChestPairing(world, villager, jobPos, chestPos);
                     VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos);
@@ -324,7 +348,6 @@ public final class JobBlockPairingHelper {
             craftingTablePos.ifPresent(pos -> VillagerProfessionBehaviorRegistry.notifyCraftingTablePaired(world, villager, jobPos, nearbyChest.get(), pos));
         }
 
-        VillagerProfession profession = villager.getVillagerData().getProfession();
         if (profession == VillagerProfession.FARMER || profession == VillagerProfession.SHEPHERD) {
             // Use the cached banner list instead of the raw 37×37-chunk scan to avoid
             // thousands of chunk lookups per villager during world load.
