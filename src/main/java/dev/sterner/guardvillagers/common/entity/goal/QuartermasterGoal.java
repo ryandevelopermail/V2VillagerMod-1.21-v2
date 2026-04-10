@@ -251,7 +251,15 @@ public class QuartermasterGoal extends Goal {
     // Current active transfer
     private BlockPos sourcePos = null;
     private BlockPos destPos = null;
-    private ItemStack transferStack = ItemStack.EMPTY;
+    /**
+     * All stacks the QM is carrying on the current haul trip.
+     * Populated by planning — either a full chest-drain (bootstrap, surplus, reclaim)
+     * or a precisely-sized single-item delivery (demand queue, targeted top-ups).
+     * Drained into the destination chest by {@link #insertPayloadToInventory}.
+     */
+    private final List<ItemStack> transferPayload = new ArrayList<>();
+    /** How {@link #takePayloadFromInventory} should drain the source chest. */
+    private TransferMode transferMode = TransferMode.SINGLE_STACK;
     private final List<BlockPos> cachedSurplusCandidates = new ArrayList<>();
     private final List<BlockPos> rebuildingSurplusCandidates = new ArrayList<>();
     private int surplusCandidateCursor = 0;
@@ -268,6 +276,12 @@ public class QuartermasterGoal extends Goal {
     private boolean discoveredBootstrapSourceAtLeastOnce = false;
     private boolean demandQueueDirty = true;
     private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
+    /**
+     * True while the bootstrap sweep is in progress. When set, {@link #tryPlanTransfer}
+     * checks bootstrap FIRST — before lumberjack drain, reclaim, and demand queue —
+     * so every discovered natural chest is visited before the QM starts distributing.
+     */
+    private boolean bootstrapSweepActive = false;
     private final Deque<TransferLeg> lumberjackDrainQueue = new ArrayDeque<>();
     private LumberjackDrainCycleMetrics activeLumberjackDrainCycle = null;
 
@@ -397,7 +411,8 @@ public class QuartermasterGoal extends Goal {
         stage = Stage.IDLE;
         sourcePos = null;
         destPos = null;
-        transferStack = ItemStack.EMPTY;
+        transferPayload.clear();
+        transferMode = TransferMode.SINGLE_STACK;
     }
 
     @Override
@@ -428,7 +443,7 @@ public class QuartermasterGoal extends Goal {
                 }
             }
             case TAKE_FROM_SOURCE -> {
-                if (!takeFromInventory(world, sourcePos)) {
+                if (!takePayloadFromInventory(world, sourcePos)) {
                     stage = Stage.DONE;
                     return;
                 }
@@ -443,7 +458,7 @@ public class QuartermasterGoal extends Goal {
                 }
             }
             case INSERT_TO_DEST -> {
-                insertToInventory(world, destPos);
+                insertPayloadToInventory(world, destPos);
                 stage = Stage.DONE;
             }
             case DONE -> stage = Stage.IDLE;
@@ -496,10 +511,64 @@ public class QuartermasterGoal extends Goal {
     }
 
     // -------------------------------------------------------------------------
+    // Transfer planning helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Plans a full-chest haul: the QM will walk to {@code source}, drain <em>everything</em>
+     * from it, then walk to {@code dest} and deposit the lot.
+     * The payload is intentionally left empty here; {@link #takePayloadFromInventory}
+     * fills it from the live chest contents at pickup time so we don't snapshot stale data.
+     * Used during bootstrap consolidation sweeps.
+     */
+    private void planFullChestHaul(BlockPos source, BlockPos dest) {
+        sourcePos = source;
+        destPos = dest;
+        transferPayload.clear();
+        transferMode = TransferMode.FULL_CHEST;
+    }
+
+    /**
+     * Plans a whitelisted full-chest haul: the QM drains all {@link #SURPLUS_HAUL_WHITELIST}
+     * items from {@code source} in one trip.  Used for Priority-3 surplus redistribution.
+     */
+    private void planWhitelistedChestHaul(BlockPos source, BlockPos dest) {
+        sourcePos = source;
+        destPos = dest;
+        transferPayload.clear();
+        transferMode = TransferMode.WHITELISTED_CHEST;
+    }
+
+    /**
+     * Plans a precise single-stack delivery.
+     * Used by demand-queue entries and targeted top-up transfers where the amount
+     * has been carefully computed to avoid overfilling a profession chest.
+     */
+    private void planSingleStackHaul(BlockPos source, BlockPos dest, ItemStack stack) {
+        sourcePos = source;
+        destPos = dest;
+        transferPayload.clear();
+        if (!stack.isEmpty()) transferPayload.add(stack.copy());
+        transferMode = TransferMode.SINGLE_STACK;
+    }
+
+    // -------------------------------------------------------------------------
     // Transfer planning
     // -------------------------------------------------------------------------
 
     private boolean tryPlanTransfer(ServerWorld world) {
+        BlockPos qmChestPos = resolveBellChestPos(world);
+
+        // Bootstrap is sticky: once it starts visiting chests it takes exclusive priority
+        // until every discovered natural village chest has been drained. This ensures the
+        // QM visits ALL chests before switching to distribution mode.
+        if (bootstrapSweepActive) {
+            if (qmChestPos != null && tryPlanBootstrapConsolidationTransfer(world, qmChestPos)) {
+                return true;
+            }
+            // Sweep ended (queue drained or completed) — fall through to normal priorities
+        }
+
         if (tryPlanActiveLumberjackDrainTransfer()) {
             return true;
         }
@@ -511,8 +580,6 @@ public class QuartermasterGoal extends Goal {
         }
 
         // qmChestPos is the QM's own paired chest — it doubles as the village bank/hub.
-        // (Previously misnamed bellChestPos; there is no separate "bell chest".)
-        BlockPos qmChestPos = resolveBellChestPos(world);
         if (qmChestPos != null) {
             if (tryPlanBootstrapConsolidationTransfer(world, qmChestPos)) {
                 return true;
@@ -529,58 +596,44 @@ public class QuartermasterGoal extends Goal {
         if (masonNeedingStone.isPresent() && qmChestPos != null) {
             int stoneInQm = countItem(world, qmChestPos, Items.COBBLESTONE);
             if (stoneInQm > 0) {
-                sourcePos = qmChestPos;
-                destPos = masonNeedingStone.get().getPairedChestPos();
-                transferStack = new ItemStack(Items.COBBLESTONE, Math.min(HAUL_AMOUNT, stoneInQm));
-                LOGGER.debug("QM {}: hauling stone from QM chest to mason {}", villager.getUuidAsString(), destPos.toShortString());
-                return destPos != null;
+                BlockPos masonChest = masonNeedingStone.get().getPairedChestPos();
+                if (masonChest != null) {
+                    planSingleStackHaul(qmChestPos, masonChest, new ItemStack(Items.COBBLESTONE, Math.min(HAUL_AMOUNT, stoneInQm)));
+                    LOGGER.debug("QM {}: hauling stone from QM chest to mason {}", villager.getUuidAsString(), masonChest.toShortString());
+                    return true;
+                }
             }
         }
 
         // Priority 2a: lumberjack crafting (low on planks) → top up from QM chest.
-        // Use any plank type (tag-based), pick the most abundant stack in the QM chest
-        // so we don't artificially lock onto oak when e.g. birch is available.
         Optional<LumberjackGuardEntity> lumberjackNeedingPlanks = findLumberjackNeedingPlanks(world);
         if (lumberjackNeedingPlanks.isPresent() && qmChestPos != null) {
             ItemStack bestPlanks = findBestTagItem(world, qmChestPos, ItemTags.PLANKS);
             if (!bestPlanks.isEmpty()) {
-                sourcePos = qmChestPos;
-                destPos = lumberjackNeedingPlanks.get().getPairedChestPos();
-                transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                LOGGER.debug("QM {}: hauling {} planks from QM chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
-                return destPos != null;
+                BlockPos ljChest = lumberjackNeedingPlanks.get().getPairedChestPos();
+                if (ljChest != null) {
+                    planSingleStackHaul(qmChestPos, ljChest, bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount())));
+                    LOGGER.debug("QM {}: hauling {} planks from QM chest to lumberjack {}", villager.getUuidAsString(), bestPlanks.getItem(), ljChest.toShortString());
+                    return true;
+                }
             }
         }
 
-        // Priority 2b: weaponsmith low on planks → top up from QM chest (for wood weapon crafting).
+        // Priority 2b: weaponsmith low on planks → top up from QM chest.
         Optional<BlockPos> weaponsmithChestNeedingPlanks = findWeaponsmithChestNeedingPlanks(world);
         if (weaponsmithChestNeedingPlanks.isPresent() && qmChestPos != null) {
             ItemStack bestPlanks = findBestTagItem(world, qmChestPos, ItemTags.PLANKS);
             if (!bestPlanks.isEmpty()) {
-                sourcePos = qmChestPos;
-                destPos = weaponsmithChestNeedingPlanks.get();
-                transferStack = bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount()));
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {}: hauling {} planks from QM chest to weaponsmith at {}",
-                            villager.getUuidAsString(), bestPlanks.getItem(), destPos.toShortString());
-                }
+                planSingleStackHaul(qmChestPos, weaponsmithChestNeedingPlanks.get(), bestPlanks.copyWithCount(Math.min(HAUL_AMOUNT, bestPlanks.getCount())));
+                LOGGER.debug("QM {}: hauling {} planks from QM chest to weaponsmith at {}", villager.getUuidAsString(), bestPlanks.getItem(), weaponsmithChestNeedingPlanks.get().toShortString());
                 return true;
-            } else {
-                if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {}: weaponsmith at {} needs planks but QM chest at {} has none",
-                            villager.getUuidAsString(), weaponsmithChestNeedingPlanks.get().toShortString(),
-                            qmChestPos.toShortString());
-                }
             }
         }
 
         // Priority 2c: lumberjack needs cobblestone for furnace crafting.
-        // Deliver exactly 8 cobblestone so the lumberjack can craft a furnace for charcoal production.
-        // Skip if a furnace already exists near the lumberjack's job site.
         Optional<LumberjackFurnaceStoneNeed> lumberjackNeedingFurnaceStone = findLumberjackNeedingFurnaceStone(world);
         if (lumberjackNeedingFurnaceStone.isPresent()) {
             LumberjackFurnaceStoneNeed need = lumberjackNeedingFurnaceStone.get();
-            // Prefer QM stock first; fall back to mason chest using reserve-safe extraction limits.
             BlockPos stoneSource = countItem(world, chestPos, Items.COBBLESTONE) >= LUMBERJACK_FURNACE_STONE_AMOUNT ? chestPos : null;
             if (stoneSource == null) {
                 stoneSource = findMasonChestWithCobblestone(world, LUMBERJACK_FURNACE_STONE_AMOUNT);
@@ -591,53 +644,36 @@ public class QuartermasterGoal extends Goal {
                         ? Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT, available)
                         : Math.min(LUMBERJACK_FURNACE_STONE_AMOUNT,
                         computeMasonCobblestoneExtractionCount(available, MASON_COBBLESTONE_RESERVE));
-                if (toDeliver <= 0) {
-                    return false;
-                }
-                sourcePos = stoneSource;
-                destPos = need.chestPos();
-                transferStack = new ItemStack(Items.COBBLESTONE, toDeliver);
-                if (LOGGER.isDebugEnabled()) {
+                if (toDeliver > 0) {
+                    planSingleStackHaul(stoneSource, need.chestPos(), new ItemStack(Items.COBBLESTONE, toDeliver));
                     LOGGER.debug("QM {}: hauling {} cobblestone from {} to lumberjack {} for furnace crafting",
-                            villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), destPos.toShortString());
+                            villager.getUuidAsString(), toDeliver, stoneSource.toShortString(), need.chestPos().toShortString());
+                    return true;
                 }
-                return true;
             }
         }
 
         // Priority 2d: QM chest has saplings → route to any nearby Forester chest that is running low.
-        // Saplings end up in the QM chest via the surplus-haul whitelist (lumberjack drops, overflow).
-        // The Forester's daily provision goal also produces saplings that may overflow here.
         Optional<BlockPos> foresterChestNeedingSaplings = findForesterChestNeedingSaplings(world);
         if (foresterChestNeedingSaplings.isPresent()) {
             ItemStack bestSaplings = findBestTagItem(world, chestPos, ItemTags.SAPLINGS);
             if (!bestSaplings.isEmpty()) {
-                sourcePos = chestPos;
-                destPos = foresterChestNeedingSaplings.get();
-                transferStack = bestSaplings.copyWithCount(Math.min(HAUL_AMOUNT, bestSaplings.getCount()));
-                LOGGER.debug("QM {}: routing {} saplings from QM chest to forester at {}",
-                        villager.getUuidAsString(), transferStack.getCount(), destPos.toShortString());
+                planSingleStackHaul(chestPos, foresterChestNeedingSaplings.get(), bestSaplings.copyWithCount(Math.min(HAUL_AMOUNT, bestSaplings.getCount())));
+                LOGGER.debug("QM {}: routing {} saplings from QM chest to forester at {}", villager.getUuidAsString(), bestSaplings.getCount(), foresterChestNeedingSaplings.get().toShortString());
                 return true;
             }
         }
 
-        // Priority 3: QM chest is low → find any profession chest with surplus and haul to QM chest.
-        // IMPORTANT: only haul whitelisted bulk materials (logs, planks, wool, cobble, wheat, coal, etc.)
-        // to avoid draining specialist profession chests of their unique trade goods (arrows, potions,
-        // enchanted books, iron gear, fish, maps, meat, etc.). EC-NEW-EC-8 resolution.
+        // Priority 3: QM chest is low → haul entire whitelisted contents from a surplus chest.
         if (qmChestPos != null) {
             int qmTotal = countAllItems(world, qmChestPos);
             if (qmTotal < BELL_CHEST_LOW_THRESHOLD) {
                 Optional<BlockPos> surplusChest = findSurplusChest(world, qmChestPos);
                 if (surplusChest.isPresent()) {
-                    ItemStack whitelistedItem = findTopWhitelistedItem(world, surplusChest.get());
-                    if (!whitelistedItem.isEmpty()) {
-                        sourcePos = surplusChest.get();
-                        destPos = qmChestPos;
-                        transferStack = whitelistedItem.copyWithCount(Math.min(HAUL_AMOUNT, whitelistedItem.getCount()));
-                        LOGGER.debug("QM {}: hauling {} surplus from {} to QM chest", villager.getUuidAsString(), whitelistedItem.getItem(), sourcePos.toShortString());
-                        return true;
-                    }
+                    // Whitelisted haul — takePayloadFromInventory will drain SURPLUS_HAUL_WHITELIST items only.
+                    planWhitelistedChestHaul(surplusChest.get(), qmChestPos);
+                    LOGGER.debug("QM {}: hauling surplus chest {} to QM chest", villager.getUuidAsString(), surplusChest.get().toShortString());
+                    return true;
                 }
             }
         }
@@ -663,9 +699,7 @@ public class QuartermasterGoal extends Goal {
             if (amount <= 0) {
                 continue;
             }
-            sourcePos = bellChestPos;
-            destPos = entry.recipientChestPos();
-            transferStack = entry.requestedStack().copyWithCount(amount);
+            planSingleStackHaul(bellChestPos, entry.recipientChestPos(), entry.requestedStack().copyWithCount(amount));
             return true;
         }
         return false;
@@ -738,9 +772,7 @@ public class QuartermasterGoal extends Goal {
             return false;
         }
         TransferLeg leg = plannedLeg.get();
-        sourcePos = leg.sourcePos();
-        destPos = leg.destPos();
-        transferStack = leg.transferStack().copy();
+        planSingleStackHaul(leg.sourcePos(), leg.destPos(), leg.transferStack().copy());
         return true;
     }
 
@@ -808,9 +840,7 @@ public class QuartermasterGoal extends Goal {
             return false;
         }
         TransferLeg leg = lumberjackDrainQueue.pollFirst();
-        sourcePos = leg.sourcePos();
-        destPos = leg.destPos();
-        transferStack = leg.transferStack().copy();
+        planSingleStackHaul(leg.sourcePos(), leg.destPos(), leg.transferStack().copy());
         return true;
     }
 
@@ -1264,6 +1294,7 @@ public class QuartermasterGoal extends Goal {
             if (now < nextBootstrapDiscoveryTick) {
                 bootstrapConsolidationState = BootstrapConsolidationState.DRAINED_COMPLETE;
                 bootstrapSourceQueue.clear();
+                bootstrapSweepActive = false;
                 return false;
             }
             clearBootstrapComplete(world);
@@ -1291,6 +1322,7 @@ public class QuartermasterGoal extends Goal {
                 bootstrapEmptyDiscoveryRetries++;
                 nextBootstrapDiscoveryTick = now + BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS;
                 bootstrapConsolidationState = BootstrapConsolidationState.WAITING_RECHECK;
+                bootstrapSweepActive = false;
                 if (LOGGER.isDebugEnabled()) {
                     LOGGER.debug("QM {} bootstrap state_reason=empty_now_retrying retry={} max_retries={} next_discovery_tick={}",
                             villager.getUuidAsString(),
@@ -1300,39 +1332,46 @@ public class QuartermasterGoal extends Goal {
                 }
                 return false;
             }
+            // Found chests — mark sweep active so we hold priority over all other goals
+            // until every discovered chest has been visited.
+            bootstrapSweepActive = true;
             discoveredBootstrapSourceAtLeastOnce = true;
             bootstrapEmptyDiscoveryRetries = 0;
+            LOGGER.info("QM {}: bootstrap sweep started — will visit {} natural chest(s) before distributing",
+                    villager.getUuidAsString(), bootstrapSourceQueue.size());
         }
 
+        // Advance through the queue: skip nulls and already-empty chests,
+        // haul the entire contents of the next non-empty one in a single trip.
         while (!bootstrapSourceQueue.isEmpty()) {
             BlockPos source = bootstrapSourceQueue.peekFirst();
             if (source == null || source.equals(bellChestPos)) {
                 bootstrapSourceQueue.pollFirst();
                 continue;
             }
-            ItemStack stack = findTopTransferableItem(world, source);
-            if (stack.isEmpty()) {
+            if (countAllItems(world, source) == 0) {
+                // Already empty — skip to next chest without a trip
                 if (LOGGER.isDebugEnabled()) {
-                    LOGGER.debug("QM {} bootstrap source={} drained_or_no_transferable_items",
-                            villager.getUuidAsString(),
-                            source);
+                    LOGGER.debug("QM {} bootstrap source={} already_empty_skipping",
+                            villager.getUuidAsString(), source);
                 }
                 bootstrapSourceQueue.pollFirst();
                 continue;
             }
-            sourcePos = source;
-            destPos = bellChestPos;
-            transferStack = stack.copyWithCount(Math.min(HAUL_AMOUNT, stack.getCount()));
+            // Full-chest haul: take everything from this source in one trip.
+            // Do NOT pop the source from the queue yet — it gets popped next cycle
+            // once takePayloadFromInventory has drained it (countAllItems will be 0 then).
+            bootstrapSourceQueue.pollFirst();
+            planFullChestHaul(source, bellChestPos);
             if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {} bootstrap draining_source={} dest={} stack={}x{}",
-                        villager.getUuidAsString(),
-                        sourcePos,
-                        destPos,
-                        transferStack.getItem(),
-                        transferStack.getCount());
+                LOGGER.debug("QM {} bootstrap hauling full chest source={} dest={}",
+                        villager.getUuidAsString(), source, bellChestPos);
             }
             return true;
         }
+
+        // Queue exhausted — all chests visited
+        bootstrapSweepActive = false;
 
         if (discoveredBootstrapSourceAtLeastOnce) {
             completeBootstrap(world, "drained_complete", BootstrapConsolidationState.DRAINED_COMPLETE, now + BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS);
@@ -1669,85 +1708,159 @@ public class QuartermasterGoal extends Goal {
     // Inventory helpers
     // -------------------------------------------------------------------------
 
-    private boolean takeFromInventory(ServerWorld world, BlockPos pos) {
+    /**
+     * Takes items from the chest at {@code pos} into {@link #transferPayload} according
+     * to the current {@link #transferMode}.
+     *
+     * <ul>
+     *   <li>{@link TransferMode#SINGLE_STACK} — payload was populated by the planner;
+     *       drain exactly those items from the source slot-by-slot.</li>
+     *   <li>{@link TransferMode#FULL_CHEST} — payload is empty; drain <em>all</em> items
+     *       from the source into the payload (bootstrap consolidation).</li>
+     *   <li>{@link TransferMode#WHITELISTED_CHEST} — payload is empty; drain only items
+     *       that pass {@link #SURPLUS_HAUL_WHITELIST} (Priority-3 surplus haul).</li>
+     * </ul>
+     *
+     * @return {@code true} if at least one item was taken; {@code false} if nothing was
+     *         available (caller should abort the trip).
+     */
+    private boolean takePayloadFromInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
         if (inv.isEmpty()) {
             requestImmediatePrerequisiteRevalidation();
             return false;
         }
-        if (transferStack.isEmpty()) return false;
         Inventory inventory = inv.get();
-        net.minecraft.item.Item item = transferStack.getItem();
-        int needed = transferStack.getCount();
-        int taken = 0;
 
-        for (int i = 0; i < inventory.size() && taken < needed; i++) {
-            ItemStack stack = inventory.getStack(i);
-            if (!stack.isEmpty() && stack.isOf(item)) {
-                int grab = Math.min(stack.getCount(), needed - taken);
-                stack.decrement(grab);
-                if (stack.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
-                taken += grab;
+        if (transferMode == TransferMode.SINGLE_STACK) {
+            // Drain exactly the stacks that were planned.
+            if (transferPayload.isEmpty()) return false;
+            boolean anyTaken = false;
+            for (int p = 0; p < transferPayload.size(); p++) {
+                ItemStack wanted = transferPayload.get(p);
+                if (wanted.isEmpty()) continue;
+                net.minecraft.item.Item item = wanted.getItem();
+                int needed = wanted.getCount();
+                int taken = 0;
+                for (int i = 0; i < inventory.size() && taken < needed; i++) {
+                    ItemStack slot = inventory.getStack(i);
+                    if (!slot.isEmpty() && slot.isOf(item)) {
+                        int grab = Math.min(slot.getCount(), needed - taken);
+                        slot.decrement(grab);
+                        if (slot.isEmpty()) inventory.setStack(i, ItemStack.EMPTY);
+                        taken += grab;
+                    }
+                }
+                if (taken > 0) {
+                    transferPayload.set(p, new ItemStack(item, taken));
+                    anyTaken = true;
+                } else {
+                    transferPayload.set(p, ItemStack.EMPTY);
+                }
             }
+            transferPayload.removeIf(ItemStack::isEmpty);
+            if (anyTaken) inventory.markDirty();
+            return anyTaken;
         }
 
-        if (taken > 0) {
-            transferStack = new ItemStack(item, taken);
+        // FULL_CHEST or WHITELISTED_CHEST — payload must be empty at this point (set by planner).
+        transferPayload.clear();
+        Predicate<ItemStack> filter = (transferMode == TransferMode.WHITELISTED_CHEST)
+                ? SURPLUS_HAUL_WHITELIST
+                : stack -> !stack.isEmpty();
+
+        for (int i = 0; i < inventory.size(); i++) {
+            ItemStack slot = inventory.getStack(i);
+            if (slot.isEmpty() || !filter.test(slot)) continue;
+            // Merge into payload by item type so the payload doesn't balloon with duplicates.
+            ItemStack copy = slot.copy();
+            boolean merged = false;
+            for (ItemStack existing : transferPayload) {
+                if (ItemStack.areItemsAndComponentsEqual(existing, copy)
+                        && existing.getCount() < existing.getMaxCount()) {
+                    int space = existing.getMaxCount() - existing.getCount();
+                    int move = Math.min(space, copy.getCount());
+                    existing.increment(move);
+                    copy.decrement(move);
+                    if (copy.isEmpty()) { merged = true; break; }
+                }
+            }
+            if (!merged && !copy.isEmpty()) {
+                transferPayload.add(copy);
+            }
+            inventory.setStack(i, ItemStack.EMPTY);
+        }
+        if (!transferPayload.isEmpty()) {
             inventory.markDirty();
             return true;
         }
         return false;
     }
 
-    private void insertToInventory(ServerWorld world, BlockPos pos) {
+    /**
+     * Inserts every stack in {@link #transferPayload} into the chest at {@code pos}.
+     * Any overflow that does not fit is dropped at the villager's feet as item entities
+     * so items are never silently destroyed.
+     * Clears {@link #transferPayload} at the end regardless of success.
+     */
+    private void insertPayloadToInventory(ServerWorld world, BlockPos pos) {
         Optional<Inventory> inv = getInventory(world, pos);
         if (inv.isEmpty()) {
             requestImmediatePrerequisiteRevalidation();
+            transferPayload.clear();
             return;
         }
-        if (transferStack.isEmpty()) return;
         Inventory inventory = inv.get();
-        ItemStack remaining = transferStack.copy();
 
-        for (int i = 0; i < inventory.size() && !remaining.isEmpty(); i++) {
-            ItemStack existing = inventory.getStack(i);
-            if (existing.isEmpty()) {
-                if (!inventory.isValid(i, remaining)) continue;
-                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
-                inventory.setStack(i, remaining.copyWithCount(moved));
-                remaining.decrement(moved);
-            } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                int space = existing.getMaxCount() - existing.getCount();
-                if (space > 0) {
-                    int moved = Math.min(space, remaining.getCount());
-                    existing.increment(moved);
+        for (ItemStack carrying : transferPayload) {
+            if (carrying.isEmpty()) continue;
+            ItemStack remaining = carrying.copy();
+
+            for (int i = 0; i < inventory.size() && !remaining.isEmpty(); i++) {
+                ItemStack existing = inventory.getStack(i);
+                if (existing.isEmpty()) {
+                    if (!inventory.isValid(i, remaining)) continue;
+                    int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                    inventory.setStack(i, remaining.copyWithCount(moved));
                     remaining.decrement(moved);
+                } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                    int space = existing.getMaxCount() - existing.getCount();
+                    if (space > 0) {
+                        int moved = Math.min(space, remaining.getCount());
+                        existing.increment(moved);
+                        remaining.decrement(moved);
+                    }
                 }
+            }
+
+            // If dest chest was full, drop overflow at the villager's feet so items are never lost.
+            if (!remaining.isEmpty()) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
+                            villager.getUuidAsString(), pos.toShortString(),
+                            remaining.getCount(), remaining.getItem());
+                }
+                ItemEntity drop = new ItemEntity(
+                        world, villager.getX(), villager.getY(), villager.getZ(), remaining.copy());
+                drop.setPickupDelay(10);
+                world.spawnEntity(drop);
             }
         }
 
         inventory.markDirty();
-        // If dest chest was full, remaining items would be silently lost.
-        // Drop them at the villager's feet so items are never destroyed.
-        if (!remaining.isEmpty()) {
-            if (LOGGER.isDebugEnabled()) {
-                LOGGER.debug("QM {}: dest chest at {} full, dropping {} x {} at villager feet",
-                        villager.getUuidAsString(), pos.toShortString(),
-                        remaining.getCount(), remaining.getItem());
-            }
-            ItemEntity drop = new ItemEntity(
-                    world, villager.getX(), villager.getY(), villager.getZ(), remaining.copy());
-            drop.setPickupDelay(10);
-            world.spawnEntity(drop);
-        }
+
         if (activeLumberjackDrainCycle != null && chestPos.equals(pos)) {
             activeLumberjackDrainCycle.recordVisitedSource(sourcePos);
-            activeLumberjackDrainCycle.recordMovedStack();
+            // Count each stack delivered as one moved-stack event.
+            for (int k = 0; k < transferPayload.size(); k++) {
+                activeLumberjackDrainCycle.recordMovedStack();
+            }
             if (lumberjackDrainQueue.isEmpty()) {
                 finishActiveLumberjackDrainCycleIfNeeded();
             }
         }
-        transferStack = ItemStack.EMPTY;
+
+        transferPayload.clear();
         LOGGER.debug("QM {}: delivered to {}", villager.getUuidAsString(), pos.toShortString());
     }
 
@@ -2013,7 +2126,9 @@ public class QuartermasterGoal extends Goal {
     }
 
     static PlannedTransfer getPlannedTransferForTest(QuartermasterGoal goal) {
-        return new PlannedTransfer(goal.sourcePos, goal.destPos, goal.transferStack.copy());
+        // For test purposes expose the first payload stack (covers all single-stack haul assertions).
+        ItemStack firstStack = goal.transferPayload.isEmpty() ? ItemStack.EMPTY : goal.transferPayload.get(0).copy();
+        return new PlannedTransfer(goal.sourcePos, goal.destPos, firstStack);
     }
 
     static List<QuartermasterDemandPlanner.QueueEntry> getDemandQueueForTest(QuartermasterGoal goal) {
@@ -2063,6 +2178,18 @@ public class QuartermasterGoal extends Goal {
     private record QmBootstrapKey(net.minecraft.registry.RegistryKey<net.minecraft.world.World> worldKey, UUID villagerUuid) {}
     private enum ReserveGrouping { LOGS, PLANKS, CHARCOAL, ITEM }
     private enum BootstrapConsolidationState { NOT_STARTED, DISCOVERING, CONSOLIDATING, WAITING_RECHECK, DRAINED_COMPLETE }
+    /**
+     * Controls how {@link #takePayloadFromInventory} drains the source chest.
+     * <ul>
+     *   <li>{@code SINGLE_STACK} — payload already holds the precise stack(s) to move;
+     *       drain exactly those items from source.</li>
+     *   <li>{@code FULL_CHEST} — payload is empty at planning time; drain <em>everything</em>
+     *       from the source (used during bootstrap consolidation).</li>
+     *   <li>{@code WHITELISTED_CHEST} — payload is empty at planning time; drain only
+     *       items that pass {@link #SURPLUS_HAUL_WHITELIST} (used for Priority-3 surplus haul).</li>
+     * </ul>
+     */
+    private enum TransferMode { SINGLE_STACK, FULL_CHEST, WHITELISTED_CHEST }
 
     private static final class LumberjackDrainCycleMetrics {
         private final int eligibleChestCount;
