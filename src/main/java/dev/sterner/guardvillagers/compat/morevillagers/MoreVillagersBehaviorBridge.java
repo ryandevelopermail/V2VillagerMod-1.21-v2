@@ -9,13 +9,9 @@ import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersMin
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersNetherian;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersOceanographer;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersWoodworker;
-import net.minecraft.registry.Registries;
 import net.minecraft.util.Identifier;
-import net.minecraft.village.VillagerProfession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.Optional;
 
 /**
  * Registers GuardVillagers profession behaviors for MoreVillagers professions.
@@ -53,13 +49,11 @@ public final class MoreVillagersBehaviorBridge {
     }
 
     private static void registerProfession(String name, java.util.function.Supplier<dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior> factory) {
+        // Register by Identifier directly — avoids VillagerProfession object identity/equality
+        // issues with HashMap and is immune to load-order: the profession doesn't need to be in
+        // the Vanilla registry at registration time; lookup happens at event dispatch time.
         Identifier id = Identifier.of(MV_NAMESPACE, name);
-        Optional<VillagerProfession> profession = Registries.VILLAGER_PROFESSION.getOrEmpty(id);
-        if (profession.isEmpty()) {
-            LOGGER.warn("[morevillagers-compat] Could not find profession '{}' in registry — skipping behavior registration.", id);
-            return;
-        }
-        VillagerProfessionBehaviorRegistry.registerBehavior(profession.get(), factory.get());
+        VillagerProfessionBehaviorRegistry.registerBehavior(id, factory.get());
         LOGGER.info("[morevillagers-compat] Registered behavior for profession '{}'.", id);
     }
 }
