@@ -127,6 +127,13 @@ public final class VillageLumberjackSpawnManager {
     private static final int RATIO_TOTAL = 6;
 
     /**
+     * Hard cap on forced-spawn lumberjacks per village bell.
+     * No matter how large the village gets, we never force more than this many
+     * lumberjacks — prevents an explosion of crafting tables.
+     */
+    private static final int MAX_FORCED_LUMBERJACKS = 3;
+
+    /**
      * Fix 1 — stale-table guard.
      *
      * A crafting table that has been sitting unclaimed for longer than one full maintenance
@@ -844,11 +851,12 @@ public final class VillageLumberjackSpawnManager {
         int fromTotal = totalVillagers > 0 ? (totalVillagers + RATIO_TOTAL - 1) / RATIO_TOTAL : 0;
         int ratioDesired = Math.max(fromProfessionals, fromTotal);
 
-        if (!hasEligibleVillageResident) {
-            return ratioDesired;
-        }
+        int desired = !hasEligibleVillageResident
+                ? ratioDesired
+                : Math.max(ratioDesired, configuredVillageMinimum(totalVillagers));
 
-        return Math.max(ratioDesired, configuredVillageMinimum(totalVillagers));
+        // Hard cap: never force-spawn more than MAX_FORCED_LUMBERJACKS per village bell.
+        return Math.min(desired, MAX_FORCED_LUMBERJACKS);
     }
 
     private static int configuredVillageMinimum(int totalVillagers) {

@@ -113,7 +113,12 @@ public class QuartermasterGoal extends Goal {
     private static final int FORESTER_SAPLING_TOP_UP_THRESHOLD = 8;
     // The villager displayed as "Forester" in MoreVillagers has internal profession ID "woodworker"
     private static final Identifier FORESTER_PROFESSION_ID = Identifier.of("morevillagers", "woodworker");
-    private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = Set.of(
+    /**
+     * All blocks that count as village job sites for the bootstrap chest scan.
+     * Mutable so soft-dep mods (e.g. MoreVillagers) can register their job blocks at startup
+     * via {@link #registerNaturalVillageJobSiteBlock(net.minecraft.block.Block)}.
+     */
+    private static final Set<net.minecraft.block.Block> NATURAL_VILLAGE_JOB_SITE_BLOCKS = new HashSet<>(Set.of(
             Blocks.BLAST_FURNACE,
             Blocks.SMOKER,
             Blocks.CARTOGRAPHY_TABLE,
@@ -127,7 +132,16 @@ public class QuartermasterGoal extends Goal {
             Blocks.LOOM,
             Blocks.SMITHING_TABLE,
             Blocks.GRINDSTONE
-    );
+    ));
+
+    /**
+     * Registers an additional block as a village job-site anchor for the bootstrap chest scan.
+     * Call this from mod compat bridges after the block registry is available.
+     */
+    public static void registerNaturalVillageJobSiteBlock(net.minecraft.block.Block block) {
+        NATURAL_VILLAGE_JOB_SITE_BLOCKS.add(block);
+    }
+
     /**
      * Runtime-only active quartermaster registry, keyed by world + anchor chest position.
      *
