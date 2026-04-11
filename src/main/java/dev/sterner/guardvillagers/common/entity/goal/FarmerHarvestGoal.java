@@ -281,7 +281,7 @@ public class FarmerHarvestGoal extends Goal {
                             villager.getUuidAsString(), unseededCount);
                 }
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                long day = world.getTimeOfDay() / 24000L;
+                long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
@@ -302,7 +302,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 wheatSeedForagingRequested = true;
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                long day = world.getTimeOfDay() / 24000L;
+                long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
@@ -312,7 +312,7 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         // --- NORMAL PATH (no unseeded farmland obligation) ---
-        long day = world.getTimeOfDay() / 24000L;
+        long day = world.getTime() / 24000L;
         if (day != lastHarvestDay) {
             lastHarvestDay = day;
             // Evaluate before committing to a daily run — if there is truly nothing actionable
@@ -858,7 +858,7 @@ public class FarmerHarvestGoal extends Goal {
 
     private void notifyDailyHarvestComplete(ServerWorld world) {
         if (craftingGoal != null) {
-            craftingGoal.notifyDailyHarvestComplete(world.getTimeOfDay() / 24000L);
+            craftingGoal.notifyDailyHarvestComplete(world.getTime() / 24000L);
         }
     }
 

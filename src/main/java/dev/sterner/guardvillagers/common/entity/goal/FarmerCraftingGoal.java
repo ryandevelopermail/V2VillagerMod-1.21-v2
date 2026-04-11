@@ -39,12 +39,12 @@ public class FarmerCraftingGoal extends AbstractCraftingGoal<FarmerCraftingGoal.
     @Override
     protected void onDailyReset(ServerWorld world) {
         guaranteedCraftPending = false;
-        guaranteedCraftDay = world.getTimeOfDay() / 24000L;
+        guaranteedCraftDay = world.getTime() / 24000L;
     }
 
     @Override
     protected boolean shouldBypassCooldown(ServerWorld world, boolean immediateCheckPending) {
-        long day = world.getTimeOfDay() / 24000L;
+        long day = world.getTime() / 24000L;
         return immediateCheckPending || (guaranteedCraftPending && guaranteedCraftDay == day);
     }
 
