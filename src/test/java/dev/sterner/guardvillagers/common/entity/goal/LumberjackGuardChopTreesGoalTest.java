@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -380,6 +381,69 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, -1L));
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, countdownStartTick));
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick + 300L, countdownStartTick));
+    }
+
+    @Test
+    void recoverFailedTargetQueue_stalledRoot_replacesHeadTargetBeforeRescan() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        BlockPos queuedTarget = new BlockPos(5, 64, 5);
+        BlockPos replacement = failedRoot.up();
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot, queuedTarget));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                2,
+                replacement,
+                List.of(),
+                Predicate.not(failedRoot::equals)
+        );
+
+        assertTrue(outcome.replacementApplied());
+        assertFalse(outcome.rescanAdded());
+        assertTrue(outcome.hasTarget());
+        assertEquals(List.of(replacement, queuedTarget), selectedTargets);
+    }
+
+    @Test
+    void recoverFailedTargetQueue_noReplacement_localRescanRefillsRemainingSessionCap() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        BlockPos rescanned = new BlockPos(2, 64, 2);
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                1,
+                null,
+                List.of(failedRoot, rescanned),
+                failedRoot::equals
+        );
+
+        assertFalse(outcome.replacementApplied());
+        assertTrue(outcome.rescanAdded());
+        assertTrue(outcome.hasTarget());
+        assertEquals(List.of(rescanned), selectedTargets);
+    }
+
+    @Test
+    void recoverFailedTargetQueue_noReplacementAndNoRescan_returnsNoTargetForReturnToBase() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                1,
+                null,
+                List.of(),
+                failedRoot::equals
+        );
+
+        assertFalse(outcome.replacementApplied());
+        assertFalse(outcome.rescanAdded());
+        assertFalse(outcome.hasTarget());
+        assertTrue(selectedTargets.isEmpty());
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {
