@@ -325,6 +325,10 @@ public final class LumberjackChestTriggerController {
     }
 
     public static int countEligibleV1VillagersMissingPairedChest(ServerWorld world, LumberjackGuardEntity guard) {
+        return countActionableEligibleV1VillagersMissingPairedChest(world, guard);
+    }
+
+    public static int countActionableEligibleV1VillagersMissingPairedChest(ServerWorld world, LumberjackGuardEntity guard) {
         int count = 0;
         for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
             if (!isEligibleV1Villager(world, villager)) {
@@ -336,7 +340,8 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()) {
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
+                    && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 count++;
             }
         }
@@ -754,11 +759,11 @@ public final class LumberjackChestTriggerController {
 
     private static V2BlockReason resolveV2BlockReason(ServerWorld world, LumberjackGuardEntity guard) {
         UpgradeDemand nextDemand = resolveNextUpgradeDemand(world, guard);
-        int eligibleV1MissingChestCount = countEligibleV1VillagersMissingPairedChest(world, guard);
-        if (!shouldBlockV2TablePlacement(nextDemand, eligibleV1MissingChestCount)) {
+        int actionableEligibleV1MissingChestCount = countActionableEligibleV1VillagersMissingPairedChest(world, guard);
+        if (!shouldBlockV2TablePlacement(nextDemand, actionableEligibleV1MissingChestCount)) {
             return null;
         }
-        return new V2BlockReason(nextDemand, eligibleV1MissingChestCount);
+        return new V2BlockReason(nextDemand, actionableEligibleV1MissingChestCount);
     }
 
     private static PlacementMaterialUse tryConsumeCraftingTableMaterials(Inventory pairedChestInventory,

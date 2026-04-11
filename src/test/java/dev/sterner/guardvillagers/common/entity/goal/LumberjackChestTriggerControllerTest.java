@@ -71,7 +71,7 @@ class LumberjackChestTriggerControllerTest {
     }
 
     @Test
-    void shouldBlockV2TablePlacement_whenAnyEligibleV1VillagerStillMissingChest() {
+    void reachableV1MissingChest_stillBlocksV2Placement() {
         boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
                 LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
                 1
@@ -81,7 +81,7 @@ class LumberjackChestTriggerControllerTest {
     }
 
     @Test
-    void shouldNotBlockV2TablePlacement_whenNoUnresolvedV1ChestDemandExists() {
+    void unreachableV1MissingChest_doesNotBlockV2Forever() {
         boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
                 LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
                 0
