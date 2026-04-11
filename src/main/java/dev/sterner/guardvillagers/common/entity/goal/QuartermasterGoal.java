@@ -1227,7 +1227,10 @@ public class QuartermasterGoal extends Goal {
     }
 
     private List<BlockPos> discoverBootstrapSourceChests(ServerWorld world, BlockPos bellChestPos) {
-        return discoverBootstrapSourceChestsWithStats(world, bellChestPos).discovered();
+        BootstrapDiscoveryResult result = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
+        List<BlockPos> all = new ArrayList<>(result.tierA());
+        all.addAll(result.tierB());
+        return all;
     }
 
     private int getNaturalVillagePoiScanRadius() {
@@ -1263,10 +1266,11 @@ public class QuartermasterGoal extends Goal {
         List<BlockPos> tierA = new ArrayList<>();
         List<BlockPos> tierB = new ArrayList<>();
         int filteredPaired = 0;
+        int filteredNotNatural = 0;
         int filteredEmpty = 0;
         int strictTierBSkipped = 0;
+        boolean strictVillageOnly = false;
         int range = (int) Math.ceil(getScanRange());
-        boolean strictVillageOnly = GuardVillagersConfig.quartermasterBootstrapStrictVillageOnly;
         for (BlockPos scanPos : BlockPos.iterate(bellChestPos.add(-range, -range, -range), bellChestPos.add(range, range, range))) {
             if (!bellChestPos.isWithinDistance(scanPos, getScanRange())) continue;
             BlockState state = world.getBlockState(scanPos);
@@ -1299,7 +1303,7 @@ public class QuartermasterGoal extends Goal {
                 continue;
             }
             if (deduplicated.add(candidate)) {
-                discovered.add(candidate);
+                tierA.add(candidate);
                 LOGGER.info("QM {} bootstrap discovered_natural_chest={} items={}",
                         villager.getUuidAsString(),
                         candidate.toShortString(),
@@ -1332,13 +1336,13 @@ public class QuartermasterGoal extends Goal {
             bootstrapSourceQueue.clear();
             bootstrapVisitedThisCycle.clear();
             BootstrapDiscoveryResult discovery = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
-            bootstrapSourceQueue.addAll(discovery.discovered());
-            LOGGER.info("QM {} bootstrap discovery run #{}: discovered={} filtered_paired={} filtered_not_natural={} filtered_empty={} (zone_radius={} local_poi_radius={})",
+            bootstrapSourceQueue.addAll(discovery.tierA());
+            bootstrapSourceQueue.addAll(discovery.tierB());
+            LOGGER.info("QM {} bootstrap discovery run #{}: discovered={} filtered_paired={} filtered_empty={} (zone_radius={} local_poi_radius={})",
                     villager.getUuidAsString(),
                     bootstrapDiscoveryRuns,
-                    discovery.discovered().size(),
+                    discovery.discoveredCount(),
                     discovery.filteredPaired(),
-                    discovery.filteredNotNatural(),
                     discovery.filteredEmpty(),
                     getNaturalVillagePoiScanRadius(),
                     getNaturalVillageChestLocalPoiRadius());
