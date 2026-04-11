@@ -13,6 +13,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -84,6 +85,14 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final double PLANT_REACH_SQ = 2.5D * 2.5D;
     private static final int PATH_RETRY_TICKS = 20;
 
+    /**
+     * Planting only starts when a player is within this many blocks of the forester.
+     * Matches a typical server render/simulation distance (10 chunks × 16 = 160 blocks).
+     * Using a fixed constant rather than querying the server's configured view distance
+     * keeps the check cheap and predictable regardless of server settings.
+     */
+    private static final double PLAYER_PROXIMITY_RANGE = 160.0D;
+
     /** Blocks that saplings can be planted on. */
     private static final Set<Block> VALID_GROUND = Set.of(
             Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.PODZOL,
@@ -135,6 +144,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
+
+        // Only run when a player is within render distance — avoids background churn
+        // and ensures the player can actually observe the forester planting trees.
+        if (!isPlayerNearby(world)) return false;
 
         // Cooldown gate — single check, no per-tick log spam
         long now = world.getTime();
@@ -565,5 +578,21 @@ public class ForesterSaplingPlantingGoal extends Goal {
         return target != null
                 && villager.squaredDistanceTo(
                         target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= reachSq;
+    }
+
+    /**
+     * Returns true if at least one online player is within {@link #PLAYER_PROXIMITY_RANGE}
+     * of this forester villager. Planting is suppressed when no player is nearby so that
+     * the forester only works while observable — consistent with vanilla entity simulation
+     * behaviour and avoids silent background world modification.
+     */
+    private boolean isPlayerNearby(ServerWorld world) {
+        double rangeSq = PLAYER_PROXIMITY_RANGE * PLAYER_PROXIMITY_RANGE;
+        for (ServerPlayerEntity player : world.getPlayers()) {
+            if (player.squaredDistanceTo(villager) <= rangeSq) {
+                return true;
+            }
+        }
+        return false;
     }
 }
