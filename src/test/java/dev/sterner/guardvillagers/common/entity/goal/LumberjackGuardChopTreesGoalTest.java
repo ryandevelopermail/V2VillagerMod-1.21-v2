@@ -446,6 +446,47 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(selectedTargets.isEmpty());
     }
 
+    @Test
+    void getSelectedSessionTargetCount_unpairedBootstrapCapsSessionToOneTarget() {
+        int selectedCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                null,
+                5,
+                4
+        );
+
+        assertEquals(1, selectedCount);
+    }
+
+    @Test
+    void getSelectedSessionTargetCount_pairedLumberjackKeepsMultiTreeSessionRange() {
+        BlockPos pairedChest = new BlockPos(1, 64, 1);
+
+        int minRangeCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                pairedChest,
+                3,
+                5
+        );
+        int maxRangeCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                pairedChest,
+                5,
+                5
+        );
+
+        assertEquals(3, minRangeCount);
+        assertEquals(5, maxRangeCount);
+    }
+
+    @Test
+    void shouldReturnToBaseAfterSuccessfulTeardown_bootstrapModeReturnsImmediately() {
+        boolean shouldReturn = LumberjackGuardChopTreesGoal.shouldReturnToBaseAfterSuccessfulTeardown(
+                true,
+                3,
+                false
+        );
+
+        assertTrue(shouldReturn);
+    }
+
     private List<BlockPos> adjacent(BlockPos pos) {
         return List.of(
                 pos.up(),
