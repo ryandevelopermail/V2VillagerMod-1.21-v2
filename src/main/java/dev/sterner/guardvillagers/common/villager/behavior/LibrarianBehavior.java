@@ -21,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.WeakHashMap;
 
 public class LibrarianBehavior implements VillagerProfessionBehavior {
@@ -29,6 +30,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final int QUARTERMASTER_GOAL_PRIORITY = 3;
     private static final long INVENTORY_MUTATION_DEBOUNCE_TICKS = 30L;
+    private static final long QUARTERMASTER_PAIR_REVALIDATION_GUARD_TICKS = 1L;
     private static final Map<VillagerEntity, LibrarianCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LibrarianBellChestDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, QuartermasterGoal> QUARTERMASTER_GOALS = new WeakHashMap<>();
@@ -36,6 +38,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> LAST_IMMEDIATE_REQUEST_TICK = new WeakHashMap<>();
     private static final Map<VillagerEntity, Boolean> INVENTORY_DIRTY_FLAGS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, LastQuartermasterPair> LAST_QUARTERMASTER_PAIR = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -145,7 +148,6 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             bypassDebounce = true;
         }
         if (!(inventory instanceof SimpleInventory simpleInventory)) {
-            demoteQuartermaster(world, villager, "missing_or_invalid_chest");
             return;
         }
         InventoryChangedListener listener = sender -> {
@@ -193,6 +195,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
         if (quartermasterGoal != null) {
             quartermasterGoal.requestImmediatePrerequisiteRevalidation();
+            quartermasterGoal.requestImmediateDemandReplan();
         }
         LAST_IMMEDIATE_REQUEST_TICK.put(villager, currentTick);
         INVENTORY_DIRTY_FLAGS.put(villager, false);
@@ -210,13 +213,23 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     }
 
     private void syncQuartermasterState(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, String reason) {
+        long currentTick = world.getTime();
+        LastQuartermasterPair lastPair = LAST_QUARTERMASTER_PAIR.get(villager);
+        boolean samePairRecentlyValidated = lastPair != null
+                && lastPair.matches(jobPos, chestPos)
+                && currentTick - lastPair.tick() <= QUARTERMASTER_PAIR_REVALIDATION_GUARD_TICKS;
+
         QuartermasterPrerequisiteHelper.Result prerequisites =
                 QuartermasterPrerequisiteHelper.validate(world, villager, jobPos, chestPos);
         if (!prerequisites.valid()) {
+            if (samePairRecentlyValidated && QUARTERMASTER_GOALS.containsKey(villager)) {
+                return;
+            }
             demoteQuartermaster(world, villager, "missing_or_invalid_chest");
             return;
         }
 
+        LAST_QUARTERMASTER_PAIR.put(villager, new LastQuartermasterPair(jobPos.toImmutable(), chestPos.toImmutable(), currentTick));
         if (QUARTERMASTER_GOALS.containsKey(villager)) {
             return;
         }
@@ -242,12 +255,20 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         if (pairedChestPos != null) {
             QuartermasterGoal.unregisterActiveQuartermaster(world, pairedChestPos, villager.getUuid());
         }
+        QuartermasterGoal.clearBootstrapState(world, villager.getUuid());
         if (pairedChestPos != null && world.getServer() != null) {
             VillageAnchorState.get(world.getServer()).unregister(world, pairedChestPos);
         }
         PAIRED_CHEST_POS.remove(villager);
+        LAST_QUARTERMASTER_PAIR.remove(villager);
         LOGGER.info("Librarian {} removed from Quartermaster role (reason={})",
                 villager.getUuidAsString(),
                 reason);
+    }
+
+    private record LastQuartermasterPair(BlockPos jobPos, BlockPos chestPos, long tick) {
+        private boolean matches(BlockPos otherJobPos, BlockPos otherChestPos) {
+            return Objects.equals(jobPos, otherJobPos) && Objects.equals(chestPos, otherChestPos);
+        }
     }
 }

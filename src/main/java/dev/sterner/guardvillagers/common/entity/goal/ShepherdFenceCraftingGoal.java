@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -70,6 +71,7 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
      * Using 300 caused the live-scan fallback to pick up unrelated pens and block crafting.
      */
     private static final int PEN_SCAN_RADIUS = 64;
+    private int lastFenceBatchCraftCount = 1;
 
     public ShepherdFenceCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -130,17 +132,20 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
         List<FenceRecipe> recipes = new ArrayList<>();
         int planks = countTag(inventory, ItemTags.PLANKS);
         int sticks = countMatching(inventory, stack -> stack.isOf(Items.STICK));
+        int availableFenceCrafts = computeAvailableFenceCrafts(planks, sticks);
+        int batchMin = resolveFenceBatchMin();
+        int batchMax = resolveFenceBatchMax(batchMin);
 
-        LOGGER.debug("ShepherdFence {}: fences={}/{} gates={}/{} planks={} sticks={} noPen=true",
-                villager.getUuidAsString(), fencesInChest, FENCE_TARGET, gatesInChest, GATE_TARGET, planks, sticks);
+        LOGGER.debug("ShepherdFence {}: fences={}/{} gates={}/{} planks={} sticks={} noPen=true batchMin={} batchMax={} availableFenceCrafts={}",
+                villager.getUuidAsString(), fencesInChest, FENCE_TARGET, gatesInChest, GATE_TARGET, planks, sticks, batchMin, batchMax, availableFenceCrafts);
 
         // Phase 1: craft fences until target reached
         if (fencesInChest < FENCE_TARGET) {
-            if (hasFenceIngredients(inventory)) {
+            if (availableFenceCrafts >= batchMin) {
                 recipes.add(FenceRecipe.FENCE);
             } else {
-                LOGGER.debug("ShepherdFence {}: needs fences but insufficient ingredients (need 6 planks + 2 sticks, have {} + {})",
-                        villager.getUuidAsString(), planks, sticks);
+                LOGGER.debug("ShepherdFence {}: needs fences but insufficient ingredients (need at least {} craft(s) => {} planks + {} sticks, have {} + {})",
+                        villager.getUuidAsString(), batchMin, batchMin * PLANKS_PER_FENCE_CRAFT, batchMin * STICKS_PER_FENCE_CRAFT, planks, sticks);
             }
         }
         // Phase 2: craft gate once fence quota is met
@@ -164,24 +169,34 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
     @Override
     protected boolean craftRecipe(ServerWorld world, Inventory inventory, FenceRecipe recipe) {
         if (recipe == FenceRecipe.FENCE) {
-            if (!consumeMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS), PLANKS_PER_FENCE_CRAFT)) return false;
-            if (!consumeMatching(inventory, stack -> stack.isOf(Items.STICK), STICKS_PER_FENCE_CRAFT)) return false;
+            int batchCraftCount = chooseFenceBatchCraftCount(inventory);
+            if (batchCraftCount < 1) {
+                return false;
+            }
+            int planksToConsume = batchCraftCount * PLANKS_PER_FENCE_CRAFT;
+            int sticksToConsume = batchCraftCount * STICKS_PER_FENCE_CRAFT;
+            if (!consumeMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS), planksToConsume)) return false;
+            if (!consumeMatching(inventory, stack -> stack.isOf(Items.STICK), sticksToConsume)) return false;
             // Output matching wood-type fences (use first plank type found)
-            ItemStack fenceStack = new ItemStack(chooseFenceItem(inventory), FENCES_PER_CRAFT);
+            int fencesCrafted = batchCraftCount * FENCES_PER_CRAFT;
+            lastFenceBatchCraftCount = batchCraftCount;
+            ItemStack fenceStack = new ItemStack(chooseFenceItem(inventory), fencesCrafted);
             insertStack(inventory, fenceStack);
         } else {
             if (!consumeMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS), PLANKS_PER_GATE_CRAFT)) return false;
             if (!consumeMatching(inventory, stack -> stack.isOf(Items.STICK), STICKS_PER_GATE_CRAFT)) return false;
             ItemStack gateStack = new ItemStack(chooseGateItem(inventory), 1);
             insertStack(inventory, gateStack);
+            lastFenceBatchCraftCount = 1;
         }
         return true;
     }
 
     @Override
     protected ItemStack getRecipeOutput(FenceRecipe recipe) {
+        int batchCount = Math.max(1, lastFenceBatchCraftCount);
         return recipe == FenceRecipe.FENCE
-                ? new ItemStack(Items.OAK_FENCE, FENCES_PER_CRAFT)
+                ? new ItemStack(Items.OAK_FENCE, FENCES_PER_CRAFT * batchCount)
                 : new ItemStack(Items.OAK_FENCE_GATE, 1);
     }
 
@@ -200,13 +215,51 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
     // -------------------------------------------------------------------------
 
     private boolean hasFenceIngredients(Inventory inventory) {
-        return countTag(inventory, ItemTags.PLANKS) >= MIN_PLANKS_FOR_FENCE
-                && countMatching(inventory, stack -> stack.isOf(Items.STICK)) >= MIN_STICKS;
+        int planks = countTag(inventory, ItemTags.PLANKS);
+        int sticks = countMatching(inventory, stack -> stack.isOf(Items.STICK));
+        return computeAvailableFenceCrafts(planks, sticks) >= resolveFenceBatchMin();
     }
 
     private boolean hasGateIngredients(Inventory inventory) {
         return countTag(inventory, ItemTags.PLANKS) >= MIN_PLANKS_FOR_GATE
                 && countMatching(inventory, stack -> stack.isOf(Items.STICK)) >= STICKS_PER_GATE_CRAFT;
+    }
+
+    private int chooseFenceBatchCraftCount(Inventory inventory) {
+        int planks = countTag(inventory, ItemTags.PLANKS);
+        int sticks = countMatching(inventory, stack -> stack.isOf(Items.STICK));
+        int availableFenceCrafts = computeAvailableFenceCrafts(planks, sticks);
+        int batchMin = resolveFenceBatchMin();
+        if (availableFenceCrafts < batchMin) {
+            return 0;
+        }
+        int batchMax = resolveFenceBatchMax(batchMin);
+        int upperBound = Math.min(batchMax, availableFenceCrafts);
+        if (upperBound <= batchMin) {
+            return batchMin;
+        }
+        return batchMin + villager.getRandom().nextInt(upperBound - batchMin + 1);
+    }
+
+    private int computeAvailableFenceCrafts(int planks, int sticks) {
+        return Math.min(planks / PLANKS_PER_FENCE_CRAFT, sticks / STICKS_PER_FENCE_CRAFT);
+    }
+
+    private int resolveFenceBatchMin() {
+        return clamp(GuardVillagersConfig.shepherdFenceBatchMin,
+                GuardVillagersConfig.MIN_SHEPHERD_FENCE_BATCH,
+                GuardVillagersConfig.MAX_SHEPHERD_FENCE_BATCH);
+    }
+
+    private int resolveFenceBatchMax(int batchMin) {
+        int configuredMax = clamp(GuardVillagersConfig.shepherdFenceBatchMax,
+                GuardVillagersConfig.MIN_SHEPHERD_FENCE_BATCH,
+                GuardVillagersConfig.MAX_SHEPHERD_FENCE_BATCH);
+        return Math.max(batchMin, configuredMax);
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private int countTag(Inventory inventory, net.minecraft.registry.tag.TagKey<Item> tag) {

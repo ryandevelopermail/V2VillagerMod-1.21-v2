@@ -205,7 +205,7 @@ public class ArmorerCraftingGoal extends Goal {
     }
 
     private void refreshDailyLimit(ServerWorld world) {
-        long day = world.getTimeOfDay() / 24000L;
+        long day = world.getTime() / 24000L;
         if (day != lastCraftDay) {
             lastCraftDay = day;
             dailyCraftLimit = 4;

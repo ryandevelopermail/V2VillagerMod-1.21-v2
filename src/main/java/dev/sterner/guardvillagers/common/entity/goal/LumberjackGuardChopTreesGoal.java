@@ -21,6 +21,7 @@ import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.registry.tag.TagKey;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
@@ -58,7 +59,6 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int STICKS_PER_PLANK = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
-    private static final int TREE_SEARCH_RADIUS = 20;
     private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
     private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
@@ -93,13 +93,31 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int TARGET_STUCK_FALLBACK_TICKS = 20 * 30;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
-    private static final int TREE_SCAN_BLOCK_BUDGET_PER_TICK = 8000;
+    private static final int TREE_SCAN_HIGH_ELAPSED_MS = 12;
+    private static final int TREE_SCAN_LOW_ELAPSED_MS = 4;
+    private static final float TREE_SCAN_HIGH_ELAPSED_REDUCTION_FACTOR = 0.75F;
+    private static final float TREE_SCAN_LOW_ELAPSED_INCREASE_FACTOR = 1.15F;
     private static final int INITIAL_SCAN_ACCEPTED_ROOT_TARGET = SESSION_TARGET_MAX;
     private static final int INITIAL_SCAN_LOCAL_ROOT_TARGET = 1;
     private static final int MAX_REGION_BLOCK_VISITS_PER_PASS = 12000;
     private static final int NO_TREE_ESCALATION_HIGH_WATER_MARK = 5;
     private static final int NO_TREE_ESCALATION_REPEAT_INTERVAL = 3;
     private static final int NO_TREE_ESCALATION_RETRY_DELAY_TICKS = 20 * 60 * 12;
+    private static final int TREE_SCAN_METRICS_INFO_ELAPSED_MS = 20;
+    private static final int TREE_SCAN_METRICS_INFO_INTERVAL = 5;
+    private static final int MIDPOINT_MISSING_CHEST_REFRESH_THRESHOLD = 3;
+    private static final long MIDPOINT_UPGRADE_RETRY_DELAY_TICKS = 20L * 30L;
+    private static final double GOVERNOR_EMA_ALPHA = 0.20D;
+    private static final int GOVERNOR_PRESSURE_STEP = 120;
+    private static final int GOVERNOR_RECOVERY_STEP = 80;
+    private static final int GOVERNOR_MAX_BACKPRESSURE = 900;
+    private static final int GOVERNOR_LOAD_ELAPSED_WEIGHT = 500;
+    private static final int GOVERNOR_LOAD_VISITED_WEIGHT = 350;
+    private static final int GOVERNOR_LOAD_RETRY_WEIGHT = 90;
+    private static final int GOVERNOR_LOAD_FORCED_WEIGHT = 220;
+    private static final String COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE = "governor backpressure";
+    private static final long BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS = 20L * 10L;
+    private static final long MIDPOINT_AUDIT_DEFER_ONLY_LOG_MIN_INTERVAL_TICKS = 20L * 60L;
 
     private final LumberjackGuardEntity guard;
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
@@ -111,6 +129,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private int stallRecoveryAttempts;
     private boolean bootstrapRetryTreeScheduled;
     private @Nullable TreeTargetScanSession pendingTreeTargetScan;
+    private int adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
+    private long lastObservedScanElapsedMs;
+    private int completedTreeScanCount;
+    private int pendingGovernorRetryEvents;
+    private int pendingGovernorForcedRemovals;
+    private long throttleUntilTick;
+    private long adaptiveScanVolumeWindow;
+    private int adaptivePathRetryWindow;
+    private int adaptiveFailedSessionWindow;
+    private int adaptiveForcedRecoveryWindow;
+    private int adaptiveSessionCount;
+    private long lastBackpressureDeferTick = Long.MIN_VALUE;
+    private long lastBackpressureDeferLogTick = Long.MIN_VALUE;
+    private int consecutiveBackpressureDefers;
+    private long lastMidpointAuditLogTick = Long.MIN_VALUE;
+    private long lastMidpointAuditCountdownStartTick = Long.MIN_VALUE;
+    private String activeCountdownReason = "";
 
     public LumberjackGuardChopTreesGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -205,15 +240,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         int remainingLogs = remainingLogCountResult.count();
         collectNearbyWoodDrops(world);
 
-        LOGGER.info("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={} fallbackSeedUsed={}",
-                this.guard.getUuidAsString(),
-                targetRoot,
-                teardownResult.initialCandidateLogs(),
-                teardownResult.brokenLogs(),
-                remainingLogs,
-                remainingLogCountResult.fallbackSeedUsed());
-
         if (remainingLogs > 0) {
+            this.pendingGovernorRetryEvents++;
             int retryAttempt = this.rootTeardownRetryAttempts.getOrDefault(targetRoot, 0) + 1;
             this.rootTeardownRetryAttempts.put(targetRoot.toImmutable(), retryAttempt);
             if (retryAttempt >= MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT) {
@@ -236,6 +264,15 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                         remainingLogs);
             }
             return;
+        }
+        if (isLumberjackVerboseLoggingEnabled()) {
+            LOGGER.debug("Lumberjack Guard {} tree_teardown_verification root={} initialCandidates={} brokenLogs={} remainingLogs={} fallbackSeedUsed={}",
+                    this.guard.getUuidAsString(),
+                    targetRoot,
+                    teardownResult.initialCandidateLogs(),
+                    teardownResult.brokenLogs(),
+                    remainingLogs,
+                    remainingLogCountResult.fallbackSeedUsed());
         }
 
         this.rootTeardownRetryAttempts.remove(targetRoot);
@@ -325,30 +362,175 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         if (this.guard.isChopCountdownActive() && world.getTime() >= this.guard.getNextChopTick()) {
             this.guard.clearChopCountdown();
+            this.activeCountdownReason = "";
             continueOrStartTreeTargetScan(world);
         }
     }
 
     private void continueOrStartTreeTargetScan(ServerWorld world) {
         if (this.pendingTreeTargetScan == null) {
+            if (world.getTime() < this.throttleUntilTick) {
+                return;
+            }
+            if (shouldThrottleAdaptiveScan(world)) {
+                return;
+            }
+            boolean forcedProbe = WorldLumberjackGovernor.tryConsumeForcedProbePermit(world);
+            if (!forcedProbe && WorldLumberjackGovernor.shouldDeferNewScanSession(world)) {
+                int deferTicks = getConfiguredGovernorHighLoadDeferTicks();
+                long remainingCountdownTicks = Math.max(0L, this.guard.getNextChopTick() - world.getTime());
+                if (shouldKeepExistingBackpressureCountdown(
+                        this.guard.isChopCountdownActive(),
+                        remainingCountdownTicks,
+                        this.activeCountdownReason)) {
+                    return;
+                }
+                if (shouldSkipBackpressureDeferRestart(
+                        this.guard.isChopCountdownActive(),
+                        remainingCountdownTicks,
+                        deferTicks,
+                        world.getTime(),
+                        this.lastBackpressureDeferTick,
+                        BACKPRESSURE_RETRIGGER_COOLDOWN_TICKS)) {
+                    return;
+                }
+                this.consecutiveBackpressureDefers++;
+                if (shouldLogBackpressureDeferStart(
+                        world.getTime(),
+                        this.lastBackpressureDeferLogTick,
+                        getConfiguredGovernorBackpressureDeferLogMinIntervalTicks())) {
+                    LOGGER.info("Lumberjack Guard {} deferring tree scan session due to governor backpressure (deferTicks={})",
+                            this.guard.getUuidAsString(),
+                            deferTicks);
+                    this.lastBackpressureDeferLogTick = world.getTime();
+                }
+                maybeLogBackpressureDeferLoopSnapshot(world);
+                startChopCountdown(world, deferTicks, COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE);
+                this.lastBackpressureDeferTick = world.getTime();
+                return;
+            }
+            if (forcedProbe) {
+                LOGGER.info("Lumberjack Guard {} bypassing governor defer via forced probe (consecutiveBackpressureDefers={})",
+                        this.guard.getUuidAsString(),
+                        this.consecutiveBackpressureDefers);
+            }
+            this.consecutiveBackpressureDefers = 0;
             this.pendingTreeTargetScan = createTreeTargetScanSession(world);
+            this.adaptiveScanPerGuardBudget = getConfiguredTreeScanPerGuardBudgetCap();
+            this.lastObservedScanElapsedMs = 0L;
         }
 
-        this.pendingTreeTargetScan.scanNextBudget(world, TREE_SCAN_BLOCK_BUDGET_PER_TICK,
-                (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+        if (!WorldLumberjackGovernor.tryAcquireHeavyScanToken(world)) {
+            return;
+        }
+
+        int perGuardCap = Math.max(1, Math.min(this.adaptiveScanPerGuardBudget, getConfiguredTreeScanPerGuardBudgetCap()));
+        int governorBudgetScalePermille = WorldLumberjackGovernor.getBudgetScalePermille(world);
+        perGuardCap = Math.max(1, (perGuardCap * governorBudgetScalePermille) / 1000);
+        int worldSharedRemaining = WorldScanBudgetManager.remaining(world);
+        int grantedBudget = Math.min(perGuardCap, worldSharedRemaining);
+        if (grantedBudget <= 0) {
+            return;
+        }
+
+        this.pendingTreeTargetScan.scanNextBudget(world, grantedBudget,
+                (scanWorld, pos, bells, roots, qualificationContext, metrics) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots, qualificationContext, metrics));
+        WorldScanBudgetManager.consume(world, grantedBudget);
+        adaptPerGuardScanBudgetFromElapsed(this.pendingTreeTargetScan.metricsElapsedMs());
 
         if (!this.pendingTreeTargetScan.complete()) {
             return;
         }
 
         List<BlockPos> targets = this.pendingTreeTargetScan.sortedRoots();
-        this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString());
+        this.completedTreeScanCount++;
+        boolean logScanMetricsAtInfo = shouldLogScanMetricsAtInfo(this.pendingTreeTargetScan)
+                || this.completedTreeScanCount % TREE_SCAN_METRICS_INFO_INTERVAL == 0;
+        this.pendingTreeTargetScan.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
+        this.adaptiveScanVolumeWindow += this.pendingTreeTargetScan.metricsVisitedBlocks();
+        this.adaptiveSessionCount++;
+        maybeLogAdaptiveSummary(world);
+        WorldLumberjackGovernor.recordScanSession(world,
+                this.pendingTreeTargetScan.metricsElapsedMs(),
+                this.pendingTreeTargetScan.metricsVisitedBlocks(),
+                this.pendingGovernorRetryEvents,
+                this.pendingGovernorForcedRemovals);
+        this.pendingGovernorRetryEvents = 0;
+        this.pendingGovernorForcedRemovals = 0;
         this.pendingTreeTargetScan = null;
         startSession(world, targets);
     }
 
+    private void maybeLogBackpressureDeferLoopSnapshot(ServerWorld world) {
+        int threshold = getConfiguredGovernorConsecutiveBackpressureDefersSnapshotThreshold();
+        if (threshold <= 0 || this.consecutiveBackpressureDefers < threshold) {
+            return;
+        }
+        if ((this.consecutiveBackpressureDefers - threshold) % threshold != 0) {
+            return;
+        }
+        LOGGER.warn("Lumberjack Guard {} consecutive_backpressure_defers={} governor_snapshot={}",
+                this.guard.getUuidAsString(),
+                this.consecutiveBackpressureDefers,
+                WorldLumberjackGovernor.describeStateSnapshot(world));
+    }
+
+    private void adaptPerGuardScanBudgetFromElapsed(long cumulativeElapsedMs) {
+        long elapsedThisPass = Math.max(0L, cumulativeElapsedMs - this.lastObservedScanElapsedMs);
+        this.lastObservedScanElapsedMs = cumulativeElapsedMs;
+        int cap = getConfiguredTreeScanPerGuardBudgetCap();
+        int min = getConfiguredTreeScanPerGuardBudgetFloor(cap);
+
+        if (elapsedThisPass >= TREE_SCAN_HIGH_ELAPSED_MS) {
+            this.adaptiveScanPerGuardBudget = Math.max(min,
+                    Math.round(this.adaptiveScanPerGuardBudget * TREE_SCAN_HIGH_ELAPSED_REDUCTION_FACTOR));
+            return;
+        }
+        if (elapsedThisPass <= TREE_SCAN_LOW_ELAPSED_MS) {
+            this.adaptiveScanPerGuardBudget = Math.min(cap,
+                    Math.max(min + 1, Math.round(this.adaptiveScanPerGuardBudget * TREE_SCAN_LOW_ELAPSED_INCREASE_FACTOR)));
+        }
+    }
+
+    private boolean shouldThrottleAdaptiveScan(ServerWorld world) {
+        long adaptiveLoadScore = this.adaptiveScanVolumeWindow
+                + (long) this.adaptivePathRetryWindow * 120L
+                + (long) this.adaptiveFailedSessionWindow * 200L
+                + (long) this.adaptiveForcedRecoveryWindow * 260L;
+        if (adaptiveLoadScore < GuardVillagersConfig.lumberjackAdaptiveThrottleLoadThreshold) {
+            return false;
+        }
+        long jitter = GuardVillagersConfig.lumberjackAdaptiveThrottleJitterTicks <= 0
+                ? 0L
+                : this.guard.getRandom().nextInt(GuardVillagersConfig.lumberjackAdaptiveThrottleJitterTicks + 1);
+        long deferTicks = GuardVillagersConfig.lumberjackAdaptiveThrottleDeferTicks + jitter;
+        this.throttleUntilTick = world.getTime() + deferTicks;
+        this.adaptiveScanVolumeWindow = Math.max(0L, this.adaptiveScanVolumeWindow / 2L);
+        this.adaptivePathRetryWindow = Math.max(0, this.adaptivePathRetryWindow / 2);
+        this.adaptiveFailedSessionWindow = Math.max(0, this.adaptiveFailedSessionWindow / 2);
+        this.adaptiveForcedRecoveryWindow = Math.max(0, this.adaptiveForcedRecoveryWindow / 2);
+        startChopCountdown(world, deferTicks, "adaptive throttle");
+        return true;
+    }
+
+    private void maybeLogAdaptiveSummary(ServerWorld world) {
+        int interval = Math.max(1, GuardVillagersConfig.lumberjackAdaptiveSummaryLogIntervalSessions);
+        if (this.adaptiveSessionCount % interval != 0) {
+            return;
+        }
+        LOGGER.info("Lumberjack adaptive summary guard={} sessions={} scanVolume={} pathRetries={} failedSessions={} forcedRecoveries={} throttleUntilTick={}",
+                this.guard.getUuidAsString(),
+                this.adaptiveSessionCount,
+                this.adaptiveScanVolumeWindow,
+                this.adaptivePathRetryWindow,
+                this.adaptiveFailedSessionWindow,
+                this.adaptiveForcedRecoveryWindow,
+                this.throttleUntilTick);
+    }
+
     private void startSession(ServerWorld world, List<BlockPos> targets) {
         if (targets.isEmpty()) {
+            this.adaptiveFailedSessionWindow++;
             int noTreeFailures = this.guard.getConsecutiveNoTreeSessions() + 1;
             this.guard.setConsecutiveNoTreeSessions(noTreeFailures);
             boolean escalated = maybeRunNoTreeEscalation(world, noTreeFailures);
@@ -426,10 +608,19 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
         this.lastTreeDistanceSq = Double.MAX_VALUE;
-        LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
-                this.guard.getUuidAsString(),
-                reason,
-                this.guard.getGatheredStackBuffer().size());
+        if ("session complete".equals(reason)) {
+            if (isLumberjackVerboseLoggingEnabled()) {
+                LOGGER.debug("Lumberjack Guard {} {} (buffer stacks: {})",
+                        this.guard.getUuidAsString(),
+                        reason,
+                        this.guard.getGatheredStackBuffer().size());
+            }
+        } else {
+            LOGGER.info("Lumberjack Guard {} {} (buffer stacks: {})",
+                    this.guard.getUuidAsString(),
+                    reason,
+                    this.guard.getGatheredStackBuffer().size());
+        }
     }
 
     private boolean updateStallState(ServerWorld world, BlockPos targetRoot, double treeDistanceSq) {
@@ -483,6 +674,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
 
             this.stallRecoveryAttempts++;
+            this.adaptivePathRetryWindow++;
             this.stalledTicks = 0;
             if (this.stallRecoveryAttempts >= MAX_STALL_RECOVERY_ATTEMPTS) {
                 LOGGER.debug("Lumberjack Guard {} target {} exhausted stall recovery after {} attempts",
@@ -619,6 +811,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void recordFailedTargetAttempt(BlockPos targetRoot, String reason) {
+        this.adaptiveFailedSessionWindow++;
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
         this.failedSessionRoots.add(targetRoot.toImmutable());
         this.rootTeardownRetryAttempts.remove(targetRoot);
@@ -699,6 +892,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private void startChopCountdown(ServerWorld world, long totalTicks, String reason) {
         this.guard.startChopCountdown(world.getTime(), totalTicks);
+        this.activeCountdownReason = reason == null ? "" : reason;
         LOGGER.info("Lumberjack Guard {} chop countdown started ({} ticks) {}",
                 this.guard.getUuidAsString(),
                 totalTicks,
@@ -726,6 +920,60 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 && (noTreeFailures - NO_TREE_ESCALATION_HIGH_WATER_MARK) % NO_TREE_ESCALATION_REPEAT_INTERVAL == 0;
     }
 
+    static boolean shouldSkipBackpressureDeferRestart(boolean countdownActive,
+                                                      long countdownRemainingTicks,
+                                                      long requestedDeferTicks,
+                                                      long currentTick,
+                                                      long lastBackpressureDeferTick,
+                                                      long retriggerCooldownTicks) {
+        if (countdownActive && countdownRemainingTicks >= getSubstantialBackpressureRemainingTicks(requestedDeferTicks)) {
+            return true;
+        }
+        return hasBackpressureDeferCooldown(currentTick, lastBackpressureDeferTick, retriggerCooldownTicks);
+    }
+
+    static long getSubstantialBackpressureRemainingTicks(long requestedDeferTicks) {
+        long normalizedDeferTicks = Math.max(requestedDeferTicks, 0L);
+        return Math.max(40L, normalizedDeferTicks / 3L);
+    }
+
+    static boolean hasBackpressureDeferCooldown(long currentTick, long lastBackpressureDeferTick, long retriggerCooldownTicks) {
+        if (lastBackpressureDeferTick < 0L || retriggerCooldownTicks <= 0L) {
+            return false;
+        }
+        return currentTick - lastBackpressureDeferTick < retriggerCooldownTicks;
+    }
+
+    static boolean shouldLogDeferredMidpointAudit(long currentTick, long lastAuditLogTick, long minimumIntervalTicks) {
+        if (minimumIntervalTicks <= 0L || lastAuditLogTick < 0L) {
+            return true;
+        }
+        return currentTick - lastAuditLogTick >= minimumIntervalTicks;
+    }
+
+    static boolean shouldKeepExistingBackpressureCountdown(boolean countdownActive,
+                                                           long countdownRemainingTicks,
+                                                           String activeCountdownReason) {
+        return countdownActive
+                && countdownRemainingTicks > 0L
+                && isDeferredBackpressureCountdown(activeCountdownReason);
+    }
+
+    static boolean shouldLogBackpressureDeferStart(long currentTick, long lastBackpressureDeferLogTick, long minimumIntervalTicks) {
+        if (minimumIntervalTicks <= 0L || lastBackpressureDeferLogTick < 0L) {
+            return true;
+        }
+        return currentTick - lastBackpressureDeferLogTick >= minimumIntervalTicks;
+    }
+
+    static boolean shouldRunMidpointAuditForCountdown(long countdownStartTick, long lastMidpointAuditCountdownStartTick) {
+        return countdownStartTick >= 0L && countdownStartTick != lastMidpointAuditCountdownStartTick;
+    }
+
+    private static boolean isDeferredBackpressureCountdown(String reason) {
+        return COUNTDOWN_REASON_GOVERNOR_BACKPRESSURE.equals(reason);
+    }
+
     private void logCountdownProgress(ServerWorld world) {
         if (this.guard.getChopCountdownTotalTicks() <= 0L) {
             return;
@@ -739,26 +987,61 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.setChopCountdownLastLogStep(step);
 
         if (step == 2) {
+            if (!shouldRunMidpointAuditForCountdown(this.guard.getChopCountdownStartTick(), this.lastMidpointAuditCountdownStartTick)) {
+                return;
+            }
+            if (isDeferredBackpressureCountdown(this.activeCountdownReason)
+                    && !shouldLogDeferredMidpointAudit(
+                    world.getTime(),
+                    this.lastMidpointAuditLogTick,
+                    MIDPOINT_AUDIT_DEFER_ONLY_LOG_MIN_INTERVAL_TICKS)) {
+                return;
+            }
+            this.lastMidpointAuditCountdownStartTick = this.guard.getChopCountdownStartTick();
+            this.lastMidpointAuditLogTick = world.getTime();
             LumberjackVillageDemandAudit.AuditSnapshot auditSnapshot = LumberjackVillageDemandAudit.run(world, this.guard);
             List<String> recipientsChosen = LumberjackGuardDepositLogsGoal.runMidpointAuditedDemandDistribution(
                     world,
                     this.guard,
                     auditSnapshot);
+            MidpointUpgradeRecoveryResult midpointRecoveryResult = recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                    auditSnapshot.eligibleV1VillagersMissingChest(),
+                    recipientsChosen,
+                    MIDPOINT_MISSING_CHEST_REFRESH_THRESHOLD,
+                    () -> LumberjackChestTriggerController.runTargetedMidpointPairingRefreshPass(world, this.guard),
+                    () -> LumberjackChestTriggerController.runTargetedMidpointChestPlacementPass(world, this.guard),
+                    () -> LumberjackGuardDepositLogsGoal.runMidpointAuditedDemandDistribution(world, this.guard, auditSnapshot),
+                    () -> LumberjackChestTriggerController.scheduleMidpointUpgradeRetryWithBackoff(world, this.guard, MIDPOINT_UPGRADE_RETRY_DELAY_TICKS),
+                    () -> LumberjackChestTriggerController.resetMidpointUpgradeRetryBackoff(this.guard),
+                    this.guard.getUuidAsString()
+            );
             boolean midpointUpgradeApplied = runMidpointUpgradeNeedPass(world, this.guard);
-            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}, midpoint upgrade applied={}",
+            LOGGER.info("Lumberjack Guard {} countdown audit [midpoint]: eligible-v1 missing chest={}, eligible-v2 missing crafting table={}, v2 recipients under stick/plank targets={}, recipients chosen={}, midpoint upgrade applied={}, pairing_refresh_triggered={}, paired_after_refresh={}, upgrade_retry_scheduled={}, retry_attempt={}, retry_delay_ticks={}, retry_throttled={}",
                     this.guard.getUuidAsString(),
                     auditSnapshot.eligibleV1VillagersMissingChest(),
                     auditSnapshot.eligibleV2VillagersMissingCraftingTable(),
                     auditSnapshot.eligibleV2ProfessionalsUnderToolMaterialThreshold(),
-                    recipientsChosen,
-                    midpointUpgradeApplied);
+                    midpointRecoveryResult.recipientsChosen(),
+                    midpointUpgradeApplied,
+                    midpointRecoveryResult.pairingRefreshTriggered(),
+                    midpointRecoveryResult.pairedAfterRefresh(),
+                    midpointRecoveryResult.upgradeRetryScheduled(),
+                    midpointRecoveryResult.retryAttempt(),
+                    midpointRecoveryResult.retryDelayTicks(),
+                    midpointRecoveryResult.retryThrottled());
         }
 
         long remaining = this.guard.getNextChopTick() - world.getTime();
-        LOGGER.info("Lumberjack Guard {} chop countdown {}% ({} ticks remaining)",
-                this.guard.getUuidAsString(),
-                step * 25,
-                Math.max(remaining, 0L));
+        if (isLumberjackVerboseLoggingEnabled()) {
+            LOGGER.debug("Lumberjack Guard {} chop countdown {}% ({} ticks remaining)",
+                    this.guard.getUuidAsString(),
+                    step * 25,
+                    Math.max(remaining, 0L));
+        }
+    }
+
+    private static boolean isLumberjackVerboseLoggingEnabled() {
+        return GuardVillagersConfig.lumberjackVerboseLogging;
     }
 
     static boolean runMidpointUpgradeNeedPass(ServerWorld world, LumberjackGuardEntity guard) {
@@ -787,6 +1070,75 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
 
         return runImmediateUpgradePass.getAsBoolean();
+    }
+
+    static MidpointUpgradeRecoveryResult recoverMidpointRecipientsWhenMissingChestDemandHigh(
+            int eligibleV1MissingChestCount,
+            List<String> recipientsChosen,
+            int missingChestRefreshThreshold,
+            Supplier<LumberjackChestTriggerController.MidpointPairingRefreshResult> runTargetedPairingRefreshPass,
+            Supplier<LumberjackChestTriggerController.MidpointChestPlacementResult> runTargetedChestPlacementPass,
+            Supplier<List<String>> rerunRecipientDistribution,
+            Supplier<LumberjackChestTriggerController.MidpointRetryPlan> scheduleUpgradeRetryWithBackoff,
+            Runnable resetRetryBackoff,
+            String guardIdForLogs) {
+        if (eligibleV1MissingChestCount < missingChestRefreshThreshold || !recipientsChosen.isEmpty()) {
+            if (!recipientsChosen.isEmpty()) {
+                resetRetryBackoff.run();
+            }
+            return new MidpointUpgradeRecoveryResult(recipientsChosen, false, false, false, 0, 0L, false);
+        }
+
+        int missingBefore = eligibleV1MissingChestCount;
+        LumberjackChestTriggerController.MidpointPairingRefreshResult pairingRefreshResult = runTargetedPairingRefreshPass.get();
+        LumberjackChestTriggerController.MidpointChestPlacementResult placementResult = runTargetedChestPlacementPass.get();
+        List<String> refreshedRecipients = recipientsChosen;
+        boolean pairedAfterRefresh = false;
+        if (pairingRefreshResult.pairedAfterRefresh() || placementResult.placedCount() > 0) {
+            refreshedRecipients = rerunRecipientDistribution.get();
+            pairedAfterRefresh = !refreshedRecipients.isEmpty();
+        }
+
+        boolean upgradeRetryScheduled = false;
+        int retryAttempt = 0;
+        long retryDelayTicks = 0L;
+        boolean retryThrottled = false;
+        if (!pairedAfterRefresh) {
+            LumberjackChestTriggerController.MidpointRetryPlan retryPlan = scheduleUpgradeRetryWithBackoff.get();
+            upgradeRetryScheduled = retryPlan.scheduled();
+            retryAttempt = retryPlan.attempt();
+            retryDelayTicks = retryPlan.delayTicks();
+            retryThrottled = retryPlan.throttled();
+        } else {
+            resetRetryBackoff.run();
+        }
+
+        int stillMissing = placementResult.stillMissingCount();
+        int pairedAfter = Math.max(0, missingBefore - Math.max(stillMissing, 0));
+        LOGGER.info("Lumberjack Guard {} midpoint_chest_recovery_cycle missing_before={} paired_after={} still_missing={}",
+                guardIdForLogs,
+                missingBefore,
+                pairedAfter,
+                Math.max(stillMissing, 0));
+
+        return new MidpointUpgradeRecoveryResult(
+                refreshedRecipients,
+                pairingRefreshResult.pairingRefreshTriggered() || placementResult.placementTriggered(),
+                pairedAfterRefresh,
+                upgradeRetryScheduled,
+                retryAttempt,
+                retryDelayTicks,
+                retryThrottled
+        );
+    }
+
+    record MidpointUpgradeRecoveryResult(List<String> recipientsChosen,
+                                         boolean pairingRefreshTriggered,
+                                         boolean pairedAfterRefresh,
+                                         boolean upgradeRetryScheduled,
+                                         int retryAttempt,
+                                         long retryDelayTicks,
+                                         boolean retryThrottled) {
     }
 
     private static int countByItemForMidpoint(Inventory inventory, Item item) {
@@ -888,13 +1240,21 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
+        int baseRadius = getConfiguredBaseTreeSearchRadius();
         if (attempts >= 4) {
             return TREE_SEARCH_MAX_EXPANDED_RADIUS;
         }
         if (attempts >= 2) {
             return TREE_SEARCH_EXPANDED_RADIUS;
         }
-        return TREE_SEARCH_RADIUS;
+        return baseRadius;
+    }
+
+    private static int getConfiguredBaseTreeSearchRadius() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackBaseTreeSearchRadius,
+                GuardVillagersConfig.MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS,
+                GuardVillagersConfig.MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS);
     }
 
     private static BlockPos normalizeRootStatic(ServerWorld world, BlockPos pos) {
@@ -1021,10 +1381,17 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         TreeTargetScanSession session = createTreeTargetScanSession(world);
         while (!session.complete()) {
             session.scanNextBudget(world, Integer.MAX_VALUE / 4,
-                    (scanWorld, pos, bells, roots) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots));
+                    (scanWorld, pos, bells, roots, qualificationContext, metrics) -> tryAddQualifiedRoot(scanWorld, pos, bells, roots, qualificationContext, metrics));
         }
-        session.logMetrics(this.guard.getUuidAsString());
+        boolean logScanMetricsAtInfo = shouldLogScanMetricsAtInfo(session);
+        session.logMetrics(this.guard.getUuidAsString(), logScanMetricsAtInfo, isLumberjackVerboseLoggingEnabled());
         return session.sortedRoots();
+    }
+
+    private boolean shouldLogScanMetricsAtInfo(TreeTargetScanSession session) {
+        return session.metricsElapsedMs() >= TREE_SCAN_METRICS_INFO_ELAPSED_MS
+                || session.usedMappedBounds()
+                || session.earlyCompleted();
     }
 
     private TreeTargetScanSession createTreeTargetScanSession(ServerWorld world) {
@@ -1058,7 +1425,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 hasMappedBounds,
                 mappedContext == null ? 0 : mappedContext.cartographerCount(),
                 regions,
-                nearbyBells);
+                nearbyBells,
+                ScanQualificationContext.create(world, regions, getConfiguredHousePoiProtectionRadius()));
     }
 
     private Set<BlockPos> collectQualifiedRootsInMappedBounds(ServerWorld world,
@@ -1127,9 +1495,18 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         return uniqueRoots;
     }
 
-    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots) {
-        BlockPos root = normalizeRoot(world, candidateLog);
-        RootQualificationResult qualification = qualifyRoot(world, root, cachedBells);
+    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world,
+                                                        BlockPos candidateLog,
+                                                        @Nullable Set<BlockPos> cachedBells,
+                                                        Set<BlockPos> uniqueRoots,
+                                                        @Nullable ScanQualificationContext qualificationContext,
+                                                        ScanMetrics metrics) {
+        BlockPos root = qualificationContext != null
+                ? qualificationContext.normalizeRootCached(world, candidateLog)
+                : normalizeRoot(world, candidateLog);
+        RootQualificationResult qualification = qualificationContext != null
+                ? qualificationContext.qualifyRootCached(world, root, cachedBells, metrics)
+                : qualifyRoot(world, root, cachedBells, null);
         if (!qualification.accepted()) {
             return qualification;
         }
@@ -1137,6 +1514,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return new RootQualificationResult(false, REJECTED_DUPLICATE_ROOT);
         }
         return new RootQualificationResult(true, "");
+    }
+
+    private RootQualificationResult tryAddQualifiedRoot(ServerWorld world,
+                                                        BlockPos candidateLog,
+                                                        @Nullable Set<BlockPos> cachedBells,
+                                                        Set<BlockPos> uniqueRoots) {
+        return tryAddQualifiedRoot(world, candidateLog, cachedBells, uniqueRoots, null, new ScanMetrics());
     }
 
     private @Nullable MappedBoundsSearchContext resolveMappedBoundsSearchContext(ServerWorld world, BlockPos center) {
@@ -1235,7 +1619,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     static boolean isCandidateInScanMode(BlockPos center, BlockPos candidate, @Nullable VillageMappedBoundsState.MappedBounds mappedBounds) {
-        return isCandidateInScanMode(center, candidate, mappedBounds, TREE_SEARCH_RADIUS);
+        return isCandidateInScanMode(center, candidate, mappedBounds, getConfiguredBaseTreeSearchRadius());
     }
 
     static boolean isCandidateInScanMode(BlockPos center,
@@ -1267,7 +1651,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                               @Nullable VillageMappedBoundsState.MappedBounds mappedBounds,
                               boolean usesLocalBellExclusion) {
         static ScanBounds fromLocalRadius(BlockPos center) {
-            return fromLocalRadius(center, TREE_SEARCH_RADIUS);
+            return fromLocalRadius(center, getConfiguredBaseTreeSearchRadius());
         }
 
         static ScanBounds fromLocalRadius(BlockPos center, int radius) {
@@ -1291,7 +1675,12 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     @FunctionalInterface
     private interface RootCollector {
-        RootQualificationResult evaluate(ServerWorld world, BlockPos candidateLog, @Nullable Set<BlockPos> cachedBells, Set<BlockPos> uniqueRoots);
+        RootQualificationResult evaluate(ServerWorld world,
+                                         BlockPos candidateLog,
+                                         @Nullable Set<BlockPos> cachedBells,
+                                         Set<BlockPos> uniqueRoots,
+                                         @Nullable ScanQualificationContext qualificationContext,
+                                         ScanMetrics metrics);
     }
 
     private record RootQualificationResult(boolean accepted, String rejectReason) {}
@@ -1301,6 +1690,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private long visitedBlocks;
         private long candidateLogs;
         private int acceptedRoots;
+        private long rootQualificationCacheHits;
+        private long rootQualificationCacheMisses;
         private final Map<String, Integer> skippedReasons = new LinkedHashMap<>();
 
         void visited() {
@@ -1315,12 +1706,218 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.acceptedRoots++;
         }
 
+        void rootQualificationCacheHit() {
+            this.rootQualificationCacheHits++;
+        }
+
+        void rootQualificationCacheMiss() {
+            this.rootQualificationCacheMisses++;
+        }
+
         void skipped(String reason) {
             this.skippedReasons.merge(reason, 1, Integer::sum);
         }
 
         long elapsedMs() {
             return (System.nanoTime() - this.startNanos) / 1_000_000L;
+        }
+    }
+
+    private static final class WorldLumberjackGovernor {
+        private static final Map<RegistryKey<net.minecraft.world.World>, GovernorState> STATE_BY_WORLD = new HashMap<>();
+
+        private static boolean shouldDeferNewScanSession(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            return state.backpressurePermille >= getConfiguredGovernorDeferBackpressureThresholdPermille();
+        }
+
+        private static boolean tryConsumeForcedProbePermit(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            int deferThreshold = getConfiguredGovernorDeferBackpressureThresholdPermille();
+            if (state.backpressurePermille < deferThreshold) {
+                return false;
+            }
+            int interval = getConfiguredGovernorForcedProbeIntervalTicks();
+            long tick = world.getTime();
+            if (state.lastForcedProbePermitTick >= 0L && tick - state.lastForcedProbePermitTick < interval) {
+                return false;
+            }
+            state.lastForcedProbePermitTick = tick;
+            return true;
+        }
+
+        private static boolean tryAcquireHeavyScanToken(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            long tick = world.getTime();
+            if (state.tokenTick != tick) {
+                state.tokenTick = tick;
+                state.activeHeavyScans = 0;
+            }
+            int maxConcurrent = getConfiguredMaxConcurrentHeavyScansPerWorld();
+            if (state.activeHeavyScans >= maxConcurrent) {
+                return false;
+            }
+            state.activeHeavyScans++;
+            return true;
+        }
+
+        private static int getBudgetScalePermille(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            return Math.max(150, 1000 - state.backpressurePermille);
+        }
+
+        private static void recordScanSession(ServerWorld world,
+                                              long elapsedMs,
+                                              long visitedBlocks,
+                                              int retryEvents,
+                                              int forcedRemovals) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            state.scanSessions++;
+            state.emaElapsedMs = ema(state.emaElapsedMs, elapsedMs);
+            state.emaVisitedBlocks = ema(state.emaVisitedBlocks, visitedBlocks);
+            state.emaRetryEvents = ema(state.emaRetryEvents, Math.max(0, retryEvents));
+            state.emaForcedRemovals = ema(state.emaForcedRemovals, Math.max(0, forcedRemovals));
+
+            int previousBackpressure = state.backpressurePermille;
+            int loadPermille = computeLoadPermille(state);
+            int highThreshold = getConfiguredGovernorHighLoadThresholdPermille();
+            int lowThreshold = getConfiguredGovernorLowLoadThresholdPermille();
+            if (loadPermille >= highThreshold) {
+                state.backpressurePermille = Math.min(GOVERNOR_MAX_BACKPRESSURE, state.backpressurePermille + GOVERNOR_PRESSURE_STEP);
+            } else if (loadPermille <= lowThreshold) {
+                state.backpressurePermille = Math.max(0, state.backpressurePermille - GOVERNOR_RECOVERY_STEP);
+            } else if (state.backpressurePermille > 0) {
+                state.backpressurePermille = Math.max(0, state.backpressurePermille - (GOVERNOR_RECOVERY_STEP / 2));
+            }
+
+            int interval = getConfiguredGovernorMetricsLogInterval();
+            boolean transitioned = previousBackpressure != state.backpressurePermille;
+            if (transitioned || state.scanSessions % interval == 0) {
+                LOGGER.info("Lumberjack governor world={} session={} loadPermille={} backpressure={} budgetScalePermille={} emaElapsedMs={} emaVisited={} emaRetry={} emaForced={} transitioned={}",
+                        world.getRegistryKey().getValue(),
+                        state.scanSessions,
+                        loadPermille,
+                        state.backpressurePermille,
+                        getBudgetScalePermille(world),
+                        round(state.emaElapsedMs),
+                        round(state.emaVisitedBlocks),
+                        round(state.emaRetryEvents),
+                        round(state.emaForcedRemovals),
+                        transitioned);
+            }
+        }
+
+        private static int computeLoadPermille(GovernorState state) {
+            double elapsedRatio = state.emaElapsedMs / Math.max(1D, TREE_SCAN_HIGH_ELAPSED_MS);
+            double visitedRatio = state.emaVisitedBlocks / Math.max(1D, getConfiguredTreeScanPerGuardBudgetCap());
+            double load = elapsedRatio * GOVERNOR_LOAD_ELAPSED_WEIGHT
+                    + visitedRatio * GOVERNOR_LOAD_VISITED_WEIGHT
+                    + state.emaRetryEvents * GOVERNOR_LOAD_RETRY_WEIGHT
+                    + state.emaForcedRemovals * GOVERNOR_LOAD_FORCED_WEIGHT;
+            return Math.max(0, (int) Math.round(load));
+        }
+
+        private static GovernorState getState(ServerWorld world) {
+            return STATE_BY_WORLD.computeIfAbsent(world.getRegistryKey(), key -> new GovernorState());
+        }
+
+        private static void applyPassiveBackpressureDecay(ServerWorld world, GovernorState state) {
+            long decayIntervalTicks = getConfiguredGovernorPassiveBackpressureDecayIntervalTicks();
+            int decayPermillePerSlice = getConfiguredGovernorPassiveBackpressureDecayPermillePerSlice();
+            if (decayIntervalTicks <= 0L || decayPermillePerSlice <= 0) {
+                state.lastPassiveDecayTick = world.getTime();
+                return;
+            }
+            long tick = world.getTime();
+            if (state.lastPassiveDecayTick < 0L) {
+                state.lastPassiveDecayTick = tick;
+                return;
+            }
+            long elapsedTicks = tick - state.lastPassiveDecayTick;
+            if (elapsedTicks < decayIntervalTicks) {
+                return;
+            }
+            long slices = elapsedTicks / decayIntervalTicks;
+            long decay = slices * decayPermillePerSlice;
+            state.backpressurePermille = Math.max(0, state.backpressurePermille - (int) Math.min(Integer.MAX_VALUE, decay));
+            state.lastPassiveDecayTick += slices * decayIntervalTicks;
+        }
+
+        private static String describeStateSnapshot(ServerWorld world) {
+            GovernorState state = getState(world);
+            applyPassiveBackpressureDecay(world, state);
+            return String.format("world=%s sessions=%d backpressure=%d loadPermille=%d budgetScalePermille=%d emaElapsedMs=%d emaVisited=%d emaRetry=%d emaForced=%d lastForcedProbeTick=%d",
+                    world.getRegistryKey().getValue(),
+                    state.scanSessions,
+                    state.backpressurePermille,
+                    computeLoadPermille(state),
+                    getBudgetScalePermille(world),
+                    round(state.emaElapsedMs),
+                    round(state.emaVisitedBlocks),
+                    round(state.emaRetryEvents),
+                    round(state.emaForcedRemovals),
+                    state.lastForcedProbePermitTick);
+        }
+
+        private static double ema(double current, double sample) {
+            return current <= 0.0D ? sample : (current * (1.0D - GOVERNOR_EMA_ALPHA)) + (sample * GOVERNOR_EMA_ALPHA);
+        }
+
+        private static int round(double value) {
+            return (int) Math.round(value);
+        }
+
+        private static final class GovernorState {
+            private long tokenTick = Long.MIN_VALUE;
+            private int activeHeavyScans;
+            private int scanSessions;
+            private int backpressurePermille;
+            private double emaElapsedMs;
+            private double emaVisitedBlocks;
+            private double emaRetryEvents;
+            private double emaForcedRemovals;
+            private long lastPassiveDecayTick = Long.MIN_VALUE;
+            private long lastForcedProbePermitTick = Long.MIN_VALUE;
+        }
+    }
+
+    private static final class WorldScanBudgetManager {
+        private static final Map<RegistryKey<net.minecraft.world.World>, TickBudgetState> BUDGET_BY_WORLD = new HashMap<>();
+
+        private static int remaining(ServerWorld world) {
+            TickBudgetState state = BUDGET_BY_WORLD.computeIfAbsent(world.getRegistryKey(),
+                    key -> new TickBudgetState(Long.MIN_VALUE, 0));
+            long tick = world.getTime();
+            int cap = getConfiguredTreeScanWorldSharedBudgetCap();
+            if (state.tick != tick) {
+                state.tick = tick;
+                state.remaining = cap;
+            }
+            return Math.max(0, state.remaining);
+        }
+
+        private static void consume(ServerWorld world, int budgetRequested) {
+            remaining(world);
+            TickBudgetState state = BUDGET_BY_WORLD.get(world.getRegistryKey());
+            if (state == null) {
+                return;
+            }
+            state.remaining = Math.max(0, state.remaining - Math.max(0, budgetRequested));
+        }
+
+        private static final class TickBudgetState {
+            private long tick;
+            private int remaining;
+
+            private TickBudgetState(long tick, int remaining) {
+                this.tick = tick;
+                this.remaining = remaining;
+            }
         }
     }
 
@@ -1335,6 +1932,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private final int cartographerCount;
         private final List<ScanBounds> regions;
         private final @Nullable Set<BlockPos> nearbyBells;
+        private final ScanQualificationContext qualificationContext;
         private final Set<BlockPos> uniqueRoots = new HashSet<>();
         private final ScanMetrics metrics = new ScanMetrics();
         private final int[] regionLayerIndices;
@@ -1350,6 +1948,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         private int localAcceptedRoots;
         private int debugRejectLogs;
         private boolean complete;
+        private boolean earlyCompleted;
 
         private TreeTargetScanSession(String guardId,
                                       BlockPos center,
@@ -1357,7 +1956,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                                       boolean hasMappedBounds,
                                       int cartographerCount,
                                       List<ScanBounds> regions,
-                                      @Nullable Set<BlockPos> nearbyBells) {
+                                      @Nullable Set<BlockPos> nearbyBells,
+                                      ScanQualificationContext qualificationContext) {
             this.guardId = guardId;
             this.center = center;
             this.localSearchRadius = localSearchRadius;
@@ -1365,6 +1965,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             this.cartographerCount = cartographerCount;
             this.regions = regions;
             this.nearbyBells = nearbyBells;
+            this.qualificationContext = qualificationContext;
             this.regionLayerIndices = new int[regions.size()];
             this.regionX = new int[regions.size()];
             this.regionZ = new int[regions.size()];
@@ -1404,13 +2005,20 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 } else {
                     this.metrics.candidate();
                     Set<BlockPos> bellExclusion = region.usesLocalBellExclusion() ? this.nearbyBells : null;
-                    RootQualificationResult qualificationResult = collector.evaluate(world, pos, bellExclusion, this.uniqueRoots);
+                    RootQualificationResult qualificationResult = collector.evaluate(
+                            world,
+                            pos,
+                            bellExclusion,
+                            this.uniqueRoots,
+                            this.qualificationContext,
+                            this.metrics);
                     if (qualificationResult.accepted()) {
                         this.metrics.accepted();
                         if (region.usesLocalBellExclusion()) {
                             this.localAcceptedRoots++;
                         }
                         if (shouldEarlyCompleteCurrentPass()) {
+                            this.earlyCompleted = true;
                             this.complete = true;
                             saveRegionCursor();
                             break;
@@ -1472,6 +2080,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
         private void advancePassIfNeeded() {
             if (shouldEarlyCompleteCurrentPass()) {
+                this.earlyCompleted = true;
                 this.complete = true;
                 return;
             }
@@ -1532,14 +2141,48 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return this.complete;
         }
 
+        long metricsElapsedMs() {
+            return this.metrics.elapsedMs();
+        }
+
+        long metricsVisitedBlocks() {
+            return this.metrics.visitedBlocks;
+        }
+
+        boolean usedMappedBounds() {
+            return this.hasMappedBounds;
+        }
+
+        boolean earlyCompleted() {
+            return this.earlyCompleted;
+        }
+
         List<BlockPos> sortedRoots() {
             List<BlockPos> sorted = new ArrayList<>(this.uniqueRoots);
             sorted.sort(Comparator.comparingDouble(this.center::getSquaredDistance));
             return sorted;
         }
 
-        void logMetrics(String guardId) {
-            LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} skipped={}",
+        void logMetrics(String guardId, boolean infoLevel, boolean verboseLogging) {
+            if (!infoLevel && !verboseLogging) {
+                return;
+            }
+            if (infoLevel) {
+                LOGGER.info("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
+                        guardId,
+                        this.hasMappedBounds ? "local+mapped" : "local-only",
+                        this.cartographerCount,
+                        this.regions.size(),
+                        this.metrics.elapsedMs(),
+                        this.metrics.visitedBlocks,
+                        this.metrics.candidateLogs,
+                        this.metrics.acceptedRoots,
+                        this.metrics.rootQualificationCacheHits,
+                        this.metrics.rootQualificationCacheMisses,
+                        this.metrics.skippedReasons);
+                return;
+            }
+            LOGGER.debug("Lumberjack Guard {} tree_scan_metrics mode={} cartographers={} regions={} elapsedMs={} visitedBlocks={} candidateLogs={} acceptedRoots={} rootQualificationCacheHits={} rootQualificationCacheMisses={} skipped={}",
                     guardId,
                     this.hasMappedBounds ? "local+mapped" : "local-only",
                     this.cartographerCount,
@@ -1548,7 +2191,138 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                     this.metrics.visitedBlocks,
                     this.metrics.candidateLogs,
                     this.metrics.acceptedRoots,
+                    this.metrics.rootQualificationCacheHits,
+                    this.metrics.rootQualificationCacheMisses,
                     this.metrics.skippedReasons);
+        }
+    }
+
+    private static final class ScanQualificationContext {
+        private final Set<Long> protectedPoiDoorInfluence;
+        private final Map<BlockPos, RootQualificationResult> rootQualificationMemo = new HashMap<>();
+        private final Map<BlockPos, BlockPos> normalizedRootsMemo = new HashMap<>();
+
+        private ScanQualificationContext(Set<Long> protectedPoiDoorInfluence) {
+            this.protectedPoiDoorInfluence = protectedPoiDoorInfluence;
+        }
+
+        static ScanQualificationContext create(ServerWorld world, List<ScanBounds> regions, int housePoiRadius) {
+            Set<Long> influence = buildProtectedPoiDoorInfluence(world, regions, housePoiRadius);
+            return new ScanQualificationContext(influence);
+        }
+
+        private static Set<Long> buildProtectedPoiDoorInfluence(ServerWorld world, List<ScanBounds> regions, int radius) {
+            if (regions.isEmpty()) {
+                return Set.of();
+            }
+            int minX = Integer.MAX_VALUE;
+            int minY = Integer.MAX_VALUE;
+            int minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE;
+            int maxY = Integer.MIN_VALUE;
+            int maxZ = Integer.MIN_VALUE;
+            for (ScanBounds region : regions) {
+                minX = Math.min(minX, region.min().getX());
+                minY = Math.min(minY, region.min().getY());
+                minZ = Math.min(minZ, region.min().getZ());
+                maxX = Math.max(maxX, region.max().getX());
+                maxY = Math.max(maxY, region.max().getY());
+                maxZ = Math.max(maxZ, region.max().getZ());
+            }
+
+            Set<Long> influence = new HashSet<>();
+            PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
+            int centerX = (minX + maxX) / 2;
+            int centerZ = (minZ + maxZ) / 2;
+            int squareRadius = Math.max(maxX - centerX, maxZ - centerZ) + radius;
+            BlockPos poiCenter = new BlockPos(centerX, (minY + maxY) / 2, centerZ);
+            for (var poi : poiStorage.getInSquare(
+                    type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
+                    poiCenter,
+                    squareRadius,
+                    PointOfInterestStorage.OccupationStatus.ANY).toList()) {
+                addSquareInfluence(influence, poi.getPos(), radius, minX, maxX, minY, maxY, minZ, maxZ);
+            }
+
+            BlockPos minDoor = new BlockPos(minX - radius, minY - 2, minZ - radius);
+            BlockPos maxDoor = new BlockPos(maxX + radius, maxY + 2, maxZ + radius);
+            for (BlockPos cursor : BlockPos.iterate(minDoor, maxDoor)) {
+                BlockState state = world.getBlockState(cursor);
+                if (state.isIn(BlockTags.WOODEN_DOORS) || state.isOf(Blocks.IRON_DOOR)) {
+                    addDoorInfluence(influence, cursor.toImmutable(), radius, minX, maxX, minY, maxY, minZ, maxZ);
+                }
+            }
+            return influence;
+        }
+
+        private static void addSquareInfluence(Set<Long> influence,
+                                               BlockPos source,
+                                               int radius,
+                                               int minX,
+                                               int maxX,
+                                               int minY,
+                                               int maxY,
+                                               int minZ,
+                                               int maxZ) {
+            int startX = Math.max(minX, source.getX() - radius);
+            int endX = Math.min(maxX, source.getX() + radius);
+            int startZ = Math.max(minZ, source.getZ() - radius);
+            int endZ = Math.min(maxZ, source.getZ() + radius);
+            for (int x = startX; x <= endX; x++) {
+                for (int z = startZ; z <= endZ; z++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        influence.add(BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
+        }
+
+        private static void addDoorInfluence(Set<Long> influence,
+                                             BlockPos source,
+                                             int radius,
+                                             int minX,
+                                             int maxX,
+                                             int minY,
+                                             int maxY,
+                                             int minZ,
+                                             int maxZ) {
+            int startX = Math.max(minX, source.getX() - radius);
+            int endX = Math.min(maxX, source.getX() + radius);
+            int startY = Math.max(minY, source.getY() - 2);
+            int endY = Math.min(maxY, source.getY() + 2);
+            int startZ = Math.max(minZ, source.getZ() - radius);
+            int endZ = Math.min(maxZ, source.getZ() + radius);
+            for (int x = startX; x <= endX; x++) {
+                for (int y = startY; y <= endY; y++) {
+                    for (int z = startZ; z <= endZ; z++) {
+                        influence.add(BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
+        }
+
+        BlockPos normalizeRootCached(ServerWorld world, BlockPos candidateLog) {
+            return this.normalizedRootsMemo.computeIfAbsent(candidateLog.toImmutable(),
+                    key -> normalizeRootStatic(world, key));
+        }
+
+        RootQualificationResult qualifyRootCached(ServerWorld world,
+                                                  BlockPos root,
+                                                  @Nullable Set<BlockPos> cachedBells,
+                                                  ScanMetrics metrics) {
+            RootQualificationResult cached = this.rootQualificationMemo.get(root);
+            if (cached != null) {
+                metrics.rootQualificationCacheHit();
+                return cached;
+            }
+            metrics.rootQualificationCacheMiss();
+            RootQualificationResult computed = qualifyRoot(world, root, cachedBells, this);
+            this.rootQualificationMemo.put(root.toImmutable(), computed);
+            return computed;
+        }
+
+        boolean isWithinProtectedPoiDoorInfluence(BlockPos root) {
+            return this.protectedPoiDoorInfluence.contains(root.asLong());
         }
     }
 
@@ -1596,10 +2370,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
      *                    scan the world on demand (slower — only use for one-off checks)
      */
     private static boolean isEligibleRootImpl(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
-        return qualifyRoot(world, pos, cachedBells).accepted();
+        return qualifyRoot(world, pos, cachedBells, null).accepted();
     }
 
-    private static RootQualificationResult qualifyRoot(ServerWorld world, BlockPos pos, Set<BlockPos> cachedBells) {
+    private static RootQualificationResult qualifyRoot(ServerWorld world,
+                                                       BlockPos pos,
+                                                       Set<BlockPos> cachedBells,
+                                                       @Nullable ScanQualificationContext qualificationContext) {
         BlockState state = world.getBlockState(pos);
         if (!state.isIn(BlockTags.LOGS)) {
             return new RootQualificationResult(false, REJECTED_NOT_LOG);
@@ -1632,7 +2409,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return new RootQualificationResult(false, REJECTED_BELL_RADIUS);
         }
 
-        if (isNearProtectedVillagePoi(world, pos, getConfiguredHousePoiProtectionRadius())) {
+        int poiRadius = getConfiguredHousePoiProtectionRadius();
+        if (poiRadius > 0 && isNearProtectedVillagePoi(world, pos, poiRadius, qualificationContext)) {
             return new RootQualificationResult(false, REJECTED_HOUSE_POI_RADIUS);
         }
 
@@ -1681,7 +2459,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 || state.isOf(Blocks.COARSE_DIRT)
                 || state.isOf(Blocks.ROOTED_DIRT)
                 || state.isOf(Blocks.MOSS_BLOCK)
-                || state.isOf(Blocks.MYCELIUM);
+                || state.isOf(Blocks.MYCELIUM)
+                || state.isOf(Blocks.MUD)
+                || state.isOf(Blocks.MUDDY_MANGROVE_ROOTS)
+                || state.isOf(Blocks.FARMLAND)
+                || state.isOf(Blocks.SAND)
+                || state.isOf(Blocks.RED_SAND)
+                || state.isOf(Blocks.GRAVEL);
     }
 
     /**
@@ -1727,10 +2511,114 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private static int getConfiguredHousePoiProtectionRadius() {
-        return Math.max(1, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
+        return Math.max(0, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
     }
 
-    private static boolean isNearProtectedVillagePoi(ServerWorld world, BlockPos root, int radius) {
+    private static int getConfiguredTreeScanPerGuardBudgetCap() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackTreeScanPerGuardBudgetCap,
+                GuardVillagersConfig.MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET,
+                GuardVillagersConfig.MAX_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET);
+    }
+
+    private static int getConfiguredTreeScanPerGuardBudgetFloor(int cap) {
+        return Math.max(64, cap / 4);
+    }
+
+    private static int getConfiguredTreeScanWorldSharedBudgetCap() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackTreeScanWorldSharedBudgetCap,
+                GuardVillagersConfig.MIN_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET,
+                GuardVillagersConfig.MAX_LUMBERJACK_TREE_SCAN_WORLD_SHARED_BUDGET);
+    }
+
+    private static int getConfiguredMaxConcurrentHeavyScansPerWorld() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackMaxConcurrentHeavyScansPerWorld,
+                GuardVillagersConfig.MIN_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS,
+                GuardVillagersConfig.MAX_LUMBERJACK_MAX_CONCURRENT_HEAVY_SCANS);
+    }
+
+    private static int getConfiguredGovernorHighLoadThresholdPermille() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorHighLoadThresholdPermille,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_THRESHOLD,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_THRESHOLD);
+    }
+
+    private static int getConfiguredGovernorLowLoadThresholdPermille() {
+        int highThreshold = getConfiguredGovernorHighLoadThresholdPermille();
+        int clampedLow = MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorLowLoadThresholdPermille,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_THRESHOLD,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_THRESHOLD);
+        int maxLow = Math.max(GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_THRESHOLD, highThreshold - 50);
+        return Math.min(maxLow, clampedLow);
+    }
+
+    private static int getConfiguredGovernorHighLoadDeferTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorHighLoadDeferTicks,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorDeferBackpressureThresholdPermille() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorDeferBackpressureThresholdPermille,
+                0,
+                GOVERNOR_MAX_BACKPRESSURE);
+    }
+
+    private static int getConfiguredGovernorPassiveBackpressureDecayPermillePerSlice() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorPassiveBackpressureDecayPermillePerSlice,
+                0,
+                GOVERNOR_MAX_BACKPRESSURE);
+    }
+
+    private static int getConfiguredGovernorPassiveBackpressureDecayIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorPassiveBackpressureDecayIntervalTicks,
+                1,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorForcedProbeIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorForcedProbeIntervalTicks,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_DEFER_TICKS,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorBackpressureDeferLogMinIntervalTicks() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorBackpressureDeferLogMinIntervalTicks,
+                0,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_DEFER_TICKS);
+    }
+
+    private static int getConfiguredGovernorConsecutiveBackpressureDefersSnapshotThreshold() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold,
+                1,
+                500);
+    }
+
+    private static int getConfiguredGovernorMetricsLogInterval() {
+        return MathHelper.clamp(
+                GuardVillagersConfig.lumberjackGovernorMetricsLogInterval,
+                GuardVillagersConfig.MIN_LUMBERJACK_GOVERNOR_LOG_INTERVAL,
+                GuardVillagersConfig.MAX_LUMBERJACK_GOVERNOR_LOG_INTERVAL);
+    }
+
+    private static boolean isNearProtectedVillagePoi(ServerWorld world,
+                                                     BlockPos root,
+                                                     int radius,
+                                                     @Nullable ScanQualificationContext qualificationContext) {
+        if (qualificationContext != null) {
+            return qualificationContext.isWithinProtectedPoiDoorInfluence(root);
+        }
         PointOfInterestStorage poiStorage = world.getPointOfInterestStorage();
         boolean nearBedOrJob = poiStorage.getInSquare(
                         type -> type.isIn(PointOfInterestTypeTags.ACQUIRABLE_JOB_SITE) || type.matchesKey(PointOfInterestTypes.HOME),
@@ -1816,6 +2704,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void executeForcedTreeRemoval(ServerWorld world, BlockPos root, String reason) {
+        this.pendingGovernorForcedRemovals++;
+        this.adaptiveForcedRecoveryWindow++;
         TreeTeardownResult forcedTeardown = teardownTree(world, root);
         RemainingLogCountResult afterForcedTeardown = countRemainingConnectedLogs(world, root);
         int remainingAfterForcedTeardown = afterForcedTeardown.count();

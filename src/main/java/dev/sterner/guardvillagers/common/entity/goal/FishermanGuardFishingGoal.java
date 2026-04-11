@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.ChestBlock;
@@ -16,7 +17,10 @@ import net.minecraft.registry.RegistryKeys;
 import net.minecraft.registry.RegistryWrapper;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.world.Heightmap;
+import net.minecraft.entity.ai.pathing.Path;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +28,9 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Comparator;
 
 public class FishermanGuardFishingGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(FishermanGuardFishingGoal.class);
@@ -36,6 +43,7 @@ public class FishermanGuardFishingGoal extends Goal {
     private final FishermanGuardEntity guard;
     private Stage stage = Stage.IDLE;
     private @Nullable BlockPos targetWaterPos;
+    private @Nullable BlockPos targetStandPos;
     private long sessionStartTick;
     private long sessionDurationTicks;
     private boolean halfwayLogged;
@@ -44,6 +52,7 @@ public class FishermanGuardFishingGoal extends Goal {
     private final List<ItemStack> localDeliveryLoot = new ArrayList<>();
     private long nextSessionAttemptTick;
     private @Nullable ButcherTransferTarget butcherTransferTarget;
+    private final Map<BlockPos, Long> invalidWaterTargetCooldowns = new HashMap<>();
 
     public FishermanGuardFishingGoal(FishermanGuardEntity guard) {
         this.guard = guard;
@@ -62,8 +71,15 @@ public class FishermanGuardFishingGoal extends Goal {
             return false;
         }
 
-        this.targetWaterPos = findNearestFishableWater();
-        return this.targetWaterPos != null;
+        FishingTarget target = findNearestFishableWater(world);
+        if (target == null) {
+            this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+            return false;
+        }
+
+        this.targetWaterPos = target.waterPos();
+        this.targetStandPos = target.standPos();
+        return true;
     }
 
     @Override
@@ -79,8 +95,8 @@ public class FishermanGuardFishingGoal extends Goal {
         this.localDeliveryLoot.clear();
         this.halfwayLogged = false;
         this.butcherTransferTarget = null;
-        if (this.targetWaterPos != null) {
-            moveTo(this.targetWaterPos);
+        if (this.targetStandPos != null) {
+            moveTo(this.targetStandPos);
         }
     }
 
@@ -89,6 +105,7 @@ public class FishermanGuardFishingGoal extends Goal {
         this.guard.getNavigation().stop();
         this.stage = Stage.DONE;
         this.targetWaterPos = null;
+        this.targetStandPos = null;
         this.butcherTransferTarget = null;
         this.butcherDeliveryLoot.clear();
         this.localDeliveryLoot.clear();
@@ -114,12 +131,12 @@ public class FishermanGuardFishingGoal extends Goal {
     private void tickMovingToWater(ServerWorld world) {
         if (this.targetWaterPos == null) {
             this.stage = Stage.DONE;
-            this.nextSessionAttemptTick = world.getTime() + 200L;
+            this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
             return;
         }
 
         this.guard.getLookControl().lookAt(this.targetWaterPos.getX() + 0.5D, this.targetWaterPos.getY() + 0.5D, this.targetWaterPos.getZ() + 0.5D);
-        if (isNear(this.targetWaterPos)) {
+        if (this.targetStandPos != null && isNear(this.targetStandPos)) {
             this.stage = Stage.FISHING;
             this.sessionStartTick = world.getTime();
             this.sessionDurationTicks = MathHelper.nextInt(this.guard.getRandom(), MIN_SESSION_TICKS, MAX_SESSION_TICKS);
@@ -127,8 +144,23 @@ public class FishermanGuardFishingGoal extends Goal {
             return;
         }
 
+        if (!isCurrentTargetStillViable(world)) {
+            blacklistInvalidCurrentTarget(world, "became invalid while moving");
+            if (!retargetToNextViableWater(world)) {
+                this.stage = Stage.DONE;
+                this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+            }
+            return;
+        }
+
         if (this.guard.getNavigation().isIdle()) {
-            moveTo(this.targetWaterPos);
+            if (this.targetStandPos != null && !moveTo(this.targetStandPos)) {
+                blacklistInvalidCurrentTarget(world, "pathfinder could not move to stand position");
+                if (!retargetToNextViableWater(world)) {
+                    this.stage = Stage.DONE;
+                    this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+                }
+            }
         }
     }
 
@@ -434,41 +466,140 @@ public class FishermanGuardFishingGoal extends Goal {
         return this.guard.getPairedChestPos();
     }
 
-    private void moveTo(BlockPos pos) {
-        this.guard.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, MOVE_SPEED);
+    private boolean moveTo(BlockPos pos) {
+        return this.guard.getNavigation().startMovingTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, MOVE_SPEED);
     }
 
     private boolean isNear(BlockPos pos) {
         return this.guard.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
     }
 
-    private @Nullable BlockPos findNearestFishableWater() {
+    private @Nullable FishingTarget findNearestFishableWater(ServerWorld world) {
+        cleanupExpiredInvalidWaterTargetCooldowns(world.getTime());
         BlockPos center = this.guard.getBlockPos();
         BlockPos.Mutable cursor = new BlockPos.Mutable();
-        BlockPos nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
+        List<FishingTargetCandidate> candidates = new ArrayList<>();
 
         for (int dx = -WATER_SEARCH_RADIUS; dx <= WATER_SEARCH_RADIUS; dx++) {
             for (int dy = -WATER_SEARCH_RADIUS; dy <= WATER_SEARCH_RADIUS; dy++) {
                 for (int dz = -WATER_SEARCH_RADIUS; dz <= WATER_SEARCH_RADIUS; dz++) {
                     cursor.set(center.getX() + dx, center.getY() + dy, center.getZ() + dz);
-                    if (!this.guard.getWorld().getBlockState(cursor).isOf(Blocks.WATER)) {
-                        continue;
-                    }
-                    if (!this.guard.getWorld().getBlockState(cursor.up()).isAir()) {
+                    BlockPos candidateWater = cursor.toImmutable();
+                    if (!isFishableWaterCandidate(world, candidateWater)) {
                         continue;
                     }
 
-                    double distance = center.getSquaredDistance(cursor);
-                    if (distance < nearestDistance) {
-                        nearestDistance = distance;
-                        nearest = cursor.toImmutable();
+                    if (isBlacklistedWaterTarget(candidateWater, world.getTime())) {
+                        continue;
                     }
+
+                    double distance = center.getSquaredDistance(candidateWater);
+                    candidates.add(new FishingTargetCandidate(candidateWater, distance));
                 }
             }
         }
 
-        return nearest;
+        candidates.sort(Comparator.comparingDouble(FishingTargetCandidate::distanceSquared));
+        for (FishingTargetCandidate candidate : candidates) {
+            FishingTarget viable = toViableFishingTarget(world, candidate.waterPos());
+            if (viable != null) {
+                return viable;
+            }
+            markWaterTargetInvalid(candidate.waterPos(), world.getTime(), "failed stand/path viability");
+        }
+
+        return null;
+    }
+
+    private boolean isFishableWaterCandidate(ServerWorld world, BlockPos waterPos) {
+        if (!world.getBlockState(waterPos).isOf(Blocks.WATER)) {
+            return false;
+        }
+        if (!world.getBlockState(waterPos.up()).isAir()) {
+            return false;
+        }
+
+        boolean skyVisible = world.isSkyVisible(waterPos.up());
+        int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, waterPos.getX(), waterPos.getZ()) - 1;
+        boolean surfaceQualified = waterPos.getY() >= topY;
+        return (GuardVillagersConfig.fishermanRequireSkyVisibleWater && skyVisible)
+                || (GuardVillagersConfig.fishermanAllowSurfaceQualifiedWater && surfaceQualified);
+    }
+
+    private @Nullable FishingTarget toViableFishingTarget(ServerWorld world, BlockPos waterPos) {
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos standPos = waterPos.offset(direction);
+            if (!isStandableAdjacentBlock(world, standPos)) {
+                continue;
+            }
+            Path path = this.guard.getNavigation().findPathTo(standPos, 0);
+            if (path == null) {
+                continue;
+            }
+            return new FishingTarget(waterPos, standPos.toImmutable());
+        }
+        return null;
+    }
+
+    private boolean isStandableAdjacentBlock(ServerWorld world, BlockPos standPos) {
+        if (!world.getBlockState(standPos).isAir()) {
+            return false;
+        }
+        if (!world.getBlockState(standPos.up()).isAir()) {
+            return false;
+        }
+        return world.getBlockState(standPos.down()).isSideSolidFullSquare(world, standPos.down(), Direction.UP);
+    }
+
+    private boolean isCurrentTargetStillViable(ServerWorld world) {
+        if (this.targetWaterPos == null || this.targetStandPos == null) {
+            return false;
+        }
+        if (!isFishableWaterCandidate(world, this.targetWaterPos)) {
+            return false;
+        }
+        if (!isStandableAdjacentBlock(world, this.targetStandPos)) {
+            return false;
+        }
+        return this.guard.getNavigation().findPathTo(this.targetStandPos, 0) != null;
+    }
+
+    private boolean retargetToNextViableWater(ServerWorld world) {
+        FishingTarget replacement = findNearestFishableWater(world);
+        if (replacement == null) {
+            this.targetWaterPos = null;
+            this.targetStandPos = null;
+            return false;
+        }
+        this.targetWaterPos = replacement.waterPos();
+        this.targetStandPos = replacement.standPos();
+        moveTo(this.targetStandPos);
+        return true;
+    }
+
+    private void blacklistInvalidCurrentTarget(ServerWorld world, String reason) {
+        if (this.targetWaterPos != null) {
+            markWaterTargetInvalid(this.targetWaterPos, world.getTime(), reason);
+        }
+    }
+
+    private void markWaterTargetInvalid(BlockPos waterPos, long worldTime, String reason) {
+        long until = worldTime + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+        this.invalidWaterTargetCooldowns.put(waterPos.toImmutable(), until);
+        LOGGER.debug("fisherman [{}] blacklisted water target {} until {} ({})",
+                this.guard.getUuidAsString(),
+                waterPos.toShortString(),
+                until,
+                reason);
+    }
+
+    private boolean isBlacklistedWaterTarget(BlockPos waterPos, long worldTime) {
+        Long until = this.invalidWaterTargetCooldowns.get(waterPos);
+        return until != null && until > worldTime;
+    }
+
+    private void cleanupExpiredInvalidWaterTargetCooldowns(long worldTime) {
+        this.invalidWaterTargetCooldowns.entrySet().removeIf(entry -> entry.getValue() <= worldTime);
     }
 
     private enum Stage {
@@ -481,5 +612,11 @@ public class FishermanGuardFishingGoal extends Goal {
     }
 
     private record ButcherTransferTarget(BlockPos smokerPos, BlockPos chestPos) {
+    }
+
+    private record FishingTarget(BlockPos waterPos, BlockPos standPos) {
+    }
+
+    private record FishingTargetCandidate(BlockPos waterPos, double distanceSquared) {
     }
 }

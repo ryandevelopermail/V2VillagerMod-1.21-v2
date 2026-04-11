@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -8,6 +9,7 @@ import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FallingBlock;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
@@ -27,6 +29,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
 
 public class MasonMiningStairGoal extends Goal {
@@ -49,6 +54,10 @@ public class MasonMiningStairGoal extends Goal {
     private static final int FAILURE_REASON_RESET_THRESHOLD = 3;
     private static final int MIN_RESERVED_COBBLESTONE = 8;
     private static final int MIN_RESERVED_DIRT = 8;
+    private static final int BOOTSTRAP_STAGING_RADIUS_MIN = 5;
+    private static final int BOOTSTRAP_STAGING_RADIUS_MAX = 10;
+    private static final int BOOTSTRAP_STAGING_MAX_ATTEMPTS = 48;
+    private static final int WATER_BLACKLIST_MIN_RADIUS = 20;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -80,6 +89,14 @@ public class MasonMiningStairGoal extends Goal {
     private int consecutiveFailureCount;
     private boolean blockedByProtectedJobBlock;
     private final Set<BlockPos> protectedBlockSkipPositions = new HashSet<>();
+    private long adaptiveThrottleUntilTick;
+    private long adaptiveScanVolumeWindow;
+    private int adaptivePathRetryWindow;
+    private int adaptiveFailedSessionWindow;
+    private int adaptiveForcedRecoveryWindow;
+    private int adaptiveSessionCount;
+    private int bootstrapRetryCount;
+    private final List<ShaftBlacklistEntry> waterBailoutBlacklist = new ArrayList<>();
     private Stage stage = Stage.IDLE;
 
     public MasonMiningStairGoal(MasonGuardEntity guard) {
@@ -112,14 +129,22 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         long worldTime = world.getTime();
+        expireBlacklistedShafts(worldTime);
         if (worldTime < guard.getNextMiningStartTick()) {
             maybeLogCooldownProgress(worldTime);
+            return false;
+        }
+        if (worldTime < adaptiveThrottleUntilTick) {
+            return false;
+        }
+        if (shouldThrottleMiningSelection(world, worldTime)) {
             return false;
         }
 
         this.cooldownQuarterLogTick = 0L;
         this.cooldownThreeQuarterLogTick = 0L;
         this.cooldownProgressLoggedForStartTick = -1L;
+        this.adaptiveScanVolumeWindow += Math.max(1L, this.stepIndex + 1L);
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
         Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
@@ -158,6 +183,41 @@ public class MasonMiningStairGoal extends Goal {
             this.rejoinStepTarget = null;
             this.rejoinDeepTarget = null;
         }
+
+        if (stepIndex == 0 && isBootstrapObstructedAtOrigin(world, origin, miningDirection)) {
+            BlockPos stagingOrigin = findBootstrapStagingOrigin(world, origin, miningDirection);
+            if (stagingOrigin == null) {
+                bootstrapRetryCount = 0;
+                LOGGER.warn("Mason guard {} mining bootstrap failed after {} staging attempts (origin={}, direction={}); deferring to normal workflow",
+                        guard.getUuidAsString(),
+                        BOOTSTRAP_STAGING_MAX_ATTEMPTS,
+                        origin == null ? "none" : origin.toShortString(),
+                        miningDirection);
+                return false;
+            }
+
+            this.origin = stagingOrigin;
+            this.stepIndex = 0;
+            this.rejoinStepTarget = stagingOrigin;
+            this.rejoinDeepTarget = null;
+            guard.setMiningProgress(this.origin, this.stepIndex, this.miningDirection.getId());
+            guard.setMiningPathAnchors(this.origin, null);
+        }
+
+        int blacklistRadius = getWaterBlacklistRadius();
+        if (isNearBlacklistedShaft(this.origin, blacklistRadius)) {
+            LOGGER.info("Mason guard {} mining session skipped: reasonCode=blacklisted_shaft origin={} radius={}",
+                    guard.getUuidAsString(),
+                    this.origin == null ? "none" : this.origin.toShortString(),
+                    blacklistRadius);
+            guard.clearMiningProgress();
+            this.origin = guard.getBlockPos();
+            this.stepIndex = 0;
+            this.rejoinStepTarget = null;
+            this.rejoinDeepTarget = null;
+            return false;
+        }
+
         this.currentStepTarget = computeStepTarget(stepIndex);
         this.noProgressTicks = 0;
         this.lastDistanceToTarget = Double.MAX_VALUE;
@@ -302,6 +362,9 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private void tickRejoinLastStep(ServerWorld world) {
+        if (shouldAbortForWaterHazard(world, rejoinStepTarget)) {
+            return;
+        }
         if (rejoinStepTarget == null) {
             activateMiningStage(world);
             this.noProgressTicks = 0;
@@ -332,6 +395,7 @@ public class MasonMiningStairGoal extends Goal {
             lastDistanceToTarget = distanceToTarget;
         } else {
             noProgressTicks++;
+            adaptivePathRetryWindow++;
             if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
                 recoveryAttemptedForStep = true;
                 if (tryStartRecoveryMove(world, rejoinStepTarget, "rejoin")) {
@@ -366,6 +430,10 @@ public class MasonMiningStairGoal extends Goal {
             activateMiningStage(world);
         }
 
+        if (shouldAbortForWaterHazard(world, currentStepTarget)) {
+            return;
+        }
+
         if (!clearCurrentHeadBlock(world)) {
             beginReturn(ReturnReason.CANNOT_ADVANCE);
             return;
@@ -392,6 +460,7 @@ public class MasonMiningStairGoal extends Goal {
             lastDistanceToTarget = distanceToTarget;
         } else {
             noProgressTicks++;
+            adaptivePathRetryWindow++;
             if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
                 recoveryAttemptedForStep = true;
                 if (tryStartRecoveryMove(world, currentStepTarget, "mining")) {
@@ -703,6 +772,93 @@ public class MasonMiningStairGoal extends Goal {
         return origin.offset(miningDirection, index + 1).down(index + 1);
     }
 
+    private BlockPos computeStepTarget(BlockPos stepOrigin, Direction direction, int index) {
+        return stepOrigin.offset(direction, index + 1).down(index + 1);
+    }
+
+    private boolean isBootstrapObstructedAtOrigin(ServerWorld world, BlockPos stepOrigin, Direction direction) {
+        if (stepOrigin == null || direction == null || !direction.getAxis().isHorizontal()) {
+            return true;
+        }
+
+        BlockPos chestPos = guard.getPairedChestPos();
+        BlockPos jobPos = guard.getPairedJobPos();
+        for (Direction scanDirection : Direction.Type.HORIZONTAL) {
+            BlockPos scanPos = stepOrigin.offset(scanDirection);
+            if ((chestPos != null && chestPos.equals(scanPos)) || (jobPos != null && jobPos.equals(scanPos))) {
+                return true;
+            }
+        }
+
+        BlockPos firstStepTarget = computeStepTarget(stepOrigin, direction, 0);
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            BlockPos samplePos = firstStepTarget.up(i);
+            BlockState sampleState = world.getBlockState(samplePos);
+            if (sampleState.isAir() || sampleState.getCollisionShape(world, samplePos).isEmpty()) {
+                continue;
+            }
+            if (sampleState.getBlock() instanceof ChestBlock || isProtectedJobBlock(samplePos, sampleState)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private BlockPos findBootstrapStagingOrigin(ServerWorld world, BlockPos blockedOrigin, Direction direction) {
+        if (blockedOrigin == null || direction == null || !direction.getAxis().isHorizontal()) {
+            return null;
+        }
+
+        List<BlockPos> candidates = buildBootstrapCandidateOffsets(blockedOrigin);
+        bootstrapRetryCount = 0;
+        for (BlockPos candidate : candidates) {
+            if (bootstrapRetryCount >= BOOTSTRAP_STAGING_MAX_ATTEMPTS) {
+                break;
+            }
+            bootstrapRetryCount++;
+            if (!isCandidateValidStagingOrigin(world, candidate, direction)) {
+                continue;
+            }
+            return candidate;
+        }
+        return null;
+    }
+
+    private List<BlockPos> buildBootstrapCandidateOffsets(BlockPos blockedOrigin) {
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int radius = BOOTSTRAP_STAGING_RADIUS_MIN; radius <= BOOTSTRAP_STAGING_RADIUS_MAX; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
+                        continue;
+                    }
+                    candidates.add(blockedOrigin.add(dx, 0, dz));
+                }
+            }
+        }
+        return candidates;
+    }
+
+    private boolean isCandidateValidStagingOrigin(ServerWorld world, BlockPos candidateOrigin, Direction direction) {
+        if (!world.isChunkLoaded(candidateOrigin)) {
+            return false;
+        }
+        if (!hasSafeSupport(world, candidateOrigin)) {
+            return false;
+        }
+        if (!world.getBlockState(candidateOrigin).getCollisionShape(world, candidateOrigin).isEmpty()
+                || !world.getBlockState(candidateOrigin.up()).getCollisionShape(world, candidateOrigin.up()).isEmpty()) {
+            return false;
+        }
+        if (isBootstrapObstructedAtOrigin(world, candidateOrigin, direction)) {
+            return false;
+        }
+
+        BlockPos firstStep = computeStepTarget(candidateOrigin, direction, 0);
+        Path preflight = guard.getNavigation().findPathTo(firstStep, 0);
+        return preflight != null;
+    }
+
     private void activateMiningStage(ServerWorld world) {
         this.stage = Stage.MINING;
         if (this.miningSessionStartTick >= 0L && this.miningSessionEndTick >= 0L) {
@@ -746,6 +902,9 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
         this.returnReason = reason;
+        if (reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE) {
+            adaptiveFailedSessionWindow++;
+        }
         long worldTime = guard.getWorld().getTime();
         boolean protectedEarlyAbort = reason == ReturnReason.CANNOT_ADVANCE
                 && blockedByProtectedJobBlock
@@ -761,10 +920,16 @@ public class MasonMiningStairGoal extends Goal {
         this.cooldownProgressLoggedForStartTick = -1L;
 
         boolean forceSafeAnchorReset = protectedEarlyAbort ? false : trackFailureReason(reason);
+        if (reason == ReturnReason.WATER_BAILOUT) {
+            recordWaterBailoutOrigin();
+        } else if (reason == ReturnReason.BATCH_COMPLETE) {
+            clearBlacklistOnSuccessfulDistantSession();
+        }
 
-        LOGGER.info("Mason guard {} ending mining session: reason={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
+        LOGGER.info("Mason guard {} ending mining session: reason={}, reasonCode={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
                 guard.getUuidAsString(),
                 reason,
+                reason.reasonCode,
                 minedBlockCount,
                 stepIndex,
                 guard.getMiningStartPos() == null ? "none" : guard.getMiningStartPos().toShortString(),
@@ -998,11 +1163,109 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private int computeSessionBackoffTicks(ReturnReason reason) {
-        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE;
+        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE
+                || reason == ReturnReason.STUCK_30_SECONDS
+                || reason == ReturnReason.TOOL_BROKE
+                || reason == ReturnReason.WATER_BAILOUT;
         if (isFailureReason) {
             return MathHelper.nextInt(guard.getRandom(), FAILURE_BACKOFF_MIN_TICKS, FAILURE_BACKOFF_MAX_TICKS);
         }
         return MathHelper.nextInt(guard.getRandom(), SESSION_BACKOFF_MIN_TICKS, SESSION_BACKOFF_MAX_TICKS);
+    }
+
+    private boolean shouldAbortForWaterHazard(ServerWorld world, BlockPos forwardPathTarget) {
+        BlockPos feetPos = guard.getBlockPos();
+        if (isWaterAt(world, feetPos)) {
+            triggerWaterBailout("feet", feetPos);
+            return true;
+        }
+
+        BlockPos headPos = feetPos.up();
+        if (isWaterAt(world, headPos)) {
+            triggerWaterBailout("head", headPos);
+            return true;
+        }
+
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos adjacentHead = headPos.offset(direction);
+            if (isWaterAt(world, adjacentHead)) {
+                triggerWaterBailout("head_adjacent", adjacentHead);
+                return true;
+            }
+        }
+
+        if (forwardPathTarget != null) {
+            for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+                BlockPos pathSample = forwardPathTarget.up(i);
+                if (isWaterAt(world, pathSample)) {
+                    triggerWaterBailout("forward_path", pathSample);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isWaterAt(ServerWorld world, BlockPos pos) {
+        return world.getBlockState(pos).getFluidState().isIn(FluidTags.WATER);
+    }
+
+    private void triggerWaterBailout(String hazardZone, BlockPos waterPos) {
+        LOGGER.info("Mason guard {} mining water bailout: reasonCode=water_bailout zone={} waterPos={} origin={} stepIndex={}",
+                guard.getUuidAsString(),
+                hazardZone,
+                waterPos.toShortString(),
+                origin == null ? "none" : origin.toShortString(),
+                stepIndex);
+        beginReturn(ReturnReason.WATER_BAILOUT);
+    }
+
+    private void recordWaterBailoutOrigin() {
+        if (origin == null) {
+            return;
+        }
+        long expiresAt = guard.getWorld().getTime() + Math.max(20L, GuardVillagersConfig.masonWaterBailoutBlacklistDurationTicks);
+        waterBailoutBlacklist.removeIf(entry -> entry.origin().equals(origin));
+        waterBailoutBlacklist.add(new ShaftBlacklistEntry(origin.toImmutable(), expiresAt));
+    }
+
+    private void clearBlacklistOnSuccessfulDistantSession() {
+        if (origin == null || waterBailoutBlacklist.isEmpty()) {
+            return;
+        }
+        int blacklistRadius = getWaterBlacklistRadius();
+        int minDistanceSquared = blacklistRadius * blacklistRadius;
+        waterBailoutBlacklist.removeIf(entry -> entry.origin().getSquaredDistance(origin) >= minDistanceSquared);
+    }
+
+    private boolean isNearBlacklistedShaft(BlockPos targetOrigin, int radius) {
+        if (targetOrigin == null || waterBailoutBlacklist.isEmpty()) {
+            return false;
+        }
+        int radiusSquared = radius * radius;
+        for (ShaftBlacklistEntry entry : waterBailoutBlacklist) {
+            if (entry.origin().getSquaredDistance(targetOrigin) < radiusSquared) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int getWaterBlacklistRadius() {
+        return Math.max(WATER_BLACKLIST_MIN_RADIUS, GuardVillagersConfig.masonWaterBailoutBlacklistRadius);
+    }
+
+    private void expireBlacklistedShafts(long worldTime) {
+        if (waterBailoutBlacklist.isEmpty()) {
+            return;
+        }
+        Iterator<ShaftBlacklistEntry> iterator = waterBailoutBlacklist.iterator();
+        while (iterator.hasNext()) {
+            ShaftBlacklistEntry entry = iterator.next();
+            if (entry.expiresAtTick() <= worldTime) {
+                iterator.remove();
+            }
+        }
     }
 
     private void clearTemporaryMiningState() {
@@ -1126,6 +1389,7 @@ public class MasonMiningStairGoal extends Goal {
 
             recoveryMoveTarget = candidate;
             recoveryTicks = 0;
+            adaptiveForcedRecoveryWindow++;
             LOGGER.info("Mason guard {} recovery move started: context={}, from={}, candidate={}, noProgressTicks={}",
                     guard.getUuidAsString(),
                     context,
@@ -1205,6 +1469,7 @@ public class MasonMiningStairGoal extends Goal {
             case TOOL_BROKE -> "TOOL_BROKE";
             case CANNOT_ADVANCE -> "CANNOT_ADVANCE";
             case STUCK_30_SECONDS -> "STUCK_30_SECONDS";
+            case WATER_BAILOUT -> "WATER_BAILOUT";
             default -> "NONE";
         };
 
@@ -1220,6 +1485,8 @@ public class MasonMiningStairGoal extends Goal {
                 reservedCobblestone,
                 reservedDirt,
                 guard.getMainHandStack().isEmpty() ? "empty" : Registries.ITEM.getId(guard.getMainHandStack().getItem()));
+        adaptiveSessionCount++;
+        maybeLogAdaptiveSummary();
     }
 
     static boolean hasRepairSummaryData(int repairedObstructions, int placedSupports) {
@@ -1239,6 +1506,42 @@ public class MasonMiningStairGoal extends Goal {
                 stepIndex);
     }
 
+    private boolean shouldThrottleMiningSelection(ServerWorld world, long worldTime) {
+        long adaptiveLoadScore = adaptiveScanVolumeWindow
+                + (long) adaptivePathRetryWindow * 20L
+                + (long) adaptiveFailedSessionWindow * 45L
+                + (long) adaptiveForcedRecoveryWindow * 60L;
+        if (adaptiveLoadScore < GuardVillagersConfig.masonAdaptiveThrottleLoadThreshold) {
+            return false;
+        }
+        int jitter = GuardVillagersConfig.masonAdaptiveThrottleJitterTicks <= 0
+                ? 0
+                : guard.getRandom().nextInt(GuardVillagersConfig.masonAdaptiveThrottleJitterTicks + 1);
+        int deferTicks = GuardVillagersConfig.masonAdaptiveThrottleDeferTicks + jitter;
+        adaptiveThrottleUntilTick = worldTime + deferTicks;
+        guard.setNextMiningStartTick(Math.max(guard.getNextMiningStartTick(), worldTime + deferTicks));
+        adaptiveScanVolumeWindow = Math.max(0L, adaptiveScanVolumeWindow / 2L);
+        adaptivePathRetryWindow = Math.max(0, adaptivePathRetryWindow / 2);
+        adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
+        adaptiveForcedRecoveryWindow = Math.max(0, adaptiveForcedRecoveryWindow / 2);
+        return true;
+    }
+
+    private void maybeLogAdaptiveSummary() {
+        int interval = Math.max(1, GuardVillagersConfig.masonAdaptiveSummaryLogIntervalSessions);
+        if (adaptiveSessionCount % interval != 0) {
+            return;
+        }
+        LOGGER.info("Mason adaptive summary guard={} sessions={} scanVolume={} pathRetries={} failedSessions={} forcedRecoveries={} throttleUntilTick={}",
+                guard.getUuidAsString(),
+                adaptiveSessionCount,
+                adaptiveScanVolumeWindow,
+                adaptivePathRetryWindow,
+                adaptiveFailedSessionWindow,
+                adaptiveForcedRecoveryWindow,
+                adaptiveThrottleUntilTick);
+    }
+
     private enum Stage {
         IDLE,
         REJOIN_LAST_STEP,
@@ -1249,17 +1552,23 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private enum ReturnReason {
-        NONE(false),
-        BATCH_COMPLETE(false),
-        MINING_TIME_LIMIT_REACHED(false),
-        TOOL_BROKE(false),
-        CANNOT_ADVANCE(true),
-        STUCK_30_SECONDS(true);
+        NONE(false, "none"),
+        BATCH_COMPLETE(false, "batch_complete"),
+        MINING_TIME_LIMIT_REACHED(false, "time_limit"),
+        TOOL_BROKE(false, "tool_broke"),
+        CANNOT_ADVANCE(true, "cannot_advance"),
+        STUCK_30_SECONDS(true, "stuck_30s"),
+        WATER_BAILOUT(true, "water_bailout");
 
         private final boolean resetsMiningProgress;
+        private final String reasonCode;
 
-        ReturnReason(boolean resetsMiningProgress) {
+        ReturnReason(boolean resetsMiningProgress, String reasonCode) {
             this.resetsMiningProgress = resetsMiningProgress;
+            this.reasonCode = reasonCode;
         }
+    }
+
+    private record ShaftBlacklistEntry(BlockPos origin, long expiresAtTick) {
     }
 }

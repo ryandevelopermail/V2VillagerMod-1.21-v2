@@ -159,7 +159,7 @@ public class ShepherdFencePlacerGoal extends Goal {
         LOGGER.debug("ShepherdFencePlacer {}: canStart check — fences={}/{} gates={}/{} jobPos={} chestPos={}",
                 villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES,
                 jobPos.toShortString(), chestPos.toShortString());
-        if (fenceCount < MIN_FENCES || gateCount < MIN_GATES) {
+        if (!hasRequiredPenMaterials(fenceCount, gateCount)) {
             LOGGER.debug("ShepherdFencePlacer {}: insufficient materials — fences={}/{} gates={}/{}",
                     villager.getUuidAsString(), fenceCount, MIN_FENCES, gateCount, MIN_GATES);
             return false;
@@ -710,6 +710,10 @@ public class ShepherdFencePlacerGoal extends Goal {
             if (!stack.isEmpty() && stack.isIn(tag)) total += stack.getCount();
         }
         return total;
+    }
+
+    static boolean hasRequiredPenMaterials(int fenceCount, int gateCount) {
+        return fenceCount >= MIN_FENCES && gateCount >= MIN_GATES;
     }
 
     private boolean consumeOne(Inventory inventory, net.minecraft.registry.tag.TagKey<Item> tag) {

@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -37,7 +38,6 @@ import java.util.function.Function;
 public class MasonGuardChestDistributionGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
     private static final double TARGET_REACH_SQUARED = 4.0D;
-    private static final double RECIPIENT_SCAN_RANGE = 24.0D;
     private static final double SOURCE_CHEST_FULLNESS_TRIGGER = 0.80D;
     private static final int DISTRIBUTION_INTERVAL_TICKS = 20;
     private static final int PATH_RETRY_INTERVAL_TICKS = 20;
@@ -536,8 +536,32 @@ public class MasonGuardChestDistributionGoal extends Goal {
      * so the standard VillagerEntity-based profession scan cannot find them.
      */
     private List<RecipientRecord> findLumberjackRecipients(ServerWorld world) {
+        double shortRange = getRecipientShortRange();
+        List<RecipientRecord> recipients = collectLumberjackRecipients(world, shortRange);
+        if (recipients.isEmpty()) {
+            double wideRange = getRecipientWideRange(shortRange);
+            if (wideRange > shortRange) {
+                recipients = collectLumberjackRecipients(world, wideRange);
+            }
+        }
+        return recipients;
+    }
+
+    private List<RecipientRecord> findRecipients(ServerWorld world, VillagerProfession profession, Block expectedJobBlock) {
+        double shortRange = getRecipientShortRange();
+        List<RecipientRecord> recipients = collectVillagerRecipients(world, profession, expectedJobBlock, shortRange);
+        if (recipients.isEmpty()) {
+            double wideRange = getRecipientWideRange(shortRange);
+            if (wideRange > shortRange) {
+                recipients = collectVillagerRecipients(world, profession, expectedJobBlock, wideRange);
+            }
+        }
+        return recipients;
+    }
+
+    private List<RecipientRecord> collectLumberjackRecipients(ServerWorld world, double range) {
         List<RecipientRecord> recipients = new ArrayList<>();
-        Box scanBox = new Box(guard.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
+        Box scanBox = new Box(guard.getBlockPos()).expand(range);
         for (LumberjackGuardEntity lumberjack : world.getEntitiesByClass(LumberjackGuardEntity.class, scanBox,
                 candidate -> candidate.isAlive() && !candidate.isBaby())) {
             BlockPos chestPos = lumberjack.getPairedChestPos();
@@ -553,10 +577,9 @@ public class MasonGuardChestDistributionGoal extends Goal {
         return recipients;
     }
 
-    private List<RecipientRecord> findRecipients(ServerWorld world, VillagerProfession profession, Block expectedJobBlock) {
+    private List<RecipientRecord> collectVillagerRecipients(ServerWorld world, VillagerProfession profession, Block expectedJobBlock, double range) {
         List<RecipientRecord> recipients = new ArrayList<>();
-        Box scanBox = new Box(guard.getBlockPos()).expand(RECIPIENT_SCAN_RANGE);
-
+        Box scanBox = new Box(guard.getBlockPos()).expand(range);
         for (VillagerEntity villager : world.getEntitiesByClass(VillagerEntity.class, scanBox,
                 candidate -> candidate.isAlive() && !candidate.isBaby() && candidate.getVillagerData().getProfession() == profession)) {
             Optional<GlobalPos> jobSiteMemory = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
@@ -583,6 +606,14 @@ public class MasonGuardChestDistributionGoal extends Goal {
             recipients.add(new RecipientRecord(targetInventory.get(), chestPos.get().toImmutable(), guard.squaredDistanceTo(villager)));
         }
         return recipients;
+    }
+
+    private static double getRecipientShortRange() {
+        return Math.max(16.0D, GuardVillagersConfig.professionalRecipientScanRange);
+    }
+
+    private static double getRecipientWideRange(double shortRange) {
+        return Math.max(shortRange, GuardVillagersConfig.professionalRecipientWideScanRange);
     }
 
     private List<RecipientRecord> normalizeRecipients(List<RecipientRecord> recipients) {

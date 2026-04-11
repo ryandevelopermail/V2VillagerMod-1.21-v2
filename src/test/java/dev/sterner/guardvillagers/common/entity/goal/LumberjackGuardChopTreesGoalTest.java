@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -179,6 +180,206 @@ class LumberjackGuardChopTreesGoalTest {
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(6));
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(7));
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunNoTreeEscalation(8));
+    }
+
+    @Test
+    void midpointMissingChestFallback_refreshesPairingsAndTransitionsToRecipientsChosen() {
+        AtomicInteger distributionCalls = new AtomicInteger();
+        Supplier<List<String>> distributionAfterRefresh = () -> {
+            distributionCalls.incrementAndGet();
+            return List.of("stick->TOOLSMITH@abc");
+        };
+
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        4,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 4, 4, true),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(false, 0, 0, 0, 0),
+                        distributionAfterRefresh,
+                        () -> new LumberjackChestTriggerController.MidpointRetryPlan(false, 0, 0L, 0L, false),
+                        () -> {
+                        },
+                        "guard-1"
+                );
+
+        assertEquals(List.of("stick->TOOLSMITH@abc"), result.recipientsChosen());
+        assertTrue(result.pairingRefreshTriggered());
+        assertTrue(result.pairedAfterRefresh());
+        assertFalse(result.upgradeRetryScheduled());
+        assertEquals(1, distributionCalls.get());
+    }
+
+    @Test
+    void midpointMissingChestFallback_schedulesRetryWhenRefreshDoesNotRecoverPairing() {
+        AtomicInteger retryCalls = new AtomicInteger();
+
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        3,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 2, 2, false),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(false, 2, 0, 2, 3),
+                        List::of,
+                        () -> {
+                            retryCalls.incrementAndGet();
+                            return new LumberjackChestTriggerController.MidpointRetryPlan(true, 1, 600L, 1_600L, false);
+                        },
+                        () -> {
+                        },
+                        "guard-2"
+                );
+
+        assertTrue(result.recipientsChosen().isEmpty());
+        assertTrue(result.pairingRefreshTriggered());
+        assertFalse(result.pairedAfterRefresh());
+        assertTrue(result.upgradeRetryScheduled());
+        assertEquals(1, result.retryAttempt());
+        assertEquals(600L, result.retryDelayTicks());
+        assertFalse(result.retryThrottled());
+        assertEquals(1, retryCalls.get());
+    }
+
+    @Test
+    void midpointMissingChestFallback_placesChestThenTransitionsToRecipientsChosen() {
+        AtomicInteger distributionCalls = new AtomicInteger();
+        LumberjackGuardChopTreesGoal.MidpointUpgradeRecoveryResult result =
+                LumberjackGuardChopTreesGoal.recoverMidpointRecipientsWhenMissingChestDemandHigh(
+                        5,
+                        List.of(),
+                        3,
+                        () -> new LumberjackChestTriggerController.MidpointPairingRefreshResult(true, 5, 5, false),
+                        () -> new LumberjackChestTriggerController.MidpointChestPlacementResult(true, 2, 1, 2, 1),
+                        () -> {
+                            distributionCalls.incrementAndGet();
+                            return List.of("plank->FARMER@xyz");
+                        },
+                        () -> {
+                            throw new AssertionError("Retry should not be scheduled after successful placement recovery");
+                        },
+                        () -> {
+                        },
+                        "guard-3"
+                );
+
+        assertEquals(List.of("plank->FARMER@xyz"), result.recipientsChosen());
+        assertTrue(result.pairingRefreshTriggered());
+        assertTrue(result.pairedAfterRefresh());
+        assertFalse(result.upgradeRetryScheduled());
+        assertEquals(1, distributionCalls.get());
+    }
+
+    @Test
+    void shouldSkipBackpressureDeferRestart_activeDeferWithSubstantialRemaining_skipsRestart() {
+        long requestedDeferTicks = 240L;
+        long substantialRemaining = LumberjackGuardChopTreesGoal.getSubstantialBackpressureRemainingTicks(requestedDeferTicks);
+
+        boolean shouldSkip = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                true,
+                substantialRemaining,
+                requestedDeferTicks,
+                1_000L,
+                -1L,
+                200L
+        );
+
+        assertTrue(shouldSkip);
+    }
+
+    @Test
+    void shouldSkipBackpressureDeferRestart_retriggerCooldownBlocksImmediateRescheduleAfterExpiry() {
+        long requestedDeferTicks = 240L;
+        long now = 1_000L;
+        long cooldown = 200L;
+
+        boolean shouldSkipDuringCooldown = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now,
+                now - 50L,
+                cooldown
+        );
+        boolean shouldAllowAfterCooldown = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now + cooldown,
+                now - 50L,
+                cooldown
+        );
+
+        assertTrue(shouldSkipDuringCooldown);
+        assertFalse(shouldAllowAfterCooldown);
+    }
+
+    @Test
+    void shouldLogDeferredMidpointAudit_rateLimitsDeferOnlyMidpointAuditLogs() {
+        long minInterval = 1_200L;
+
+        assertTrue(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(5_000L, -1L, minInterval));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(5_500L, 5_000L, minInterval));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldLogDeferredMidpointAudit(6_200L, 5_000L, minInterval));
+    }
+
+    @Test
+    void backpressureDefer_oneEventCreatesOneConfiguredCountdownAndNoRepeatedRestartWhileActive() {
+        long requestedDeferTicks = 300L;
+        long now = 10_000L;
+
+        boolean shouldStartFirstDefer = !LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                now,
+                -1L,
+                200L
+        );
+        boolean shouldKeepExisting = LumberjackGuardChopTreesGoal.shouldKeepExistingBackpressureCountdown(
+                true,
+                requestedDeferTicks - 1L,
+                "governor backpressure"
+        );
+
+        assertTrue(shouldStartFirstDefer);
+        assertEquals(300L, requestedDeferTicks);
+        assertTrue(shouldKeepExisting);
+    }
+
+    @Test
+    void backpressureDefer_scanResumesAfterCountdownExpiryWhenCooldownElapsed() {
+        long requestedDeferTicks = 300L;
+        long cooldown = 200L;
+        long deferStartedAt = 2_000L;
+        long afterExpiryAndCooldown = deferStartedAt + requestedDeferTicks + cooldown + 1L;
+
+        boolean shouldKeepExisting = LumberjackGuardChopTreesGoal.shouldKeepExistingBackpressureCountdown(
+                true,
+                0L,
+                "governor backpressure"
+        );
+        boolean shouldSkipRestart = LumberjackGuardChopTreesGoal.shouldSkipBackpressureDeferRestart(
+                false,
+                0L,
+                requestedDeferTicks,
+                afterExpiryAndCooldown,
+                deferStartedAt,
+                cooldown
+        );
+
+        assertFalse(shouldKeepExisting);
+        assertFalse(shouldSkipRestart);
+    }
+
+    @Test
+    void shouldRunMidpointAuditForCountdown_onlyOncePerCountdownStartTick() {
+        long countdownStartTick = 4_000L;
+
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, -1L));
+        assertFalse(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, countdownStartTick));
+        assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick + 300L, countdownStartTick));
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {

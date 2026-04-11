@@ -33,4 +33,11 @@ class FarmerHarvestGoalStartupReadinessTest {
         assertFalse(startupReadyWithoutSeeds);
         assertTrue(startupReadyWithOneSeed);
     }
+
+    @Test
+    void computeSeedTargetFromEligibleArea_scalesWithAreaAndReserveMargin() {
+        assertFalse(FarmerHarvestGoal.computeSeedTargetFromEligibleArea(0) > 0);
+        assertTrue(FarmerHarvestGoal.computeSeedTargetFromEligibleArea(1) >= 3);
+        assertTrue(FarmerHarvestGoal.computeSeedTargetFromEligibleArea(20) >= 24);
+    }
 }

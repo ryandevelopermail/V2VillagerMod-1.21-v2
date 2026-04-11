@@ -4,7 +4,9 @@ import dev.sterner.guardvillagers.common.entity.goal.PlaceOwnJobBlockNearJobSite
 import net.minecraft.block.Block;
 import net.minecraft.entity.ai.goal.PrioritizedGoal;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
 
@@ -14,7 +16,12 @@ import java.util.Map;
 import java.util.Optional;
 
 public final class VillagerProfessionBehaviorRegistry {
-    private static final Map<VillagerProfession, VillagerProfessionBehavior> BEHAVIORS = new HashMap<>();
+    /**
+     * Keyed by registry Identifier string rather than VillagerProfession object to avoid
+     * HashMap equality/identity issues with mod-registered professions whose object instances
+     * may differ between registration time and lookup time (e.g. MoreVillagers soft-dep).
+     */
+    private static final Map<Identifier, VillagerProfessionBehavior> BEHAVIORS = new HashMap<>();
     private static final Map<Block, SpecialModifier> SPECIAL_MODIFIERS = new IdentityHashMap<>();
     private static final int UNIVERSAL_JOB_BLOCK_GOAL_PRIORITY = 5;
 
@@ -22,11 +29,26 @@ public final class VillagerProfessionBehaviorRegistry {
     }
 
     public static void registerBehavior(VillagerProfession profession, VillagerProfessionBehavior behavior) {
-        BEHAVIORS.put(profession, behavior);
+        Identifier id = Registries.VILLAGER_PROFESSION.getId(profession);
+        if (id != null) {
+            BEHAVIORS.put(id, behavior);
+        }
+    }
+
+    /** Register by ID directly — safe to call before the profession is in the registry. */
+    public static void registerBehavior(Identifier professionId, VillagerProfessionBehavior behavior) {
+        BEHAVIORS.put(professionId, behavior);
     }
 
     public static Optional<VillagerProfessionBehavior> getBehavior(VillagerProfession profession) {
-        return Optional.ofNullable(BEHAVIORS.get(profession));
+        Identifier id = Registries.VILLAGER_PROFESSION.getId(profession);
+        if (id == null) return Optional.empty();
+        return Optional.ofNullable(BEHAVIORS.get(id));
+    }
+
+    public static boolean containsBehavior(VillagerProfession profession) {
+        Identifier id = Registries.VILLAGER_PROFESSION.getId(profession);
+        return id != null && BEHAVIORS.containsKey(id);
     }
 
     public static void registerSpecialModifier(SpecialModifier modifier) {
@@ -42,10 +64,10 @@ public final class VillagerProfessionBehaviorRegistry {
     }
 
     public static void ensureUniversalJobBlockGoal(VillagerEntity villager, BlockPos jobPos) {
-        // hasDefinition covers vanilla professions; BEHAVIORS.containsKey covers soft-dep compat professions
+        // hasDefinition covers vanilla professions; containsBehavior covers soft-dep compat professions
         // (e.g. MoreVillagers) that are registered directly without going through ProfessionDefinitions.
         VillagerProfession profession = villager.getVillagerData().getProfession();
-        if (!ProfessionDefinitions.hasDefinition(profession) && !BEHAVIORS.containsKey(profession)) {
+        if (!ProfessionDefinitions.hasDefinition(profession) && !containsBehavior(profession)) {
             return;
         }
 
@@ -56,6 +78,12 @@ public final class VillagerProfessionBehaviorRegistry {
         if (!hasGoal) {
             villager.goalSelector.add(UNIVERSAL_JOB_BLOCK_GOAL_PRIORITY, new PlaceOwnJobBlockNearJobSiteGoal(villager, jobPos));
         }
+    }
+
+    public static void notifyJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        ensureUniversalJobBlockGoal(villager, jobPos);
+        getBehavior(villager.getVillagerData().getProfession())
+                .ifPresent(behavior -> behavior.onJobSiteReady(world, villager, jobPos));
     }
 
     public static void notifyChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
