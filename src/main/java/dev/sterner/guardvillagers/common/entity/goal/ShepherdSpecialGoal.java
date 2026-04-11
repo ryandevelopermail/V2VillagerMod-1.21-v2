@@ -206,7 +206,7 @@ public class ShepherdSpecialGoal extends Goal {
         if (jobPos == null || chestPos == null) {
             return false;
         }
-        long day = world.getTimeOfDay() / 24000L;
+        long day = world.getTime() / 24000L;
         boolean dayChanged = day != lastShearDay;
         if (dayChanged) {
             lastShearDay = day;

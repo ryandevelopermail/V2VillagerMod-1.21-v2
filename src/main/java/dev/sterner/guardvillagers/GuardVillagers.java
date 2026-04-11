@@ -26,6 +26,8 @@ import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
+import net.minecraft.entity.passive.VillagerEntity;
 import dev.sterner.guardvillagers.compat.morevillagers.MoreVillagersBehaviorBridge;
 import net.fabricmc.loader.api.FabricLoader;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -89,7 +91,10 @@ public class GuardVillagers implements ModInitializer {
     public static final String MODID = "guardvillagers";
     private static final Logger LOGGER = LoggerFactory.getLogger(GuardVillagers.class);
     private static final Map<RegistryKey<World>, Long> LAST_CONVERSION_EXECUTION_TICK = new HashMap<>();
-    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 300L;
+    // 1200 ticks = 60 s. The previous value (300 = 15 s) caused 4× per-minute world-scale
+    // entity scans for all specialist guard types. 60 s is more than sufficient for
+    // workstation reconciliation to stay accurate.
+    private static final long RESERVATION_RECONCILIATION_INTERVAL_TICKS = 1200L;
 
     public static final ScreenHandlerType<GuardVillagerScreenHandler> GUARD_SCREEN_HANDLER =
             new ExtendedScreenHandlerType<>((syncId, inventory, data) -> new GuardVillagerScreenHandler(syncId, inventory, data), GuardData.PACKET_CODEC);
@@ -304,6 +309,20 @@ public class GuardVillagers implements ModInitializer {
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
+                }
+                // Re-run pairing for all behavior-registered villagers every 60 s.
+                // This catches foresters (and other soft-dep profession villagers) that
+                // claimed a job site AFTER entity load, so their V1 goals get registered
+                // even when no chest is present.
+                if (world.getTime() % 1200L == 11L) {
+                    Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+                    for (VillagerEntity villager : world.getEntitiesByClass(
+                            VillagerEntity.class, worldBounds, VillagerEntity::isAlive)) {
+                        if (VillagerProfessionBehaviorRegistry.containsBehavior(
+                                villager.getVillagerData().getProfession())) {
+                            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+                        }
+                    }
                 }
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());

@@ -16,16 +16,13 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 /**
- * Behavior for the MoreVillagers "Forester" profession.
- *
- * <p>Despite the display name "Forester", MoreVillagers internally registers this
- * profession as {@code morevillagers:woodworker} with job block
- * {@code morevillagers:woodworking_table} ("Forestry Bench").
+ * Behavior for the MoreVillagers Forester profession.
+ * Job block: {@code morevillagers:sapling_pot}
  *
  * <p>Registered behaviors (active once a chest is paired):
  * <ol>
  *   <li><b>ForesterSaplingProvisionGoal</b> (priority 3) – each day, places 4
- *       biome-appropriate tree saplings in the paired chest.</li>
+ *       biome-appropriate saplings in the paired chest.</li>
  *   <li><b>ForesterSaplingPlantingGoal</b> (priority 4) – fetches those saplings
  *       from the chest and plants them at the village outskirts (16–64 blocks from
  *       the QM anchor), spaced at least 5 blocks apart.</li>
@@ -33,10 +30,13 @@ import java.util.WeakHashMap;
  *       for tree drops (saplings, sticks, apples, logs) left by Lumberjacks and
  *       deposits them in the paired chest.</li>
  * </ol>
+ *
+ * <p>All job-block identification is done at runtime via the block registry so this
+ * class compiles and runs without importing any MoreVillagers class directly.
  */
-public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
+public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(MoreVillagersWoodworker.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(MoreVillagersForester.class);
 
     private static final int PROVISION_GOAL_PRIORITY = 3;
     private static final int PLANTING_GOAL_PRIORITY = 4;
@@ -55,16 +55,16 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
-        boolean isJobBlock = isWoodworkerJobBlock(world, jobPos);
+        boolean isJobBlock = isForesterJobBlock(world, jobPos);
         boolean isAlive = villager.isAlive();
         boolean inRange = jobPos.isWithinDistance(chestPos, CHEST_PAIR_RANGE);
-        LOGGER.info("[morevillagers-compat] Forester {} onChestPaired: jobPos={} chestPos={} isJobBlock={} isAlive={} inRange={}",
+        LOGGER.info("[morevillagers-compat] Forester {} onChestPaired called: jobPos={} chestPos={} isJobBlock={} isAlive={} inRange={} (range={})",
                 villager.getUuidAsString(), jobPos.toShortString(), chestPos.toShortString(),
-                isJobBlock, isAlive, inRange);
+                isJobBlock, isAlive, inRange, CHEST_PAIR_RANGE);
         if (!checkPairingPreconditions(world, villager, jobPos, chestPos,
-                (w, p) -> isWoodworkerJobBlock(w, p),
+                (w, p) -> isForesterJobBlock(w, p),
                 () -> clearChestListener(CHEST_LISTENERS, villager))) {
-            LOGGER.warn("[morevillagers-compat] Forester {} onChestPaired REJECTED (isJobBlock={} isAlive={} inRange={})",
+            LOGGER.warn("[morevillagers-compat] Forester {} onChestPaired REJECTED by preconditions (isJobBlock={} isAlive={} inRange={})",
                     villager.getUuidAsString(), isJobBlock, isAlive, inRange);
             return;
         }
@@ -104,11 +104,11 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
-        boolean isJobBlock = isWoodworkerJobBlock(world, jobPos);
+        boolean isJobBlock = isForesterJobBlock(world, jobPos);
         boolean hasV2 = PROVISION_GOALS.containsKey(villager) || PLANTING_GOALS.containsKey(villager);
-        LOGGER.info("[morevillagers-compat] Forester {} onJobSiteReady: jobPos={} blockAt={} isJobBlock={} hasV2Goals={}",
+        LOGGER.info("[morevillagers-compat] Forester {} onJobSiteReady called: jobPos={} blockAt={} isJobBlock={} hasV2Goals={}",
                 villager.getUuidAsString(), jobPos.toShortString(),
-                Registries.BLOCK.getId(world.getBlockState(jobPos).getBlock()),
+                net.minecraft.registry.Registries.BLOCK.getId(world.getBlockState(jobPos).getBlock()),
                 isJobBlock, hasV2);
         if (!isJobBlock) return;
 
@@ -141,8 +141,8 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
     // Job block detection
     // -----------------------------------------------------------------------------------------
 
-    private static boolean isWoodworkerJobBlock(ServerWorld world, BlockPos pos) {
+    private static boolean isForesterJobBlock(ServerWorld world, BlockPos pos) {
         return Registries.BLOCK.getId(world.getBlockState(pos).getBlock())
-                .equals(Identifier.of("morevillagers", "woodworking_table"));
+                .equals(Identifier.of("morevillagers", "sapling_pot"));
     }
 }

@@ -281,7 +281,7 @@ public class FarmerHarvestGoal extends Goal {
                             villager.getUuidAsString(), unseededCount);
                 }
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                long day = world.getTimeOfDay() / 24000L;
+                long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
@@ -302,7 +302,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
                 wheatSeedForagingRequested = true;
                 nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
-                long day = world.getTimeOfDay() / 24000L;
+                long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
@@ -312,7 +312,7 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         // --- NORMAL PATH (no unseeded farmland obligation) ---
-        long day = world.getTimeOfDay() / 24000L;
+        long day = world.getTime() / 24000L;
         if (day != lastHarvestDay) {
             lastHarvestDay = day;
             // Evaluate before committing to a daily run — if there is truly nothing actionable
@@ -589,6 +589,16 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
 
+                // Break any clearable plant on the surface before hoeing so the farmer
+                // doesn't skip valid dirt just because grass is growing on it.
+                // Breaking SHORT_GRASS / TALL_GRASS may also drop wheat seeds.
+                BlockPos above = target.up();
+                BlockState aboveState = serverWorld.getBlockState(above);
+                if (isClearableSurfacePlant(aboveState)) {
+                    serverWorld.breakBlock(above, true, villager);
+                    collectNearbyDrops(serverWorld, above);
+                }
+
                 serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
                 hoeTargets.removeFirst();
                 currentHoeTarget = null;
@@ -858,7 +868,7 @@ public class FarmerHarvestGoal extends Goal {
 
     private void notifyDailyHarvestComplete(ServerWorld world) {
         if (craftingGoal != null) {
-            craftingGoal.notifyDailyHarvestComplete(world.getTimeOfDay() / 24000L);
+            craftingGoal.notifyDailyHarvestComplete(world.getTime() / 24000L);
         }
     }
 
@@ -1102,6 +1112,13 @@ public class FarmerHarvestGoal extends Goal {
         if (!hoeTargets.isEmpty()) {
             setStage(Stage.HOE_GROUND);
             return true;
+        }
+
+        // After hoeing new farmland the farmer has a concrete obligation to seed it.
+        // Clear any stale forage cooldown so a prior failed seed-search doesn't block
+        // gathering seeds for the freshly-prepared plots.
+        if (afterHoeing && !plantTargets.isEmpty()) {
+            clearSeedForageRetryCooldown(world, "fresh farmland created by hoeing");
         }
 
         prioritizeWheatSeedsForPlanting = false;
@@ -1945,7 +1962,22 @@ public class FarmerHarvestGoal extends Goal {
         if (!(state.isOf(Blocks.DIRT) || state.isOf(Blocks.GRASS_BLOCK) || state.isOf(Blocks.DIRT_PATH))) {
             return false;
         }
-        return world.getBlockState(pos.up()).isAir();
+        BlockState above = world.getBlockState(pos.up());
+        return above.isAir() || isClearableSurfacePlant(above);
+    }
+
+    /** Returns true for short plants that grow naturally on dirt/grass and can be broken to
+     *  clear the surface before hoeing. Breaking these may also yield wheat seeds. */
+    private static boolean isClearableSurfacePlant(BlockState state) {
+        return state.isOf(Blocks.SHORT_GRASS)
+                || state.isOf(Blocks.TALL_GRASS)
+                || state.isOf(Blocks.FERN)
+                || state.isOf(Blocks.LARGE_FERN)
+                || state.isOf(Blocks.DEAD_BUSH)
+                || state.isOf(Blocks.SUNFLOWER)
+                || state.isOf(Blocks.LILAC)
+                || state.isOf(Blocks.ROSE_BUSH)
+                || state.isOf(Blocks.PEONY);
     }
 
     private void ensureEligibleTerritoryCache(ServerWorld world, boolean forceScan) {

@@ -721,12 +721,6 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (!hasPreCraftingTableMaterialReadiness(context.world(), villager, jobPos)) {
-                LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} not eligible (preconditions)",
-                        villager.getUuid(), jobPos.toShortString());
-                continue;
-            }
-
             PlacementMaterialUse materialUse = tryConsumeCraftingTableMaterials(pairedChestInventory, contextInventory, contextBuffer);
             if (materialUse == null) {
                 LOGGER.debug("Skip V2 crafting table placement: villager={} jobPos={} placePos={} no materials",
