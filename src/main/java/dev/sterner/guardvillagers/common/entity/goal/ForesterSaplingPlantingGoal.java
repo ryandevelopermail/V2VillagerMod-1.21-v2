@@ -28,42 +28,56 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Once per day the Forester fetches all saplings from their paired chest and
- * plants them at the village outskirts – between {@link #MIN_PLANT_DISTANCE} and
- * {@link #MAX_PLANT_DISTANCE} blocks from the village anchor (QM chest), with at
- * least {@link #MIN_SAPLING_SPACING} blocks between each planted sapling.
+ * The Forester fetches all available saplings from their paired chest (V2) or uses
+ * saplings already in their own inventory (V1), then plants them at the village
+ * outskirts at least {@link #MIN_PLANT_DISTANCE} blocks from the village anchor.
+ *
+ * <p><b>Batch / cooldown model (replaces the old one-per-day gate):</b>
+ * After completing a planting run (whether saplings were planted or no spots were found),
+ * a {@link #PLANTING_COOLDOWN_TICKS} cooldown starts before the goal tries again.
+ * This means:
+ * <ul>
+ *   <li>If the chest is full of saplings, the forester plants them in batches at each
+ *       cooldown boundary — not just once per day.</li>
+ *   <li>If no planting sites are currently available, the forester waits the cooldown
+ *       and retries rather than spinning in the log every tick.</li>
+ * </ul>
  *
  * <p>Valid planting ground: dirt, grass, podzol, coarse dirt, rooted dirt, or moss.
- * The block immediately above must be air, and no existing sapling block may exist
+ * The block immediately above must be air, and no existing sapling/log may exist
  * within {@link #MIN_SAPLING_SPACING} of the candidate.
  */
 public class ForesterSaplingPlantingGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ForesterSaplingPlantingGoal.class);
 
-    /** Minimum distance (blocks) from village anchor to plant saplings. */
-    private static final int MIN_PLANT_DISTANCE = 16;
-    /** Maximum distance (blocks) from village anchor to plant saplings. */
-    private static final int MAX_PLANT_DISTANCE = 64;
-    /** Minimum gap between any two planted saplings. */
-    private static final int MIN_SAPLING_SPACING = 5;
-    /** Maximum saplings planted in a single day. Matches the provision amount. */
-    private static final int SAPLINGS_PER_DAY = 4;
-    /** Radius of the volume scanned for planting candidates. */
-    private static final int PLANT_SCAN_RADIUS = 80;
     /**
-     * Maximum block positions evaluated per canStart() to avoid tick stalls.
-     *
-     * <p>The scan iterates a 160×16×160 box (~409K positions) but filters by
-     * horizontal distance band (16–64 blocks). A budget of 256 was far too low —
-     * the iterator starts in the bounding-box corner and the first ~hundreds of
-     * positions all fail the MIN_PLANT_DISTANCE check before we ever reach the
-     * valid ring. Raised to 8192 so the scan reliably reaches valid candidates.
-     * This goal fires at most once per day so the cost is negligible.
+     * Minimum horizontal distance (blocks) from the village anchor to plant saplings.
+     * Raised from 16 to 24 to keep trees well clear of village building footprints.
      */
-    private static final int SCAN_BUDGET = 8192;
+    private static final int MIN_PLANT_DISTANCE = 24;
+    /**
+     * Maximum horizontal distance (blocks) from the village anchor.
+     * Raised from 64 to 80 to give more candidate area given the larger minimum.
+     */
+    private static final int MAX_PLANT_DISTANCE = 80;
+    /** Minimum gap (blocks) between any two planted saplings or existing saplings/logs. */
+    private static final int MIN_SAPLING_SPACING = 6;
+    /** Max saplings planted in a single run. */
+    private static final int MAX_SAPLINGS_PER_RUN = 8;
+    /**
+     * Ticks to wait between planting runs (~5 minutes at 20 TPS).
+     * Prevents log spam when no planting sites are available, and paces batch planting
+     * when a chest is stocked with many saplings.
+     */
+    private static final long PLANTING_COOLDOWN_TICKS = 6000L;
+    /**
+     * Shorter cooldown used when no planting sites were found.
+     * Retries after ~2 minutes rather than 5 so new growth/terrain gets checked sooner.
+     */
+    private static final long NO_SPOTS_COOLDOWN_TICKS = 2400L;
     /** Y range above/below the anchor to scan. */
-    private static final int SCAN_Y_RANGE = 8;
+    private static final int SCAN_Y_RANGE = 10;
 
     private static final double MOVE_SPEED = 0.6D;
     private static final double CHEST_REACH_SQ = 3.5D * 3.5D;
@@ -81,15 +95,15 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private BlockPos chestPos;
 
     private Stage stage = Stage.IDLE;
-    private long lastPlantingDay = -1L;
+    /** World-time tick at which the planting cooldown expires. */
+    private long cooldownExpiresTick = 0L;
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
     /** Item currently held (taken from chest) waiting to be planted. */
     private Item heldSaplingItem = null;
     private BlockPos currentNavTarget = null;
     private long lastPathRequestTick = Long.MIN_VALUE;
-    private boolean needsWorkCheck = false;
 
-    /** Linked provision goal – receives feedback when planting spots are exhausted or succeed. */
+    /** Linked provision goal – receives feedback when planting succeeds. */
     private ForesterSaplingProvisionGoal linkedProvisionGoal = null;
 
     private enum Stage { IDLE, FETCH_FROM_CHEST, MOVE_TO_SITE, PLANT, RETURN_TO_CHEST, DONE }
@@ -107,10 +121,6 @@ public class ForesterSaplingPlantingGoal extends Goal {
         this.stage = Stage.IDLE;
     }
 
-    public void requestImmediateWorkCheck() {
-        needsWorkCheck = true;
-    }
-
     /** Wire the provision goal so this goal can report back planting outcomes. */
     public void linkProvisionGoal(ForesterSaplingProvisionGoal goal) {
         this.linkedProvisionGoal = goal;
@@ -126,37 +136,28 @@ public class ForesterSaplingPlantingGoal extends Goal {
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
 
-        long currentDay = world.getTimeOfDay() / 24000L;
-        if (currentDay == lastPlantingDay && !needsWorkCheck) {
-            // Log a countdown every 1200 ticks (~1 min) so you can see when planting will resume.
-            long tickOfDay = world.getTimeOfDay() % 24000L;
-            if (tickOfDay % 1200 == 0) {
-                long ticksUntilNextDay = 24000L - tickOfDay;
-                LOGGER.info("[forester-planting] {} already planted today (day={}) — next planting in ~{} ticks",
-                        villager.getUuidAsString(), currentDay, ticksUntilNextDay);
-            }
+        // Cooldown gate — single check, no per-tick log spam
+        long now = world.getTime();
+        if (now < cooldownExpiresTick) {
             return false;
         }
-        needsWorkCheck = false;
 
         if (chestPos == null) {
             // V1 mode: saplings must already be in the villager's inventory (placed by provision goal)
             if (!hasSaplingInVillagerInventory()) {
-                LOGGER.info("[forester-planting] {} V1 mode — no saplings in villager inventory, skipping",
-                        villager.getUuidAsString());
                 return false;
             }
         } else {
-            // V2 mode: fetch from chest
+            // V2 mode: check chest has saplings
             Optional<Inventory> invOpt = getChestInventory(world);
             if (invOpt.isEmpty()) {
-                LOGGER.info("[forester-planting] {} chest at {} not found, skipping",
+                LOGGER.debug("[forester-planting] {} chest at {} not found, skipping",
                         villager.getUuidAsString(), chestPos.toShortString());
                 return false;
             }
             int saplingCount = countSaplingsInInventory(invOpt.get());
             if (saplingCount == 0) {
-                LOGGER.info("[forester-planting] {} chest at {} has 0 saplings — nothing to plant",
+                LOGGER.debug("[forester-planting] {} chest at {} has 0 saplings — nothing to plant",
                         villager.getUuidAsString(), chestPos.toShortString());
                 return false;
             }
@@ -167,8 +168,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
         // Need at least one valid planting spot
         List<BlockPos> targets = findPlantingTargets(world);
         if (targets.isEmpty()) {
-            LOGGER.info("[forester-planting] {} found no valid planting sites (checked ring {}–{} blocks from anchor)",
-                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE);
+            // No spots right now — set a shorter retry cooldown and stay quiet
+            cooldownExpiresTick = now + NO_SPOTS_COOLDOWN_TICKS;
+            LOGGER.info("[forester-planting] {} no valid planting sites (ring {}–{} blocks); will retry in {} ticks",
+                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE, NO_SPOTS_COOLDOWN_TICKS);
             if (linkedProvisionGoal != null) {
                 linkedProvisionGoal.reportNoPlantingSpots();
             }
@@ -270,12 +273,12 @@ public class ForesterSaplingPlantingGoal extends Goal {
                     if (linkedProvisionGoal != null) {
                         linkedProvisionGoal.reportPlantingSucceeded();
                     }
-                    // Refresh held item in case this type is now exhausted (e.g. mixed types in inventory)
+                    // Refresh held item in case this type is now exhausted
                     if (!hasSaplingOfTypeInVillagerInventory(heldSaplingItem)) {
                         heldSaplingItem = findFirstSaplingInVillagerInventory();
                     }
                 }
-                // Check if we can continue planting
+                // Continue planting if we have more sapling + targets
                 boolean hasSapling = hasSaplingInVillagerInventory();
                 boolean hasTarget = !plantTargets.isEmpty();
                 if (hasSapling && hasTarget) {
@@ -287,7 +290,7 @@ public class ForesterSaplingPlantingGoal extends Goal {
             }
             case RETURN_TO_CHEST -> {
                 if (chestPos == null) {
-                    // V1 mode: no chest to return to; leftover saplings stay in inventory for next cycle
+                    // V1 mode: no chest to return to; leftover saplings stay for next run
                     stage = Stage.DONE;
                 } else if (hasSaplingInVillagerInventory()) {
                     // V2 mode: deposit leftovers back into the chest
@@ -303,9 +306,11 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 }
             }
             case DONE -> {
-                lastPlantingDay = world.getTimeOfDay() / 24000L;
-                LOGGER.info("[forester-planting] {} planting run COMPLETE for day={} — next planting in ~{} ticks",
-                        villager.getUuidAsString(), lastPlantingDay, 24000L - (world.getTimeOfDay() % 24000L));
+                // Apply standard cooldown and go idle
+                long now = world.getTime();
+                cooldownExpiresTick = now + PLANTING_COOLDOWN_TICKS;
+                LOGGER.info("[forester-planting] {} planting run COMPLETE — next run after {} more ticks",
+                        villager.getUuidAsString(), PLANTING_COOLDOWN_TICKS);
                 heldSaplingItem = null;
                 plantTargets.clear();
                 stage = Stage.IDLE;
@@ -325,57 +330,58 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 .orElse(jobPos);
 
         List<BlockPos> found = new ArrayList<>();
-        int checked = 0;
-
-        // Candidate positions already committed in this run (to enforce spacing)
+        // Positions already committed in this scan (to enforce spacing between new plantings)
         List<BlockPos> committed = new ArrayList<>();
 
-        BlockPos.Mutable mut = new BlockPos.Mutable();
-        // Scan a bounding box bounded by MAX_PLANT_DISTANCE (not the wider PLANT_SCAN_RADIUS)
-        // so we don't waste budget iterating positions that are geometrically too far away.
-        for (BlockPos candidate : BlockPos.iterate(
-                center.add(-MAX_PLANT_DISTANCE, -SCAN_Y_RANGE, -MAX_PLANT_DISTANCE),
-                center.add(MAX_PLANT_DISTANCE, SCAN_Y_RANGE, MAX_PLANT_DISTANCE))) {
-            if (checked >= SCAN_BUDGET) break;
-            checked++;
+        // Scan outward in concentric rings from MIN to MAX so we fill from the inner boundary
+        // outward. This avoids always landing at the same far corner every run and distributes
+        // plantings more evenly around the village perimeter.
+        outer:
+        for (int ring = MIN_PLANT_DISTANCE; ring <= MAX_PLANT_DISTANCE; ring += 4) {
+            int ringMax = Math.min(ring + 3, MAX_PLANT_DISTANCE);
+            for (BlockPos candidate : BlockPos.iterate(
+                    center.add(-ringMax, -SCAN_Y_RANGE, -ringMax),
+                    center.add(ringMax, SCAN_Y_RANGE, ringMax))) {
 
-            double dx = candidate.getX() - center.getX();
-            double dz = candidate.getZ() - center.getZ();
-            double horizDist = Math.sqrt(dx * dx + dz * dz);
+                double dx = candidate.getX() - center.getX();
+                double dz = candidate.getZ() - center.getZ();
+                double horizDist = Math.sqrt(dx * dx + dz * dz);
 
-            if (horizDist < MIN_PLANT_DISTANCE || horizDist > MAX_PLANT_DISTANCE) continue;
-            if (!VALID_GROUND.contains(world.getBlockState(candidate).getBlock())) continue;
+                if (horizDist < ring || horizDist > ringMax) continue;
+                if (!VALID_GROUND.contains(world.getBlockState(candidate).getBlock())) continue;
 
-            BlockPos above = candidate.up();
-            if (!world.getBlockState(above).isAir()) continue;
+                BlockPos above = candidate.up();
+                if (!world.getBlockState(above).isAir()) continue;
 
-            // No existing sapling block within spacing radius
-            if (hasNearbySapling(world, candidate, MIN_SAPLING_SPACING)) continue;
+                // No existing sapling or log within spacing radius (keeps trees spread out)
+                if (hasNearbySaplingOrLog(world, candidate, MIN_SAPLING_SPACING)) continue;
 
-            // No committed target within spacing radius
-            boolean tooClose = false;
-            for (BlockPos c : committed) {
-                if (c.getManhattanDistance(candidate) < MIN_SAPLING_SPACING) {
-                    tooClose = true;
-                    break;
+                // No committed target within spacing radius
+                boolean tooClose = false;
+                for (BlockPos c : committed) {
+                    if (c.getManhattanDistance(candidate) < MIN_SAPLING_SPACING) {
+                        tooClose = true;
+                        break;
+                    }
                 }
-            }
-            if (tooClose) continue;
+                if (tooClose) continue;
 
-            found.add(candidate.toImmutable());
-            committed.add(candidate.toImmutable());
-            if (found.size() >= SAPLINGS_PER_DAY) break;
+                found.add(candidate.toImmutable());
+                committed.add(candidate.toImmutable());
+                if (found.size() >= MAX_SAPLINGS_PER_RUN) break outer;
+            }
         }
 
         return found;
     }
 
-    private boolean hasNearbySapling(ServerWorld world, BlockPos center, int radius) {
+    private boolean hasNearbySaplingOrLog(ServerWorld world, BlockPos center, int radius) {
         Box box = new Box(center).expand(radius);
         for (BlockPos pos : BlockPos.iterate(
                 (int) box.minX, (int) box.minY, (int) box.minZ,
                 (int) box.maxX, (int) box.maxY, (int) box.maxZ)) {
-            if (world.getBlockState(pos).isIn(BlockTags.SAPLINGS)) return true;
+            BlockState state = world.getBlockState(pos);
+            if (state.isIn(BlockTags.SAPLINGS) || state.isIn(BlockTags.LOGS)) return true;
         }
         return false;
     }
@@ -396,44 +402,47 @@ public class ForesterSaplingPlantingGoal extends Goal {
     // -----------------------------------------------------------------------------------------
 
     /**
-     * Moves all saplings from the chest into the villager's personal inventory.
+     * Moves saplings from the chest into the villager's personal inventory (up to MAX_SAPLINGS_PER_RUN).
      * Sets {@link #heldSaplingItem} to the first sapling type encountered.
      */
     private void takeSaplingsFromChest(ServerWorld world, Inventory chestInv) {
         int beforeCount = countSaplingsInInventory(chestInv);
+        int takenTotal = 0;
         Inventory villagerInv = villager.getInventory();
-        for (int i = 0; i < chestInv.size() && !isVillagerInventoryFull(villagerInv); i++) {
+        for (int i = 0; i < chestInv.size() && !isVillagerInventoryFull(villagerInv)
+                && takenTotal < MAX_SAPLINGS_PER_RUN; i++) {
             ItemStack stack = chestInv.getStack(i);
             if (stack.isEmpty() || !stack.isIn(ItemTags.SAPLINGS)) continue;
-            ItemStack taken = stack.split(stack.getCount());
+
+            int toTake = Math.min(stack.getCount(), MAX_SAPLINGS_PER_RUN - takenTotal);
+            ItemStack taken = stack.split(toTake);
             chestInv.markDirty();
             if (heldSaplingItem == null) heldSaplingItem = taken.getItem();
+
             // Try to add to villager inventory
-            for (int j = 0; j < villagerInv.size(); j++) {
+            for (int j = 0; j < villagerInv.size() && !taken.isEmpty(); j++) {
                 ItemStack existing = villagerInv.getStack(j);
                 if (existing.isEmpty()) {
-                    villagerInv.setStack(j, taken);
+                    villagerInv.setStack(j, taken.copy());
+                    takenTotal += taken.getCount();
                     taken = ItemStack.EMPTY;
-                    break;
                 } else if (ItemStack.areItemsEqual(existing, taken)) {
                     int space = existing.getMaxCount() - existing.getCount();
                     int transfer = Math.min(space, taken.getCount());
                     existing.increment(transfer);
                     taken.decrement(transfer);
-                    if (taken.isEmpty()) break;
+                    takenTotal += transfer;
                 }
             }
             // If we couldn't fit it all, put remainder back
             if (!taken.isEmpty()) {
                 chestInv.setStack(i, taken);
                 chestInv.markDirty();
-                break;
             }
         }
         int afterCount = countSaplingsInInventory(chestInv);
-        int fetched = beforeCount - afterCount;
         LOGGER.info("[forester-planting] {} FETCHED {} sapling(s) from chest (chest had {}, now has {}, holding={})",
-                villager.getUuidAsString(), fetched, beforeCount, afterCount, heldSaplingItem);
+                villager.getUuidAsString(), takenTotal, beforeCount, afterCount, heldSaplingItem);
     }
 
     private void depositAllSaplingsFromVillager(ServerWorld world, Inventory chestInv) {

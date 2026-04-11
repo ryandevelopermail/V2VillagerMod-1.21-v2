@@ -19,19 +19,21 @@ import java.util.EnumSet;
 import java.util.Optional;
 
 /**
- * Each new Minecraft day, the Forester walks to their paired chest and deposits
- * 4 biome-appropriate saplings, representing the day's planting supply.
+ * Each day (or when the chest/inventory runs low), the Forester tops up their
+ * sapling supply with {@link #SAPLINGS_PER_PROVISION} biome-appropriate saplings.
  *
- * <p>Biome mapping uses {@link VillagerType#forBiome} (the same mechanism
- * used by {@code GuardEntity.getRandomTypeForBiome}) plus a supplementary
- * registry-key check for cherry, birch, and dark-oak biomes that VillagerType
- * doesn't distinguish.
+ * <p><b>V2 mode (paired chest):</b> saplings are deposited into the paired chest
+ * up to {@link #CHEST_SAPLING_CAP}. Provisioning is gated by a per-day limit —
+ * once per Minecraft day at most — so the chest is never flooded faster than the
+ * planting goal can drain it.
  *
- * <p>V1 mode (null chestPos): saplings are placed directly into the villager's
+ * <p><b>V1 mode (no chest):</b> saplings are placed directly into the villager's
  * own inventory. A cap of {@link #V1_SAPLING_CAP} prevents unbounded accumulation.
- * Feedback from {@link ForesterSaplingPlantingGoal} via {@link #reportNoPlantingSpots()}
- * and {@link #reportPlantingSucceeded()} further throttles provisioning when the
- * forester is unable to find planting sites.
+ *
+ * <p>The {@link #reportNoPlantingSpots()} and {@link #reportPlantingSucceeded()}
+ * callbacks are still present for compatibility with the linked planting goal, but
+ * they no longer suppress provisioning — the planting goal manages its own retry
+ * cooldown independently.
  */
 public class ForesterSaplingProvisionGoal extends Goal {
 
@@ -39,23 +41,28 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     private static final double MOVE_SPEED = 0.6D;
     private static final double REACH_SQ = 3.5D * 3.5D;
-    private static final int SAPLINGS_PER_DAY = 4;
+    /** Saplings inserted per provision run. */
+    private static final int SAPLINGS_PER_PROVISION = 4;
     private static final int PATH_RETRY_TICKS = 20;
 
     /** Maximum saplings kept in villager inventory in V1 (chestless) mode. */
     private static final int V1_SAPLING_CAP = 8;
+    /**
+     * Maximum saplings kept in paired chest before provisioning is skipped.
+     * Raised from 8 to 32 so a stockpile can build up for batch planting when
+     * the player drops in saplings or the forester picks up tree drops.
+     */
+    private static final int CHEST_SAPLING_CAP = 32;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
 
     private Stage stage = Stage.IDLE;
+    /** The Minecraft day on which provisioning last ran (prevents multiple runs per day). */
     private long lastProvisionDay = -1L;
     private BlockPos currentNavTarget = null;
     private long lastPathRequestTick = Long.MIN_VALUE;
-
-    /** Number of consecutive days the linked planting goal found no spots. */
-    private int consecutiveNullDays = 0;
 
     private enum Stage { IDLE, MOVE_TO_CHEST, INSERT, DONE }
 
@@ -74,29 +81,17 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     // -----------------------------------------------------------------------------------------
     // Feedback callbacks (called by ForesterSaplingPlantingGoal)
+    // No-ops kept for API compatibility — planting goal manages its own cooldown now.
     // -----------------------------------------------------------------------------------------
 
-    /**
-     * Called by the linked planting goal when it found no valid planting spots.
-     * After 2 consecutive null days, skip provisioning the next day too.
-     */
+    /** Called by linked planting goal when no planting spots were found. No-op. */
     public void reportNoPlantingSpots() {
-        consecutiveNullDays++;
-        if (consecutiveNullDays >= 2 && villager.getWorld() instanceof ServerWorld world) {
-            // Suppress provisioning tomorrow by advancing lastProvisionDay to current day
-            long currentDay = world.getTimeOfDay() / 24000L;
-            lastProvisionDay = currentDay;
-            LOGGER.info("[forester-provision] {} suppressing next provision — no planting spots found {} day(s) in a row",
-                    villager.getUuidAsString(), consecutiveNullDays);
-        }
+        // Planting goal manages its own retry cooldown; nothing to suppress here.
     }
 
-    /**
-     * Called by the linked planting goal when at least one sapling was successfully planted.
-     * Resets the no-spots streak.
-     */
+    /** Called by linked planting goal when at least one sapling was successfully planted. No-op. */
     public void reportPlantingSucceeded() {
-        consecutiveNullDays = 0;
+        // No state to reset.
     }
 
     // -----------------------------------------------------------------------------------------
@@ -109,54 +104,40 @@ public class ForesterSaplingProvisionGoal extends Goal {
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
 
+        // At most once per Minecraft day
         long currentDay = world.getTimeOfDay() / 24000L;
         if (currentDay == lastProvisionDay) {
-            // Log a countdown every 1200 ticks (~1 min) so you can see when the next provision is due.
-            long tickOfDay = world.getTimeOfDay() % 24000L;
-            if (tickOfDay % 1200 == 0) {
-                long ticksUntilNextDay = 24000L - tickOfDay;
-                LOGGER.info("[forester-provision] {} waiting for next day (day={} ticks_until_next_provision~={})",
-                        villager.getUuidAsString(), currentDay, ticksUntilNextDay);
-            }
             return false;
         }
 
         if (chestPos == null) {
             // V1 mode: only provision if villager has room and is under the cap
             int currentSaplings = countSaplingsInInventory(villager.getInventory());
-            if (currentSaplings >= V1_SAPLING_CAP) {
-                LOGGER.info("[forester-provision] {} skipping — villager inventory already at cap ({}/{})",
-                        villager.getUuidAsString(), currentSaplings, V1_SAPLING_CAP);
-                return false;
-            }
-            if (!hasEmptySlot(villager.getInventory())) {
-                LOGGER.info("[forester-provision] {} skipping — villager inventory full (no empty slots)",
-                        villager.getUuidAsString());
-                return false;
-            }
+            if (currentSaplings >= V1_SAPLING_CAP) return false;
+            if (!hasEmptySlot(villager.getInventory())) return false;
             return true;
         }
 
         // V2 mode: only provision if chest exists, has room, and is under the cap
         Optional<Inventory> inv = getChestInventory(world);
         if (inv.isEmpty()) {
-            LOGGER.info("[forester-provision] {} skipping — paired chest at {} not found",
+            LOGGER.debug("[forester-provision] {} skipping — paired chest at {} not found",
                     villager.getUuidAsString(), chestPos.toShortString());
             return false;
         }
         int chestSaplings = countSaplingsInInventory(inv.get());
-        if (chestSaplings >= V1_SAPLING_CAP) {
-            LOGGER.info("[forester-provision] {} skipping — chest already at cap ({}/{} saplings) at {}",
-                    villager.getUuidAsString(), chestSaplings, V1_SAPLING_CAP, chestPos.toShortString());
+        if (chestSaplings >= CHEST_SAPLING_CAP) {
+            LOGGER.debug("[forester-provision] {} skipping — chest at cap ({}/{} saplings)",
+                    villager.getUuidAsString(), chestSaplings, CHEST_SAPLING_CAP);
             return false;
         }
         if (!hasEmptySlot(inv.get())) {
-            LOGGER.info("[forester-provision] {} skipping — chest full (no empty slots) at {}",
-                    villager.getUuidAsString(), chestPos.toShortString());
+            LOGGER.debug("[forester-provision] {} skipping — chest full (no empty slots)",
+                    villager.getUuidAsString());
             return false;
         }
         LOGGER.info("[forester-provision] {} READY to provision — chest has {}/{} saplings, day={}",
-                villager.getUuidAsString(), chestSaplings, V1_SAPLING_CAP, currentDay);
+                villager.getUuidAsString(), chestSaplings, CHEST_SAPLING_CAP, currentDay);
         return true;
     }
 
@@ -202,12 +183,12 @@ public class ForesterSaplingProvisionGoal extends Goal {
             }
             case INSERT -> {
                 Item sapling = selectSaplingForBiome(world);
-                ItemStack toInsert = new ItemStack(sapling, SAPLINGS_PER_DAY);
+                ItemStack toInsert = new ItemStack(sapling, SAPLINGS_PER_PROVISION);
                 if (chestPos == null) {
                     // V1 mode: place saplings directly into villager inventory
                     insertIntoInventory(villager.getInventory(), toInsert);
                     LOGGER.info("[forester-provision] {} INSERTED {}x {} into own inventory (V1 mode)",
-                            villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling);
+                            villager.getUuidAsString(), SAPLINGS_PER_PROVISION, sapling);
                 } else {
                     Optional<Inventory> invOpt = getChestInventory(world);
                     if (invOpt.isEmpty()) {
@@ -217,7 +198,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
                     }
                     insertIntoInventory(invOpt.get(), toInsert);
                     LOGGER.info("[forester-provision] {} INSERTED {}x {} into paired chest at {}",
-                            villager.getUuidAsString(), SAPLINGS_PER_DAY, sapling, chestPos.toShortString());
+                            villager.getUuidAsString(), SAPLINGS_PER_PROVISION, sapling, chestPos.toShortString());
                 }
                 lastProvisionDay = world.getTimeOfDay() / 24000L;
                 stage = Stage.DONE;
@@ -233,43 +214,24 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     /**
      * Selects the most appropriate sapling type for the villager's current biome.
-     * Uses VillagerType as the primary classifier, with a supplementary biome-key
-     * check for cherry, birch-forest, and dark-forest that VillagerType doesn't
-     * distinguish from plains/forest.
      */
     private Item selectSaplingForBiome(ServerWorld world) {
         BlockPos pos = villager.getBlockPos();
 
-        // Supplementary fine-grained check first (biome registry key path)
+        // Fine-grained biome-key check first
         String biomePath = world.getBiome(pos).getKey()
                 .map(k -> k.getValue().getPath())
                 .orElse("");
 
-        if (biomePath.contains("cherry")) {
-            return Items.CHERRY_SAPLING;
-        }
-        if (biomePath.contains("dark_forest")) {
-            return Items.DARK_OAK_SAPLING;
-        }
-        if (biomePath.contains("birch_forest")) {
-            return Items.BIRCH_SAPLING;
-        }
-        if (biomePath.contains("mangrove")) {
-            // Mangrove swamp — propagule isn't a sapling in the standard sense; use oak as fallback
-            return Items.OAK_SAPLING;
-        }
+        if (biomePath.contains("cherry")) return Items.CHERRY_SAPLING;
+        if (biomePath.contains("dark_forest")) return Items.DARK_OAK_SAPLING;
+        if (biomePath.contains("birch_forest")) return Items.BIRCH_SAPLING;
+        if (biomePath.contains("mangrove")) return Items.OAK_SAPLING; // propagule edge case
 
-        // VillagerType-based classification covers the remaining major biome categories
         VillagerType type = VillagerType.forBiome(world.getBiome(pos));
-        if (type == VillagerType.TAIGA || type == VillagerType.SNOW) {
-            return Items.SPRUCE_SAPLING;
-        }
-        if (type == VillagerType.JUNGLE) {
-            return Items.JUNGLE_SAPLING;
-        }
-        if (type == VillagerType.SAVANNA) {
-            return Items.ACACIA_SAPLING;
-        }
+        if (type == VillagerType.TAIGA || type == VillagerType.SNOW) return Items.SPRUCE_SAPLING;
+        if (type == VillagerType.JUNGLE) return Items.JUNGLE_SAPLING;
+        if (type == VillagerType.SAVANNA) return Items.ACACIA_SAPLING;
 
         return Items.OAK_SAPLING;
     }
@@ -280,9 +242,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
         BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) return Optional.empty();
         Inventory inv = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
         return Optional.ofNullable(inv);
     }
@@ -305,7 +265,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
 
     /** Inserts {@code stack} into the first available slot(s) of {@code inv}. */
     private void insertIntoInventory(Inventory inv, ItemStack stack) {
-        // Try to merge with existing stacks of the same type first
+        // Try to merge with existing stacks first
         for (int i = 0; i < inv.size() && !stack.isEmpty(); i++) {
             ItemStack existing = inv.getStack(i);
             if (!existing.isEmpty() && ItemStack.areItemsEqual(existing, stack)) {

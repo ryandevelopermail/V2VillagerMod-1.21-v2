@@ -95,14 +95,8 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
                 () -> new ForesterTreeDropPickupGoal(villager, jobPos, chestPos));
         pickupGoal.setTargets(jobPos, chestPos);
 
-        // Chest listener: wake planting goal when chest contents change
-        updateChestListener(world, villager, chestPos, CHEST_LISTENERS,
-                (w, v) -> sender -> {
-                    ForesterSaplingPlantingGoal planting = PLANTING_GOALS.get(v);
-                    if (planting != null) {
-                        planting.requestImmediateWorkCheck();
-                    }
-                });
+        // No chest listener needed: planting goal runs on its own cooldown schedule
+        // and does not require a wake signal when the chest contents change.
     }
 
     @Override
