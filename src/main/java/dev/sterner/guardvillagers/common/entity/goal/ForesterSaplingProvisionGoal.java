@@ -105,7 +105,11 @@ public class ForesterSaplingProvisionGoal extends Goal {
         if (jobPos == null) return false;
 
         // At most once per Minecraft day
-        long currentDay = world.getTimeOfDay() / 24000L;
+        // world.getTime() is the absolute tick counter (ever-increasing); dividing by 24000
+        // gives the current day number. world.getTimeOfDay() would be wrong here — it wraps
+        // at 24000 so getTimeOfDay()/24000 is always 0, permanently blocking provisioning
+        // after the first run.
+        long currentDay = world.getTime() / 24000L;
         if (currentDay == lastProvisionDay) {
             return false;
         }
@@ -200,7 +204,7 @@ public class ForesterSaplingProvisionGoal extends Goal {
                     LOGGER.info("[forester-provision] {} INSERTED {}x {} into paired chest at {}",
                             villager.getUuidAsString(), SAPLINGS_PER_PROVISION, sapling, chestPos.toShortString());
                 }
-                lastProvisionDay = world.getTimeOfDay() / 24000L;
+                lastProvisionDay = world.getTime() / 24000L;
                 stage = Stage.DONE;
             }
             case DONE -> stage = Stage.IDLE;
