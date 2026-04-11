@@ -26,6 +26,8 @@ import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
+import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
+import net.minecraft.entity.passive.VillagerEntity;
 import dev.sterner.guardvillagers.compat.morevillagers.MoreVillagersBehaviorBridge;
 import net.fabricmc.loader.api.FabricLoader;
 import eu.midnightdust.lib.config.MidnightConfig;
@@ -307,6 +309,20 @@ public class GuardVillagers implements ModInitializer {
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
+                }
+                // Re-run pairing for all behavior-registered villagers every 60 s.
+                // This catches foresters (and other soft-dep profession villagers) that
+                // claimed a job site AFTER entity load, so their V1 goals get registered
+                // even when no chest is present.
+                if (world.getTime() % 1200L == 11L) {
+                    Box worldBounds = JobBlockPairingHelper.getWorldBounds(world);
+                    for (VillagerEntity villager : world.getEntitiesByClass(
+                            VillagerEntity.class, worldBounds, VillagerEntity::isAlive)) {
+                        if (VillagerProfessionBehaviorRegistry.containsBehavior(
+                                villager.getVillagerData().getProfession())) {
+                            JobBlockPairingHelper.refreshVillagerPairings(world, villager);
+                        }
+                    }
                 }
             }
             TakeJobSiteInjectDiagnostics.warnIfInjectMissing(server.getWorlds());
