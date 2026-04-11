@@ -4,6 +4,7 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import net.minecraft.block.BlockState;
 import org.junit.jupiter.api.Test;
 import net.minecraft.entity.EquipmentSlot;
+import net.minecraft.entity.ai.pathing.EntityNavigation;
 import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -27,6 +28,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 
 class LumberjackGuardCraftingGoalTest {
 
@@ -139,6 +142,48 @@ class LumberjackGuardCraftingGoalTest {
         InOrder orderedCalls = inOrder(guard);
         orderedCalls.verify(guard).setPairedChestPos(any());
         orderedCalls.verify(guard).equipStack(eq(EquipmentSlot.MAINHAND), any());
+    }
+
+    @Test
+    void canStartAtNight_unpairedWithBootstrapInputs_placesChestBeforeDepositing() {
+        LumberjackGuardEntity guard = mock(LumberjackGuardEntity.class);
+        ServerWorld world = bootstrapWorld();
+        EntityNavigation navigation = mock(EntityNavigation.class);
+        AtomicReference<LumberjackGuardEntity.WorkflowStage> workflowStage =
+                new AtomicReference<>(LumberjackGuardEntity.WorkflowStage.CRAFTING);
+        AtomicReference<BlockPos> pairedChestPos = new AtomicReference<>(null);
+        List<ItemStack> buffer = new ArrayList<>();
+        buffer.add(new ItemStack(Items.OAK_LOG, 2));
+
+        when(guard.getWorld()).thenReturn(world);
+        when(guard.isAlive()).thenReturn(true);
+        when(guard.getWorkflowStage()).thenAnswer(invocation -> workflowStage.get());
+        when(guard.setWorkflowStage(any())).thenAnswer(invocation -> {
+            workflowStage.set(invocation.getArgument(0));
+            return null;
+        });
+        when(guard.getGatheredStackBuffer()).thenReturn(buffer);
+        when(guard.getPairedChestPos()).thenAnswer(invocation -> pairedChestPos.get());
+        when(guard.setPairedChestPos(any())).thenAnswer(invocation -> {
+            pairedChestPos.set(invocation.getArgument(0));
+            return null;
+        });
+        when(guard.getPairedCraftingTablePos()).thenReturn(new BlockPos(0, 64, 0));
+        when(guard.squaredDistanceTo(any())).thenReturn(0.0D);
+        when(guard.getMainHandStack()).thenReturn(new ItemStack(Items.WOODEN_AXE));
+        when(guard.getNavigation()).thenReturn(navigation);
+        when(world.isDay()).thenReturn(false);
+        when(world.getTime()).thenReturn(42000L);
+
+        LumberjackGuardCraftingGoal goal = new LumberjackGuardCraftingGoal(guard);
+
+        assertTrue(goal.canStart(), "Bootstrap crafting should be allowed at night when inputs exist.");
+        verify(guard, never()).setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+
+        goal.tick();
+
+        assertTrue(pairedChestPos.get() != null, "Unpaired lumberjack should place a chest during bootstrap crafting.");
+        assertEquals(LumberjackGuardEntity.WorkflowStage.DEPOSITING, workflowStage.get(), "Goal should complete and hand off to depositing after bootstrap attempt.");
     }
 
     private static boolean invokePerformWoodConversion(LumberjackGuardCraftingGoal goal, SimpleInventory chestInventory) throws Exception {

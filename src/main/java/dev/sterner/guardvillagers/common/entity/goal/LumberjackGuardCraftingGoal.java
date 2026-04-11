@@ -47,7 +47,13 @@ public class LumberjackGuardCraftingGoal extends Goal {
         if (this.guard.getWorkflowStage() != LumberjackGuardEntity.WorkflowStage.CRAFTING || !this.guard.isAlive()) {
             return false;
         }
-        if (!world.isDay() || craftedToday >= DAILY_CRAFT_LIMIT || !hasCraftingInputs(world)) {
+        boolean bootstrapSession = isBootstrapSession();
+        boolean hasInputs = hasCraftingInputs(world);
+        if (!hasInputs) {
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+            return false;
+        }
+        if (!bootstrapSession && (!world.isDay() || craftedToday >= DAILY_CRAFT_LIMIT)) {
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
             return false;
         }
