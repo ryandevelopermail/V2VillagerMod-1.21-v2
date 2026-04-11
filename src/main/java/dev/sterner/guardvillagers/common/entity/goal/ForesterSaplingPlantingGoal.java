@@ -66,17 +66,6 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final int MIN_SAPLING_SPACING = 6;
     /** Max saplings planted in a single run. */
     private static final int MAX_SAPLINGS_PER_RUN = 8;
-    /**
-     * Ticks to wait between planting runs (~10 minutes at 20 TPS).
-     * Gives a natural rhythm: one batch every ~half a Minecraft day when saplings are plentiful.
-     * Short enough that a chest stocked with many saplings still gets cleared in a few sessions.
-     */
-    private static final long PLANTING_COOLDOWN_TICKS = 12000L;
-    /**
-     * Shorter cooldown used when no planting sites were found.
-     * Retries after ~3 minutes so new terrain/saplings get checked reasonably quickly.
-     */
-    private static final long NO_SPOTS_COOLDOWN_TICKS = 3600L;
     /** Y range above/below the anchor to scan. */
     private static final int SCAN_Y_RANGE = 10;
 
@@ -85,12 +74,7 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final double PLANT_REACH_SQ = 2.5D * 2.5D;
     private static final int PATH_RETRY_TICKS = 20;
 
-    /**
-     * Planting only starts when a player is within this many blocks of the forester.
-     * Matches a typical server render/simulation distance (10 chunks × 16 = 160 blocks).
-     * Using a fixed constant rather than querying the server's configured view distance
-     * keeps the check cheap and predictable regardless of server settings.
-     */
+    /** Planting only starts when a player is within render distance (~10 chunks). */
     private static final double PLAYER_PROXIMITY_RANGE = 160.0D;
 
     /** Blocks that saplings can be planted on. */
@@ -104,10 +88,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private BlockPos chestPos;
 
     private Stage stage = Stage.IDLE;
-    /** World-time tick at which the planting cooldown expires. */
-    private long cooldownExpiresTick = 0L;
-    /** The Minecraft day on which the cooldown was last set, used to reset it each new day. */
-    private long cooldownSetDay = -1L;
+    /** Day number of the last completed planting run (or no-spots). -1 = never run. */
+    private long lastPlantedDay = -1L;
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
     /** Item currently held (taken from chest) waiting to be planted. */
     private Item heldSaplingItem = null;
@@ -147,28 +129,11 @@ public class ForesterSaplingPlantingGoal extends Goal {
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
 
-        // Only run when a player is within render distance — avoids background churn
-        // and ensures the player can actually observe the forester planting trees.
-        if (!isPlayerNearby(world)) return false;
-
-        // Each new Minecraft day, reset the planting cooldown so the forester always
-        // attempts a fresh run at day-start when a player enters render distance.
-        // Without this, if the forester drained its saplings mid-day and the 10-minute
-        // cooldown hadn't expired yet, it would stay idle until the cooldown ticked out
-        // even though a new provision batch is now available.
+        // Once per Minecraft day, triggered when a player is within render distance
         long now = world.getTime();
-        long currentDay = now / 24000L;
-        if (currentDay > cooldownSetDay && cooldownSetDay >= 0) {
-            // New day — clear the cooldown so planting can fire immediately this morning.
-            cooldownExpiresTick = 0L;
-        }
-        // Always stamp the current day so we track when the cooldown was last touched.
-        cooldownSetDay = currentDay;
-
-        // Cooldown gate — single check, no per-tick log spam
-        if (now < cooldownExpiresTick) {
-            return false;
-        }
+        long today = now / 24000L;
+        if (today == lastPlantedDay) return false;
+        if (!isPlayerNearby(world)) return false;
 
         if (chestPos == null) {
             // V1 mode: saplings must already be in the villager's inventory (placed by provision goal)
@@ -196,10 +161,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
         // Need at least one valid planting spot
         List<BlockPos> targets = findPlantingTargets(world);
         if (targets.isEmpty()) {
-            // No spots right now — set a shorter retry cooldown and stay quiet
-            cooldownExpiresTick = now + NO_SPOTS_COOLDOWN_TICKS;
-            LOGGER.info("[forester-planting] {} no valid planting sites (ring {}–{} blocks); will retry in {} ticks",
-                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE, NO_SPOTS_COOLDOWN_TICKS);
+            // No spots today — stamp the day so we don't re-scan every tick until tomorrow
+            lastPlantedDay = today;
+            LOGGER.info("[forester-planting] {} no valid planting sites (ring {}–{} blocks); will retry tomorrow",
+                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE);
             if (linkedProvisionGoal != null) {
                 linkedProvisionGoal.reportNoPlantingSpots();
             }
@@ -334,11 +299,10 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 }
             }
             case DONE -> {
-                // Apply standard cooldown and go idle
-                long now = world.getTime();
-                cooldownExpiresTick = now + PLANTING_COOLDOWN_TICKS;
-                LOGGER.info("[forester-planting] {} planting run COMPLETE — next run after {} more ticks",
-                        villager.getUuidAsString(), PLANTING_COOLDOWN_TICKS);
+                // Stamp today so planting doesn't fire again until tomorrow
+                lastPlantedDay = world.getTime() / 24000L;
+                LOGGER.info("[forester-planting] {} planting run COMPLETE — next run tomorrow (day {})",
+                        villager.getUuidAsString(), lastPlantedDay + 1);
                 heldSaplingItem = null;
                 plantTargets.clear();
                 stage = Stage.IDLE;
