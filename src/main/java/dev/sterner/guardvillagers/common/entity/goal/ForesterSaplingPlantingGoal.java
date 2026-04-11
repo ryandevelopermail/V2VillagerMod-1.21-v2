@@ -66,16 +66,16 @@ public class ForesterSaplingPlantingGoal extends Goal {
     /** Max saplings planted in a single run. */
     private static final int MAX_SAPLINGS_PER_RUN = 8;
     /**
-     * Ticks to wait between planting runs (~5 minutes at 20 TPS).
-     * Prevents log spam when no planting sites are available, and paces batch planting
-     * when a chest is stocked with many saplings.
+     * Ticks to wait between planting runs (~10 minutes at 20 TPS).
+     * Gives a natural rhythm: one batch every ~half a Minecraft day when saplings are plentiful.
+     * Short enough that a chest stocked with many saplings still gets cleared in a few sessions.
      */
-    private static final long PLANTING_COOLDOWN_TICKS = 6000L;
+    private static final long PLANTING_COOLDOWN_TICKS = 12000L;
     /**
      * Shorter cooldown used when no planting sites were found.
-     * Retries after ~2 minutes rather than 5 so new growth/terrain gets checked sooner.
+     * Retries after ~3 minutes so new terrain/saplings get checked reasonably quickly.
      */
-    private static final long NO_SPOTS_COOLDOWN_TICKS = 2400L;
+    private static final long NO_SPOTS_COOLDOWN_TICKS = 3600L;
     /** Y range above/below the anchor to scan. */
     private static final int SCAN_Y_RANGE = 10;
 

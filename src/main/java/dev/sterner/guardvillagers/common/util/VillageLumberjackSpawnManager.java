@@ -10,7 +10,6 @@ import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingS
 import dev.sterner.guardvillagers.common.villager.UnemployedLumberjackConversionHook;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
@@ -26,12 +25,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 
 import net.minecraft.registry.tag.BlockTags;
@@ -39,23 +36,19 @@ import net.minecraft.registry.tag.BlockTags;
 /**
  * Periodically ensures enough lumberjacks exist relative to village population.
  *
- * <p><b>Strategy (v2 — reliable village-interior placement):</b>
+ * <p><b>Strategy (v3 — villager-first placement):</b>
  * <ol>
  *   <li>Count existing lumberjacks near the bell; if enough, skip.</li>
- *   <li>Find every chest within {@link #CHEST_SCAN_RANGE} of the bell.</li>
- *   <li>For each chest, try adjacent floor positions (within 3 blocks) for a
- *       crafting table: space is air, floor below is solid, no existing table nearby.</li>
- *   <li>Place the table immediately.</li>
- *   <li>Force-convert the closest unemployed villager within {@link #UNEMPLOYED_SCAN_RANGE}
- *       of the table — no reachability check, no hook delay.</li>
+ *   <li>Gate on tree supply: if there aren't enough harvestable trees/saplings, defer.</li>
+ *   <li>Find or spawn an unemployed villager near the bell.</li>
+ *   <li>Place a crafting table on a solid, open block within
+ *       {@link JobBlockPairingHelper#JOB_BLOCK_PAIRING_RANGE} of that villager.</li>
+ *   <li>Force-convert the villager immediately — vanilla cannot produce custom entity types.</li>
  * </ol>
  *
- * <p>Placing next to a chest is reliable because:
- * <ul>
- *   <li>Chests are almost always indoors (or adjacent to a work site).</li>
- *   <li>The table lands within {@link JobBlockPairingHelper#JOB_BLOCK_PAIRING_RANGE} of the
- *       chest, so {@code findNearbyChest()} in the conversion immediately succeeds.</li>
- * </ul>
+ * <p>Placing next to the villager (not next to an existing chest) is critical because the
+ * lumberjack later crafts and places its own chest beside its table.  Pre-pairing to a
+ * natural chest disrupts the lumberjack workflow.
  */
 public final class VillageLumberjackSpawnManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(VillageLumberjackSpawnManager.class);
@@ -346,117 +339,131 @@ public final class VillageLumberjackSpawnManager {
     }
 
     // -------------------------------------------------------------------------
-    // Table placement + immediate conversion
+    // Villager-first table placement + conversion
     // -------------------------------------------------------------------------
 
+    /**
+     * Correct spawn order:
+     * <ol>
+     *   <li>Find the nearest unemployed villager within {@link #UNEMPLOYED_SCAN_RANGE} of the bell.</li>
+     *   <li>If none found, spawn one at a safe surface position near the bell.</li>
+     *   <li>Place a crafting table on a solid, open block within 3 blocks of the villager.</li>
+     *   <li>Force-convert that villager immediately (vanilla cannot convert to custom entity types).</li>
+     * </ol>
+     *
+     * <p>This ensures the table is placed beside the villager, not beside a random
+     * existing chest. The lumberjack will later craft and place its own chest next to
+     * the table — placing the table next to a natural chest first would pre-pair the
+     * lumberjack to the wrong chest and disrupt its workflow.
+     */
     private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType,
                                                 List<BlockPos> existingTables,
                                                 List<LumberjackGuardEntity> activeLumberjacks,
                                                 int desiredLumberjackCount) {
-        // existingTables is pre-computed by processBell — no duplicate scan needed.
-
-        // Find all chests near the bell and shuffle them for variety.
-        List<BlockPos> chests = findChestsNearBell(world, bellPos);
-        if (chests.isEmpty()) {
-            LOGGER.debug("lumberjack-spawn attempt={} bell={} — no chests found within {} blocks; cannot place table",
-                    attemptType, bellPos.toShortString(), CHEST_SCAN_RANGE);
-            // Fallback: try a free surface spot near the bell itself
-            tryPlaceTableNearBellFallbackInner(world, bellPos, existingTables, attemptType, activeLumberjacks, desiredLumberjackCount);
+        if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, bellPos, attemptType)) {
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} — population balancer denied at pre-placement", attemptType, bellPos.toShortString());
             return;
         }
 
-        Collections.shuffle(chests, new Random(world.getTime() ^ bellPos.asLong()));
-
-        for (BlockPos chestPos : chests) {
-            BlockPos tablePos = findFreeSlotNearChest(world, chestPos, existingTables);
-            if (tablePos == null) {
-                continue;
-            }
-
-            placeTableAndConvert(world, bellPos, tablePos, attemptType, activeLumberjacks, desiredLumberjackCount);
-            return;
-        }
-
-        LOGGER.debug("lumberjack-spawn attempt={} bell={} — {} chest(s) found but none had a free adjacent floor slot",
-                attemptType, bellPos.toShortString(), chests.size());
-
-        // Fallback: open surface near bell
-        tryPlaceTableNearBellFallbackInner(world, bellPos, existingTables, attemptType, activeLumberjacks, desiredLumberjackCount);
-    }
-
-    /**
-     * Place table at {@code tablePos} and immediately force-convert the nearest
-     * unemployed villager. If none is found the table still stays — the conversion
-     * hook will pick it up later.
-     *
-     * <p>{@code activeLumberjacks} and {@code desiredLumberjackCount} are passed in from
-     * {@code processBell} so {@link #shouldSpawnFallbackUnemployed} doesn't need to
-     * re-query the entity list or re-scan tables.
-     */
-    private static void placeTableAndConvert(ServerWorld world, BlockPos bellPos, BlockPos tablePos, String attemptType,
-                                             List<LumberjackGuardEntity> activeLumberjacks, int desiredLumberjackCount) {
-        world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
-        LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} near bell {}",
-                attemptType, tablePos.toShortString(), bellPos.toShortString());
-
-        // Immediately find and convert the closest unemployed villager.
-        VillagerEntity candidate = findNearestUnemployed(world, tablePos);
-        if (candidate != null) {
-            forceConvert(world, candidate, tablePos);
-        } else {
-            if (!shouldSpawnFallbackUnemployed(world, bellPos, tablePos, attemptType, activeLumberjacks, desiredLumberjackCount)) {
-                LOGGER.debug("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} — table placed, conversion hook will fire later",
-                        attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
-                // Nudge the hook for the next tick just in case.
-                if (!world.getPlayers().isEmpty()) {
-                    UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
-                }
+        // Step 1: find or spawn an unemployed villager.
+        Box bellBox = new Box(bellPos).expand(UNEMPLOYED_SCAN_RANGE);
+        VillagerEntity candidate = findNearestUnemployed(world, bellPos);
+        if (candidate == null) {
+            // Spawn a fresh unemployed villager at a safe position near the bell.
+            candidate = spawnUnemployedVillagerNearBell(world, bellPos);
+            if (candidate == null) {
+                LOGGER.debug("lumberjack-spawn attempt={} bell={} — could not find or spawn unemployed villager; aborting",
+                        attemptType, bellPos.toShortString());
                 return;
             }
-
-            VillagerEntity spawned = spawnUnemployedVillagerNearTable(world, tablePos);
-            if (spawned != null) {
-                LOGGER.info("lumberjack-spawn attempt={} event=spawned_unemployed_for_lumberjack_conversion villager={} table={}",
-                        attemptType, spawned.getUuidAsString(), tablePos.toShortString());
-                forceConvert(world, spawned, tablePos);
-            } else {
-                LOGGER.debug("lumberjack-spawn attempt={} no unemployed villager within {} blocks of {} and fallback spawn failed — table placed, conversion hook will fire later",
-                        attemptType, UNEMPLOYED_SCAN_RANGE, tablePos.toShortString());
-                if (!world.getPlayers().isEmpty()) {
-                    UnemployedLumberjackConversionHook.tryConvertUnemployedVillagersNearCraftingTables(world);
-                }
-            }
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — spawned unemployed villager {} for conversion",
+                    attemptType, bellPos.toShortString(), candidate.getUuidAsString());
+        } else {
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — found unemployed villager {} at {}",
+                    attemptType, bellPos.toShortString(), candidate.getUuidAsString(),
+                    candidate.getBlockPos().toShortString());
         }
+
+        // Step 2: place a crafting table within 3 blocks of that villager.
+        BlockPos tablePos = findFreeSlotNearVillager(world, candidate.getBlockPos(), existingTables);
+        if (tablePos == null) {
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} — no open floor slot within 3 blocks of villager {}; aborting",
+                    attemptType, bellPos.toShortString(), candidate.getUuidAsString());
+            return;
+        }
+
+        world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
+        LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} beside villager {} near bell {}",
+                attemptType, tablePos.toShortString(), candidate.getUuidAsString(), bellPos.toShortString());
+
+        // Step 3: immediately force-convert (vanilla cannot produce custom entity types).
+        forceConvert(world, candidate, tablePos);
     }
 
     /**
-     * Fallback: place table on open surface within a small ring around the bell.
-     * Less ideal but better than nothing.
+     * Finds a free floor slot within {@link JobBlockPairingHelper#JOB_BLOCK_PAIRING_RANGE}
+     * of the given villager position. Air above, solid floor below, not too close to an
+     * existing table.
      */
-    private static void tryPlaceTableNearBellFallbackInner(ServerWorld world, BlockPos bellPos, List<BlockPos> existingTables,
-                                                            String attemptType,
-                                                            List<LumberjackGuardEntity> activeLumberjacks,
-                                                            int desiredLumberjackCount) {
-        for (int radius = 3; radius <= 12; radius++) {
+    private static BlockPos findFreeSlotNearVillager(ServerWorld world, BlockPos villagerPos, List<BlockPos> existingTables) {
+        int range = (int) Math.floor(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        List<BlockPos> candidates = new ArrayList<>();
+        for (int dx = -range; dx <= range; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -range; dz <= range; dz++) {
+                    BlockPos candidate = villagerPos.add(dx, dy, dz);
+                    if (candidate.equals(villagerPos)) continue;
+                    if (!villagerPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) continue;
+                    if (!world.getBlockState(candidate).isReplaceable()) continue;
+                    BlockPos below = candidate.down();
+                    if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
+                    if (isTooCloseToExistingTable(candidate, existingTables)) continue;
+                    candidates.add(candidate.toImmutable());
+                }
+            }
+        }
+        if (candidates.isEmpty()) return null;
+        // Prefer positions at the same Y as the villager (most likely to be the floor they stand on).
+        candidates.sort((a, b) -> Integer.compare(
+                Math.abs(a.getY() - villagerPos.getY()), Math.abs(b.getY() - villagerPos.getY())));
+        return candidates.get(0);
+    }
+
+    /**
+     * Spawns a fresh unemployed villager at a safe surface position near the bell.
+     */
+    private static VillagerEntity spawnUnemployedVillagerNearBell(ServerWorld world, BlockPos bellPos) {
+        BlockPos spawnPos = findSafeVillagerSpawnNearBell(world, bellPos);
+        if (spawnPos == null) return null;
+
+        VillagerEntity villager = EntityType.VILLAGER.create(world);
+        if (villager == null) return null;
+        villager.refreshPositionAndAngles(
+                spawnPos.getX() + 0.5D, spawnPos.getY(), spawnPos.getZ() + 0.5D,
+                world.random.nextFloat() * 360.0F, 0.0F);
+        villager.initialize((ServerWorldAccess) world, world.getLocalDifficulty(spawnPos), SpawnReason.MOB_SUMMONED, null);
+        villager.getBrain().forget(MemoryModuleType.JOB_SITE);
+        villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
+        return world.spawnEntity(villager) ? villager : null;
+    }
+
+    private static BlockPos findSafeVillagerSpawnNearBell(ServerWorld world, BlockPos bellPos) {
+        // Scan outward from bell in a ring, looking for safe ground (solid below, air at feet + head).
+        for (int radius = 2; radius <= 12; radius++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
-                    int dist = Math.abs(dx) + Math.abs(dz);
-                    if (dist != radius) continue; // walk the perimeter only at each radius
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) continue; // perimeter only
                     int wx = bellPos.getX() + dx;
                     int wz = bellPos.getZ() + dz;
                     int surfaceY = world.getTopY(net.minecraft.world.Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, wx, wz);
                     BlockPos candidate = new BlockPos(wx, surfaceY, wz);
-                    BlockPos below = candidate.down();
-                    if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
-                    if (!world.getBlockState(candidate).isReplaceable()) continue;
-                    if (isTooCloseToExistingTable(candidate, existingTables)) continue;
-
-                    placeTableAndConvert(world, bellPos, candidate, attemptType, activeLumberjacks, desiredLumberjackCount);
-                    return;
+                    if (isSafeVillagerSpawnPos(world, candidate)) {
+                        return candidate;
+                    }
                 }
             }
         }
-        LOGGER.debug("lumberjack-spawn attempt={} bell={} — fallback surface scan also found no placement slot", attemptType, bellPos.toShortString());
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -510,56 +517,6 @@ public final class VillageLumberjackSpawnManager {
     // -------------------------------------------------------------------------
     // Spatial helpers
     // -------------------------------------------------------------------------
-
-    /**
-     * Finds all chest blocks within {@link #CHEST_SCAN_RANGE} of the bell,
-     * including interior ones (full 3-D scan, not just surface).
-     */
-    private static List<BlockPos> findChestsNearBell(ServerWorld world, BlockPos bellPos) {
-        List<BlockPos> chests = new ArrayList<>();
-        int r = CHEST_SCAN_RANGE;
-        // Scan a generous Y range to catch chests at any floor level.
-        for (BlockPos pos : BlockPos.iterate(
-                bellPos.add(-r, -8, -r),
-                bellPos.add(r, 8, r))) {
-            if (!bellPos.isWithinDistance(pos, r)) continue;
-            BlockState state = world.getBlockState(pos);
-            if (state.getBlock() instanceof ChestBlock) {
-                chests.add(pos.toImmutable());
-            }
-        }
-        return chests;
-    }
-
-    /**
-     * Finds a free floor slot within {@link #TABLE_ADJACENT_RANGE} of {@code chestPos}.
-     * Requirements: air at the slot, solid block below, not too close to an existing table.
-     * Returns the first valid position found, or null.
-     */
-    private static BlockPos findFreeSlotNearChest(ServerWorld world, BlockPos chestPos, List<BlockPos> existingTables) {
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int dx = -TABLE_ADJACENT_RANGE; dx <= TABLE_ADJACENT_RANGE; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                for (int dz = -TABLE_ADJACENT_RANGE; dz <= TABLE_ADJACENT_RANGE; dz++) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue; // skip chest itself
-                    BlockPos candidate = chestPos.add(dx, dy, dz);
-                    if (!chestPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) continue;
-
-                    if (!world.getBlockState(candidate).isReplaceable()) continue;
-                    BlockPos below = candidate.down();
-                    if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
-                    if (isTooCloseToExistingTable(candidate, existingTables)) continue;
-
-                    candidates.add(candidate.toImmutable());
-                }
-            }
-        }
-        if (candidates.isEmpty()) return null;
-        // Prefer candidates at the same Y level as the chest (most likely correct floor).
-        candidates.sort((a, b) -> Integer.compare(
-                Math.abs(a.getY() - chestPos.getY()), Math.abs(b.getY() - chestPos.getY())));
-        return candidates.get(0);
-    }
 
     private static boolean isTooCloseToExistingTable(BlockPos candidate, List<BlockPos> existingTables) {
         for (BlockPos table : existingTables) {
@@ -617,23 +574,9 @@ public final class VillageLumberjackSpawnManager {
         return pending;
     }
 
-    /** Overload that performs the table scan itself (used by shouldSpawnFallbackUnemployed). */
-    private static int countPendingUnclaimedCraftingTablesNearBell(ServerWorld world, BlockPos bellPos,
-                                                                    List<LumberjackGuardEntity> activeLumberjacks) {
-        int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
-        List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
-        return countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks, nearbyTables);
-    }
-
     /**
      * Returns true when this table is eligible as pending supply:
-     * block exists, not reserved for converted workers, not already paired to a living lumberjack,
-     * AND at least one unemployed villager is within {@link #UNEMPLOYED_SCAN_RANGE} of the table.
-     *
-     * <p>Fix 1 — stale-table guard: if no unemployed villager is nearby, the table has clearly
-     * failed to attract anyone and should not keep suppressing further spawn attempts.  Without
-     * this check a table placed during a period of zero unemployed villagers would count forever
-     * as "pending supply", blocking the spawn manager from ever trying again.
+     * block exists, not reserved for converted workers, not already paired to a living lumberjack.
      */
     private static boolean isPendingLumberjackConversionTable(ServerWorld world, BlockPos tablePos, Set<BlockPos> pairedToLivingLumberjacks) {
         if (!world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)) {
@@ -642,115 +585,17 @@ public final class VillageLumberjackSpawnManager {
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
             return false;
         }
-        if (pairedToLivingLumberjacks.contains(tablePos)) {
-            return false;
-        }
-        // Stale-table check: only count this table as pending if an unemployed villager is
-        // close enough to actually claim it.  A table with nobody nearby is stale and
-        // should not suppress new placement attempts.
-        Box scanBox = new Box(tablePos).expand(UNEMPLOYED_SCAN_RANGE);
-        List<VillagerEntity> nearby = world.getEntitiesByClass(
-                VillagerEntity.class, scanBox, VillageLumberjackSpawnManager::isUnemployed);
-        if (nearby.isEmpty()) {
-            LOGGER.debug("lumberjack-spawn stale-table detected at {} (no unemployed villager within {} blocks) — not counting as pending supply",
-                    tablePos.toShortString(), UNEMPLOYED_SCAN_RANGE);
-            return false;
-        }
-        return true;
+        return !pairedToLivingLumberjacks.contains(tablePos);
     }
 
-    private static VillagerEntity findNearestUnemployed(ServerWorld world, BlockPos tablePos) {
-        Box scanBox = new Box(tablePos).expand(UNEMPLOYED_SCAN_RANGE);
+    private static VillagerEntity findNearestUnemployed(ServerWorld world, BlockPos center) {
+        Box scanBox = new Box(center).expand(UNEMPLOYED_SCAN_RANGE);
         List<VillagerEntity> candidates = world.getEntitiesByClass(
                 VillagerEntity.class, scanBox, VillageLumberjackSpawnManager::isUnemployed);
         if (candidates.isEmpty()) return null;
         candidates.sort((a, b) -> Double.compare(
-                a.squaredDistanceTo(tablePos.getX() + 0.5, tablePos.getY() + 0.5, tablePos.getZ() + 0.5),
-                b.squaredDistanceTo(tablePos.getX() + 0.5, tablePos.getY() + 0.5, tablePos.getZ() + 0.5)));
-        return candidates.get(0);
-    }
-
-    /**
-     * Decides whether a fallback unemployed villager should be spawned.
-     *
-     * <p>Accepts the already-computed {@code activeLumberjacks} list and {@code desiredLumberjackCount}
-     * from {@code processBell} so we don't repeat entity queries or table scans (P3 fix).
-     */
-    private static boolean shouldSpawnFallbackUnemployed(ServerWorld world, BlockPos bellPos, BlockPos tablePos,
-                                                          String attemptType,
-                                                          List<LumberjackGuardEntity> activeLumberjacks,
-                                                          int desiredLumberjackCount) {
-        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            LOGGER.debug("lumberjack-spawn attempt={} table {} already reserved — fallback spawn skipped",
-                    attemptType, tablePos.toShortString());
-            return false;
-        }
-        if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "spawn-unemployed-fallback")) {
-            LOGGER.debug("lumberjack-spawn attempt={} population balancer blocked fallback spawn at {}",
-                    attemptType, tablePos.toShortString());
-            return false;
-        }
-
-        // Use the lumberjack list and desired count already computed by processBell.
-        int pending = countPendingUnclaimedCraftingTablesNearBell(world, bellPos, activeLumberjacks);
-        int effective = activeLumberjacks.size() + pending;
-        if (effective >= desiredLumberjackCount) {
-            LOGGER.debug("lumberjack-spawn attempt={} desired reached before fallback spawn (bell={} desired={} active={} pending={} effective={})",
-                    attemptType, bellPos.toShortString(), desiredLumberjackCount, activeLumberjacks.size(), pending, effective);
-            return false;
-        }
-        return true;
-    }
-
-    private static VillagerEntity spawnUnemployedVillagerNearTable(ServerWorld world, BlockPos tablePos) {
-        BlockPos spawnPos = findSafeVillagerSpawnNearTable(world, tablePos);
-        if (spawnPos == null) {
-            return null;
-        }
-
-        VillagerEntity villager = EntityType.VILLAGER.create(world);
-        if (villager == null) {
-            return null;
-        }
-        villager.refreshPositionAndAngles(
-                spawnPos.getX() + 0.5D,
-                spawnPos.getY(),
-                spawnPos.getZ() + 0.5D,
-                world.random.nextFloat() * 360.0F,
-                0.0F);
-        villager.initialize((ServerWorldAccess) world, world.getLocalDifficulty(spawnPos), SpawnReason.MOB_SUMMONED, null);
-        villager.getBrain().forget(MemoryModuleType.JOB_SITE);
-        villager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
-        return world.spawnEntity(villager) ? villager : null;
-    }
-
-    private static BlockPos findSafeVillagerSpawnNearTable(ServerWorld world, BlockPos tablePos) {
-        int maxHorizontal = Math.max(1, (int) Math.floor(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE));
-        List<BlockPos> candidates = new ArrayList<>();
-        for (int dx = -maxHorizontal; dx <= maxHorizontal; dx++) {
-            for (int dz = -maxHorizontal; dz <= maxHorizontal; dz++) {
-                if (dx == 0 && dz == 0) {
-                    continue;
-                }
-                if (dx * dx + dz * dz > JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE * JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) {
-                    continue;
-                }
-                int wx = tablePos.getX() + dx;
-                int wz = tablePos.getZ() + dz;
-                for (int dy = -2; dy <= 2; dy++) {
-                    BlockPos candidate = new BlockPos(wx, tablePos.getY() + dy, wz);
-                    if (isSafeVillagerSpawnPos(world, candidate)) {
-                        candidates.add(candidate.toImmutable());
-                    }
-                }
-            }
-        }
-        if (candidates.isEmpty()) {
-            return null;
-        }
-        candidates.sort((a, b) -> Double.compare(
-                squaredDistance(a, tablePos),
-                squaredDistance(b, tablePos)));
+                a.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5),
+                b.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5)));
         return candidates.get(0);
     }
 
