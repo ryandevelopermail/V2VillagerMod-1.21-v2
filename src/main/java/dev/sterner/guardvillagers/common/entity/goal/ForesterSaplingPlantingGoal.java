@@ -106,6 +106,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private Stage stage = Stage.IDLE;
     /** World-time tick at which the planting cooldown expires. */
     private long cooldownExpiresTick = 0L;
+    /** The Minecraft day on which the cooldown was last set, used to reset it each new day. */
+    private long cooldownSetDay = -1L;
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
     /** Item currently held (taken from chest) waiting to be planted. */
     private Item heldSaplingItem = null;
@@ -149,8 +151,21 @@ public class ForesterSaplingPlantingGoal extends Goal {
         // and ensures the player can actually observe the forester planting trees.
         if (!isPlayerNearby(world)) return false;
 
-        // Cooldown gate — single check, no per-tick log spam
+        // Each new Minecraft day, reset the planting cooldown so the forester always
+        // attempts a fresh run at day-start when a player enters render distance.
+        // Without this, if the forester drained its saplings mid-day and the 10-minute
+        // cooldown hadn't expired yet, it would stay idle until the cooldown ticked out
+        // even though a new provision batch is now available.
         long now = world.getTime();
+        long currentDay = now / 24000L;
+        if (currentDay > cooldownSetDay && cooldownSetDay >= 0) {
+            // New day — clear the cooldown so planting can fire immediately this morning.
+            cooldownExpiresTick = 0L;
+        }
+        // Always stamp the current day so we track when the cooldown was last touched.
+        cooldownSetDay = currentDay;
+
+        // Cooldown gate — single check, no per-tick log spam
         if (now < cooldownExpiresTick) {
             return false;
         }
