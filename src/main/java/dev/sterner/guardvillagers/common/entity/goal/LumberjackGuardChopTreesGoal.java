@@ -2409,7 +2409,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return new RootQualificationResult(false, REJECTED_BELL_RADIUS);
         }
 
-        if (isNearProtectedVillagePoi(world, pos, getConfiguredHousePoiProtectionRadius(), qualificationContext)) {
+        int poiRadius = getConfiguredHousePoiProtectionRadius();
+        if (poiRadius > 0 && isNearProtectedVillagePoi(world, pos, poiRadius, qualificationContext)) {
             return new RootQualificationResult(false, REJECTED_HOUSE_POI_RADIUS);
         }
 
@@ -2458,7 +2459,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 || state.isOf(Blocks.COARSE_DIRT)
                 || state.isOf(Blocks.ROOTED_DIRT)
                 || state.isOf(Blocks.MOSS_BLOCK)
-                || state.isOf(Blocks.MYCELIUM);
+                || state.isOf(Blocks.MYCELIUM)
+                || state.isOf(Blocks.MUD)
+                || state.isOf(Blocks.MUDDY_MANGROVE_ROOTS)
+                || state.isOf(Blocks.FARMLAND)
+                || state.isOf(Blocks.SAND)
+                || state.isOf(Blocks.RED_SAND)
+                || state.isOf(Blocks.GRAVEL);
     }
 
     /**
@@ -2504,7 +2511,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private static int getConfiguredHousePoiProtectionRadius() {
-        return Math.max(1, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
+        return Math.max(0, GuardVillagersConfig.lumberjackHousePoiProtectionRadius);
     }
 
     private static int getConfiguredTreeScanPerGuardBudgetCap() {

@@ -163,8 +163,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackNaturalRequiredLeafCount = 4;
     @Entry(min=1)
     public static int lumberjackStructureProximityRadius = 2;
-    @Entry(min=1)
-    public static int lumberjackHousePoiProtectionRadius = 8;
+    @Entry(min=0)
+    public static int lumberjackHousePoiProtectionRadius = 3;
     // Dense-village tuning: larger radius finds more candidates but increases scan cost unless governor throttling is active.
     @Entry(min=8)
     public static int lumberjackBaseTreeSearchRadius = 24;
