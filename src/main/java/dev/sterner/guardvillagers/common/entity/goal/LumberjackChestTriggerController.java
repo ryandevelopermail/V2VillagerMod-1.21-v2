@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public final class LumberjackChestTriggerController {
@@ -49,6 +50,7 @@ public final class LumberjackChestTriggerController {
     private static final double MIDPOINT_PAIRING_REFRESH_RADIUS = 32.0D;
     private static final long MIDPOINT_RETRY_MAX_DELAY_TICKS = 20L * 60L * 8L;
     private static final int MIDPOINT_RETRY_MAX_ATTEMPTS = 5;
+    private static final int IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS = 12;
     private static final Map<UUID, UpgradeStage> UPGRADE_STAGE_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, UpgradeStage> UPGRADE_STAGE_BY_JOB_SITE = new HashMap<>();
     private static final Map<UUID, Long> CHEST_PAIRED_TICKS_BY_VILLAGER = new HashMap<>();
@@ -128,18 +130,47 @@ public final class LumberjackChestTriggerController {
             return false;
         }
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
-        if (tryPlaceChestForEligibleV1Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
-            return true;
+        return runImmediateVillageUpgradePassBatch(
+                () -> {
+                    if (!tryPlaceChestForEligibleV1Villager(context)) {
+                        return false;
+                    }
+                    guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
+                    return true;
+                },
+                () -> hasUnresolvedV1ChestDemand(world, guard),
+                () -> {
+                    if (!tryPlaceCraftingTableForEligibleV2Villager(context)) {
+                        return false;
+                    }
+                    guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
+                    return true;
+                },
+                IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS
+        );
+    }
+
+    static boolean runImmediateVillageUpgradePassBatch(BooleanSupplier tryPlaceV1Action,
+                                                       BooleanSupplier hasUnresolvedV1Demand,
+                                                       BooleanSupplier tryPlaceV2Action,
+                                                       int maxActions) {
+        int boundedMaxActions = Math.max(1, maxActions);
+        int actions = 0;
+        boolean placedAny = false;
+
+        while (actions < boundedMaxActions && tryPlaceV1Action.getAsBoolean()) {
+            placedAny = true;
+            actions++;
         }
-        if (hasUnresolvedV1ChestDemand(world, guard)) {
-            return false;
+
+        if (!hasUnresolvedV1Demand.getAsBoolean()) {
+            while (actions < boundedMaxActions && tryPlaceV2Action.getAsBoolean()) {
+                placedAny = true;
+                actions++;
+            }
         }
-        if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
-            return true;
-        }
-        return false;
+
+        return placedAny;
     }
 
     public static MidpointPairingRefreshResult runMidpointPairingRefreshPass(ServerWorld world, LumberjackGuardEntity guard) {
