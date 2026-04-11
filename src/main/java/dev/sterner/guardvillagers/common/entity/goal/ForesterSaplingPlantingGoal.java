@@ -53,6 +53,12 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ForesterSaplingPlantingGoal.class);
 
     /**
+     * Ticks between bonus V2 planting sessions within the same day when the chest
+     * still has saplings after a run (~5 minutes at 20 TPS).
+     */
+    private static final long V2_EXTRA_SESSION_COOLDOWN_TICKS = 6000L;
+
+    /**
      * Minimum horizontal distance (blocks) from the village anchor to plant saplings.
      * Raised from 16 to 24 to keep trees well clear of village building footprints.
      */
@@ -90,6 +96,11 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private Stage stage = Stage.IDLE;
     /** Day number of the last completed planting run (or no-spots). -1 = never run. */
     private long lastPlantedDay = -1L;
+    /**
+     * V2 only: tick at which the next within-day bonus session may start.
+     * Set after a run that left saplings in the chest; reset to 0 each new day.
+     */
+    private long v2BonusCooldownExpiresTick = 0L;
     private final Deque<BlockPos> plantTargets = new ArrayDeque<>();
     /** Item currently held (taken from chest) waiting to be planted. */
     private Item heldSaplingItem = null;
@@ -129,19 +140,24 @@ public class ForesterSaplingPlantingGoal extends Goal {
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
 
-        // Once per Minecraft day, triggered when a player is within render distance
         long now = world.getTime();
         long today = now / 24000L;
-        if (today == lastPlantedDay) return false;
-        if (!isPlayerNearby(world)) return false;
 
         if (chestPos == null) {
-            // V1 mode: saplings must already be in the villager's inventory (placed by provision goal)
-            if (!hasSaplingInVillagerInventory()) {
-                return false;
-            }
+            // V1 mode: once per day, player must be nearby
+            if (today == lastPlantedDay) return false;
+            if (!isPlayerNearby(world)) return false;
+            if (!hasSaplingInVillagerInventory()) return false;
         } else {
-            // V2 mode: check chest has saplings
+            // V2 mode: daily minimum + bonus sessions while chest has saplings
+            // New day resets the bonus cooldown
+            if (today > lastPlantedDay) {
+                v2BonusCooldownExpiresTick = 0L;
+            }
+            // Block if: already ran today AND bonus cooldown hasn't expired
+            if (today == lastPlantedDay && now < v2BonusCooldownExpiresTick) return false;
+            if (!isPlayerNearby(world)) return false;
+
             Optional<Inventory> invOpt = getChestInventory(world);
             if (invOpt.isEmpty()) {
                 LOGGER.debug("[forester-planting] {} chest at {} not found, skipping",
@@ -154,20 +170,24 @@ public class ForesterSaplingPlantingGoal extends Goal {
                         villager.getUuidAsString(), chestPos.toShortString());
                 return false;
             }
-            LOGGER.info("[forester-planting] {} DETECTED {} sapling(s) in paired chest at {}",
+            LOGGER.info("[forester-planting] {} DETECTED {} sapling(s) in chest at {} (bonus session eligible)",
                     villager.getUuidAsString(), saplingCount, chestPos.toShortString());
         }
 
         // Need at least one valid planting spot
         List<BlockPos> targets = findPlantingTargets(world);
         if (targets.isEmpty()) {
-            // No spots today — stamp the day so we don't re-scan every tick until tomorrow
             lastPlantedDay = today;
-            LOGGER.info("[forester-planting] {} no valid planting sites (ring {}–{} blocks); will retry tomorrow",
-                    villager.getUuidAsString(), MIN_PLANT_DISTANCE, MAX_PLANT_DISTANCE);
-            if (linkedProvisionGoal != null) {
-                linkedProvisionGoal.reportNoPlantingSpots();
+            if (chestPos != null) {
+                // V2: saplings are still there; retry after cooldown in case spots open up
+                v2BonusCooldownExpiresTick = now + V2_EXTRA_SESSION_COOLDOWN_TICKS;
+                LOGGER.info("[forester-planting] {} no valid planting sites; will retry in {}t (V2 chest still stocked)",
+                        villager.getUuidAsString(), V2_EXTRA_SESSION_COOLDOWN_TICKS);
+            } else {
+                LOGGER.info("[forester-planting] {} no valid planting sites; will retry tomorrow (V1)",
+                        villager.getUuidAsString());
             }
+            if (linkedProvisionGoal != null) linkedProvisionGoal.reportNoPlantingSpots();
             return false;
         }
 
@@ -299,10 +319,26 @@ public class ForesterSaplingPlantingGoal extends Goal {
                 }
             }
             case DONE -> {
-                // Stamp today so planting doesn't fire again until tomorrow
-                lastPlantedDay = world.getTime() / 24000L;
-                LOGGER.info("[forester-planting] {} planting run COMPLETE — next run tomorrow (day {})",
-                        villager.getUuidAsString(), lastPlantedDay + 1);
+                long nowDone = world.getTime();
+                long todayDone = nowDone / 24000L;
+                if (chestPos == null) {
+                    // V1: done for the day
+                    lastPlantedDay = todayDone;
+                    LOGGER.info("[forester-planting] {} V1 run COMPLETE — next run tomorrow", villager.getUuidAsString());
+                } else {
+                    // V2: check if chest still has saplings for a bonus session
+                    Optional<Inventory> invOpt = getChestInventory(world);
+                    boolean chestHasSaplings = invOpt.isPresent() && countSaplingsInInventory(invOpt.get()) > 0;
+                    lastPlantedDay = todayDone;
+                    if (chestHasSaplings) {
+                        v2BonusCooldownExpiresTick = nowDone + V2_EXTRA_SESSION_COOLDOWN_TICKS;
+                        LOGGER.info("[forester-planting] {} V2 run COMPLETE — chest still has saplings, bonus session in {}t",
+                                villager.getUuidAsString(), V2_EXTRA_SESSION_COOLDOWN_TICKS);
+                    } else {
+                        v2BonusCooldownExpiresTick = Long.MAX_VALUE; // chest empty, no bonus today
+                        LOGGER.info("[forester-planting] {} V2 run COMPLETE — chest empty, done for today", villager.getUuidAsString());
+                    }
+                }
                 heldSaplingItem = null;
                 plantTargets.clear();
                 stage = Stage.IDLE;
