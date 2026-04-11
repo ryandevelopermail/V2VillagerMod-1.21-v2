@@ -280,7 +280,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.getSelectedTreeTargets().remove(0);
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
 
-        if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().isEmpty()) {
+        if (shouldReturnToBaseAfterSuccessfulTeardown(
+                this.guard.getPairedChestPos() == null,
+                this.guard.getSessionTargetsRemaining(),
+                this.guard.getSelectedTreeTargets().isEmpty())) {
+            if (this.guard.getPairedChestPos() == null) {
+                LOGGER.info("Lumberjack Guard {} completed bootstrap tree teardown; returning to base",
+                        this.guard.getUuidAsString());
+                beginReturnToBase();
+                return;
+            }
             if (this.bootstrapRetryTreeScheduled) {
                 LOGGER.info("Lumberjack Guard {} completed bootstrap retry tree; returning to base for crafting retry",
                         this.guard.getUuidAsString());
@@ -548,8 +557,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
         this.guard.setConsecutiveNoTreeSessions(0);
 
-        int sessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
-        int selectedCount = Math.min(sessionCap, targets.size());
+        int randomizedSessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
+        int selectedCount = getSelectedSessionTargetCount(this.guard.getPairedChestPos(), randomizedSessionCap, targets.size());
 
         this.guard.getSelectedTreeTargets().clear();
         this.guard.getSelectedTreeTargets().addAll(targets.subList(0, selectedCount));
@@ -566,6 +575,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         LOGGER.info("Lumberjack Guard {} starting chop session with {} target(s)",
                 this.guard.getUuidAsString(),
                 selectedCount);
+    }
+
+    static int getSelectedSessionTargetCount(@Nullable BlockPos pairedChestPos, int randomizedSessionCap, int availableTargetCount) {
+        int normalizedAvailable = Math.max(0, availableTargetCount);
+        if (normalizedAvailable == 0) {
+            return 0;
+        }
+        int sessionCap = pairedChestPos == null
+                ? 1
+                : Math.max(1, randomizedSessionCap);
+        return Math.min(sessionCap, normalizedAvailable);
+    }
+
+    static boolean shouldReturnToBaseAfterSuccessfulTeardown(boolean bootstrapMode,
+                                                             int sessionTargetsRemaining,
+                                                             boolean selectedTargetsEmpty) {
+        return bootstrapMode || sessionTargetsRemaining <= 0 || selectedTargetsEmpty;
     }
 
     private void beginReturnToBase() {
