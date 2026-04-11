@@ -51,6 +51,7 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
     // V1 goals (no chest – provision into own inventory, plant from inventory)
     private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> V1_PROVISION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> V1_PLANTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ForesterTreeDropPickupGoal> V1_PICKUP_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -76,6 +77,8 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
         if (v1Prov != null) villager.goalSelector.remove(v1Prov);
         ForesterSaplingPlantingGoal v1Plant = V1_PLANTING_GOALS.remove(villager);
         if (v1Plant != null) villager.goalSelector.remove(v1Plant);
+        ForesterTreeDropPickupGoal v1Pickup = V1_PICKUP_GOALS.remove(villager);
+        if (v1Pickup != null) villager.goalSelector.remove(v1Pickup);
 
         // Sapling provision goal – stocks the chest with 4 biome-appropriate saplings each dawn
         ForesterSaplingProvisionGoal provisionGoal = upsertGoal(PROVISION_GOALS, villager, PROVISION_GOAL_PRIORITY,
@@ -127,6 +130,11 @@ public class MoreVillagersForester extends AbstractPairedProfessionBehavior {
 
         // Wire provision↔planting feedback
         plantingGoal.linkProvisionGoal(provisionGoal);
+
+        // Pickup goal – V1 mode: collected saplings stay in villager inventory for planting
+        ForesterTreeDropPickupGoal pickupGoal = upsertGoal(V1_PICKUP_GOALS, villager, PICKUP_GOAL_PRIORITY,
+                () -> new ForesterTreeDropPickupGoal(villager, jobPos, null));
+        pickupGoal.setTargets(jobPos, null);
     }
 
     // -----------------------------------------------------------------------------------------

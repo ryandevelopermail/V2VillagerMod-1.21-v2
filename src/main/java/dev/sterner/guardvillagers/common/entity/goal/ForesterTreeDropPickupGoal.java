@@ -21,12 +21,16 @@ import java.util.Optional;
 
 /**
  * Scans a large radius around the Forester's job site for tree drops left behind
- * by Lumberjacks — saplings, sticks, apples, and logs — and deposits them into
- * the paired chest.
+ * by players or Lumberjacks — saplings, sticks, apples, and logs.
+ *
+ * <p><b>V2 mode (paired chest):</b> all collected items are deposited into the chest.
+ * <p><b>V1 mode (no chest):</b> saplings are kept in the villager's own inventory
+ * (where the planting goal reads from); other drops are discarded after collection
+ * so they don't clog inventory slots.
  *
  * <p>Scanning is throttled by {@link #SCAN_COOLDOWN_TICKS} to avoid per-tick
  * world queries. Once a target item entity is acquired the Forester walks to it,
- * absorbs it, and then deposits into the chest.
+ * absorbs it, then either deposits into the chest (V2) or stays put (V1).
  */
 public class ForesterTreeDropPickupGoal extends Goal {
 
@@ -46,6 +50,7 @@ public class ForesterTreeDropPickupGoal extends Goal {
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
+    /** Null in V1 mode — saplings stay in villager inventory instead. */
     private BlockPos chestPos;
 
     private Stage stage = Stage.IDLE;
@@ -59,13 +64,13 @@ public class ForesterTreeDropPickupGoal extends Goal {
     public ForesterTreeDropPickupGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         setControls(EnumSet.of(Control.MOVE));
     }
 
     public void setTargets(BlockPos jobPos, BlockPos chestPos) {
         this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+        this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         this.stage = Stage.IDLE;
         this.targetItem = null;
     }
@@ -78,7 +83,9 @@ public class ForesterTreeDropPickupGoal extends Goal {
     public boolean canStart() {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive() || !world.isDay()) return false;
-        if (jobPos == null || chestPos == null) return false;
+        if (jobPos == null) return false;
+        // V1: also gate on having inventory space (don't chase drops we can't carry)
+        if (chestPos == null && !hasInventorySpace()) return false;
         if (scanCooldown > 0) {
             scanCooldown--;
             return false;
@@ -135,15 +142,24 @@ public class ForesterTreeDropPickupGoal extends Goal {
                     if (next != null && hasInventorySpace()) {
                         targetItem = next;
                         moveTo(targetItem.getBlockPos());
-                    } else {
+                    } else if (chestPos != null) {
                         stage = Stage.DEPOSIT_TO_CHEST;
                         moveTo(chestPos);
+                    } else {
+                        // V1: saplings stay in villager inventory for the planting goal;
+                        // discard any non-sapling items so they don't clog slots
+                        purgNonSaplingsFromInventory();
+                        stage = Stage.DONE;
                     }
                 } else {
                     moveTo(targetItem.getBlockPos());
                 }
             }
             case DEPOSIT_TO_CHEST -> {
+                if (chestPos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
                 if (isNear(chestPos, CHEST_REACH_SQ)) {
                     Optional<Inventory> invOpt = getChestInventory(world);
                     if (invOpt.isPresent()) {
@@ -245,6 +261,25 @@ public class ForesterTreeDropPickupGoal extends Goal {
             if (inv.getStack(i).isEmpty()) return true;
         }
         return false;
+    }
+
+    // -------------------------------------------------------------------------
+    // V1 inventory management
+    // -------------------------------------------------------------------------
+
+    /**
+     * In V1 mode the forester keeps its inventory for sapling planting.
+     * Non-sapling tree drops (logs, sticks, apples) are cleared out so they
+     * don't fill inventory slots that the provision goal needs for saplings.
+     */
+    private void purgNonSaplingsFromInventory() {
+        Inventory inv = villager.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack s = inv.getStack(i);
+            if (!s.isEmpty() && !s.isIn(net.minecraft.registry.tag.ItemTags.SAPLINGS)) {
+                inv.setStack(i, ItemStack.EMPTY);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
