@@ -127,7 +127,26 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
         int availableLogs = countMatching(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS));
-        int logsToConvert = availableLogs / 2;
+        int logsToConvert;
+        if (isBootstrapSession()) {
+            int availablePlanks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                    + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+            int availableSticks = countByItem(chestInventory, Items.STICK)
+                    + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
+
+            int requiredPlanksForChest = shouldCraftBootstrapChest(chestInventory) ? BOOTSTRAP_CHEST_PLANK_REQUIREMENT : 0;
+            int requiredPlanksForAxe = shouldCraftBootstrapAxe(chestInventory) ? BOOTSTRAP_AXE_PLANK_REQUIREMENT : 0;
+            int requiredSticksForAxe = shouldCraftBootstrapAxe(chestInventory) ? BOOTSTRAP_AXE_STICK_REQUIREMENT : 0;
+
+            int stickDeficit = Math.max(0, requiredSticksForAxe - availableSticks);
+            int additionalPlanksNeededForStickCrafting = stickDeficit > 0 ? 2 : 0; // 2 planks -> 4 sticks
+            int totalRequiredPlanks = requiredPlanksForChest + requiredPlanksForAxe + additionalPlanksNeededForStickCrafting;
+            int plankDeficit = Math.max(0, totalRequiredPlanks - availablePlanks);
+            logsToConvert = Math.min(availableLogs, (plankDeficit + 3) / 4);
+        } else {
+            logsToConvert = availableLogs / 2;
+        }
+
         if (logsToConvert > 0 && consumeMatching(chestInventory, this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.LOGS), logsToConvert)) {
             addToBuffer(new ItemStack(Items.OAK_PLANKS, logsToConvert * 4));
             converted = true;
@@ -137,20 +156,13 @@ public class LumberjackGuardCraftingGoal extends Goal {
                 + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
         int planksToConvert;
         if (isBootstrapSession()) {
-            int plankReserve = 0;
-            if (shouldCraftBootstrapChest(chestInventory)) {
-                plankReserve += BOOTSTRAP_CHEST_PLANK_REQUIREMENT;
-            }
-            if (shouldCraftBootstrapAxe(chestInventory)) {
-                plankReserve += BOOTSTRAP_AXE_PLANK_REQUIREMENT;
-            }
-
+            int chestPlankReserve = shouldCraftBootstrapChest(chestInventory) ? BOOTSTRAP_CHEST_PLANK_REQUIREMENT : 0;
             int requiredSticks = shouldCraftBootstrapAxe(chestInventory) ? BOOTSTRAP_AXE_STICK_REQUIREMENT : 0;
             int availableSticks = countByItem(chestInventory, Items.STICK) + countByItem(this.guard.getGatheredStackBuffer(), Items.STICK);
             int stickDeficit = Math.max(0, requiredSticks - availableSticks);
 
-            int planksAvailableAfterReserve = Math.max(0, availablePlanks - plankReserve);
-            int planksNeededForSticks = (stickDeficit + 1) / 2;
+            int planksAvailableAfterReserve = Math.max(0, availablePlanks - chestPlankReserve);
+            int planksNeededForSticks = stickDeficit > 0 ? 2 : 0; // 2 planks -> 4 sticks
             planksToConvert = Math.min(planksAvailableAfterReserve, planksNeededForSticks);
         } else {
             // Cap stick production: only convert planks to sticks up to the stick target cap.
