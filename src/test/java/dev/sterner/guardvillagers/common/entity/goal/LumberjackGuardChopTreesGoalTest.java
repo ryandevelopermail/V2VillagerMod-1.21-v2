@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -158,11 +159,32 @@ class LumberjackGuardChopTreesGoalTest {
 
     @Test
     void getEffectiveTreeSearchRadiusForAttempts_expandsAfterRepeatedNoTreeSessions() {
-        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
-        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(1));
-        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
-        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(3));
-        assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        int previousBase = GuardVillagersConfig.lumberjackBaseTreeSearchRadius;
+        try {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = 28;
+
+            assertEquals(28, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
+            assertEquals(28, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(1));
+            assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
+            assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(3));
+            assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        } finally {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = previousBase;
+        }
+    }
+
+    @Test
+    void getEffectiveTreeSearchRadiusForAttempts_keepsEscalationsAboveConfiguredBaseAtUpperBound() {
+        int previousBase = GuardVillagersConfig.lumberjackBaseTreeSearchRadius;
+        try {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = GuardVillagersConfig.MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS;
+
+            assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
+            assertEquals(44, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
+            assertEquals(52, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        } finally {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = previousBase;
+        }
     }
 
     @Test
