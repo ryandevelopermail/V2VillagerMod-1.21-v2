@@ -215,6 +215,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=20)
     public static int quartermasterLumberjackDrainSweepIntervalTicks = 12_000;
     @Entry
+    public static boolean quartermasterLumberjackDrainEnabled = false;
+    @Entry
     public static boolean quartermasterLumberjackDrainProtectUpgradeRecipeInputs = true;
     @Entry(min=0.0, max=1.0)
     public static double quartermasterLumberjackReclaimQmChestFullnessThreshold = 0.85D;
