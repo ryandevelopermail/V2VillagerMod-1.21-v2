@@ -7,6 +7,7 @@ import net.minecraft.inventory.SimpleInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class QuartermasterGoalLumberjackDrainPlanningTest {
@@ -27,16 +29,19 @@ class QuartermasterGoalLumberjackDrainPlanningTest {
     private int originalReserveLogs;
     private int originalReservePlanks;
     private int originalReserveCharcoal;
+    private boolean originalDrainEnabled;
 
     @BeforeEach
     void captureConfig() {
         originalReserveLogs = GuardVillagersConfig.quartermasterLumberjackReserveLogs;
         originalReservePlanks = GuardVillagersConfig.quartermasterLumberjackReservePlanks;
         originalReserveCharcoal = GuardVillagersConfig.quartermasterLumberjackReserveCharcoal;
+        originalDrainEnabled = GuardVillagersConfig.quartermasterLumberjackDrainEnabled;
 
         GuardVillagersConfig.quartermasterLumberjackReserveLogs = 0;
         GuardVillagersConfig.quartermasterLumberjackReservePlanks = 0;
         GuardVillagersConfig.quartermasterLumberjackReserveCharcoal = 0;
+        GuardVillagersConfig.quartermasterLumberjackDrainEnabled = true;
     }
 
     @AfterEach
@@ -44,6 +49,7 @@ class QuartermasterGoalLumberjackDrainPlanningTest {
         GuardVillagersConfig.quartermasterLumberjackReserveLogs = originalReserveLogs;
         GuardVillagersConfig.quartermasterLumberjackReservePlanks = originalReservePlanks;
         GuardVillagersConfig.quartermasterLumberjackReserveCharcoal = originalReserveCharcoal;
+        GuardVillagersConfig.quartermasterLumberjackDrainEnabled = originalDrainEnabled;
     }
 
     @Test
@@ -105,6 +111,21 @@ class QuartermasterGoalLumberjackDrainPlanningTest {
         assertTrue(exclusions.test(moddedPlankStack));
         assertTrue(exclusions.test(moddedLogStack));
         assertFalse(exclusions.test(new ItemStack(Items.COBBLESTONE, 1)));
+    }
+
+    @Test
+    void drainPlanning_disabledToggle_skipsSweepBeforePlanningLegs() throws Exception {
+        GuardVillagersConfig.quartermasterLumberjackDrainEnabled = false;
+        QuartermasterGoal goal = new QuartermasterGoal(mock(VillagerEntity.class), BlockPos.ORIGIN, BlockPos.ORIGIN);
+        ServerWorld world = mock(ServerWorld.class);
+
+        Method method = QuartermasterGoal.class.getDeclaredMethod("tryPlanLumberjackDrainSweepIfDue", ServerWorld.class);
+        method.setAccessible(true);
+
+        boolean planned = (boolean) method.invoke(goal, world);
+
+        assertFalse(planned);
+        verifyNoInteractions(world);
     }
 
     @SuppressWarnings("unchecked")

@@ -841,6 +841,9 @@ public class QuartermasterGoal extends Goal {
     }
 
     private boolean tryPlanLumberjackDrainSweepIfDue(ServerWorld world) {
+        if (!GuardVillagersConfig.quartermasterLumberjackDrainEnabled) {
+            return false;
+        }
         long worldTime = world.getTime();
         if (worldTime < nextLumberjackDrainSweepTick) {
             return false;
