@@ -140,7 +140,7 @@ public final class LumberjackChestTriggerController {
                 },
                 () -> hasUnresolvedV1ChestDemand(world, guard),
                 () -> {
-                    if (!tryPlaceCraftingTableForEligibleV2Villager(context)) {
+                    if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
                         return false;
                     }
                     guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
@@ -706,6 +706,10 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
+        return tryPlaceCraftingTableForEligibleV2Villager(context, false);
+    }
+
+    private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context, boolean skipDelay) {
         V2BlockReason v2BlockReason = resolveV2BlockReason(context.world(), context.guard());
         if (v2BlockReason != null) {
             LOGGER.debug("Skip V2 crafting table placement: {}", v2BlockReason.debugReason());
@@ -739,7 +743,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager)) {
+            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager, !skipDelay)) {
                 LOGGER.debug("Skip V2 crafting table placement: villager={} not eligible", villager.getUuid());
                 continue;
             }
