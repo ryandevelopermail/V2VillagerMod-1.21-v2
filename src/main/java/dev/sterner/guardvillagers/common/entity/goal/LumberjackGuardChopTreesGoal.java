@@ -1368,11 +1368,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
         int baseRadius = getConfiguredBaseTreeSearchRadius();
+        int expandedRadius = Math.max(TREE_SEARCH_EXPANDED_RADIUS, baseRadius + 4);
+        int maxExpandedRadius = Math.max(TREE_SEARCH_MAX_EXPANDED_RADIUS, expandedRadius + 8);
         if (attempts >= 4) {
-            return TREE_SEARCH_MAX_EXPANDED_RADIUS;
+            return maxExpandedRadius;
         }
         if (attempts >= 2) {
-            return TREE_SEARCH_EXPANDED_RADIUS;
+            return expandedRadius;
         }
         return baseRadius;
     }
