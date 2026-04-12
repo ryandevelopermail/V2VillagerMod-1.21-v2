@@ -1589,12 +1589,15 @@ public class MasonWallBuilderGoal extends Goal {
     }
 
     private StandabilityAssessment assessStandabilityForNavigation(ServerWorld world, BlockPos pos) {
-        if (!world.getBlockState(pos).isSolidBlock(world, pos)) return new StandabilityAssessment(false, Integer.MAX_VALUE);
+        // pos is the entity feet position.
+        // The block *below* pos must be solid — the entity stands on top of it.
+        if (!world.getBlockState(pos.down()).isSolidBlock(world, pos.down())) return new StandabilityAssessment(false, Integer.MAX_VALUE);
+        // The entity occupies pos (feet) and pos.up() (head); check those two plus one block above for clearance.
         BlockPos above = pos.up();
         BlockPos twoAbove = above.up();
         int obstructionCount = 0;
         int clearableLeafObstructions = 0;
-        for (BlockPos headPos : new BlockPos[]{above, twoAbove}) {
+        for (BlockPos headPos : new BlockPos[]{pos, above, twoAbove}) {
             BlockState headState = world.getBlockState(headPos);
             if (!world.getFluidState(headPos).isEmpty()) {
                 return new StandabilityAssessment(false, Integer.MAX_VALUE);
