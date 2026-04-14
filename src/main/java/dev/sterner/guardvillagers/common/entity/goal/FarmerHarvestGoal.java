@@ -61,7 +61,12 @@ public class FarmerHarvestGoal extends Goal {
     /** How often to attempt incremental seed pickup when no seeds and no hoe are available. */
     private static final int SEED_INCREMENT_INTERVAL_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
-    private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
+    /**
+     * Vertical range when scanning for nearby water. Vanilla farmland hydration works within
+     * roughly ±1 block vertically, so ±3 is a comfortable margin without bloating per-block
+     * scan cost the way ±8 did (saves ~63% of scan volume per territory cell).
+     */
+    private static final int WATER_SEARCH_VERTICAL_RANGE = 3;
     private static final int BOOTSTRAP_SCAN_RADIUS = 16;
     private static final int BOOTSTRAP_SCAN_MIN_Y_OFFSET = -1;
     private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
@@ -2085,7 +2090,10 @@ public class FarmerHarvestGoal extends Goal {
             BlockState above = world.getBlockState(pos.up());
             return above.isAir() || above.getBlock() instanceof CropBlock;
         }
-        return isHoeTarget(world, pos) && hasNearbyWater(world, pos);
+        // Dirt/grass/path counts toward territory even without nearby water so fresh setups
+        // reach MIN_VIABLE_TERRITORY_PLOTS and the farmer can begin work. Water is still
+        // required before the farmer will actually hoe or treat a cell as actionable coverage.
+        return isHoeTarget(world, pos);
     }
 
 
