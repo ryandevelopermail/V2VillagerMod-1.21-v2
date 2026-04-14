@@ -59,6 +59,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int STICKS_PER_PLANK = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
+    /**
+     * Bootstrap guards (no chest yet) should chop again almost immediately after returning —
+     * there's no reason to wait 3-8 minutes between cycles when the guard hasn't even crafted
+     * its own chest yet. A short delay (1 second) is enough to let the MC goal system settle
+     * before the next scan begins.
+     */
+    private static final int BOOTSTRAP_CHOP_INTERVAL_TICKS = 20;
     private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
     private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
@@ -1013,7 +1020,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void startChopCountdown(ServerWorld world, String reason) {
-        long totalTicks = MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
+        // Bootstrap guards (no chest yet) should cycle back to chopping almost immediately.
+        // Using the normal 3-8 minute interval here means each bootstrap chop cycle takes
+        // multiple real minutes, causing the "days to craft own chest" symptom.
+        boolean bootstrap = this.guard.getPairedChestPos() == null;
+        long totalTicks = bootstrap
+                ? BOOTSTRAP_CHOP_INTERVAL_TICKS
+                : MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
         startChopCountdown(world, totalTicks, reason);
     }
 

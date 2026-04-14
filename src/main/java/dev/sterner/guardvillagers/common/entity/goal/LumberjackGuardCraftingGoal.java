@@ -21,8 +21,12 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 public class LumberjackGuardCraftingGoal extends Goal {
-    // Per-day cap for priority outputs only (raw wood/plank conversion does not consume this limit).
+    // Per-day cap for axe/tool-upgrade outputs (does not apply to V1 chest / V2 table promotion).
     private static final int DAILY_CRAFT_LIMIT = 4;
+    // Higher per-day cap specifically for V1 chest and V2 crafting table promotion outputs.
+    // A village can need many chests and tables in quick succession; throttling them at 4/day
+    // would stretch promotion over many real-world MC days.
+    private static final int DAILY_PROMOTION_CRAFT_LIMIT = 16;
     private static final int BOOTSTRAP_CHEST_PLANK_REQUIREMENT = 8;
     private static final int BOOTSTRAP_AXE_PLANK_REQUIREMENT = 3;
     private static final int BOOTSTRAP_AXE_STICK_REQUIREMENT = 2;
@@ -30,6 +34,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
     private int craftedToday;
+    private int promotionCraftedToday;
     private boolean basePairingEstablished;
 
     public LumberjackGuardCraftingGoal(LumberjackGuardEntity guard) {
@@ -53,7 +58,11 @@ public class LumberjackGuardCraftingGoal extends Goal {
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
             return false;
         }
-        if (!bootstrapSession && (!world.isDay() || craftedToday >= DAILY_CRAFT_LIMIT)) {
+        if (!bootstrapSession && !world.isDay()) {
+            this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+            return false;
+        }
+        if (!bootstrapSession && craftedToday >= DAILY_CRAFT_LIMIT && promotionCraftedToday >= DAILY_PROMOTION_CRAFT_LIMIT) {
             this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
             return false;
         }
@@ -108,16 +117,16 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         Inventory chestInventory = resolveChestInventory(world);
-        boolean woodConversionSucceeded = performWoodConversion(chestInventory);
-        boolean priorityOutputCrafted = craftPriorityOutputs(world, chestInventory, isBasePairingReadyForDemand());
+        performWoodConversion(chestInventory);
+        // craftPriorityOutputs now returns the number of promotion items crafted this visit.
+        // Non-promotion crafts (axe upgrades etc.) still count against the regular daily limit.
+        int promotionCraftsThisVisit = craftPriorityOutputs(world, chestInventory, isBasePairingReadyForDemand());
 
-        boolean meaningfulActionSucceeded = priorityOutputCrafted;
-        // Wood conversion is tracked for clarity, but only completed priority crafting or chest placement
-        // should count against the daily crafting budget.
-        if (meaningfulActionSucceeded) {
+        if (promotionCraftsThisVisit < 0) {
+            // Negative sentinel: a non-promotion craft happened (e.g. axe upgrade).
             craftedToday++;
-        } else if (woodConversionSucceeded) {
-            // Intentionally do not count this toward DAILY_CRAFT_LIMIT.
+        } else {
+            promotionCraftedToday += promotionCraftsThisVisit;
         }
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
@@ -194,7 +203,15 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return converted;
     }
 
-    private boolean craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
+    /**
+     * Craft priority outputs for this visit.
+     *
+     * Returns:
+     *   > 0  — number of promotion items (V1 chests / V2 crafting tables) crafted this visit
+     *   0    — nothing crafted this visit (no demand or no materials)
+     *  -1    — a non-promotion craft happened (axe upgrade etc.); counts against regular daily limit
+     */
+    private int craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
             boolean meaningfulAction = craftBootstrapChestAndAttemptPlacementIfNeeded(
                     shouldCraftBootstrapChest(chestInventory),
@@ -213,25 +230,52 @@ public class LumberjackGuardCraftingGoal extends Goal {
             }
 
             equipBootstrapAxeFromSupplies(chestInventory);
-            return meaningfulAction;
+            // Bootstrap crafts don't count against either daily limit.
+            return 0;
         }
 
         if (!demandEnabled || !isBasePairingReadyForDemand()) {
-            return false;
+            return 0;
         }
 
-        LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
-        int outputOnHand = demand == null ? 0 : countByItem(chestInventory, demand.outputItem()) + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem());
-        if (demand != null && outputOnHand < demand.outputCount()) {
-            if (craftIfPossible(chestInventory, demand.planksCost(), demand.stickCost(), demand.outputItem(), demand.outputCount())) {
-                stashCraftedOutput(chestInventory, demand.outputItem(), demand.outputCount());
-                LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
-                return true;
+        // Batch-craft all available promotion demands in one visit (up to the promotion daily limit).
+        // Previously only one item was crafted per visit, causing promotion to stretch over many chop
+        // cycles (3-8 min each) — now we drain as many demands as materials + limits allow.
+        int promotionCraftsThisVisit = 0;
+        int remainingPromotionBudget = DAILY_PROMOTION_CRAFT_LIMIT - promotionCraftedToday;
+        while (remainingPromotionBudget > promotionCraftsThisVisit) {
+            LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
+            if (demand == null) {
+                break;
             }
-            return false;
+            boolean isPromotionDemand = demand.equals(LumberjackChestTriggerController.UpgradeDemand.v1Chest())
+                    || demand.equals(LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable());
+            if (!isPromotionDemand && craftedToday >= DAILY_CRAFT_LIMIT) {
+                // Non-promotion demand and regular daily limit already reached — stop.
+                break;
+            }
+            int outputOnHand = countByItem(chestInventory, demand.outputItem())
+                    + countByItem(this.guard.getGatheredStackBuffer(), demand.outputItem());
+            if (outputOnHand >= demand.outputCount()) {
+                // Already have this output stocked; run upgrade pass and try next demand.
+                LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
+                break;
+            }
+            if (!craftIfPossible(chestInventory, demand.planksCost(), demand.stickCost(), demand.outputItem(), demand.outputCount())) {
+                // Not enough materials for this demand right now — stop.
+                break;
+            }
+            stashCraftedOutput(chestInventory, demand.outputItem(), demand.outputCount());
+            LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, this.guard);
+            if (isPromotionDemand) {
+                promotionCraftsThisVisit++;
+            } else {
+                // Non-promotion craft: signal to tick() that it should count against regular limit.
+                return -1;
+            }
         }
 
-        return false;
+        return promotionCraftsThisVisit;
     }
 
     static boolean craftBootstrapChestAndAttemptPlacementIfNeeded(boolean shouldCraftBootstrapChest, BooleanSupplier craftChestAction, BooleanSupplier placeChestAction) {
@@ -814,6 +858,7 @@ public class LumberjackGuardCraftingGoal extends Goal {
         if (day != lastCraftDay) {
             lastCraftDay = day;
             craftedToday = 0;
+            promotionCraftedToday = 0;
         }
     }
 }
