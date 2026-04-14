@@ -5,6 +5,8 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -71,7 +73,7 @@ class LumberjackChestTriggerControllerTest {
     }
 
     @Test
-    void shouldBlockV2TablePlacement_whenAnyEligibleV1VillagerStillMissingChest() {
+    void reachableV1MissingChest_stillBlocksV2Placement() {
         boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
                 LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
                 1
@@ -81,7 +83,7 @@ class LumberjackChestTriggerControllerTest {
     }
 
     @Test
-    void shouldNotBlockV2TablePlacement_whenNoUnresolvedV1ChestDemandExists() {
+    void unreachableV1MissingChest_doesNotBlockV2Forever() {
         boolean blocked = LumberjackChestTriggerController.shouldBlockV2TablePlacement(
                 LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable(),
                 0
@@ -149,6 +151,43 @@ class LumberjackChestTriggerControllerTest {
         assertEquals(1_200L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 2));
         assertEquals(2_400L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 3));
         assertEquals(2_400L, LumberjackChestTriggerController.computeCappedRetryDelay(base, cap, 5));
+    }
+
+    @Test
+    void immediateUpgradeBatch_promotesMultipleV1CandidatesInOnePass() {
+        AtomicInteger v1Placements = new AtomicInteger();
+        AtomicInteger v2Placements = new AtomicInteger();
+
+        boolean placedAny = LumberjackChestTriggerController.runImmediateVillageUpgradePassBatch(
+                () -> v1Placements.incrementAndGet() <= 2,
+                () -> false,
+                () -> {
+                    v2Placements.incrementAndGet();
+                    return false;
+                },
+                12
+        );
+
+        assertTrue(placedAny);
+        assertEquals(3, v1Placements.get(), "V1 should be retried until first non-actionable attempt.");
+        assertEquals(1, v2Placements.get(), "V2 should still be evaluated after V1 backlog clears.");
+    }
+
+    @Test
+    void immediateUpgradeBatch_runsV2PlacementsInSamePassAfterV1BacklogClears() {
+        AtomicInteger v1Calls = new AtomicInteger();
+        AtomicInteger v2Calls = new AtomicInteger();
+
+        boolean placedAny = LumberjackChestTriggerController.runImmediateVillageUpgradePassBatch(
+                () -> v1Calls.incrementAndGet() == 1,
+                () -> false,
+                () -> v2Calls.incrementAndGet() <= 2,
+                12
+        );
+
+        assertTrue(placedAny);
+        assertEquals(2, v1Calls.get(), "V1 should run until non-actionable before V2 starts.");
+        assertEquals(3, v2Calls.get(), "V2 should place repeatedly in the same pass.");
     }
 
 }

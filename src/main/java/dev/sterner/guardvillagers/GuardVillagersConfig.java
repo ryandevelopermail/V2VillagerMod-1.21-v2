@@ -29,7 +29,7 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MIN_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE = 0;
     public static final int MAX_LUMBERJACK_GOVERNOR_BACKPRESSURE_PERMILLE = 900;
     public static final int MIN_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 8;
-    public static final int MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 31;
+    public static final int MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS = 40;
     public static final int MIN_PROFESSION_THROTTLE_THRESHOLD = 1;
     public static final int MAX_PROFESSION_THROTTLE_THRESHOLD = 500000;
     public static final int MIN_PROFESSION_THROTTLE_DEFER_TICKS = 20;
@@ -167,7 +167,7 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackHousePoiProtectionRadius = 3;
     // Dense-village tuning: larger radius finds more candidates but increases scan cost unless governor throttling is active.
     @Entry(min=8)
-    public static int lumberjackBaseTreeSearchRadius = 24;
+    public static int lumberjackBaseTreeSearchRadius = 28;
     @Entry(min=250)
     public static int lumberjackTreeScanPerGuardBudgetCap = 8000;
     @Entry(min=500)
@@ -214,6 +214,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int quartermasterLumberjackFurnaceFuelReserve = 8;
     @Entry(min=20)
     public static int quartermasterLumberjackDrainSweepIntervalTicks = 12_000;
+    @Entry
+    public static boolean quartermasterLumberjackDrainEnabled = false;
     @Entry
     public static boolean quartermasterLumberjackDrainProtectUpgradeRecipeInputs = true;
     @Entry(min=0.0, max=1.0)

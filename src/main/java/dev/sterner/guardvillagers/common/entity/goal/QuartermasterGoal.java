@@ -107,6 +107,8 @@ public class QuartermasterGoal extends Goal {
     private static final int MASON_COBBLESTONE_RESERVE = 8;
     private static final int MASON_MINING_DIRT_BUFFER = 8;
     private static final int LUMBERJACK_PROMOTION_CHAIN_PLANK_FLOOR = 20;
+    private static final int LUMBERJACK_DYNAMIC_PLANK_SAFETY_BUFFER = 2;
+    private static final int PLANKS_PER_LOG_CONVERSION = 4;
     private static final long BOOTSTRAP_DISCOVERY_RETRY_INTERVAL_TICKS = 1200L;
     private static final int BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES = 5;
     private static final long BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS = 24_000L;
@@ -839,6 +841,9 @@ public class QuartermasterGoal extends Goal {
     }
 
     private boolean tryPlanLumberjackDrainSweepIfDue(ServerWorld world) {
+        if (!GuardVillagersConfig.quartermasterLumberjackDrainEnabled) {
+            return false;
+        }
         long worldTime = world.getTime();
         if (worldTime < nextLumberjackDrainSweepTick) {
             return false;
@@ -890,13 +895,14 @@ public class QuartermasterGoal extends Goal {
                 continue;
             }
 
-            Set<net.minecraft.item.Item> excludedItems = Set.of();
+            Predicate<ItemStack> exclusionPredicate = stack -> false;
+            LumberjackChestTriggerController.UpgradeDemand activeDemand = null;
             if (GuardVillagersConfig.quartermasterLumberjackDrainProtectUpgradeRecipeInputs) {
-                LumberjackChestTriggerController.UpgradeDemand activeDemand = resolveLumberjackUpgradeDemand(world, lumberjack);
-                excludedItems = buildLumberjackActiveRecipeExclusions(activeDemand);
+                activeDemand = resolveLumberjackUpgradeDemand(world, lumberjack);
+                exclusionPredicate = buildLumberjackActiveRecipeExclusions(activeDemand);
             }
 
-            List<TransferLeg> plannedLegs = planLumberjackChestDrainLegs(lumberjackChestPos, inventory.get(), excludedItems);
+            List<TransferLeg> plannedLegs = planLumberjackChestDrainLegs(lumberjackChestPos, inventory.get(), activeDemand, exclusionPredicate);
             if (plannedLegs.isEmpty()) {
                 continue;
             }
@@ -920,22 +926,46 @@ public class QuartermasterGoal extends Goal {
         return true;
     }
 
-    private List<TransferLeg> planLumberjackChestDrainLegs(BlockPos sourceChestPos, Inventory inventory, Set<net.minecraft.item.Item> excludedItems) {
+    private List<TransferLeg> planLumberjackChestDrainLegs(BlockPos sourceChestPos,
+                                                           Inventory inventory,
+                                                           LumberjackChestTriggerController.UpgradeDemand activeDemand,
+                                                           Predicate<ItemStack> exclusionPredicate) {
         ProfessionReclaimPolicy policy = LUMBERJACK_RECLAIM_POLICY;
         Map<net.minecraft.item.Item, Integer> totals = totalsByItem(inventory);
-        int remainingLogs = Math.max(0, countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS)) - getLumberjackLogReserveFloor());
-        int remainingPlanks = Math.max(0, countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS)) - getLumberjackPlankReserveFloor());
+        int totalLogs = countMatching(inventory, stack -> stack.isIn(ItemTags.LOGS));
+        int totalPlanks = countMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS));
+        int logReserveFloor = getLumberjackLogReserveFloor();
+        int plankReserveFloor = getLumberjackPlankReserveFloor();
+        int stickReserveFloor = policy.reserveCount(Items.STICK);
+        if (activeDemand != null) {
+            if (activeDemand.planksCost() > 0) {
+                int demandPlankFloor = activeDemand.planksCost() + LUMBERJACK_DYNAMIC_PLANK_SAFETY_BUFFER;
+                plankReserveFloor = Math.max(plankReserveFloor, demandPlankFloor);
+                if (totalPlanks < plankReserveFloor) {
+                    int plankShortfall = plankReserveFloor - totalPlanks;
+                    int convertibleLogReserve = (int) Math.ceil((double) plankShortfall / PLANKS_PER_LOG_CONVERSION);
+                    logReserveFloor = Math.max(logReserveFloor, convertibleLogReserve);
+                }
+            }
+            if (activeDemand.stickCost() > 0) {
+                stickReserveFloor = Math.max(stickReserveFloor, activeDemand.stickCost());
+            }
+        }
+
+        int remainingLogs = Math.max(0, totalLogs - logReserveFloor);
+        int remainingPlanks = Math.max(0, totalPlanks - plankReserveFloor);
         int remainingCharcoal = Math.max(0, totals.getOrDefault(Items.CHARCOAL, 0) - getLumberjackCharcoalReserveFloor());
         Map<net.minecraft.item.Item, Integer> remainingByItem = new HashMap<>();
         for (Map.Entry<net.minecraft.item.Item, Integer> entry : totals.entrySet()) {
             int keep = policy.reserveCount(entry.getKey());
             remainingByItem.put(entry.getKey(), Math.max(0, entry.getValue() - keep));
         }
+        remainingByItem.put(Items.STICK, Math.max(0, totals.getOrDefault(Items.STICK, 0) - stickReserveFloor));
 
         List<TransferLeg> planned = new ArrayList<>();
         for (int i = 0; i < inventory.size(); i++) {
             ItemStack stack = inventory.getStack(i);
-            if (stack.isEmpty() || !policy.canReclaim(stack) || excludedItems.contains(stack.getItem())) {
+            if (stack.isEmpty() || !policy.canReclaim(stack) || exclusionPredicate.test(stack)) {
                 continue;
             }
             int reclaimable = switch (reserveGrouping(stack)) {
@@ -1031,29 +1061,20 @@ public class QuartermasterGoal extends Goal {
         return usedCapacity / totalCapacity;
     }
 
-    private Set<net.minecraft.item.Item> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
-        Set<net.minecraft.item.Item> exclusions = new HashSet<>();
+    private Predicate<ItemStack> buildLumberjackActiveRecipeExclusions(LumberjackChestTriggerController.UpgradeDemand demand) {
         if (demand == null) {
-            return exclusions;
+            return stack -> false;
         }
+        List<Predicate<ItemStack>> exclusions = new ArrayList<>();
         if (demand.planksCost() > 0) {
-            exclusions.add(Items.OAK_PLANKS);
-            exclusions.add(Items.SPRUCE_PLANKS);
-            exclusions.add(Items.BIRCH_PLANKS);
-            exclusions.add(Items.JUNGLE_PLANKS);
-            exclusions.add(Items.ACACIA_PLANKS);
-            exclusions.add(Items.DARK_OAK_PLANKS);
-            exclusions.add(Items.MANGROVE_PLANKS);
-            exclusions.add(Items.CHERRY_PLANKS);
-            exclusions.add(Items.BAMBOO_PLANKS);
-            exclusions.add(Items.CRIMSON_PLANKS);
-            exclusions.add(Items.WARPED_PLANKS);
+            exclusions.add(stack -> stack.isIn(ItemTags.PLANKS));
+            exclusions.add(stack -> stack.isIn(ItemTags.LOGS));
         }
         if (demand.stickCost() > 0) {
-            exclusions.add(Items.STICK);
+            exclusions.add(stack -> stack.isOf(Items.STICK));
         }
-        exclusions.add(demand.outputItem());
-        return exclusions;
+        exclusions.add(stack -> stack.isOf(demand.outputItem()));
+        return stack -> exclusions.stream().anyMatch(predicate -> predicate.test(stack));
     }
 
     private void finishActiveLumberjackDrainCycleIfNeeded() {

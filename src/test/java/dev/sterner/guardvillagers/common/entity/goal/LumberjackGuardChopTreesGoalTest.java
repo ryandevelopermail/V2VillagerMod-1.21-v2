@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -12,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -157,11 +159,32 @@ class LumberjackGuardChopTreesGoalTest {
 
     @Test
     void getEffectiveTreeSearchRadiusForAttempts_expandsAfterRepeatedNoTreeSessions() {
-        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
-        assertEquals(20, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(1));
-        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
-        assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(3));
-        assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        int previousBase = GuardVillagersConfig.lumberjackBaseTreeSearchRadius;
+        try {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = 28;
+
+            assertEquals(28, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
+            assertEquals(28, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(1));
+            assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
+            assertEquals(32, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(3));
+            assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        } finally {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = previousBase;
+        }
+    }
+
+    @Test
+    void getEffectiveTreeSearchRadiusForAttempts_keepsEscalationsAboveConfiguredBaseAtUpperBound() {
+        int previousBase = GuardVillagersConfig.lumberjackBaseTreeSearchRadius;
+        try {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = GuardVillagersConfig.MAX_LUMBERJACK_BASE_TREE_SEARCH_RADIUS;
+
+            assertEquals(40, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(0));
+            assertEquals(44, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(2));
+            assertEquals(52, LumberjackGuardChopTreesGoal.getEffectiveTreeSearchRadiusForAttempts(4));
+        } finally {
+            GuardVillagersConfig.lumberjackBaseTreeSearchRadius = previousBase;
+        }
     }
 
     @Test
@@ -380,6 +403,110 @@ class LumberjackGuardChopTreesGoalTest {
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, -1L));
         assertFalse(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick, countdownStartTick));
         assertTrue(LumberjackGuardChopTreesGoal.shouldRunMidpointAuditForCountdown(countdownStartTick + 300L, countdownStartTick));
+    }
+
+    @Test
+    void recoverFailedTargetQueue_stalledRoot_replacesHeadTargetBeforeRescan() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        BlockPos queuedTarget = new BlockPos(5, 64, 5);
+        BlockPos replacement = failedRoot.up();
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot, queuedTarget));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                2,
+                replacement,
+                List.of(),
+                Predicate.not(failedRoot::equals)
+        );
+
+        assertTrue(outcome.replacementApplied());
+        assertFalse(outcome.rescanAdded());
+        assertTrue(outcome.hasTarget());
+        assertEquals(List.of(replacement, queuedTarget), selectedTargets);
+    }
+
+    @Test
+    void recoverFailedTargetQueue_noReplacement_localRescanRefillsRemainingSessionCap() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        BlockPos rescanned = new BlockPos(2, 64, 2);
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                1,
+                null,
+                List.of(failedRoot, rescanned),
+                failedRoot::equals
+        );
+
+        assertFalse(outcome.replacementApplied());
+        assertTrue(outcome.rescanAdded());
+        assertTrue(outcome.hasTarget());
+        assertEquals(List.of(rescanned), selectedTargets);
+    }
+
+    @Test
+    void recoverFailedTargetQueue_noReplacementAndNoRescan_returnsNoTargetForReturnToBase() {
+        BlockPos failedRoot = new BlockPos(0, 64, 0);
+        List<BlockPos> selectedTargets = new ArrayList<>(List.of(failedRoot));
+
+        LumberjackGuardChopTreesGoal.RecoveryOutcome outcome = LumberjackGuardChopTreesGoal.recoverFailedTargetQueue(
+                failedRoot,
+                selectedTargets,
+                1,
+                null,
+                List.of(),
+                failedRoot::equals
+        );
+
+        assertFalse(outcome.replacementApplied());
+        assertFalse(outcome.rescanAdded());
+        assertFalse(outcome.hasTarget());
+        assertTrue(selectedTargets.isEmpty());
+    }
+
+    @Test
+    void getSelectedSessionTargetCount_unpairedBootstrapCapsSessionToOneTarget() {
+        int selectedCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                null,
+                5,
+                4
+        );
+
+        assertEquals(1, selectedCount);
+    }
+
+    @Test
+    void getSelectedSessionTargetCount_pairedLumberjackKeepsMultiTreeSessionRange() {
+        BlockPos pairedChest = new BlockPos(1, 64, 1);
+
+        int minRangeCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                pairedChest,
+                3,
+                5
+        );
+        int maxRangeCount = LumberjackGuardChopTreesGoal.getSelectedSessionTargetCount(
+                pairedChest,
+                5,
+                5
+        );
+
+        assertEquals(3, minRangeCount);
+        assertEquals(5, maxRangeCount);
+    }
+
+    @Test
+    void shouldReturnToBaseAfterSuccessfulTeardown_bootstrapModeReturnsImmediately() {
+        boolean shouldReturn = LumberjackGuardChopTreesGoal.shouldReturnToBaseAfterSuccessfulTeardown(
+                true,
+                3,
+                false
+        );
+
+        assertTrue(shouldReturn);
     }
 
     private List<BlockPos> adjacent(BlockPos pos) {

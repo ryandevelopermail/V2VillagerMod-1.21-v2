@@ -59,6 +59,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int STICKS_PER_PLANK = 2;
     private static final int CHOP_INTERVAL_MIN_TICKS = 20 * 60 * 3;
     private static final int CHOP_INTERVAL_MAX_TICKS = 20 * 60 * 8;
+    /**
+     * Bootstrap guards (no chest yet) should chop again almost immediately after returning —
+     * there's no reason to wait 3-8 minutes between cycles when the guard hasn't even crafted
+     * its own chest yet. A short delay (1 second) is enough to let the MC goal system settle
+     * before the next scan begins.
+     */
+    private static final int BOOTSTRAP_CHOP_INTERVAL_TICKS = 20;
     private static final int TREE_SEARCH_EXPANDED_RADIUS = 32;
     private static final int TREE_SEARCH_MAX_EXPANDED_RADIUS = 40;
     private static final int TREE_SEARCH_HEIGHT = 10;
@@ -90,6 +97,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private static final int PATH_STALL_TICKS = 30;
     private static final int MAX_STALL_RECOVERY_ATTEMPTS = 3;
     private static final int MAX_TEARDOWN_RETRY_ATTEMPTS_PER_ROOT = 3;
+    private static final int FAILED_ROOT_RETRY_COOLDOWN_TICKS = 20 * 20;
     private static final int TARGET_STUCK_FALLBACK_TICKS = 20 * 30;
     private static final double STALL_PROGRESS_DELTA_SQ = 0.25D;
     private static final double STALL_JITTER_DELTA_SQ = 0.03D;
@@ -123,6 +131,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private final Set<BlockPos> completedSessionRoots = new HashSet<>();
     private final Set<BlockPos> failedSessionRoots = new HashSet<>();
     private final Map<BlockPos, Integer> rootTeardownRetryAttempts = new HashMap<>();
+    private final Map<BlockPos, Integer> failedRootCooldownTicks = new HashMap<>();
     private final Map<BlockPos, Integer> rootFocusTicks = new HashMap<>();
     private double lastTreeDistanceSq = Double.MAX_VALUE;
     private int stalledTicks;
@@ -168,6 +177,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         if (!(this.guard.getWorld() instanceof ServerWorld world)) {
             return;
         }
+        tickFailedRootCooldowns();
 
         if (!this.guard.isActiveSession()) {
             updateChopCountdown(world);
@@ -197,15 +207,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 this.guard.getSelectedTreeTargets().set(0, replacementRoot);
                 targetRoot = replacementRoot;
             } else {
-                recordFailedTargetAttempt(targetRoot, "invalid root and no replacement");
-                this.guard.getSelectedTreeTargets().remove(0);
+                handleFailedTargetAttempt(world, targetRoot, "invalid root and no replacement");
                 return;
             }
         }
 
         if (!isEligibleLog(world, targetRoot)) {
-            recordFailedTargetAttempt(targetRoot, "replacement root became invalid");
-            this.guard.getSelectedTreeTargets().remove(0);
+            handleFailedTargetAttempt(world, targetRoot, "replacement root became invalid");
             return;
         }
 
@@ -224,8 +232,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         if (treeDistanceSq > 6.25D) {
             this.guard.getNavigation().startMovingTo(targetRoot.getX() + 0.5D, targetRoot.getY(), targetRoot.getZ() + 0.5D, 0.8D);
             if (!updateStallState(world, targetRoot, treeDistanceSq)) {
-                recordFailedTargetAttempt(targetRoot, "stalled while pathing");
-                this.guard.getSelectedTreeTargets().remove(0);
+                handleFailedTargetAttempt(world, targetRoot, "stalled while pathing");
             }
             return;
         }
@@ -280,7 +287,16 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.guard.getSelectedTreeTargets().remove(0);
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
 
-        if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().isEmpty()) {
+        if (shouldReturnToBaseAfterSuccessfulTeardown(
+                this.guard.getPairedChestPos() == null,
+                this.guard.getSessionTargetsRemaining(),
+                this.guard.getSelectedTreeTargets().isEmpty())) {
+            if (this.guard.getPairedChestPos() == null) {
+                LOGGER.info("Lumberjack Guard {} completed bootstrap tree teardown; returning to base",
+                        this.guard.getUuidAsString());
+                beginReturnToBase();
+                return;
+            }
             if (this.bootstrapRetryTreeScheduled) {
                 LOGGER.info("Lumberjack Guard {} completed bootstrap retry tree; returning to base for crafting retry",
                         this.guard.getUuidAsString());
@@ -548,8 +564,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         }
         this.guard.setConsecutiveNoTreeSessions(0);
 
-        int sessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
-        int selectedCount = Math.min(sessionCap, targets.size());
+        int randomizedSessionCap = MathHelper.nextInt(this.guard.getRandom(), SESSION_TARGET_MIN, SESSION_TARGET_MAX);
+        int selectedCount = getSelectedSessionTargetCount(this.guard.getPairedChestPos(), randomizedSessionCap, targets.size());
 
         this.guard.getSelectedTreeTargets().clear();
         this.guard.getSelectedTreeTargets().addAll(targets.subList(0, selectedCount));
@@ -566,6 +582,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         LOGGER.info("Lumberjack Guard {} starting chop session with {} target(s)",
                 this.guard.getUuidAsString(),
                 selectedCount);
+    }
+
+    static int getSelectedSessionTargetCount(@Nullable BlockPos pairedChestPos, int randomizedSessionCap, int availableTargetCount) {
+        int normalizedAvailable = Math.max(0, availableTargetCount);
+        if (normalizedAvailable == 0) {
+            return 0;
+        }
+        int sessionCap = pairedChestPos == null
+                ? 1
+                : Math.max(1, randomizedSessionCap);
+        return Math.min(sessionCap, normalizedAvailable);
+    }
+
+    static boolean shouldReturnToBaseAfterSuccessfulTeardown(boolean bootstrapMode,
+                                                             int sessionTargetsRemaining,
+                                                             boolean selectedTargetsEmpty) {
+        return bootstrapMode || sessionTargetsRemaining <= 0 || selectedTargetsEmpty;
     }
 
     private void beginReturnToBase() {
@@ -814,7 +847,8 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         this.adaptiveFailedSessionWindow++;
         this.guard.setSessionTargetsRemaining(this.guard.getSessionTargetsRemaining() - 1);
         this.failedSessionRoots.add(targetRoot.toImmutable());
-        this.rootTeardownRetryAttempts.remove(targetRoot);
+        this.rootTeardownRetryAttempts.merge(targetRoot.toImmutable(), 1, Integer::sum);
+        this.failedRootCooldownTicks.put(targetRoot.toImmutable(), FAILED_ROOT_RETRY_COOLDOWN_TICKS);
         this.rootFocusTicks.remove(targetRoot);
         this.stalledTicks = 0;
         this.stallRecoveryAttempts = 0;
@@ -825,10 +859,110 @@ public class LumberjackGuardChopTreesGoal extends Goal {
                 reason,
                 this.guard.getSessionTargetsRemaining(),
                 this.stalledTicks);
+    }
 
-        if (this.guard.getSessionTargetsRemaining() <= 0 || this.guard.getSelectedTreeTargets().size() <= 1) {
+    private void handleFailedTargetAttempt(ServerWorld world, BlockPos targetRoot, String reason) {
+        recordFailedTargetAttempt(targetRoot, reason);
+        List<BlockPos> selectedTargets = this.guard.getSelectedTreeTargets();
+        BlockPos replacementRoot = resolveReplacementRoot(world, targetRoot);
+        int targetSlots = Math.max(0, this.guard.getSessionTargetsRemaining());
+        List<BlockPos> localCandidates = scanLocalTargetsAroundGuard(world, targetSlots);
+        RecoveryOutcome outcome = recoverFailedTargetQueue(
+                targetRoot,
+                selectedTargets,
+                targetSlots,
+                replacementRoot,
+                localCandidates,
+                this::isExcludedRecoveryRoot
+        );
+        if (!outcome.hasTarget()) {
             beginReturnToBase();
         }
+    }
+
+    private boolean isExcludedRecoveryRoot(BlockPos root) {
+        return this.completedSessionRoots.contains(root)
+                || this.failedSessionRoots.contains(root)
+                || this.failedRootCooldownTicks.getOrDefault(root, 0) > 0;
+    }
+
+    private List<BlockPos> scanLocalTargetsAroundGuard(ServerWorld world, int maxTargets) {
+        if (maxTargets <= 0) {
+            return List.of();
+        }
+        BlockPos center = this.guard.getBlockPos();
+        int radius = getEffectiveTreeSearchRadius();
+        ScanBounds localBounds = ScanBounds.fromLocalRadius(center, radius);
+        ScanQualificationContext context = ScanQualificationContext.create(
+                world,
+                List.of(localBounds),
+                getConfiguredHousePoiProtectionRadius());
+        Set<BlockPos> nearbyBells = collectBellsNear(world, center, radius + BELL_EXCLUSION_RADIUS);
+        Set<BlockPos> uniqueRoots = new HashSet<>();
+        ScanMetrics metrics = new ScanMetrics();
+        for (BlockPos cursor : BlockPos.iterate(localBounds.min(), localBounds.max())) {
+            BlockPos pos = cursor.toImmutable();
+            if (!isCandidateInScanMode(center, pos, null, radius)) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+            tryAddQualifiedRoot(world, pos, nearbyBells, uniqueRoots, context, metrics);
+            if (uniqueRoots.size() >= maxTargets) {
+                break;
+            }
+        }
+        return uniqueRoots.stream()
+                .sorted(Comparator.comparingDouble(root -> root.getSquaredDistance(center)))
+                .toList();
+    }
+
+    private void tickFailedRootCooldowns() {
+        if (this.failedRootCooldownTicks.isEmpty()) {
+            return;
+        }
+        this.failedRootCooldownTicks.entrySet().removeIf(entry -> {
+            int updated = entry.getValue() - 1;
+            if (updated <= 0) {
+                return true;
+            }
+            entry.setValue(updated);
+            return false;
+        });
+    }
+
+    static RecoveryOutcome recoverFailedTargetQueue(BlockPos failedRoot,
+                                                    List<BlockPos> selectedTargets,
+                                                    int sessionTargetsRemaining,
+                                                    @Nullable BlockPos replacementRoot,
+                                                    List<BlockPos> localRescanCandidates,
+                                                    Predicate<BlockPos> excludedRoot) {
+        if (!selectedTargets.isEmpty()) {
+            selectedTargets.remove(0);
+        }
+        boolean replacementApplied = false;
+        boolean rescanAdded = false;
+        if (replacementRoot != null
+                && !excludedRoot.test(replacementRoot)
+                && !selectedTargets.contains(replacementRoot)) {
+            selectedTargets.add(0, replacementRoot.toImmutable());
+            replacementApplied = true;
+        }
+        for (BlockPos candidate : localRescanCandidates) {
+            if (selectedTargets.size() >= sessionTargetsRemaining) {
+                break;
+            }
+            if (excludedRoot.test(candidate) || selectedTargets.contains(candidate) || candidate.equals(failedRoot)) {
+                continue;
+            }
+            selectedTargets.add(candidate.toImmutable());
+            rescanAdded = true;
+        }
+        return new RecoveryOutcome(replacementApplied, rescanAdded, !selectedTargets.isEmpty());
+    }
+
+    record RecoveryOutcome(boolean replacementApplied, boolean rescanAdded, boolean hasTarget) {
     }
 
     private boolean tryBreakObstacleAt(ServerWorld world, BlockPos pos) {
@@ -886,7 +1020,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private void startChopCountdown(ServerWorld world, String reason) {
-        long totalTicks = MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
+        // Bootstrap guards (no chest yet) should cycle back to chopping almost immediately.
+        // Using the normal 3-8 minute interval here means each bootstrap chop cycle takes
+        // multiple real minutes, causing the "days to craft own chest" symptom.
+        boolean bootstrap = this.guard.getPairedChestPos() == null;
+        long totalTicks = bootstrap
+                ? BOOTSTRAP_CHOP_INTERVAL_TICKS
+                : MathHelper.nextInt(this.guard.getRandom(), CHOP_INTERVAL_MIN_TICKS, CHOP_INTERVAL_MAX_TICKS);
         startChopCountdown(world, totalTicks, reason);
     }
 
@@ -1241,11 +1381,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     static int getEffectiveTreeSearchRadiusForAttempts(int attempts) {
         int baseRadius = getConfiguredBaseTreeSearchRadius();
+        int expandedRadius = Math.max(TREE_SEARCH_EXPANDED_RADIUS, baseRadius + 4);
+        int maxExpandedRadius = Math.max(TREE_SEARCH_MAX_EXPANDED_RADIUS, expandedRadius + 8);
         if (attempts >= 4) {
-            return TREE_SEARCH_MAX_EXPANDED_RADIUS;
+            return maxExpandedRadius;
         }
         if (attempts >= 2) {
-            return TREE_SEARCH_EXPANDED_RADIUS;
+            return expandedRadius;
         }
         return baseRadius;
     }

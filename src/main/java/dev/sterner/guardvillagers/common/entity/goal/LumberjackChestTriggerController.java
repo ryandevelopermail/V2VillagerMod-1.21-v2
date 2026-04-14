@@ -36,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public final class LumberjackChestTriggerController {
@@ -49,6 +50,7 @@ public final class LumberjackChestTriggerController {
     private static final double MIDPOINT_PAIRING_REFRESH_RADIUS = 32.0D;
     private static final long MIDPOINT_RETRY_MAX_DELAY_TICKS = 20L * 60L * 8L;
     private static final int MIDPOINT_RETRY_MAX_ATTEMPTS = 5;
+    private static final int IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS = 12;
     private static final Map<UUID, UpgradeStage> UPGRADE_STAGE_BY_VILLAGER = new HashMap<>();
     private static final Map<BlockPos, UpgradeStage> UPGRADE_STAGE_BY_JOB_SITE = new HashMap<>();
     private static final Map<UUID, Long> CHEST_PAIRED_TICKS_BY_VILLAGER = new HashMap<>();
@@ -128,18 +130,47 @@ public final class LumberjackChestTriggerController {
             return false;
         }
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
-        if (tryPlaceChestForEligibleV1Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
-            return true;
+        return runImmediateVillageUpgradePassBatch(
+                () -> {
+                    if (!tryPlaceChestForEligibleV1Villager(context)) {
+                        return false;
+                    }
+                    guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
+                    return true;
+                },
+                () -> hasUnresolvedV1ChestDemand(world, guard),
+                () -> {
+                    if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
+                        return false;
+                    }
+                    guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
+                    return true;
+                },
+                IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS
+        );
+    }
+
+    static boolean runImmediateVillageUpgradePassBatch(BooleanSupplier tryPlaceV1Action,
+                                                       BooleanSupplier hasUnresolvedV1Demand,
+                                                       BooleanSupplier tryPlaceV2Action,
+                                                       int maxActions) {
+        int boundedMaxActions = Math.max(1, maxActions);
+        int actions = 0;
+        boolean placedAny = false;
+
+        while (actions < boundedMaxActions && tryPlaceV1Action.getAsBoolean()) {
+            placedAny = true;
+            actions++;
         }
-        if (hasUnresolvedV1ChestDemand(world, guard)) {
-            return false;
+
+        if (!hasUnresolvedV1Demand.getAsBoolean()) {
+            while (actions < boundedMaxActions && tryPlaceV2Action.getAsBoolean()) {
+                placedAny = true;
+                actions++;
+            }
         }
-        if (tryPlaceCraftingTableForEligibleV2Villager(context)) {
-            guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
-            return true;
-        }
-        return false;
+
+        return placedAny;
     }
 
     public static MidpointPairingRefreshResult runMidpointPairingRefreshPass(ServerWorld world, LumberjackGuardEntity guard) {
@@ -325,6 +356,10 @@ public final class LumberjackChestTriggerController {
     }
 
     public static int countEligibleV1VillagersMissingPairedChest(ServerWorld world, LumberjackGuardEntity guard) {
+        return countActionableEligibleV1VillagersMissingPairedChest(world, guard);
+    }
+
+    public static int countActionableEligibleV1VillagersMissingPairedChest(ServerWorld world, LumberjackGuardEntity guard) {
         int count = 0;
         for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
             if (!isEligibleV1Villager(world, villager)) {
@@ -336,7 +371,8 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()) {
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
+                    && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 count++;
             }
         }
@@ -670,6 +706,10 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context) {
+        return tryPlaceCraftingTableForEligibleV2Villager(context, false);
+    }
+
+    private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context, boolean skipDelay) {
         V2BlockReason v2BlockReason = resolveV2BlockReason(context.world(), context.guard());
         if (v2BlockReason != null) {
             LOGGER.debug("Skip V2 crafting table placement: {}", v2BlockReason.debugReason());
@@ -703,7 +743,7 @@ public final class LumberjackChestTriggerController {
                 continue;
             }
 
-            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager)) {
+            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager, !skipDelay)) {
                 LOGGER.debug("Skip V2 crafting table placement: villager={} not eligible", villager.getUuid());
                 continue;
             }
@@ -754,11 +794,11 @@ public final class LumberjackChestTriggerController {
 
     private static V2BlockReason resolveV2BlockReason(ServerWorld world, LumberjackGuardEntity guard) {
         UpgradeDemand nextDemand = resolveNextUpgradeDemand(world, guard);
-        int eligibleV1MissingChestCount = countEligibleV1VillagersMissingPairedChest(world, guard);
-        if (!shouldBlockV2TablePlacement(nextDemand, eligibleV1MissingChestCount)) {
+        int actionableEligibleV1MissingChestCount = countActionableEligibleV1VillagersMissingPairedChest(world, guard);
+        if (!shouldBlockV2TablePlacement(nextDemand, actionableEligibleV1MissingChestCount)) {
             return null;
         }
-        return new V2BlockReason(nextDemand, eligibleV1MissingChestCount);
+        return new V2BlockReason(nextDemand, actionableEligibleV1MissingChestCount);
     }
 
     private static PlacementMaterialUse tryConsumeCraftingTableMaterials(Inventory pairedChestInventory,
