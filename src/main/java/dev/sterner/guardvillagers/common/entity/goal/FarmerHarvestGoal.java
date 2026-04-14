@@ -36,13 +36,8 @@ import java.util.Set;
 
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
-    /**
-     * Hoeing scans for raw dirt/grass to convert to farmland. This must be kept very tight —
-     * the farmer's job block is a composter, which is placed adjacent to the farm plot.
-     * A large radius causes the farmer to walk far from the farm and hoe unrelated dirt.
-     * 10 blocks keeps hoeing anchored near the job block where the actual farmland is.
-     */
-    private static final int HOE_RADIUS = 10;
+    // Hoeing range is controlled by BOOTSTRAP_SCAN_RADIUS (16) via eligibleTerritory.
+    // The farmer only hoes blocks already in the territory cache, which is anchored to the job block.
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
@@ -76,7 +71,10 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
     private static final int BOOTSTRAP_RESCAN_COOLDOWN_TICKS = 100;
-    private static final int MIN_VIABLE_TERRITORY_PLOTS = 6;
+    /** Minimum eligible territory plots required before the farmer will do any work.
+     *  Kept low (2) so fresh setups with just a few dirt+water blocks aren't permanently gated.
+     *  The territory cache builds incrementally — a high value causes indefinite stand-still on new farms. */
+    private static final int MIN_VIABLE_TERRITORY_PLOTS = 2;
     private static final int SEED_TARGET_RESERVE_MARGIN_MIN = 2;
     private static final int SEED_TARGET_RESERVE_MARGIN_DIVISOR = 5;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -559,6 +557,9 @@ public class FarmerHarvestGoal extends Goal {
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
                     currentHoeTarget = null;
+                    // Invalidate the farmland coverage cache so the next canStart() / routePostDepositFlow()
+                    // sees the newly created farmland rather than stale pre-hoe data.
+                    coverageCacheTime = -1L;
                     if (!routePostDepositFlow(serverWorld, true)) {
                         finishDailyRunIfNeeded(serverWorld);
                         setStage(Stage.DONE);
@@ -1252,7 +1253,7 @@ public class FarmerHarvestGoal extends Goal {
     private boolean prepareFeeding(ServerWorld world) {
         // Use VillagePenRegistry (geometry-based) instead of banner tracker.
         VillagePenRegistry.PenEntry pen = VillagePenRegistry.get(world.getServer())
-                .getNearestPen(world, jobPos, 300)
+                .getNearestPen(world, jobPos, 64)
                 .orElse(null);
         if (pen == null) {
             return false;
@@ -1859,7 +1860,10 @@ public class FarmerHarvestGoal extends Goal {
     private int computeWheatSeedTarget(ServerWorld world) {
         int eligibleArea = getEligibleTerritoryCount(world);
         int areaBasedTarget = computeSeedTargetFromEligibleArea(eligibleArea);
-        return Math.max(areaBasedTarget, getConfiguredWheatSeedBootstrapFloor());
+        int uncapped = Math.max(areaBasedTarget, getConfiguredWheatSeedBootstrapFloor());
+        // Apply the configurable hard cap so the farmer doesn't hoard unlimited seeds.
+        int cap = GuardVillagersConfig.farmerWheatSeedReserveCap;
+        return cap > 0 ? Math.min(uncapped, cap) : uncapped;
     }
 
     private record FarmlandCoverageStats(int accessibleCells, int seededCells) {
@@ -1921,10 +1925,19 @@ public class FarmerHarvestGoal extends Goal {
 
     private boolean isValidSeedSource(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        return state.isOf(Blocks.SHORT_GRASS)
+        // Grass and ferns drop wheat seeds when broken.
+        if (state.isOf(Blocks.SHORT_GRASS)
                 || state.isOf(Blocks.TALL_GRASS)
                 || state.isOf(Blocks.FERN)
-                || state.isOf(Blocks.LARGE_FERN);
+                || state.isOf(Blocks.LARGE_FERN)) {
+            return true;
+        }
+        // Mature wheat crops are a reliable seed source (drop 1–4 seeds).
+        // Only target fully grown wheat so we don't destroy immature crops.
+        if (state.isOf(Blocks.WHEAT) && state.getBlock() instanceof CropBlock crop) {
+            return crop.isMature(state);
+        }
+        return false;
     }
 
     private boolean hasNearbyWater(ServerWorld world, BlockPos farmlandCandidate) {
