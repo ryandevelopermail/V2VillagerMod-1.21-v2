@@ -86,3 +86,21 @@ publishing {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+tasks.register('exportRunLog') {
+	doLast {
+		def src = file("logs/latest.log")
+		def dest = file("/home/computer/storage/private/mc-latest-run.log")
+		if (src.exists()) {
+			dest.parentFile.mkdirs()
+			dest.bytes = src.bytes
+			println "[exportRunLog] Log exported to ${dest}"
+		} else {
+			println "[exportRunLog] No log found at ${src} — nothing exported"
+		}
+	}
+}
+
+tasks.named('runServer') { finalizedBy('exportRunLog') }
+tasks.named('runClient') { finalizedBy('exportRunLog') }
+tasks.named('test')      { finalizedBy('exportRunLog') }
