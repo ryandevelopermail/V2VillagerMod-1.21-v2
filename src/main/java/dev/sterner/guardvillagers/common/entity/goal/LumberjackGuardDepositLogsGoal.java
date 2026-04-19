@@ -37,7 +37,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final int RECOVERY_CHEST_PLANK_REQUIREMENT = 8;
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
-    static final int BUTCHER_LOG_TRANSFER_CLAMP = 1;
+    static final int BUTCHER_LOG_TRANSFER_CLAMP = 4;
 
     private final LumberjackGuardEntity guard;
     private long nextDistributionAttemptTick;

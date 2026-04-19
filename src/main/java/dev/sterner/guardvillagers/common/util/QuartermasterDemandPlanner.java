@@ -323,7 +323,7 @@ public final class QuartermasterDemandPlanner {
         caps.put(VillagerProfession.FARMER, farmerCaps);
 
         EnumMap<RecipeDemandIndex.DemandMaterial, Integer> butcherCaps = new EnumMap<>(RecipeDemandIndex.DemandMaterial.class);
-        butcherCaps.put(RecipeDemandIndex.DemandMaterial.LOGS, 1);
+        butcherCaps.put(RecipeDemandIndex.DemandMaterial.LOGS, 4);
         caps.put(VillagerProfession.BUTCHER, butcherCaps);
 
         EnumMap<RecipeDemandIndex.DemandMaterial, Integer> cartographerCaps = new EnumMap<>(RecipeDemandIndex.DemandMaterial.class);
