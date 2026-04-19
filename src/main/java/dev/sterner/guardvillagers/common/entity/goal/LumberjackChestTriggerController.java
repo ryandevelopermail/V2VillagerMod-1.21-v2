@@ -1334,7 +1334,7 @@ public final class LumberjackChestTriggerController {
             if (secondaryAnchor != null && !secondaryAnchor.isWithinDistance(candidate, range)) {
                 continue;
             }
-            if (!world.getBlockState(candidate).isAir()) {
+            if (!world.getBlockState(candidate).isReplaceable()) {
                 continue;
             }
 
@@ -1411,7 +1411,7 @@ public final class LumberjackChestTriggerController {
 
         FurnacePlacementCandidate best = null;
         for (BlockPos pos : BlockPos.iterate(min, max)) {
-            if (!world.getBlockState(pos).isAir()) {
+            if (!world.getBlockState(pos).isReplaceable()) {
                 continue;
             }
             BlockPos below = pos.down();
