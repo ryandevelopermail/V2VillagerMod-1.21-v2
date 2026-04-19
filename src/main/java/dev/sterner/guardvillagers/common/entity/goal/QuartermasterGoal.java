@@ -42,7 +42,6 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -292,8 +291,6 @@ public class QuartermasterGoal extends Goal {
     private int bootstrapEmptyDiscoveryRetries = 0;
     private long nextBootstrapDiscoveryTick = 0L;
     private boolean discoveredBootstrapSourceAtLeastOnce = false;
-    private final Set<BlockPos> bootstrapVisitedThisCycle = new HashSet<>();
-    private BootstrapCycleMetrics activeBootstrapCycleMetrics = null;
     private boolean demandQueueDirty = true;
     private BootstrapConsolidationState bootstrapConsolidationState = BootstrapConsolidationState.NOT_STARTED;
     /**
@@ -1355,7 +1352,6 @@ public class QuartermasterGoal extends Goal {
             bootstrapConsolidationState = BootstrapConsolidationState.DISCOVERING;
             bootstrapDiscoveryRuns++;
             bootstrapSourceQueue.clear();
-            bootstrapVisitedThisCycle.clear();
             BootstrapDiscoveryResult discovery = discoverBootstrapSourceChestsWithStats(world, bellChestPos);
             bootstrapSourceQueue.addAll(discovery.tierA());
             bootstrapSourceQueue.addAll(discovery.tierB());
@@ -1396,9 +1392,6 @@ public class QuartermasterGoal extends Goal {
         while (!bootstrapSourceQueue.isEmpty()) {
             BlockPos source = bootstrapSourceQueue.peekFirst();
             if (source == null || source.equals(bellChestPos)) {
-                if (activeBootstrapCycleMetrics != null) {
-                    activeBootstrapCycleMetrics.recordSkipped("invalid_source");
-                }
                 bootstrapSourceQueue.pollFirst();
                 continue;
             }
@@ -1407,10 +1400,6 @@ public class QuartermasterGoal extends Goal {
                 if (LOGGER.isDebugEnabled()) {
                     LOGGER.debug("QM {} bootstrap source={} already_empty_skipping",
                             villager.getUuidAsString(), source);
-                }
-                bootstrapVisitedThisCycle.add(source.toImmutable());
-                if (activeBootstrapCycleMetrics != null) {
-                    activeBootstrapCycleMetrics.recordDrained(source);
                 }
                 bootstrapSourceQueue.pollFirst();
                 continue;
@@ -1434,7 +1423,6 @@ public class QuartermasterGoal extends Goal {
         bootstrapSweepActive = false;
 
         if (discoveredBootstrapSourceAtLeastOnce) {
-            logBootstrapCycleSummary();
             completeBootstrap(world, "drained_complete", BootstrapConsolidationState.DRAINED_COMPLETE, now + BOOTSTRAP_DRAINED_RECHECK_INTERVAL_TICKS);
         } else if (now >= nextBootstrapDiscoveryTick) {
             if (bootstrapEmptyDiscoveryRetries >= BOOTSTRAP_MAX_EMPTY_DISCOVERY_RETRIES) {
@@ -1471,8 +1459,6 @@ public class QuartermasterGoal extends Goal {
     private void completeBootstrap(ServerWorld world, String reason, BootstrapConsolidationState completionState, long nextRecheckTick) {
         bootstrapConsolidationState = completionState;
         bootstrapSourceQueue.clear();
-        bootstrapVisitedThisCycle.clear();
-        activeBootstrapCycleMetrics = null;
         nextBootstrapDiscoveryTick = Math.max(nextBootstrapDiscoveryTick, nextRecheckTick);
         setBootstrapComplete(world);
         // Arm the reclaim and drain-sweep timers now that bootstrap is done.
@@ -1481,20 +1467,6 @@ public class QuartermasterGoal extends Goal {
         armPostBootstrapTimers(now);
         LOGGER.info("QM {} bootstrap COMPLETE reason={} armed_reclaim_tick={} armed_drain_sweep_tick={} next_recheck_tick={}",
                 villager.getUuidAsString(), reason, nextDailyReclaimTick, nextLumberjackDrainSweepTick, nextBootstrapDiscoveryTick);
-    }
-
-    private void logBootstrapCycleSummary() {
-        if (activeBootstrapCycleMetrics == null || !LOGGER.isInfoEnabled()) {
-            return;
-        }
-        LOGGER.info("QM {} bootstrap cycle summary: strict_mode={} discovered={} attempted={} drained={} skipped={} skip_reasons={}",
-                villager.getUuidAsString(),
-                activeBootstrapCycleMetrics.strictVillageOnly,
-                activeBootstrapCycleMetrics.discoveredCount,
-                activeBootstrapCycleMetrics.attemptedSources.size(),
-                activeBootstrapCycleMetrics.drainedSources.size(),
-                activeBootstrapCycleMetrics.totalSkipped(),
-                activeBootstrapCycleMetrics.skippedReasons);
     }
 
     private BlockPos canonicalChestPos(ServerWorld world, BlockPos chestCandidate) {
@@ -2027,40 +1999,6 @@ public class QuartermasterGoal extends Goal {
     }
 
     /**
-     * Finds the largest single stack that passes {@link #SURPLUS_HAUL_WHITELIST} in the chest at
-     * {@code pos}. Returns a copy, or {@link ItemStack#EMPTY} if no whitelisted material found.
-     *
-     * <p>Used by Priority-3 surplus haul so that only generic bulk materials (logs, planks, wool,
-     * cobblestone, wheat, coal, etc.) are ever moved into the bell chest. Specialist trade goods
-     * (arrows, potions, enchanted books, iron gear, fish, maps, meat) will never be touched.
-     */
-    private ItemStack findTopWhitelistedItem(ServerWorld world, BlockPos pos) {
-        Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty()) return ItemStack.EMPTY;
-        ItemStack best = ItemStack.EMPTY;
-        for (int i = 0; i < inv.get().size(); i++) {
-            ItemStack stack = inv.get().getStack(i);
-            if (!stack.isEmpty() && SURPLUS_HAUL_WHITELIST.test(stack) && stack.getCount() > best.getCount()) {
-                best = stack;
-            }
-        }
-        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
-    }
-
-    private ItemStack findTopTransferableItem(ServerWorld world, BlockPos pos) {
-        Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty()) return ItemStack.EMPTY;
-        ItemStack best = ItemStack.EMPTY;
-        for (int i = 0; i < inv.get().size(); i++) {
-            ItemStack stack = inv.get().getStack(i);
-            if (!stack.isEmpty() && stack.getCount() > best.getCount()) {
-                best = stack;
-            }
-        }
-        return best.isEmpty() ? ItemStack.EMPTY : best.copy();
-    }
-
-    /**
      * If the chest at {@code pos} is one half of a double-chest, returns the position of the
      * other half. Returns empty for single chests or non-chest blocks.
      * Used to add both halves to protected sets so the QM never hauls within the same double-chest.
@@ -2318,56 +2256,6 @@ public class QuartermasterGoal extends Goal {
         int eligibleChestCount() { return eligibleChestCount; }
         int totalStacksMoved() { return totalStacksMoved; }
         Set<BlockPos> visitedChests() { return visitedChests; }
-    }
-
-    private static final class BootstrapCycleMetrics {
-        private final int discoveredCount;
-        private final boolean strictVillageOnly;
-        private final Set<BlockPos> attemptedSources = new HashSet<>();
-        private final Set<BlockPos> drainedSources = new HashSet<>();
-        private final Map<String, Integer> skippedReasons = new LinkedHashMap<>();
-
-        private BootstrapCycleMetrics(BootstrapDiscoveryResult discovery) {
-            this.discoveredCount = discovery.discoveredCount();
-            this.strictVillageOnly = discovery.strictVillageOnly();
-            if (discovery.filteredPaired() > 0) {
-                skippedReasons.put("paired_chest_excluded", discovery.filteredPaired());
-            }
-            if (discovery.filteredEmpty() > 0) {
-                skippedReasons.put("empty_chest", discovery.filteredEmpty());
-            }
-            if (discovery.skippedStrictTierB() > 0) {
-                skippedReasons.put("strict_village_mode", discovery.skippedStrictTierB());
-            }
-        }
-
-        static BootstrapCycleMetrics start(BootstrapDiscoveryResult discovery) {
-            return new BootstrapCycleMetrics(discovery);
-        }
-
-        void recordAttempt(BlockPos source) {
-            if (source != null) {
-                attemptedSources.add(source.toImmutable());
-            }
-        }
-
-        void recordDrained(BlockPos source) {
-            if (source != null) {
-                drainedSources.add(source.toImmutable());
-            }
-        }
-
-        void recordSkipped(String reason) {
-            skippedReasons.merge(reason, 1, Integer::sum);
-        }
-
-        int totalSkipped() {
-            int total = 0;
-            for (Integer count : skippedReasons.values()) {
-                total += count;
-            }
-            return total;
-        }
     }
 
     private static final class SurplusScanBudget {
