@@ -96,13 +96,11 @@ public final class UniversalDistributionRouter {
                         RoutingMode.ALWAYS
                 ),
                 new DistributionRouteRule(
-                        "charcoal-to-smithing-and-cooking-professions",
+                        "charcoal-to-fuel-consuming-professions",
                         stack -> stack.isOf(Items.CHARCOAL),
                         List.of(
                                 RecipientTarget.withCapability(VillagerProfession.BUTCHER, Blocks.SMOKER, RecipientCapability.PAIRED_FURNACE_MODIFIER),
-                                RecipientTarget.withCapability(VillagerProfession.ARMORER, Blocks.BLAST_FURNACE, RecipientCapability.PAIRED_FURNACE_MODIFIER),
-                                RecipientTarget.withCapability(VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE, RecipientCapability.PAIRED_FURNACE_MODIFIER),
-                                RecipientTarget.withCapability(VillagerProfession.WEAPONSMITH, Blocks.GRINDSTONE, RecipientCapability.PAIRED_FURNACE_MODIFIER)
+                                RecipientTarget.withCapability(VillagerProfession.ARMORER, Blocks.BLAST_FURNACE, RecipientCapability.PAIRED_FURNACE_MODIFIER)
                         ),
                         90,
                         RoutingMode.ALWAYS
