@@ -145,6 +145,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonWallFootprintRadius = 80;
     @Entry(min=0)
     public static int masonWallStagingMaxBelowSurfaceDelta = 3;
+    @Entry(min=40)
+    public static int masonWallBuilderAssignmentStallTicks = 200;
     @Entry
     public static boolean masonWallVerboseLogging = false;
     @Entry(min=1)
@@ -293,6 +295,7 @@ public class GuardVillagersConfig extends MidnightConfig {
                 MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
         masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
+        masonWallBuilderAssignmentStallTicks = clamp(masonWallBuilderAssignmentStallTicks, 40, 20 * 60 * 10);
         lumberjackTreeScanPerGuardBudgetCap = clamp(
                 lumberjackTreeScanPerGuardBudgetCap,
                 MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET,
