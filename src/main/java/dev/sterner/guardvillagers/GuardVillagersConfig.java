@@ -44,6 +44,12 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS = 128;
     public static final int MIN_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 1;
     public static final int MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS = 64;
+    public static final int MIN_FORESTER_BONEMEAL_SCAN_RADIUS = 24;
+    public static final int MAX_FORESTER_BONEMEAL_SCAN_RADIUS = 96;
+    public static final int MIN_FARMER_BONEMEAL_SCAN_RADIUS = 4;
+    public static final int MAX_FARMER_BONEMEAL_SCAN_RADIUS = 96;
+    public static final int MIN_BONEMEAL_APPLICATIONS_PER_SESSION = 1;
+    public static final int MAX_BONEMEAL_APPLICATIONS_PER_SESSION = 128;
 
     public enum MasonWallPoiMode {
         JOB_SITES_ONLY,
@@ -128,6 +134,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=1)
     public static int shepherdFenceBatchMax = 3;
     @Entry
+    public static boolean shepherdAllowPenRebuildIfMissing = false;
+    @Entry
     public static MasonWallPoiMode masonWallPoiMode = MasonWallPoiMode.JOBS_AND_BEDS;
     @Entry(min=0)
     public static int masonWallExpandBlocks = 5;
@@ -143,12 +151,26 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int masonWallFootprintRadius = 80;
     @Entry(min=0)
     public static int masonWallStagingMaxBelowSurfaceDelta = 3;
+    @Entry(min=40)
+    public static int masonWallBuilderAssignmentStallTicks = 200;
     @Entry
     public static boolean masonWallVerboseLogging = false;
     @Entry(min=1)
     public static int farmerWheatSeedReserveCap = 64;
     @Entry(min=0)
     public static int farmerWheatSeedBootstrapFloor = 0;
+    @Entry
+    public static boolean foresterBonemealEnabled = true;
+    @Entry(min=1)
+    public static int foresterBonemealMaxApplicationsPerSession = 16;
+    @Entry(min=24)
+    public static int foresterBonemealScanRadius = 80;
+    @Entry
+    public static boolean farmerBonemealEnabled = true;
+    @Entry(min=1)
+    public static int farmerBonemealMaxApplicationsPerSession = 16;
+    @Entry(min=4)
+    public static int farmerBonemealScanRadius = 24;
     @Entry(min=0)
     public static int lumberjackVillageMin = 1;
     @Entry(min=0)
@@ -291,6 +313,7 @@ public class GuardVillagersConfig extends MidnightConfig {
                 MAX_QUARTERMASTER_NATURAL_VILLAGE_CHEST_LOCAL_POI_RADIUS);
         masonWallFootprintRadius = clamp(masonWallFootprintRadius, MIN_MASON_WALL_FOOTPRINT_RADIUS, MAX_MASON_WALL_FOOTPRINT_RADIUS);
         masonWallStagingMaxBelowSurfaceDelta = clamp(masonWallStagingMaxBelowSurfaceDelta, 0, 16);
+        masonWallBuilderAssignmentStallTicks = clamp(masonWallBuilderAssignmentStallTicks, 40, 20 * 60 * 10);
         lumberjackTreeScanPerGuardBudgetCap = clamp(
                 lumberjackTreeScanPerGuardBudgetCap,
                 MIN_LUMBERJACK_TREE_SCAN_PER_GUARD_BUDGET,
@@ -375,6 +398,22 @@ public class GuardVillagersConfig extends MidnightConfig {
         if (shepherdFenceBatchMax < shepherdFenceBatchMin) {
             shepherdFenceBatchMax = shepherdFenceBatchMin;
         }
+        foresterBonemealMaxApplicationsPerSession = clamp(
+                foresterBonemealMaxApplicationsPerSession,
+                MIN_BONEMEAL_APPLICATIONS_PER_SESSION,
+                MAX_BONEMEAL_APPLICATIONS_PER_SESSION);
+        foresterBonemealScanRadius = clamp(
+                foresterBonemealScanRadius,
+                MIN_FORESTER_BONEMEAL_SCAN_RADIUS,
+                MAX_FORESTER_BONEMEAL_SCAN_RADIUS);
+        farmerBonemealMaxApplicationsPerSession = clamp(
+                farmerBonemealMaxApplicationsPerSession,
+                MIN_BONEMEAL_APPLICATIONS_PER_SESSION,
+                MAX_BONEMEAL_APPLICATIONS_PER_SESSION);
+        farmerBonemealScanRadius = clamp(
+                farmerBonemealScanRadius,
+                MIN_FARMER_BONEMEAL_SCAN_RADIUS,
+                MAX_FARMER_BONEMEAL_SCAN_RADIUS);
     }
 
     private static int clamp(int value, int min, int max) {

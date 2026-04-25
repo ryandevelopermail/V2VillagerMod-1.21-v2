@@ -10,6 +10,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UniversalDistributionRouterTest {
@@ -55,5 +56,21 @@ class UniversalDistributionRouterTest {
 
         assertTrue(UniversalDistributionRouter.requiresV2ShepherdPairing(shepherdAtLoom));
         assertFalse(UniversalDistributionRouter.requiresV2ShepherdPairing(farmerAtComposter));
+    }
+
+    @Test
+    void charcoalRoute_targetsOnlyRealFuelConsumers() {
+        UniversalDistributionRouter.DistributionRouteRule charcoalRoute = UniversalDistributionRouter.routeRules().stream()
+                .filter(rule -> rule.id().equals("charcoal-to-fuel-consuming-professions"))
+                .findFirst()
+                .orElseThrow();
+
+        assertTrue(charcoalRoute.matcher().test(new ItemStack(Items.CHARCOAL)));
+        assertEquals(2, charcoalRoute.targets().size());
+        assertTrue(charcoalRoute.targets().stream().anyMatch(target -> target.profession() == VillagerProfession.BUTCHER));
+        assertTrue(charcoalRoute.targets().stream().anyMatch(target -> target.profession() == VillagerProfession.ARMORER));
+        assertFalse(charcoalRoute.targets().stream().anyMatch(target -> target.profession() == VillagerProfession.TOOLSMITH));
+        assertFalse(charcoalRoute.targets().stream().anyMatch(target -> target.profession() == VillagerProfession.WEAPONSMITH));
+        assertNotEquals("charcoal-to-smithing-and-cooking-professions", charcoalRoute.id());
     }
 }

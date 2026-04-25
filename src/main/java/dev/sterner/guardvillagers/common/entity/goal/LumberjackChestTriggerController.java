@@ -73,6 +73,27 @@ public final class LumberjackChestTriggerController {
             VillagerProfession.WEAPONSMITH
     );
 
+    /**
+     * Priority order for crafting table placement. Lower index = higher priority.
+     * Toolsmith and Farmer are highest value early-game producers; Mason and Cartographer
+     * follow. All other professions are lower priority (default rank = list size).
+     */
+    private static final List<VillagerProfession> V2_CRAFTING_TABLE_PROFESSION_PRIORITY = List.of(
+            VillagerProfession.TOOLSMITH,
+            VillagerProfession.FARMER,
+            VillagerProfession.MASON,
+            VillagerProfession.CARTOGRAPHER,
+            VillagerProfession.WEAPONSMITH,
+            VillagerProfession.ARMORER,
+            VillagerProfession.CLERIC,
+            VillagerProfession.LIBRARIAN,
+            VillagerProfession.FLETCHER,
+            VillagerProfession.BUTCHER,
+            VillagerProfession.LEATHERWORKER,
+            VillagerProfession.SHEPHERD,
+            VillagerProfession.FISHERMAN
+    );
+
     private static final List<TriggerRule> RULES = List.of(
             new TriggerRule("craft_place_furnace_modifier", 100,
                     LumberjackChestTriggerController::shouldCraftOrPlaceFurnace,
@@ -130,24 +151,126 @@ public final class LumberjackChestTriggerController {
             return false;
         }
         TriggerContext context = new TriggerContext(world, guard, resolveChestInventory(world, guard));
-        return runImmediateVillageUpgradePassBatch(
-                () -> {
-                    if (!tryPlaceChestForEligibleV1Villager(context)) {
-                        return false;
-                    }
-                    guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
-                    return true;
-                },
-                () -> hasUnresolvedV1ChestDemand(world, guard),
-                () -> {
-                    if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
-                        return false;
-                    }
-                    guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
-                    return true;
-                },
-                IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS
-        );
+
+        // Paired-placement pass: for each V1 chest placed, immediately attempt a crafting table
+        // for that same villager. If no wood is available the chest is still placed and the
+        // crafting table is deferred to the next chop/upgrade session (no global V1-backlog gate
+        // blocks the paired attempt). After the paired V1→V2 pass, run a cleanup V2 pass for
+        // any CHEST_PAIRED villagers that were skipped in prior sessions.
+        boolean placedAny = false;
+        int actions = 0;
+
+        while (actions < IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS) {
+            boolean chestPlaced = tryPlaceChestForEligibleV1Villager(context);
+            if (!chestPlaced) {
+                break;
+            }
+            guard.recordTriggerAction(world.getTime(), "immediate_place_chest_for_v1");
+            placedAny = true;
+            actions++;
+
+            // Immediately attempt to place a crafting table for the villager that just got a
+            // chest. This bypasses the global "all V1 must have chests first" gate so that
+            // promotion completes in the same session rather than requiring an extra chop cycle
+            // per villager. If materials are unavailable, we simply skip and continue with the
+            // next V1 villager — the deferred crafting table will be placed on the next pass.
+            if (actions < IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS
+                    && tryPlacePairedCraftingTableForRecentlyPairedVillager(context)) {
+                guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_paired");
+                placedAny = true;
+                actions++;
+            }
+        }
+
+        // Catch-up V2 pass: place crafting tables for CHEST_PAIRED villagers that already have
+        // a chest from a prior session but are still missing a crafting table (e.g. because
+        // the lumberjack ran out of wood during the paired pass). Only runs when no V1 chest
+        // backlog remains, preserving the original fallback behaviour.
+        if (!hasUnresolvedV1ChestDemand(world, guard)) {
+            while (actions < IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS) {
+                if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
+                    break;
+                }
+                guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
+                placedAny = true;
+                actions++;
+            }
+        }
+
+        return placedAny;
+    }
+
+    /**
+     * Attempts to place a crafting table for any villager that was recently transitioned to
+     * CHEST_PAIRED stage. Unlike {@link #tryPlaceCraftingTableForEligibleV2Villager}, this
+     * method does NOT gate on the global V1-backlog check — it is intended for use immediately
+     * after a chest has been placed for a V1 villager in the same upgrade pass.
+     *
+     * <p>Materials required: 4 planks (or a pre-crafted crafting table item). If unavailable,
+     * returns false so the caller can still proceed with the next V1 villager without stalling.
+     */
+    private static boolean tryPlacePairedCraftingTableForRecentlyPairedVillager(TriggerContext context) {
+        Inventory pairedChestInventory = resolveChestInventory(context.world(), context.guard());
+        Inventory contextInventory = context.chestInventory() == pairedChestInventory ? null : context.chestInventory();
+        List<ItemStack> contextBuffer = context.guard().getGatheredStackBuffer();
+
+        // Quick material pre-check — avoid iterating all villagers when there's nothing to place.
+        int availableTables = countMatching(pairedChestInventory, stack -> stack.isOf(Items.CRAFTING_TABLE))
+                + countMatching(contextInventory, stack -> stack.isOf(Items.CRAFTING_TABLE))
+                + countMatching(contextBuffer, stack -> stack.isOf(Items.CRAFTING_TABLE));
+        int availablePlanks = countMatching(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(contextInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(contextBuffer, stack -> stack.isIn(ItemTags.PLANKS));
+        if (availableTables <= 0 && availablePlanks < 4) {
+            LOGGER.debug("Skip paired crafting table: no materials (tables={} planks={})", availableTables, availablePlanks);
+            return false;
+        }
+
+        // Use profession-priority ordering so high-value professions receive their crafting
+        // tables first even within the paired placement pass.
+        for (VillagerEntity villager : collectNearbyVillagersForV2Placement(context.world(), context.guard())) {
+            BlockPos jobPos = resolveVillagerJobSite(context.world(), villager);
+            if (jobPos == null) {
+                continue;
+            }
+
+            UpgradeStage stage = getTrackedUpgradeStage(context.world(), villager.getUuid(), jobPos);
+            if (stage != UpgradeStage.CHEST_PAIRED) {
+                continue;
+            }
+
+            // Check eligibility without the delay requirement (we just placed the chest in the
+            // same pass, so the normal V2_AFTER_CHEST_DELAY_TICKS wait would always be unmet).
+            if (!isEligibleV2VillagerMissingCraftingTable(context.world(), villager, false)) {
+                continue;
+            }
+
+            BlockPos placePos = findPlacementNearJobAndPairedChest(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+            if (placePos == null) {
+                LOGGER.debug("Skip paired crafting table: no placement pos for villager={} jobPos={}",
+                        villager.getUuid(), jobPos.toShortString());
+                continue;
+            }
+
+            PlacementMaterialUse materialUse = tryConsumeCraftingTableMaterials(pairedChestInventory, contextInventory, contextBuffer);
+            if (materialUse == null) {
+                LOGGER.debug("Skip paired crafting table: materials exhausted villager={} jobPos={}",
+                        villager.getUuid(), jobPos.toShortString());
+                return false;
+            }
+
+            if (context.world().setBlockState(placePos, Blocks.CRAFTING_TABLE.getDefaultState())) {
+                JobBlockPairingHelper.handleCraftingTablePlacement(context.world(), placePos);
+                transitionUpgradeStageToTablePaired(context.world(), villager.getUuid(), jobPos);
+                LOGGER.debug("Placed paired crafting table: villager={} jobPos={} placePos={} source={}",
+                        villager.getUuid(), jobPos.toShortString(), placePos.toShortString(), materialUse.sourceLabel());
+                return true;
+            }
+
+            restorePlacementMaterials(context, materialUse);
+        }
+
+        return false;
     }
 
     static boolean runImmediateVillageUpgradePassBatch(BooleanSupplier tryPlaceV1Action,
@@ -315,7 +438,15 @@ public final class LumberjackChestTriggerController {
             return null;
         }
 
-        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
+        // Paired demand resolution: iterate villagers in profession-priority order. For each
+        // villager, first check if they need a chest (V1), then if they need a crafting table
+        // (V2). Return the first demand found. This interleaves chest and table crafting so the
+        // lumberjack doesn't have to craft all chests before starting on tables — each villager
+        // gets their chest and table in the same chop/upgrade session.
+        //
+        // Profession priority: Toolsmith > Farmer > Mason > Cartographer > Weaponsmith >
+        // Armorer > Cleric > Librarian > Fletcher > Butcher > Leatherworker > Shepherd > Fisherman.
+        for (VillagerEntity villager : collectNearbyVillagersForV2Placement(world, guard)) {
             if (!isEligibleV1Villager(world, villager)) {
                 continue;
             }
@@ -323,21 +454,16 @@ public final class LumberjackChestTriggerController {
             if (jobPos == null) {
                 continue;
             }
+
+            // Check if this villager needs a chest.
             if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
                     && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 return UpgradeDemand.v1Chest();
             }
-        }
 
-        for (VillagerEntity villager : collectNearbyVillagers(world, guard)) {
-            if (!isEligibleV2VillagerMissingCraftingTable(world, villager)) {
-                continue;
-            }
-            BlockPos jobPos = resolveVillagerJobSite(world, villager);
-            if (jobPos == null) {
-                continue;
-            }
-            if (findPlacementNearJobAndPairedChest(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
+            // Chest present — check if they need a crafting table.
+            if (isEligibleV2VillagerMissingCraftingTableQuery(world, villager)
+                    && findPlacementNearJobAndPairedChest(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
                 return UpgradeDemand.v2CraftingTable();
             }
         }
@@ -731,7 +857,9 @@ public final class LumberjackChestTriggerController {
             return false;
         }
 
-        for (VillagerEntity villager : collectNearbyVillagers(context.world(), context.guard())) {
+        // Use profession-priority ordering so high-value professions (Toolsmith, Farmer, Mason,
+        // Cartographer) receive their crafting tables before lower-priority ones.
+        for (VillagerEntity villager : collectNearbyVillagersForV2Placement(context.world(), context.guard())) {
             BlockPos stagedJobPos = resolveVillagerJobSite(context.world(), villager);
             UpgradeStage stage = getTrackedUpgradeStage(context.world(), villager.getUuid(), stagedJobPos);
             if (stage != UpgradeStage.CHEST_PAIRED) {
@@ -1021,6 +1149,21 @@ public final class LumberjackChestTriggerController {
                 villageExpansionScanBox(guard.getPairedJobPos(), guard.getBlockPos()),
                 VillagerEntity::isAlive
         ));
+    }
+
+    /**
+     * Returns nearby villagers sorted by the V2 crafting table profession priority order.
+     * Professions listed in {@link #V2_CRAFTING_TABLE_PROFESSION_PRIORITY} are placed first;
+     * all unlisted professions are appended at the end in their natural order.
+     */
+    private static List<VillagerEntity> collectNearbyVillagersForV2Placement(ServerWorld world, LumberjackGuardEntity guard) {
+        List<VillagerEntity> villagers = collectNearbyVillagers(world, guard);
+        villagers.sort(Comparator.comparingInt(v -> {
+            int idx = V2_CRAFTING_TABLE_PROFESSION_PRIORITY.indexOf(
+                    v.getVillagerData().getProfession());
+            return idx < 0 ? V2_CRAFTING_TABLE_PROFESSION_PRIORITY.size() : idx;
+        }));
+        return villagers;
     }
 
     private static ArrayList<VillagerEntity> collectVillagersNearAnchor(ServerWorld world, BlockPos anchor, double radius) {
@@ -1334,7 +1477,7 @@ public final class LumberjackChestTriggerController {
             if (secondaryAnchor != null && !secondaryAnchor.isWithinDistance(candidate, range)) {
                 continue;
             }
-            if (!world.getBlockState(candidate).isAir()) {
+            if (!world.getBlockState(candidate).isReplaceable()) {
                 continue;
             }
 
@@ -1411,7 +1554,7 @@ public final class LumberjackChestTriggerController {
 
         FurnacePlacementCandidate best = null;
         for (BlockPos pos : BlockPos.iterate(min, max)) {
-            if (!world.getBlockState(pos).isAir()) {
+            if (!world.getBlockState(pos).isReplaceable()) {
                 continue;
             }
             BlockPos below = pos.down();

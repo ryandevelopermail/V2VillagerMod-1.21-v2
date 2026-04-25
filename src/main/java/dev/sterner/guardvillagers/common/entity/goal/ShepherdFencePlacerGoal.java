@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
+import dev.sterner.guardvillagers.common.villager.behavior.ShepherdPenLifecycle;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -35,7 +36,7 @@ import java.util.function.IntBinaryOperator;
 /**
  * Shepherd places a 7×7 fence pen (27 fences + 1 gate) near their job block when:
  * <ul>
- *   <li>No pen exists within PEN_SCAN_RADIUS blocks of the job site</li>
+ *   <li>This shepherd has not already completed their own pen lifecycle</li>
  *   <li>Chest has ≥ {@link ShepherdFenceCraftingGoal#FENCE_TARGET} fences AND ≥ 1 gate</li>
  *   <li>A valid flat 7×7 site exists within {@value #SITE_SEARCH_RADIUS} blocks of the job block</li>
  * </ul>
@@ -72,12 +73,6 @@ public class ShepherdFencePlacerGoal extends Goal {
     /** Required vertical clearance above floor for pen walkability/buildability checks. */
     private static final int REQUIRED_CLEARANCE_BLOCKS = 3;
 
-    /**
-     * Pen scan radius — matches ShepherdFenceCraftingGoal.PEN_SCAN_RADIUS (64).
-     * Using 300 caused the live-scan fallback to detect unrelated fence structures
-     * far away and block placement; 64 keeps the check local to this shepherd's village.
-     */
-    private static final int PEN_SCAN_RADIUS = 64;
 
     /** How often to re-check if we can start (ticks). */
     private static final int CHECK_INTERVAL_TICKS = 1200;
@@ -138,11 +133,7 @@ public class ShepherdFencePlacerGoal extends Goal {
 
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
 
-        // Don't act if a pen already exists near the job site
-        VillagePenRegistry registry = VillagePenRegistry.get(world.getServer());
-        if (registry.getNearestPen(world, jobPos, PEN_SCAN_RADIUS, PEN_SCAN_RADIUS).isPresent()) {
-            LOGGER.debug("ShepherdFencePlacer {}: pen already exists near job site {}, skipping",
-                    villager.getUuidAsString(), jobPos.toShortString());
+        if (ShepherdPenLifecycle.shouldBlockPenConstruction(villager, world, LOGGER, "ShepherdFencePlacer")) {
             return false;
         }
 
@@ -309,6 +300,9 @@ public class ShepherdFencePlacerGoal extends Goal {
     private void tickPlaceGate(ServerWorld world) {
         if (pendingGatePos == null
                 || world.getBlockState(pendingGatePos).getBlock() instanceof FenceGateBlock) {
+            if (pendingGatePos != null) {
+                ShepherdPenLifecycle.markPenConstructed(villager, pendingGatePos);
+            }
             stage = Stage.DONE;
             triggerRescan(world);
             return;
@@ -341,6 +335,7 @@ public class ShepherdFencePlacerGoal extends Goal {
         LOGGER.info("ShepherdFencePlacer {}: placed gate at {} (facing {})",
                 villager.getUuidAsString(), pendingGatePos.toShortString(), pendingGateFacing.name());
 
+        ShepherdPenLifecycle.markPenConstructed(villager, pendingGatePos);
         pendingGatePos = null;
         stage = Stage.DONE;
         triggerRescan(world);

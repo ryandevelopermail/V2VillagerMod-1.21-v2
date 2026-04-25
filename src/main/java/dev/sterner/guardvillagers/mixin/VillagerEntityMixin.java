@@ -9,6 +9,7 @@ import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandMemoryHolder;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.util.ShepherdPenStateHolder;
 import dev.sterner.guardvillagers.common.villager.behavior.VillagerFenceGateEscapeHelper;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
@@ -18,6 +19,7 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtList;
+import net.minecraft.nbt.NbtHelper;
 import net.minecraft.util.Identifier;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -34,10 +36,12 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Mixin(VillagerEntity.class)
-public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder, VillageMembershipTracker.VillageMembershipHolder {
+public class VillagerEntityMixin implements ArmorerStandMemoryHolder, WeaponsmithStandMemoryHolder, WeaponsmithCraftingMemoryHolder, ToolsmithCraftingMemoryHolder, LeatherworkerCraftingMemoryHolder, VillageMembershipTracker.VillageMembershipHolder, ShepherdPenStateHolder {
     private static final String WEAPONSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastWeaponsmithCrafted";
     private static final String TOOLSMITH_LAST_CRAFTED_KEY = "GuardVillagersLastToolsmithCrafted";
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
+    private static final String SHEPHERD_HAS_CONSTRUCTED_PEN_KEY = "GuardVillagersShepherdHasConstructedPen";
+    private static final String SHEPHERD_OWNED_PEN_ANCHOR_KEY = "GuardVillagersShepherdOwnedPenAnchor";
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerEntityMixin.class);
     private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_BASE_COOLDOWN_TICKS = 100L;
     private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_COOLDOWN_TICKS = 1600L;
@@ -91,6 +95,13 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Nullable
     private GlobalPos guardvillagers$homeBellPos;
 
+    @Unique
+    private boolean guardvillagers$hasConstructedPen;
+
+    @Unique
+    @Nullable
+    private BlockPos guardvillagers$ownedPenAnchor;
+
     @Override
     public GlobalPos guardvillagers$getHomeBellPos() {
         return guardvillagers$homeBellPos;
@@ -99,6 +110,26 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Override
     public void guardvillagers$setHomeBellPos(GlobalPos bellPos) {
         guardvillagers$homeBellPos = bellPos;
+    }
+
+    @Override
+    public boolean guardvillagers$hasConstructedPen() {
+        return guardvillagers$hasConstructedPen;
+    }
+
+    @Override
+    public void guardvillagers$setHasConstructedPen(boolean hasConstructedPen) {
+        guardvillagers$hasConstructedPen = hasConstructedPen;
+    }
+
+    @Override
+    public @Nullable BlockPos guardvillagers$getOwnedPenAnchor() {
+        return guardvillagers$ownedPenAnchor;
+    }
+
+    @Override
+    public void guardvillagers$setOwnedPenAnchor(@Nullable BlockPos ownedPenAnchor) {
+        guardvillagers$ownedPenAnchor = ownedPenAnchor == null ? null : ownedPenAnchor.toImmutable();
     }
 
     @Override
@@ -139,6 +170,17 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Override
     public void guardvillagers$setLastLeatherworkerCrafted(@Nullable Identifier identifier) {
         guardvillagers$lastLeatherworkerCrafted = identifier;
+    }
+
+
+    @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
+    private void guardvillagers$readShepherdPenState(NbtCompound nbt, CallbackInfo ci) {
+        guardvillagers$hasConstructedPen = nbt.getBoolean(SHEPHERD_HAS_CONSTRUCTED_PEN_KEY);
+        if (nbt.contains(SHEPHERD_OWNED_PEN_ANCHOR_KEY, 10)) {
+            guardvillagers$ownedPenAnchor = NbtHelper.toBlockPos(nbt, SHEPHERD_OWNED_PEN_ANCHOR_KEY).orElse(null);
+        } else {
+            guardvillagers$ownedPenAnchor = null;
+        }
     }
 
     @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
@@ -211,6 +253,17 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
         }
         Identifier parsed = Identifier.tryParse(nbt.getString(LEATHERWORKER_LAST_CRAFTED_KEY));
         guardvillagers$lastLeatherworkerCrafted = parsed;
+    }
+
+
+    @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
+    private void guardvillagers$writeShepherdPenState(NbtCompound nbt, CallbackInfo ci) {
+        nbt.putBoolean(SHEPHERD_HAS_CONSTRUCTED_PEN_KEY, guardvillagers$hasConstructedPen);
+        if (guardvillagers$ownedPenAnchor != null) {
+            nbt.put(SHEPHERD_OWNED_PEN_ANCHOR_KEY, NbtHelper.fromBlockPos(guardvillagers$ownedPenAnchor));
+        } else {
+            nbt.remove(SHEPHERD_OWNED_PEN_ANCHOR_KEY);
+        }
     }
 
     @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))

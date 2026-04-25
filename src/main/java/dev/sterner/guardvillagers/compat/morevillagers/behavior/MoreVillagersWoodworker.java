@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.compat.morevillagers.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.ForesterSaplingPlantingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ForesterSaplingProvisionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ForesterTreeDropPickupGoal;
+import dev.sterner.guardvillagers.common.entity.goal.ForesterBonemealGoal;
 import dev.sterner.guardvillagers.common.villager.behavior.AbstractPairedProfessionBehavior;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.registry.Registries;
@@ -41,17 +42,20 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
     private static final int PROVISION_GOAL_PRIORITY = 3;
     private static final int PLANTING_GOAL_PRIORITY = 4;
     private static final int PICKUP_GOAL_PRIORITY = 5;
+    private static final int BONEMEAL_GOAL_PRIORITY = 6;
 
     // V2 goals (chest-paired)
     private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> PROVISION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> PLANTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterTreeDropPickupGoal> PICKUP_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ForesterBonemealGoal> BONEMEAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
 
     // V1 goals (no chest – provision into own inventory, plant from inventory)
     private static final Map<VillagerEntity, ForesterSaplingProvisionGoal> V1_PROVISION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterSaplingPlantingGoal> V1_PLANTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ForesterTreeDropPickupGoal> V1_PICKUP_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, ForesterBonemealGoal> V1_BONEMEAL_GOALS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -79,6 +83,8 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
         if (v1Plant != null) villager.goalSelector.remove(v1Plant);
         ForesterTreeDropPickupGoal v1Pickup = V1_PICKUP_GOALS.remove(villager);
         if (v1Pickup != null) villager.goalSelector.remove(v1Pickup);
+        ForesterBonemealGoal v1Bonemeal = V1_BONEMEAL_GOALS.remove(villager);
+        if (v1Bonemeal != null) villager.goalSelector.remove(v1Bonemeal);
 
         // Sapling provision goal – stocks the chest with 4 biome-appropriate saplings each dawn
         ForesterSaplingProvisionGoal provisionGoal = upsertGoal(PROVISION_GOALS, villager, PROVISION_GOAL_PRIORITY,
@@ -97,6 +103,10 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
         ForesterTreeDropPickupGoal pickupGoal = upsertGoal(PICKUP_GOALS, villager, PICKUP_GOAL_PRIORITY,
                 () -> new ForesterTreeDropPickupGoal(villager, jobPos, chestPos));
         pickupGoal.setTargets(jobPos, chestPos);
+
+        ForesterBonemealGoal bonemealGoal = upsertGoal(BONEMEAL_GOALS, villager, BONEMEAL_GOAL_PRIORITY,
+                () -> new ForesterBonemealGoal(villager, jobPos, chestPos));
+        bonemealGoal.setTargets(jobPos, chestPos);
 
         // No chest listener needed: planting goal runs on its own cooldown schedule
         // and does not require a wake signal when the chest contents change.
@@ -135,6 +145,10 @@ public class MoreVillagersWoodworker extends AbstractPairedProfessionBehavior {
         ForesterTreeDropPickupGoal pickupGoal = upsertGoal(V1_PICKUP_GOALS, villager, PICKUP_GOAL_PRIORITY,
                 () -> new ForesterTreeDropPickupGoal(villager, jobPos, null));
         pickupGoal.setTargets(jobPos, null);
+
+        ForesterBonemealGoal bonemealGoal = upsertGoal(V1_BONEMEAL_GOALS, villager, BONEMEAL_GOAL_PRIORITY,
+                () -> new ForesterBonemealGoal(villager, jobPos, null));
+        bonemealGoal.setTargets(jobPos, null);
     }
 
     // -----------------------------------------------------------------------------------------

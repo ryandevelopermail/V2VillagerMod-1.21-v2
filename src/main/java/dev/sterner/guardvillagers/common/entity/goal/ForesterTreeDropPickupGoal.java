@@ -47,6 +47,7 @@ public class ForesterTreeDropPickupGoal extends Goal {
 
     private static final double MOVE_SPEED = 0.65D;
     private static final int PATH_RETRY_TICKS = 20;
+    private static final int CHEST_DEPOSIT_BLOCKED_BACKOFF_TICKS = 40;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -84,8 +85,6 @@ public class ForesterTreeDropPickupGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld world)) return false;
         if (!villager.isAlive() || !world.isDay()) return false;
         if (jobPos == null) return false;
-        // V1: also gate on having inventory space (don't chase drops we can't carry)
-        if (chestPos == null && !hasInventorySpace()) return false;
         if (scanCooldown > 0) {
             scanCooldown--;
             return false;
@@ -139,9 +138,14 @@ public class ForesterTreeDropPickupGoal extends Goal {
                     targetItem = null;
                     // Check if there are more drops to collect in one trip
                     ItemEntity next = findNearestTreeDrop(world);
-                    if (next != null && hasInventorySpace()) {
+                    if (next != null && canAbsorb(next.getStack())) {
                         targetItem = next;
                         moveTo(targetItem.getBlockPos());
+                    } else if (next != null) {
+                        LOGGER.debug("[forester-pickup] {} skipping pickup due to no merge/slot capacity: {} x {}",
+                                villager.getUuidAsString(),
+                                next.getStack().getCount(),
+                                next.getStack().getItem());
                     } else if (chestPos != null) {
                         stage = Stage.DEPOSIT_TO_CHEST;
                         moveTo(chestPos);
@@ -163,7 +167,14 @@ public class ForesterTreeDropPickupGoal extends Goal {
                 if (isNear(chestPos, CHEST_REACH_SQ)) {
                     Optional<Inventory> invOpt = getChestInventory(world);
                     if (invOpt.isPresent()) {
-                        dumpVillagerInventoryToChest(invOpt.get());
+                        boolean changed = dumpVillagerInventoryToChest(invOpt.get());
+                        if (!changed) {
+                            scanCooldown = Math.max(scanCooldown, CHEST_DEPOSIT_BLOCKED_BACKOFF_TICKS);
+                            LOGGER.debug("[forester-pickup] {} deposit blocked by chest capacity at {}; backing off {} ticks",
+                                    villager.getUuidAsString(),
+                                    chestPos.toShortString(),
+                                    CHEST_DEPOSIT_BLOCKED_BACKOFF_TICKS);
+                        }
                     }
                     stage = Stage.DONE;
                 } else {
@@ -189,6 +200,13 @@ public class ForesterTreeDropPickupGoal extends Goal {
         double bestDistSq = Double.MAX_VALUE;
         ItemEntity best = null;
         for (ItemEntity e : drops) {
+            if (!canAbsorb(e.getStack())) {
+                LOGGER.debug("[forester-pickup] {} skipping pickup due to no merge/slot capacity: {} x {}",
+                        villager.getUuidAsString(),
+                        e.getStack().getCount(),
+                        e.getStack().getItem());
+                continue;
+            }
             double dSq = villager.squaredDistanceTo(e);
             if (dSq < bestDistSq) {
                 bestDistSq = dSq;
@@ -255,10 +273,23 @@ public class ForesterTreeDropPickupGoal extends Goal {
         }
     }
 
-    private boolean hasInventorySpace() {
-        Inventory inv = villager.getInventory();
+    private boolean canAbsorb(ItemStack candidate) {
+        return canAbsorb(villager.getInventory(), candidate);
+    }
+
+    static boolean canAbsorb(Inventory inv, ItemStack candidate) {
+        if (candidate == null || candidate.isEmpty()) return false;
         for (int i = 0; i < inv.size(); i++) {
-            if (inv.getStack(i).isEmpty()) return true;
+            ItemStack slot = inv.getStack(i);
+            if (slot.isEmpty()) return true;
+            // Use explicit merge checks for mapping/API portability (canCombine is absent on some branches).
+            if (!slot.isEmpty()
+                    && !candidate.isEmpty()
+                    && slot.getItem() == candidate.getItem()
+                    && ItemStack.areItemsAndComponentsEqual(slot, candidate)) {
+                int slotLimit = Math.min(slot.getMaxCount(), inv.getMaxCountPerStack());
+                if (slot.getCount() < slotLimit) return true;
+            }
         }
         return false;
     }
@@ -286,47 +317,60 @@ public class ForesterTreeDropPickupGoal extends Goal {
     // Chest deposit
     // -------------------------------------------------------------------------
 
-    private void dumpVillagerInventoryToChest(Inventory chestInv) {
+    private boolean dumpVillagerInventoryToChest(Inventory chestInv) {
         Inventory villagerInv = villager.getInventory();
         // Tally what we're about to deposit before touching anything
         int saplingsBefore = 0;
         int otherBefore = 0;
+        boolean villagerInventoryChanged = false;
         for (int i = 0; i < villagerInv.size(); i++) {
             ItemStack s = villagerInv.getStack(i);
             if (s.isEmpty()) continue;
             if (s.isIn(net.minecraft.registry.tag.ItemTags.SAPLINGS)) saplingsBefore += s.getCount();
             else otherBefore += s.getCount();
         }
-        for (int i = 0; i < villagerInv.size(); i++) {
-            ItemStack stack = villagerInv.getStack(i);
+        villagerInventoryChanged = transferInventoryToInventory(villagerInv, chestInv);
+        if (villagerInventoryChanged) {
+            LOGGER.info("[forester-pickup] {} DEPOSITED into chest at {} — saplings={} other={}",
+                    villager.getUuidAsString(), chestPos.toShortString(), saplingsBefore, otherBefore);
+        } else {
+            LOGGER.info("[forester-pickup] {} DEPOSIT BLOCKED by chest capacity at {} — saplings={} other={}",
+                    villager.getUuidAsString(), chestPos.toShortString(), saplingsBefore, otherBefore);
+        }
+        return villagerInventoryChanged;
+    }
+
+    static boolean transferInventoryToInventory(Inventory from, Inventory to) {
+        boolean changed = false;
+        for (int i = 0; i < from.size(); i++) {
+            ItemStack stack = from.getStack(i);
             if (stack.isEmpty()) continue;
-            // Try to merge with existing chest stacks
-            for (int j = 0; j < chestInv.size() && !stack.isEmpty(); j++) {
-                ItemStack slot = chestInv.getStack(j);
+            int initialCount = stack.getCount();
+            // Try to merge with existing target stacks
+            for (int j = 0; j < to.size() && !stack.isEmpty(); j++) {
+                ItemStack slot = to.getStack(j);
                 if (!slot.isEmpty() && ItemStack.areItemsEqual(slot, stack)) {
-                    int space = slot.getMaxCount() - slot.getCount();
+                    int slotLimit = Math.min(slot.getMaxCount(), to.getMaxCountPerStack());
+                    int space = slotLimit - slot.getCount();
                     int transfer = Math.min(space, stack.getCount());
                     slot.increment(transfer);
                     stack.decrement(transfer);
-                    chestInv.markDirty();
+                    to.markDirty();
                 }
             }
-            // Place remainder in empty chest slots
-            for (int j = 0; j < chestInv.size() && !stack.isEmpty(); j++) {
-                if (chestInv.getStack(j).isEmpty()) {
-                    chestInv.setStack(j, stack.copy());
+            // Place remainder in empty target slots
+            for (int j = 0; j < to.size() && !stack.isEmpty(); j++) {
+                if (to.getStack(j).isEmpty()) {
+                    to.setStack(j, stack.copy());
                     stack = ItemStack.EMPTY;
-                    chestInv.markDirty();
+                    to.markDirty();
                 }
             }
-            if (stack.isEmpty()) {
-                villagerInv.setStack(i, ItemStack.EMPTY);
-            } else {
-                villagerInv.setStack(i, stack);
-            }
+            if (stack.isEmpty()) from.setStack(i, ItemStack.EMPTY);
+            else from.setStack(i, stack);
+            changed |= stack.getCount() != initialCount;
         }
-        LOGGER.info("[forester-pickup] {} DEPOSITED into chest at {} — saplings={} other={}",
-                villager.getUuidAsString(), chestPos.toShortString(), saplingsBefore, otherBefore);
+        return changed;
     }
 
     // -------------------------------------------------------------------------

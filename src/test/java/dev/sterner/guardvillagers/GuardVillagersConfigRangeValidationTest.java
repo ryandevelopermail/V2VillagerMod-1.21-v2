@@ -29,6 +29,10 @@ class GuardVillagersConfigRangeValidationTest {
         GuardVillagersConfig.weaponsmithAdaptiveSummaryLogIntervalSessions = 0;
         GuardVillagersConfig.shepherdFenceBatchMin = 0;
         GuardVillagersConfig.shepherdFenceBatchMax = 999;
+        GuardVillagersConfig.foresterBonemealMaxApplicationsPerSession = 999;
+        GuardVillagersConfig.foresterBonemealScanRadius = 1;
+        GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession = 0;
+        GuardVillagersConfig.farmerBonemealScanRadius = 999;
 
         GuardVillagersConfig.validateClampedRanges();
 
@@ -53,5 +57,9 @@ class GuardVillagersConfigRangeValidationTest {
         assertEquals(GuardVillagersConfig.MIN_PROFESSION_SUMMARY_LOG_INTERVAL, GuardVillagersConfig.weaponsmithAdaptiveSummaryLogIntervalSessions);
         assertEquals(GuardVillagersConfig.MIN_SHEPHERD_FENCE_BATCH, GuardVillagersConfig.shepherdFenceBatchMin);
         assertEquals(GuardVillagersConfig.MAX_SHEPHERD_FENCE_BATCH, GuardVillagersConfig.shepherdFenceBatchMax);
+        assertEquals(GuardVillagersConfig.MAX_BONEMEAL_APPLICATIONS_PER_SESSION, GuardVillagersConfig.foresterBonemealMaxApplicationsPerSession);
+        assertEquals(GuardVillagersConfig.MIN_FORESTER_BONEMEAL_SCAN_RADIUS, GuardVillagersConfig.foresterBonemealScanRadius);
+        assertEquals(GuardVillagersConfig.MIN_BONEMEAL_APPLICATIONS_PER_SESSION, GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession);
+        assertEquals(GuardVillagersConfig.MAX_FARMER_BONEMEAL_SCAN_RADIUS, GuardVillagersConfig.farmerBonemealScanRadius);
     }
 }

@@ -36,13 +36,8 @@ import java.util.Set;
 
 public class FarmerHarvestGoal extends Goal {
     private static final int HARVEST_RADIUS = 50;
-    /**
-     * Hoeing scans for raw dirt/grass to convert to farmland. This must be kept very tight —
-     * the farmer's job block is a composter, which is placed adjacent to the farm plot.
-     * A large radius causes the farmer to walk far from the farm and hoe unrelated dirt.
-     * 10 blocks keeps hoeing anchored near the job block where the actual farmland is.
-     */
-    private static final int HOE_RADIUS = 10;
+    // Hoeing range is controlled by BOOTSTRAP_SCAN_RADIUS (16) via eligibleTerritory.
+    // The farmer only hoes blocks already in the territory cache, which is anchored to the job block.
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final double MOVE_SPEED = 0.6D;
     private static final int CHECK_INTERVAL_TICKS = 20;
@@ -66,7 +61,12 @@ public class FarmerHarvestGoal extends Goal {
     /** How often to attempt incremental seed pickup when no seeds and no hoe are available. */
     private static final int SEED_INCREMENT_INTERVAL_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
-    private static final int WATER_SEARCH_VERTICAL_RANGE = 8;
+    /**
+     * Vertical range when scanning for nearby water. Vanilla farmland hydration works within
+     * roughly ±1 block vertically, so ±3 is a comfortable margin without bloating per-block
+     * scan cost the way ±8 did (saves ~63% of scan volume per territory cell).
+     */
+    private static final int WATER_SEARCH_VERTICAL_RANGE = 3;
     private static final int BOOTSTRAP_SCAN_RADIUS = 16;
     private static final int BOOTSTRAP_SCAN_MIN_Y_OFFSET = -1;
     private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
@@ -76,7 +76,12 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
     private static final int BOOTSTRAP_RESCAN_COOLDOWN_TICKS = 100;
-    private static final int MIN_VIABLE_TERRITORY_PLOTS = 6;
+    private static final int STALE_TERRITORY_MATURE_DETECTION_THRESHOLD = 3;
+    private static final int STALE_TERRITORY_RESCAN_COOLDOWN_TICKS = 200;
+    /** Minimum eligible territory plots required before the farmer will do any work.
+     *  Kept low (2) so fresh setups with just a few dirt+water blocks aren't permanently gated.
+     *  The territory cache builds incrementally — a high value causes indefinite stand-still on new farms. */
+    private static final int MIN_VIABLE_TERRITORY_PLOTS = 2;
     private static final int SEED_TARGET_RESERVE_MARGIN_MIN = 2;
     private static final int SEED_TARGET_RESERVE_MARGIN_DIVISOR = 5;
     private static final Logger LOGGER = LoggerFactory.getLogger(FarmerHarvestGoal.class);
@@ -154,6 +159,8 @@ public class FarmerHarvestGoal extends Goal {
     private long nextBootstrapScanTick = 0L;
     private int bootstrapScanCursor = 0;
     private long lastTerritoryInvalidationTick = 0L;
+    private int tinyTerritoryMatureDetectionStreak = 0;
+    private long nextForcedTerritoryRescanTick = 0L;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -184,6 +191,8 @@ public class FarmerHarvestGoal extends Goal {
         this.bootstrapScanCursor = 0;
         this.nextBootstrapScanTick = 0L;
         this.lastTerritoryInvalidationTick = 0L;
+        this.tinyTerritoryMatureDetectionStreak = 0;
+        this.nextForcedTerritoryRescanTick = 0L;
         this.cachedCoverage = null;
         this.coverageCacheTime = -1L;
     }
@@ -220,17 +229,34 @@ public class FarmerHarvestGoal extends Goal {
         if (world.getTime() < adaptiveThrottleUntilTick) {
             return false;
         }
-        if (shouldThrottleFarmlandExpansionChecks(world)) {
-            return false;
-        }
+        int matureCropSignalCount = countMatureCrops(world);
+        boolean hasMatureCropSignal = matureCropSignalCount > 0;
         ensureEligibleTerritoryCache(world, false);
         int eligibleTerritoryCount = getEligibleTerritoryCount(world);
-        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
+        maybeRecoverStaleTerritoryCache(world, eligibleTerritoryCount, hasMatureCropSignal, matureCropSignalCount);
+        if (isBlockedByTerritoryBootstrap(matureCropSignalCount, eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS)) {
+            LOGGER.debug("Farmer {} blocked by territory bootstrap (eligibleTerritoryCount={} minRequired={} matureCropCount={})",
+                    villager.getUuidAsString(), eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS, matureCropSignalCount);
             nextCheckTime = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
             return false;
         }
+        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
+            LOGGER.debug("Farmer {} allowed due to mature crop override (eligibleTerritoryCount={} minRequired={} matureCropCount={})",
+                    villager.getUuidAsString(), eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS, matureCropSignalCount);
+        } else {
+            tinyTerritoryMatureDetectionStreak = 0;
+        }
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
+        if (shouldApplyExpansionThrottle(preflight) && shouldThrottleFarmlandExpansionChecks(world)) {
+            LOGGER.debug("Farmer {} throttled expansion (expansionOnlyCandidate=true matureCropCount={})",
+                    villager.getUuidAsString(), preflight.matureCropCount);
+            return false;
+        }
+        if (preflight.matureCropCount > 0 && isAdaptiveThrottleLoadHigh()) {
+            LOGGER.debug("Farmer {} harvest allowed despite throttle due to mature crops (matureCropCount={})",
+                    villager.getUuidAsString(), preflight.matureCropCount);
+        }
 
         // Guard the expensive ~30k-block farmland scan behind resource availability.
         // The coverage scan is only actionable when the farmer can plant (seeds) or prep ground (hoe).
@@ -559,6 +585,9 @@ public class FarmerHarvestGoal extends Goal {
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
                     currentHoeTarget = null;
+                    // Invalidate the farmland coverage cache so the next canStart() / routePostDepositFlow()
+                    // sees the newly created farmland rather than stale pre-hoe data.
+                    coverageCacheTime = -1L;
                     if (!routePostDepositFlow(serverWorld, true)) {
                         finishDailyRunIfNeeded(serverWorld);
                         setStage(Stage.DONE);
@@ -1186,7 +1215,10 @@ public class FarmerHarvestGoal extends Goal {
             reason = "no plant targets after hoeing and no seeds acquired";
         }
 
-        return new BootstrapPreflight(matureCropCount, plantedCropCount, canHoeGround, hasPlantTargets, hasSeedsForPlanting, reason);
+        boolean expansionOnlyCandidate = matureCropCount == 0
+                && (reason != null || canHoeGround || hasPlantTargets || !hasSeedsForPlanting);
+        return new BootstrapPreflight(matureCropCount, plantedCropCount, canHoeGround, hasPlantTargets, hasSeedsForPlanting,
+                reason, expansionOnlyCandidate);
     }
 
     private void finishDailyRunIfNeeded(ServerWorld world) {
@@ -1210,14 +1242,17 @@ public class FarmerHarvestGoal extends Goal {
         private final boolean hasPlantTargets;
         private final boolean hasSeedsForPlanting;
         private final String reason;
+        private final boolean expansionOnlyCandidate;
 
-        private BootstrapPreflight(int matureCropCount, int plantedCropCount, boolean canHoeGround, boolean hasPlantTargets, boolean hasSeedsForPlanting, String reason) {
+        private BootstrapPreflight(int matureCropCount, int plantedCropCount, boolean canHoeGround, boolean hasPlantTargets,
+                                   boolean hasSeedsForPlanting, String reason, boolean expansionOnlyCandidate) {
             this.matureCropCount = matureCropCount;
             this.plantedCropCount = plantedCropCount;
             this.canHoeGround = canHoeGround;
             this.hasPlantTargets = hasPlantTargets;
             this.hasSeedsForPlanting = hasSeedsForPlanting;
             this.reason = reason;
+            this.expansionOnlyCandidate = expansionOnlyCandidate;
         }
 
         private boolean shouldRun() {
@@ -1252,7 +1287,7 @@ public class FarmerHarvestGoal extends Goal {
     private boolean prepareFeeding(ServerWorld world) {
         // Use VillagePenRegistry (geometry-based) instead of banner tracker.
         VillagePenRegistry.PenEntry pen = VillagePenRegistry.get(world.getServer())
-                .getNearestPen(world, jobPos, 300)
+                .getNearestPen(world, jobPos, 64)
                 .orElse(null);
         if (pen == null) {
             return false;
@@ -1706,12 +1741,28 @@ public class FarmerHarvestGoal extends Goal {
         return !hasPlantablesForPlanting;
     }
 
-    private boolean shouldThrottleFarmlandExpansionChecks(ServerWorld world) {
+    static boolean shouldApplyExpansionThrottle(int matureCropCount, boolean expansionOnlyCandidate) {
+        return matureCropCount <= 0 && expansionOnlyCandidate;
+    }
+
+    static boolean isBlockedByTerritoryBootstrap(int matureCropCount, int eligibleTerritoryCount, int minimumViableTerritoryPlots) {
+        return eligibleTerritoryCount < minimumViableTerritoryPlots && matureCropCount <= 0;
+    }
+
+    private boolean shouldApplyExpansionThrottle(BootstrapPreflight preflight) {
+        return shouldApplyExpansionThrottle(preflight.matureCropCount, preflight.expansionOnlyCandidate);
+    }
+
+    private boolean isAdaptiveThrottleLoadHigh() {
         long adaptiveLoadScore = adaptiveScanVolumeWindow
                 + (long) adaptivePathRetryWindow * 18L
                 + (long) adaptiveFailedSessionWindow * 40L
                 + (long) adaptiveForcedRecoveryWindow * 55L;
-        if (adaptiveLoadScore < GuardVillagersConfig.farmerAdaptiveThrottleLoadThreshold) {
+        return adaptiveLoadScore >= GuardVillagersConfig.farmerAdaptiveThrottleLoadThreshold;
+    }
+
+    private boolean shouldThrottleFarmlandExpansionChecks(ServerWorld world) {
+        if (!isAdaptiveThrottleLoadHigh()) {
             return false;
         }
         int jitter = GuardVillagersConfig.farmerAdaptiveThrottleJitterTicks <= 0
@@ -1725,6 +1776,22 @@ public class FarmerHarvestGoal extends Goal {
         adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
         adaptiveForcedRecoveryWindow = Math.max(0, adaptiveForcedRecoveryWindow / 2);
         return true;
+    }
+
+    private void maybeRecoverStaleTerritoryCache(ServerWorld world, int eligibleTerritoryCount, boolean hasMatureCropSignal, int matureCropSignalCount) {
+        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS && hasMatureCropSignal) {
+            tinyTerritoryMatureDetectionStreak++;
+            if (tinyTerritoryMatureDetectionStreak >= STALE_TERRITORY_MATURE_DETECTION_THRESHOLD
+                    && world.getTime() >= nextForcedTerritoryRescanTick) {
+                LOGGER.debug("Farmer {} forcing territory cache rescan (eligibleTerritoryCount={} matureCropCount={} streak={})",
+                        villager.getUuidAsString(), eligibleTerritoryCount, matureCropSignalCount, tinyTerritoryMatureDetectionStreak);
+                ensureEligibleTerritoryCache(world, true);
+                nextForcedTerritoryRescanTick = world.getTime() + STALE_TERRITORY_RESCAN_COOLDOWN_TICKS;
+                tinyTerritoryMatureDetectionStreak = 0;
+            }
+            return;
+        }
+        tinyTerritoryMatureDetectionStreak = 0;
     }
 
     private void maybeLogAdaptiveSummary() {
@@ -1859,7 +1926,10 @@ public class FarmerHarvestGoal extends Goal {
     private int computeWheatSeedTarget(ServerWorld world) {
         int eligibleArea = getEligibleTerritoryCount(world);
         int areaBasedTarget = computeSeedTargetFromEligibleArea(eligibleArea);
-        return Math.max(areaBasedTarget, getConfiguredWheatSeedBootstrapFloor());
+        int uncapped = Math.max(areaBasedTarget, getConfiguredWheatSeedBootstrapFloor());
+        // Apply the configurable hard cap so the farmer doesn't hoard unlimited seeds.
+        int cap = GuardVillagersConfig.farmerWheatSeedReserveCap;
+        return cap > 0 ? Math.min(uncapped, cap) : uncapped;
     }
 
     private record FarmlandCoverageStats(int accessibleCells, int seededCells) {
@@ -1921,10 +1991,19 @@ public class FarmerHarvestGoal extends Goal {
 
     private boolean isValidSeedSource(ServerWorld world, BlockPos pos) {
         BlockState state = world.getBlockState(pos);
-        return state.isOf(Blocks.SHORT_GRASS)
+        // Grass and ferns drop wheat seeds when broken.
+        if (state.isOf(Blocks.SHORT_GRASS)
                 || state.isOf(Blocks.TALL_GRASS)
                 || state.isOf(Blocks.FERN)
-                || state.isOf(Blocks.LARGE_FERN);
+                || state.isOf(Blocks.LARGE_FERN)) {
+            return true;
+        }
+        // Mature wheat crops are a reliable seed source (drop 1–4 seeds).
+        // Only target fully grown wheat so we don't destroy immature crops.
+        if (state.isOf(Blocks.WHEAT) && state.getBlock() instanceof CropBlock crop) {
+            return crop.isMature(state);
+        }
+        return false;
     }
 
     private boolean hasNearbyWater(ServerWorld world, BlockPos farmlandCandidate) {
@@ -2072,7 +2151,10 @@ public class FarmerHarvestGoal extends Goal {
             BlockState above = world.getBlockState(pos.up());
             return above.isAir() || above.getBlock() instanceof CropBlock;
         }
-        return isHoeTarget(world, pos) && hasNearbyWater(world, pos);
+        // Dirt/grass/path counts toward territory even without nearby water so fresh setups
+        // reach MIN_VIABLE_TERRITORY_PLOTS and the farmer can begin work. Water is still
+        // required before the farmer will actually hoe or treat a cell as actionable coverage.
+        return isHoeTarget(world, pos);
     }
 
 

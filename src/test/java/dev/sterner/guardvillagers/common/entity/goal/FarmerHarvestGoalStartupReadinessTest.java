@@ -40,4 +40,39 @@ class FarmerHarvestGoalStartupReadinessTest {
         assertTrue(FarmerHarvestGoal.computeSeedTargetFromEligibleArea(1) >= 3);
         assertTrue(FarmerHarvestGoal.computeSeedTargetFromEligibleArea(20) >= 24);
     }
+
+    @Test
+    void canStartDecision_highAdaptiveLoad_withMatureCrops_allowsHarvest() {
+        boolean shouldThrottleExpansion = FarmerHarvestGoal.shouldApplyExpansionThrottle(5, false);
+
+        assertFalse(shouldThrottleExpansion);
+    }
+
+    @Test
+    void canStartDecision_highAdaptiveLoad_noMatureCrops_expansionCandidate_defers() {
+        boolean shouldThrottleExpansion = FarmerHarvestGoal.shouldApplyExpansionThrottle(0, true);
+
+        assertTrue(shouldThrottleExpansion);
+    }
+
+    @Test
+    void canStartDecision_lowLoad_withMatureCrops_allowsHarvest() {
+        boolean shouldThrottleExpansion = FarmerHarvestGoal.shouldApplyExpansionThrottle(2, true);
+
+        assertFalse(shouldThrottleExpansion);
+    }
+
+    @Test
+    void canStartDecision_migratedWorldShape_matureCropsWithinHarvestRadius_withSparseTerritory_allowsStart() {
+        boolean blockedByBootstrap = FarmerHarvestGoal.isBlockedByTerritoryBootstrap(1, 0, 2);
+
+        assertFalse(blockedByBootstrap);
+    }
+
+    @Test
+    void canStartDecision_noMatureCrops_andNoViableTerritory_remainsBlocked() {
+        boolean blockedByBootstrap = FarmerHarvestGoal.isBlockedByTerritoryBootstrap(0, 0, 2);
+
+        assertTrue(blockedByBootstrap);
+    }
 }

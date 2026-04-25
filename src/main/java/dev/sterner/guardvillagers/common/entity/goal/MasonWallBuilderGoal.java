@@ -46,6 +46,7 @@ import java.util.Optional;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.stream.Stream;
 
 /**
@@ -638,6 +639,10 @@ public class MasonWallBuilderGoal extends Goal {
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        ServerWorld world = worldOrNull();
+        if (world != null && activeAnchorPos != null && isElectedBuilder) {
+            VillageWallProjectState.get(world.getServer()).clearAssignment(world.getRegistryKey(), activeAnchorPos);
+        }
         if (isElectedBuilder && currentSegmentIndex > 0 && currentSegmentIndex < pendingSegments.size()) {
             LOGGER.info("MasonWallBuilder {}: build cycle paused/interrupted at {}/{}",
                     guard.getUuidAsString(), currentSegmentIndex, pendingSegments.size());
@@ -894,6 +899,45 @@ public class MasonWallBuilderGoal extends Goal {
         // 4. Find all peer masons near the anchor
         List<MasonGuardEntity> peers = getPeerMasons(world, anchorPos);
 
+        List<MasonGuardEntity> allMasons = new ArrayList<>(peers);
+        if (!allMasons.contains(guard)) {
+            allMasons.add(guard);
+        }
+        Map<UUID, MasonGuardEntity> masonsByUuid = new HashMap<>();
+        for (MasonGuardEntity mason : allMasons) {
+            masonsByUuid.put(mason.getUuid(), mason);
+        }
+        Map<UUID, VillageWallProjectState.ParticipationStats> participationByMason =
+                wallProjectState.getParticipationStats(world.getRegistryKey(), anchorPos);
+        Optional<VillageWallProjectState.ProjectAssignmentSnapshot> assignmentOpt =
+                wallProjectState.getAssignmentSnapshot(world.getRegistryKey(), anchorPos);
+        AssignmentStatus assignmentStatus = evaluateAssignmentStatus(
+                assignmentOpt.orElse(null),
+                masonsByUuid,
+                anchorPos,
+                world.getTime(),
+                Math.max(40, GuardVillagersConfig.masonWallBuilderAssignmentStallTicks),
+                PEER_SCAN_RANGE
+        );
+        if (assignmentStatus.status() != AssignmentStatusKind.HEALTHY && assignmentStatus.snapshot() != null) {
+            LOGGER.info("MasonWallBuilder {}: scheduler_event=stalled anchor={} assignedBuilder={} reason={} lastProgressTick={} now={}",
+                    guard.getUuidAsString(),
+                    anchorPos.toShortString(),
+                    assignmentStatus.snapshot().builderUuid(),
+                    assignmentStatus.reason(),
+                    assignmentStatus.snapshot().lastSegmentPlacedTick(),
+                    world.getTime());
+            wallProjectState.clearAssignment(world.getRegistryKey(), anchorPos);
+            assignmentOpt = Optional.empty();
+        }
+        if (assignmentStatus.status() == AssignmentStatusKind.HEALTHY && assignmentStatus.snapshot() != null
+                && !guard.getUuid().equals(assignmentStatus.snapshot().builderUuid())) {
+            LOGGER.debug("MasonWallBuilder {}: acting as donor_only to assigned builder {}",
+                    guard.getUuidAsString(),
+                    assignmentStatus.snapshot().builderUuid());
+            return false;
+        }
+
         // 5. Count cobblestone across all peers (including self)
         int myWalls = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE_WALL);
         int myCobblestone = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE);
@@ -934,23 +978,23 @@ public class MasonWallBuilderGoal extends Goal {
 
         // 6. Elect builder — only masons with both chest + job pairing are eligible.
         List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
-        electionCandidates.add(new ElectionCandidateSnapshot(
-                guard.getUuidAsString(),
-                guard.getPairedChestPos() != null,
-                guard.getPairedJobPos() != null,
-                myWalls + myCobblestone
-        ));
-        for (MasonGuardEntity peer : peers) {
-            if (peer == guard) continue;
+        for (MasonGuardEntity peer : allMasons) {
             BlockPos peerChestPos = peer.getPairedChestPos();
-            int peerStone = peerChestPos == null ? 0 :
-                    countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
-                            + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
+            int peerStone = peerChestPos == null ? 0 : countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
+                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
+            VillageWallProjectState.ParticipationStats stats = participationByMason.getOrDefault(
+                    peer.getUuid(),
+                    new VillageWallProjectState.ParticipationStats(0, 0)
+            );
             electionCandidates.add(new ElectionCandidateSnapshot(
+                    peer.getUuid(),
                     peer.getUuidAsString(),
                     peerChestPos != null,
                     peer.getPairedJobPos() != null,
-                    peerStone
+                    peerStone,
+                    peer.getBlockPos().getSquaredDistance(anchorPos),
+                    stats.segmentsPlaced(),
+                    stats.sessionsRun()
             ));
         }
         ElectionDecision electionDecision = electBuilderCandidate(electionCandidates);
@@ -964,18 +1008,9 @@ public class MasonWallBuilderGoal extends Goal {
 
         MasonGuardEntity electedBuilder = null;
         int electedStone = electionDecision.electedStoneCount();
-        String electedCandidateId = electionDecision.electedCandidateId();
-        if (electedCandidateId != null) {
-            if (guard.getUuidAsString().equals(electedCandidateId)) {
-                electedBuilder = guard;
-            } else {
-                for (MasonGuardEntity peer : peers) {
-                    if (peer.getUuidAsString().equals(electedCandidateId)) {
-                        electedBuilder = peer;
-                        break;
-                    }
-                }
-            }
+        UUID electedBuilderUuid = electionDecision.electedBuilderUuid();
+        if (electedBuilderUuid != null) {
+            electedBuilder = masonsByUuid.get(electedBuilderUuid);
         }
 
         if (electionDecision.shouldLogNoEligibleBuilder() || electedBuilder == null) {
@@ -983,6 +1018,20 @@ public class MasonWallBuilderGoal extends Goal {
                     "MasonWallBuilder {}: election skipped; no eligible mason with paired chest+job near anchor {}",
                     guard.getUuidAsString(), anchorPos.toShortString());
             return false;
+        }
+        UUID previousAssignedBuilder = assignmentOpt.map(VillageWallProjectState.ProjectAssignmentSnapshot::builderUuid).orElse(null);
+        if (!electedBuilderUuid.equals(previousAssignedBuilder)) {
+            wallProjectState.assignBuilder(world.getRegistryKey(), anchorPos, electedBuilderUuid, world.getTime());
+            LOGGER.info("MasonWallBuilder {}: scheduler_event={} anchor={} builder={} previousBuilder={} sessionsRun={} segmentsPlaced={} stone={} distanceSq={}",
+                    guard.getUuidAsString(),
+                    previousAssignedBuilder == null ? "assigned" : "reassigned",
+                    anchorPos.toShortString(),
+                    electedBuilderUuid,
+                    previousAssignedBuilder,
+                    electionDecision.electedSessionsRun(),
+                    electionDecision.electedSegmentsPlaced(),
+                    electedStone,
+                    String.format("%.1f", electionDecision.electedDistanceSq()));
         }
 
         if (electedBuilder != guard) {
@@ -4256,7 +4305,17 @@ public class MasonWallBuilderGoal extends Goal {
         if (reason == CycleEndReason.WALL_COMPLETE
                 && world != null
                 && activeAnchorPos != null) {
-            VillageWallProjectState.get(world.getServer()).markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
+            VillageWallProjectState wallProjectState = VillageWallProjectState.get(world.getServer());
+            wallProjectState.markAllLayersComplete(world.getRegistryKey(), activeAnchorPos);
+            wallProjectState.clearAssignment(world.getRegistryKey(), activeAnchorPos);
+            LOGGER.info("MasonWallBuilder {}: scheduler_event=completed anchor={} reason={} placements={} tick={}",
+                    guard.getUuidAsString(),
+                    activeAnchorPos.toShortString(),
+                    reason.logValue,
+                    placementsSinceCycleStart,
+                    world.getTime());
+        } else if (world != null && activeAnchorPos != null) {
+            VillageWallProjectState.get(world.getServer()).clearAssignment(world.getRegistryKey(), activeAnchorPos);
         }
         releaseAllSegmentClaims(worldOrNull());
         clearWaitForStockState();
@@ -4659,6 +4718,16 @@ public class MasonWallBuilderGoal extends Goal {
     private void recordPlacementProgress(ServerWorld world, BlockPos placedSegment) {
         lastPlacementTick = world.getTime();
         placementsSinceCycleStart++;
+        if (activeAnchorPos != null) {
+            VillageWallProjectState.get(world.getServer())
+                    .markBuilderProgress(world.getRegistryKey(), activeAnchorPos, guard.getUuid(), world.getTime());
+            LOGGER.info("MasonWallBuilder {}: scheduler_event=progress anchor={} segment={} placements={} tick={}",
+                    guard.getUuidAsString(),
+                    activeAnchorPos.toShortString(),
+                    placedSegment.toShortString(),
+                    placementsSinceCycleStart,
+                    world.getTime());
+        }
         maybeExpandBootstrapRect(world, "confirmed_placement");
         clearSameCycleRestartSuppression("placement_progress");
         recordLayerOneFacePlacement(world, placedSegment);
@@ -6750,6 +6819,31 @@ public class MasonWallBuilderGoal extends Goal {
         return WaitForStockDecision.DONE;
     }
 
+    static AssignmentStatus evaluateAssignmentStatus(VillageWallProjectState.ProjectAssignmentSnapshot snapshot,
+                                                     Map<UUID, MasonGuardEntity> masonsByUuid,
+                                                     BlockPos anchorPos,
+                                                     long nowTick,
+                                                     long stallTicks,
+                                                     double maxRange) {
+        if (snapshot == null) {
+            return new AssignmentStatus(AssignmentStatusKind.NONE, null, "no_assignment");
+        }
+        MasonGuardEntity assigned = masonsByUuid.get(snapshot.builderUuid());
+        if (assigned == null || !assigned.isAlive()) {
+            return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "builder_missing_or_dead");
+        }
+        if (assigned.getPairedChestPos() == null || assigned.getPairedJobPos() == null) {
+            return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "builder_unpaired");
+        }
+        if (assigned.getBlockPos().getSquaredDistance(anchorPos) > maxRange * maxRange) {
+            return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "builder_out_of_range");
+        }
+        if (snapshot.lastSegmentPlacedTick() >= 0L && (nowTick - snapshot.lastSegmentPlacedTick()) > stallTicks) {
+            return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "stall_timeout");
+        }
+        return new AssignmentStatus(AssignmentStatusKind.HEALTHY, snapshot, "healthy");
+    }
+
     static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates) {
         ElectionCandidateSnapshot elected = null;
         List<ElectionCandidateSnapshot> excluded = new ArrayList<>();
@@ -6758,13 +6852,25 @@ public class MasonWallBuilderGoal extends Goal {
                 excluded.add(candidate);
                 continue;
             }
-            if (elected == null || candidate.stoneCount() > elected.stoneCount()) {
+            if (elected == null
+                    || candidate.sessionsRun() < elected.sessionsRun()
+                    || (candidate.sessionsRun() == elected.sessionsRun() && candidate.segmentsPlaced() < elected.segmentsPlaced())
+                    || (candidate.sessionsRun() == elected.sessionsRun()
+                    && candidate.segmentsPlaced() == elected.segmentsPlaced()
+                    && candidate.stoneCount() > elected.stoneCount())
+                    || (candidate.sessionsRun() == elected.sessionsRun()
+                    && candidate.segmentsPlaced() == elected.segmentsPlaced()
+                    && candidate.stoneCount() == elected.stoneCount()
+                    && candidate.distanceSqToAnchor() < elected.distanceSqToAnchor())) {
                 elected = candidate;
             }
         }
         return new ElectionDecision(
-                elected == null ? null : elected.candidateId(),
+                elected == null ? null : elected.builderUuid(),
                 elected == null ? -1 : elected.stoneCount(),
+                elected == null ? -1 : elected.sessionsRun(),
+                elected == null ? -1 : elected.segmentsPlaced(),
+                elected == null ? -1.0D : elected.distanceSqToAnchor(),
                 excluded,
                 elected == null
         );
@@ -7414,12 +7520,32 @@ public class MasonWallBuilderGoal extends Goal {
         }
     }
 
-    record ElectionCandidateSnapshot(String candidateId, boolean hasPairedChest, boolean hasPairedJob, int stoneCount) {}
+    record ElectionCandidateSnapshot(UUID builderUuid,
+                                     String candidateId,
+                                     boolean hasPairedChest,
+                                     boolean hasPairedJob,
+                                     int stoneCount,
+                                     double distanceSqToAnchor,
+                                     int segmentsPlaced,
+                                     int sessionsRun) {}
 
-    record ElectionDecision(String electedCandidateId,
+    record ElectionDecision(UUID electedBuilderUuid,
                             int electedStoneCount,
+                            int electedSessionsRun,
+                            int electedSegmentsPlaced,
+                            double electedDistanceSq,
                             List<ElectionCandidateSnapshot> excludedCandidates,
                             boolean shouldLogNoEligibleBuilder) {}
+
+    enum AssignmentStatusKind {
+        NONE,
+        HEALTHY,
+        UNHEALTHY
+    }
+
+    record AssignmentStatus(AssignmentStatusKind status,
+                            VillageWallProjectState.ProjectAssignmentSnapshot snapshot,
+                            String reason) {}
 
     enum WaitForStockDecision {
         MOVE_TO_SEGMENT,
