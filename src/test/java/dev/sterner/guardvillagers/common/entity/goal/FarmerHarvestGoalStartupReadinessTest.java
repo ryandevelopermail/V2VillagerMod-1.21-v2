@@ -61,4 +61,18 @@ class FarmerHarvestGoalStartupReadinessTest {
 
         assertFalse(shouldThrottleExpansion);
     }
+
+    @Test
+    void canStartDecision_migratedWorldShape_matureCropsWithinHarvestRadius_withSparseTerritory_allowsStart() {
+        boolean blockedByBootstrap = FarmerHarvestGoal.isBlockedByTerritoryBootstrap(1, 0, 2);
+
+        assertFalse(blockedByBootstrap);
+    }
+
+    @Test
+    void canStartDecision_noMatureCrops_andNoViableTerritory_remainsBlocked() {
+        boolean blockedByBootstrap = FarmerHarvestGoal.isBlockedByTerritoryBootstrap(0, 0, 2);
+
+        assertTrue(blockedByBootstrap);
+    }
 }

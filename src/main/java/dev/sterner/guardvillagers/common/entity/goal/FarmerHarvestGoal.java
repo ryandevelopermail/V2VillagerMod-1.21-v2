@@ -76,6 +76,8 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
     private static final int BOOTSTRAP_RESCAN_COOLDOWN_TICKS = 100;
+    private static final int STALE_TERRITORY_MATURE_DETECTION_THRESHOLD = 3;
+    private static final int STALE_TERRITORY_RESCAN_COOLDOWN_TICKS = 200;
     /** Minimum eligible territory plots required before the farmer will do any work.
      *  Kept low (2) so fresh setups with just a few dirt+water blocks aren't permanently gated.
      *  The territory cache builds incrementally — a high value causes indefinite stand-still on new farms. */
@@ -157,6 +159,8 @@ public class FarmerHarvestGoal extends Goal {
     private long nextBootstrapScanTick = 0L;
     private int bootstrapScanCursor = 0;
     private long lastTerritoryInvalidationTick = 0L;
+    private int tinyTerritoryMatureDetectionStreak = 0;
+    private long nextForcedTerritoryRescanTick = 0L;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -187,6 +191,8 @@ public class FarmerHarvestGoal extends Goal {
         this.bootstrapScanCursor = 0;
         this.nextBootstrapScanTick = 0L;
         this.lastTerritoryInvalidationTick = 0L;
+        this.tinyTerritoryMatureDetectionStreak = 0;
+        this.nextForcedTerritoryRescanTick = 0L;
         this.cachedCoverage = null;
         this.coverageCacheTime = -1L;
     }
@@ -223,11 +229,22 @@ public class FarmerHarvestGoal extends Goal {
         if (world.getTime() < adaptiveThrottleUntilTick) {
             return false;
         }
+        int matureCropSignalCount = countMatureCrops(world);
+        boolean hasMatureCropSignal = matureCropSignalCount > 0;
         ensureEligibleTerritoryCache(world, false);
         int eligibleTerritoryCount = getEligibleTerritoryCount(world);
-        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
+        maybeRecoverStaleTerritoryCache(world, eligibleTerritoryCount, hasMatureCropSignal, matureCropSignalCount);
+        if (isBlockedByTerritoryBootstrap(matureCropSignalCount, eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS)) {
+            LOGGER.debug("Farmer {} blocked by territory bootstrap (eligibleTerritoryCount={} minRequired={} matureCropCount={})",
+                    villager.getUuidAsString(), eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS, matureCropSignalCount);
             nextCheckTime = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
             return false;
+        }
+        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
+            LOGGER.debug("Farmer {} allowed due to mature crop override (eligibleTerritoryCount={} minRequired={} matureCropCount={})",
+                    villager.getUuidAsString(), eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS, matureCropSignalCount);
+        } else {
+            tinyTerritoryMatureDetectionStreak = 0;
         }
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
@@ -1728,6 +1745,10 @@ public class FarmerHarvestGoal extends Goal {
         return matureCropCount <= 0 && expansionOnlyCandidate;
     }
 
+    static boolean isBlockedByTerritoryBootstrap(int matureCropCount, int eligibleTerritoryCount, int minimumViableTerritoryPlots) {
+        return eligibleTerritoryCount < minimumViableTerritoryPlots && matureCropCount <= 0;
+    }
+
     private boolean shouldApplyExpansionThrottle(BootstrapPreflight preflight) {
         return shouldApplyExpansionThrottle(preflight.matureCropCount, preflight.expansionOnlyCandidate);
     }
@@ -1755,6 +1776,22 @@ public class FarmerHarvestGoal extends Goal {
         adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
         adaptiveForcedRecoveryWindow = Math.max(0, adaptiveForcedRecoveryWindow / 2);
         return true;
+    }
+
+    private void maybeRecoverStaleTerritoryCache(ServerWorld world, int eligibleTerritoryCount, boolean hasMatureCropSignal, int matureCropSignalCount) {
+        if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS && hasMatureCropSignal) {
+            tinyTerritoryMatureDetectionStreak++;
+            if (tinyTerritoryMatureDetectionStreak >= STALE_TERRITORY_MATURE_DETECTION_THRESHOLD
+                    && world.getTime() >= nextForcedTerritoryRescanTick) {
+                LOGGER.debug("Farmer {} forcing territory cache rescan (eligibleTerritoryCount={} matureCropCount={} streak={})",
+                        villager.getUuidAsString(), eligibleTerritoryCount, matureCropSignalCount, tinyTerritoryMatureDetectionStreak);
+                ensureEligibleTerritoryCache(world, true);
+                nextForcedTerritoryRescanTick = world.getTime() + STALE_TERRITORY_RESCAN_COOLDOWN_TICKS;
+                tinyTerritoryMatureDetectionStreak = 0;
+            }
+            return;
+        }
+        tinyTerritoryMatureDetectionStreak = 0;
     }
 
     private void maybeLogAdaptiveSummary() {
