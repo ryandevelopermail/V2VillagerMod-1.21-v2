@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.FarmerCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FarmerDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FarmerHarvestGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FarmerBonemealGoal;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -27,9 +28,11 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
     private static final int HARVEST_GOAL_PRIORITY = 3;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
     private static final int CRAFTING_GOAL_PRIORITY = 5;
+    private static final int BONEMEAL_GOAL_PRIORITY = 6;
     private static final Map<VillagerEntity, FarmerHarvestGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FarmerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FarmerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, FarmerBonemealGoal> BONEMEAL_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Set<BlockPos>> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
@@ -50,6 +53,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         FarmerHarvestGoal harvestGoal = upsertGoal(GOALS, villager, HARVEST_GOAL_PRIORITY,
                 () -> new FarmerHarvestGoal(villager, jobPos, chestPos));
         harvestGoal.setTargets(jobPos, chestPos);
+
+        FarmerBonemealGoal bonemealGoal = upsertGoal(BONEMEAL_GOALS, villager, BONEMEAL_GOAL_PRIORITY,
+                () -> new FarmerBonemealGoal(villager, jobPos, chestPos));
+        bonemealGoal.setTargets(jobPos, chestPos);
 
         FarmerDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new FarmerDistributionGoal(villager, jobPos, chestPos, null));
