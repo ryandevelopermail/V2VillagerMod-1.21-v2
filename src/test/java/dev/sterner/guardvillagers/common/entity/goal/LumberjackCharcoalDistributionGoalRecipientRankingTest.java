@@ -1,12 +1,14 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.village.VillagerProfession;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LumberjackCharcoalDistributionGoalRecipientRankingTest {
 
@@ -58,5 +60,13 @@ class LumberjackCharcoalDistributionGoalRecipientRankingTest {
         LumberjackCharcoalDistributionGoal.sortRecipientsForSelection(recipients);
 
         assertEquals(urgentFurnaceRefill.chestPos(), recipients.getFirst().chestPos());
+    }
+
+    @Test
+    void storageShortfallTargetsOnlyFuelConsumers() {
+        assertTrue(LumberjackCharcoalDistributionGoal.computeStorageShortfall(VillagerProfession.BUTCHER, 0) > 0);
+        assertTrue(LumberjackCharcoalDistributionGoal.computeStorageShortfall(VillagerProfession.ARMORER, 0) > 0);
+        assertEquals(0, LumberjackCharcoalDistributionGoal.computeStorageShortfall(VillagerProfession.TOOLSMITH, 0));
+        assertEquals(0, LumberjackCharcoalDistributionGoal.computeStorageShortfall(VillagerProfession.WEAPONSMITH, 0));
     }
 }

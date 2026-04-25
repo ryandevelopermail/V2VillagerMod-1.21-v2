@@ -75,11 +75,9 @@ public final class RecipeDemandIndex {
         scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.FARMER, RecipeDemandIndex::isFarmerOutput, FARMER_PLANK_COMPONENT_CAP, 1.15D);
         scanDynamic(world, aggregate, detectedToolMaterialDemandProfessions, VillagerProfession.MASON, RecipeDemandIndex::isMasonOutput, MASON_PLANK_COMPONENT_CAP, 1.4D);
 
-        // non-crafting but currently used by lumberjack fuel routing
+        // non-crafting but used by lumberjack fuel routing for real furnace consumers
         add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.BUTCHER, 1, 16, 1.0D, false, false);
         add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.ARMORER, 1, 16, 1.0D, false, false);
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.TOOLSMITH, 1, 16, 1.0D, false, false);
-        add(aggregate, DemandMaterial.CHARCOAL, VillagerProfession.WEAPONSMITH, 1, 16, 1.0D, false, false);
 
         RouteIndex routeIndex = new RouteIndex(toImmutable(aggregate));
         validateToolMaterialDemandCoverage(routeIndex, detectedToolMaterialDemandProfessions);

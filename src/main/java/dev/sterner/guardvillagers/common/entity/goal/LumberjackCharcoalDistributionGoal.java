@@ -37,7 +37,7 @@ import java.util.Optional;
 
 /**
  * Distributes surplus charcoal from the lumberjack's paired chest to nearby
- * fuel-consuming professions (butcher, armorer, toolsmith, weaponsmith).
+ * fuel-consuming professions (butcher, armorer).
  *
  * <p>The lumberjack always retains at least {@value #CHARCOAL_RESERVE} charcoal in its
  * chest so the furnace has continuous fuel to keep producing more. Only charcoal
@@ -290,16 +290,13 @@ public class LumberjackCharcoalDistributionGoal extends Goal {
     /**
      * Finds the next recipient chest (round-robin) with space for charcoal.
      * Demand-true recipients are ranked ahead of recipients that merely have chest space.
-     * Recipients: butcher (smoker), armorer (blast furnace), toolsmith (smithing table),
-     * weaponsmith (grindstone).
+     * Recipients: butcher (smoker), armorer (blast furnace).
      */
     private RecipientEntry findRecipient(ServerWorld world) {
         // Build a combined ranked list across all recipient professions
         List<RecipientEntry> all = new ArrayList<>();
         all.addAll(findRecipientsByProfession(world, VillagerProfession.BUTCHER, Blocks.SMOKER));
         all.addAll(findRecipientsByProfession(world, VillagerProfession.ARMORER, Blocks.BLAST_FURNACE));
-        all.addAll(findRecipientsByProfession(world, VillagerProfession.TOOLSMITH, Blocks.SMITHING_TABLE));
-        all.addAll(findRecipientsByProfession(world, VillagerProfession.WEAPONSMITH, Blocks.GRINDSTONE));
 
         // Filter: only recipients whose chest has room for charcoal
         all.removeIf(e -> !hasSpaceForCharcoal(e.inventory()));
