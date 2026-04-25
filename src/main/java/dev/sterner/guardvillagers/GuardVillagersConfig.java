@@ -128,6 +128,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=1)
     public static int shepherdFenceBatchMax = 3;
     @Entry
+    public static boolean shepherdAllowPenRebuildIfMissing = false;
+    @Entry
     public static MasonWallPoiMode masonWallPoiMode = MasonWallPoiMode.JOBS_AND_BEDS;
     @Entry(min=0)
     public static int masonWallExpandBlocks = 5;
