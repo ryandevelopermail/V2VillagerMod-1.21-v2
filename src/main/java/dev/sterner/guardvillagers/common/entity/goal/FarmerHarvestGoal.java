@@ -223,9 +223,6 @@ public class FarmerHarvestGoal extends Goal {
         if (world.getTime() < adaptiveThrottleUntilTick) {
             return false;
         }
-        if (shouldThrottleFarmlandExpansionChecks(world)) {
-            return false;
-        }
         ensureEligibleTerritoryCache(world, false);
         int eligibleTerritoryCount = getEligibleTerritoryCount(world);
         if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
@@ -234,6 +231,15 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
+        if (shouldApplyExpansionThrottle(preflight) && shouldThrottleFarmlandExpansionChecks(world)) {
+            LOGGER.debug("Farmer {} throttled expansion (expansionOnlyCandidate=true matureCropCount={})",
+                    villager.getUuidAsString(), preflight.matureCropCount);
+            return false;
+        }
+        if (preflight.matureCropCount > 0 && isAdaptiveThrottleLoadHigh()) {
+            LOGGER.debug("Farmer {} harvest allowed despite throttle due to mature crops (matureCropCount={})",
+                    villager.getUuidAsString(), preflight.matureCropCount);
+        }
 
         // Guard the expensive ~30k-block farmland scan behind resource availability.
         // The coverage scan is only actionable when the farmer can plant (seeds) or prep ground (hoe).
@@ -1192,7 +1198,10 @@ public class FarmerHarvestGoal extends Goal {
             reason = "no plant targets after hoeing and no seeds acquired";
         }
 
-        return new BootstrapPreflight(matureCropCount, plantedCropCount, canHoeGround, hasPlantTargets, hasSeedsForPlanting, reason);
+        boolean expansionOnlyCandidate = matureCropCount == 0
+                && (reason != null || canHoeGround || hasPlantTargets || !hasSeedsForPlanting);
+        return new BootstrapPreflight(matureCropCount, plantedCropCount, canHoeGround, hasPlantTargets, hasSeedsForPlanting,
+                reason, expansionOnlyCandidate);
     }
 
     private void finishDailyRunIfNeeded(ServerWorld world) {
@@ -1216,14 +1225,17 @@ public class FarmerHarvestGoal extends Goal {
         private final boolean hasPlantTargets;
         private final boolean hasSeedsForPlanting;
         private final String reason;
+        private final boolean expansionOnlyCandidate;
 
-        private BootstrapPreflight(int matureCropCount, int plantedCropCount, boolean canHoeGround, boolean hasPlantTargets, boolean hasSeedsForPlanting, String reason) {
+        private BootstrapPreflight(int matureCropCount, int plantedCropCount, boolean canHoeGround, boolean hasPlantTargets,
+                                   boolean hasSeedsForPlanting, String reason, boolean expansionOnlyCandidate) {
             this.matureCropCount = matureCropCount;
             this.plantedCropCount = plantedCropCount;
             this.canHoeGround = canHoeGround;
             this.hasPlantTargets = hasPlantTargets;
             this.hasSeedsForPlanting = hasSeedsForPlanting;
             this.reason = reason;
+            this.expansionOnlyCandidate = expansionOnlyCandidate;
         }
 
         private boolean shouldRun() {
@@ -1712,12 +1724,24 @@ public class FarmerHarvestGoal extends Goal {
         return !hasPlantablesForPlanting;
     }
 
-    private boolean shouldThrottleFarmlandExpansionChecks(ServerWorld world) {
+    static boolean shouldApplyExpansionThrottle(int matureCropCount, boolean expansionOnlyCandidate) {
+        return matureCropCount <= 0 && expansionOnlyCandidate;
+    }
+
+    private boolean shouldApplyExpansionThrottle(BootstrapPreflight preflight) {
+        return shouldApplyExpansionThrottle(preflight.matureCropCount, preflight.expansionOnlyCandidate);
+    }
+
+    private boolean isAdaptiveThrottleLoadHigh() {
         long adaptiveLoadScore = adaptiveScanVolumeWindow
                 + (long) adaptivePathRetryWindow * 18L
                 + (long) adaptiveFailedSessionWindow * 40L
                 + (long) adaptiveForcedRecoveryWindow * 55L;
-        if (adaptiveLoadScore < GuardVillagersConfig.farmerAdaptiveThrottleLoadThreshold) {
+        return adaptiveLoadScore >= GuardVillagersConfig.farmerAdaptiveThrottleLoadThreshold;
+    }
+
+    private boolean shouldThrottleFarmlandExpansionChecks(ServerWorld world) {
+        if (!isAdaptiveThrottleLoadHigh()) {
             return false;
         }
         int jitter = GuardVillagersConfig.farmerAdaptiveThrottleJitterTicks <= 0
