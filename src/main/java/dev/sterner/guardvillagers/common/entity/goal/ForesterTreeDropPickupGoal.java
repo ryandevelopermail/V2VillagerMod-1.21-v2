@@ -282,7 +282,11 @@ public class ForesterTreeDropPickupGoal extends Goal {
         for (int i = 0; i < inv.size(); i++) {
             ItemStack slot = inv.getStack(i);
             if (slot.isEmpty()) return true;
-            if (ItemStack.canCombine(slot, candidate)) {
+            // Use explicit merge checks for mapping/API portability (canCombine is absent on some branches).
+            if (!slot.isEmpty()
+                    && !candidate.isEmpty()
+                    && slot.getItem() == candidate.getItem()
+                    && ItemStack.areItemsAndComponentsEqual(slot, candidate)) {
                 int slotLimit = Math.min(slot.getMaxCount(), inv.getMaxCountPerStack());
                 if (slot.getCount() < slotLimit) return true;
             }
