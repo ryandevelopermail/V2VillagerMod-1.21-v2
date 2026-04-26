@@ -11,6 +11,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.LeavesBlock;
 import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.inventory.Inventory;
@@ -1338,36 +1339,7 @@ public class LumberjackGuardChopTreesGoal extends Goal {
         int effectiveTreeSearchRadius = getEffectiveTreeSearchRadius(guard);
 
         Set<BlockPos> excluded = new HashSet<>(guard.getSelectedTreeTargets());
-        BlockPos min = center.add(-effectiveTreeSearchRadius, -TREE_SEARCH_HEIGHT, -effectiveTreeSearchRadius);
-        BlockPos max = center.add(effectiveTreeSearchRadius, TREE_SEARCH_HEIGHT, effectiveTreeSearchRadius);
-        BlockPos nearest = null;
-        double nearestDistance = Double.MAX_VALUE;
-
-        for (BlockPos cursor : BlockPos.iterate(min, max)) {
-            BlockPos pos = cursor.toImmutable();
-            if (!center.isWithinDistance(pos, effectiveTreeSearchRadius)) {
-                continue;
-            }
-            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
-                continue;
-            }
-
-            BlockPos root = normalizeRootStatic(world, pos);
-            if (excluded.contains(root)) {
-                continue;
-            }
-            if (!isEligibleRootStatic(world, root)) {
-                continue;
-            }
-
-            double distance = center.getSquaredDistance(root);
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                nearest = root;
-            }
-        }
-
-        return nearest;
+        return selectEligibleTreeRootNearAnchor(world, center, effectiveTreeSearchRadius, TREE_SEARCH_HEIGHT, excluded);
     }
 
     private int getEffectiveTreeSearchRadius() {
@@ -1409,6 +1381,48 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private static boolean isEligibleRootStatic(ServerWorld world, BlockPos pos) {
         return isEligibleRootImpl(world, pos, null);
+    }
+
+    @Nullable
+    public static BlockPos selectEligibleTreeRootNearAnchor(ServerWorld world,
+                                                            BlockPos anchor,
+                                                            int horizontalRadius,
+                                                            int searchHeight,
+                                                            Set<BlockPos> excludedRoots) {
+        BlockPos min = anchor.add(-horizontalRadius, -searchHeight, -horizontalRadius);
+        BlockPos max = anchor.add(horizontalRadius, searchHeight, horizontalRadius);
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+
+        for (BlockPos cursor : BlockPos.iterate(min, max)) {
+            BlockPos pos = cursor.toImmutable();
+            if (!anchor.isWithinDistance(pos, horizontalRadius)) {
+                continue;
+            }
+            if (!world.getBlockState(pos).isIn(BlockTags.LOGS)) {
+                continue;
+            }
+
+            BlockPos normalizedRoot = normalizeRootStatic(world, pos);
+            if (excludedRoots.contains(normalizedRoot)) {
+                continue;
+            }
+            if (!isEligibleTreeRoot(world, normalizedRoot)) {
+                continue;
+            }
+
+            double distanceSq = anchor.getSquaredDistance(normalizedRoot);
+            if (distanceSq < nearestDistance) {
+                nearestDistance = distanceSq;
+                nearest = normalizedRoot;
+            }
+        }
+
+        return nearest;
+    }
+
+    public static boolean isEligibleTreeRoot(ServerWorld world, BlockPos root) {
+        return isEligibleRootStatic(world, root);
     }
 
     private static boolean hasMinimumTreeStructureStatic(ServerWorld world, BlockPos root) {
@@ -2793,7 +2807,30 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private TreeTeardownResult teardownTree(ServerWorld world, BlockPos root) {
-        ConnectedLogScanResult scanResult = collectConnectedLogsWithinTreeBounds(world, root);
+        TreeTeardownExecutionResult execution = executeTreeTeardownWithSafeguards(world, this.guard, root, this::bufferStack);
+        LOGGER.debug("Lumberjack Guard {} tree teardown at {} accepted {} logs and rejected {} cross-tree log candidates",
+                this.guard.getUuidAsString(),
+                root,
+                execution.initialCandidateLogs(),
+                execution.rejectedCrossTreeCandidates());
+
+        LOGGER.info("Lumberjack Guard {} chopped tree at {} ({} logs, {} attached leaves)",
+                this.guard.getUuidAsString(),
+                root,
+                execution.brokenLogs(),
+                execution.brokenLeaves());
+
+        return new TreeTeardownResult(execution.initialCandidateLogs(), execution.brokenLogs(), execution.brokenLeaves());
+    }
+
+    public static TreeTeardownExecutionResult executeTreeTeardownWithSafeguards(ServerWorld world,
+                                                                                LivingEntity breaker,
+                                                                                BlockPos root,
+                                                                                Consumer<ItemStack> dropCollector) {
+        ConnectedLogScanResult scanResult = collectConnectedLogsWithinTreeBounds(
+                root,
+                pos -> world.getBlockState(pos).isIn(BlockTags.LOGS),
+                LumberjackGuardChopTreesGoal::getTrunkAdjacentStatic);
         Set<BlockPos> logs = scanResult.logs();
         Set<BlockPos> attachedLeaves = new HashSet<>();
 
@@ -2810,33 +2847,25 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             }
         }
 
-        LOGGER.debug("Lumberjack Guard {} tree teardown at {} accepted {} logs and rejected {} cross-tree log candidates",
-                this.guard.getUuidAsString(),
-                root,
-                logs.size(),
-                scanResult.rejectedCrossTreeCandidates());
-
         int brokenLogs = 0;
         int brokenLeaves = 0;
-
         for (BlockPos logPos : logs) {
-            if (breakAndCollect(world, logPos)) {
+            if (breakAndCollectStatic(world, breaker, logPos, dropCollector)) {
                 brokenLogs++;
             }
         }
         for (BlockPos leafPos : attachedLeaves) {
-            if (breakAndCollect(world, leafPos)) {
+            if (breakAndCollectStatic(world, breaker, leafPos, dropCollector)) {
                 brokenLeaves++;
             }
         }
 
-        LOGGER.info("Lumberjack Guard {} chopped tree at {} ({} logs, {} attached leaves)",
-                this.guard.getUuidAsString(),
-                root,
+        return new TreeTeardownExecutionResult(
+                logs.size(),
                 brokenLogs,
-                brokenLeaves);
-
-        return new TreeTeardownResult(logs.size(), brokenLogs, brokenLeaves);
+                brokenLeaves,
+                scanResult.rejectedCrossTreeCandidates(),
+                scanResult.usedFallbackSeed());
     }
 
     private int updateAndGetFocusedRootTicks(BlockPos targetRoot) {
@@ -2880,6 +2909,13 @@ public class LumberjackGuardChopTreesGoal extends Goal {
 
     private ConnectedLogScanResult collectConnectedLogsWithinTreeBounds(ServerWorld world, BlockPos root) {
         return collectConnectedLogsWithinTreeBounds(root, pos -> isEligibleLog(world, pos), this::getTrunkAdjacent);
+    }
+
+    public static int countRemainingLogsWithinTreeBounds(ServerWorld world, BlockPos root) {
+        return collectConnectedLogsWithinTreeBounds(
+                root,
+                pos -> world.getBlockState(pos).isIn(BlockTags.LOGS),
+                LumberjackGuardChopTreesGoal::getTrunkAdjacentStatic).logs().size();
     }
 
     static ConnectedLogScanResult collectConnectedLogsWithinTreeBounds(BlockPos root,
@@ -2968,12 +3004,23 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     private record TreeTeardownResult(int initialCandidateLogs, int brokenLogs, int brokenLeaves) {
     }
 
+    public record TreeTeardownExecutionResult(int initialCandidateLogs,
+                                              int brokenLogs,
+                                              int brokenLeaves,
+                                              int rejectedCrossTreeCandidates,
+                                              boolean usedFallbackSeed) {
+    }
+
     static boolean isWithinCrownRadius(BlockPos root, BlockPos candidate) {
         return Math.abs(candidate.getX() - root.getX()) <= TREE_CROWN_RADIUS
                 && Math.abs(candidate.getZ() - root.getZ()) <= TREE_CROWN_RADIUS;
     }
 
     private List<BlockPos> getTrunkAdjacent(BlockPos pos) {
+        return getTrunkAdjacentStatic(pos);
+    }
+
+    private static List<BlockPos> getTrunkAdjacentStatic(BlockPos pos) {
         List<BlockPos> adjacent = new ArrayList<>(26);
         for (int x = -1; x <= 1; x++) {
             for (int y = -1; y <= 1; y++) {
@@ -2989,20 +3036,27 @@ public class LumberjackGuardChopTreesGoal extends Goal {
     }
 
     private boolean breakAndCollect(ServerWorld world, BlockPos pos) {
+        return breakAndCollectStatic(world, this.guard, pos, this::bufferStack);
+    }
+
+    private static boolean breakAndCollectStatic(ServerWorld world,
+                                                 LivingEntity breaker,
+                                                 BlockPos pos,
+                                                 Consumer<ItemStack> collector) {
         BlockState state = world.getBlockState(pos);
         if (state.isAir()) {
             return false;
         }
 
         BlockEntity blockEntity = world.getBlockEntity(pos);
-        List<ItemStack> drops = Block.getDroppedStacks(state, world, pos, blockEntity, this.guard, ItemStack.EMPTY);
+        List<ItemStack> drops = Block.getDroppedStacks(state, world, pos, blockEntity, breaker, ItemStack.EMPTY);
         if (!world.removeBlock(pos, false)) {
             return false;
         }
 
         for (ItemStack drop : drops) {
             if (!drop.isEmpty()) {
-                bufferStack(drop.copy());
+                collector.accept(drop.copy());
             }
         }
         return true;
