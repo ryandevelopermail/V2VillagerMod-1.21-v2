@@ -137,6 +137,22 @@ public final class LumberjackBootstrapCoordinator {
         transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.DONE, false);
     }
 
+    public static void recordPlacedTable(ServerWorld world, VillagerEntity villager, BlockPos placedTablePos) {
+        VillageScope scope = resolveScope(world, villager);
+        if (scope == null) {
+            return;
+        }
+
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue entry = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+        if (entry == null || !entry.candidateUuid().equals(villager.getUuid())) {
+            return;
+        }
+        state.setPlacedTablePos(world, scope.key().kind(), scope.key().packed(), placedTablePos, world.getTime());
+    }
+
     public static void onWorldUnload(RegistryKey<World> worldKey) {
         // No runtime cache to clear; lifecycle state is persistent.
     }
