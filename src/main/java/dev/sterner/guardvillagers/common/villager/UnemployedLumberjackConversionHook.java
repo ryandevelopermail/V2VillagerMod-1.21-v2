@@ -61,6 +61,11 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
+            LumberjackBootstrapChopRunner.tick(world, villager);
+            if (LumberjackBootstrapChopRunner.isFailed(villager) || !LumberjackBootstrapChopRunner.isCompleted(villager)) {
+                continue;
+            }
+
             Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager);
             if (craftingTablePos.isEmpty()) {
                 LumberjackBootstrapCoordinator.markNeedsTable(world, villager);

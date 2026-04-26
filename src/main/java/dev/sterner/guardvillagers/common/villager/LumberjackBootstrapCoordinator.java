@@ -125,6 +125,14 @@ public final class LumberjackBootstrapCoordinator {
         transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.READY_TO_CONVERT, false);
     }
 
+    public static void markChoppingOneTree(ServerWorld world, VillagerEntity villager) {
+        transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.CHOPPING_ONE_TREE, false);
+    }
+
+    public static void markFailed(ServerWorld world, VillagerEntity villager) {
+        transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.FAILED, true);
+    }
+
     public static void markDone(ServerWorld world, VillagerEntity villager) {
         transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.DONE, false);
     }
