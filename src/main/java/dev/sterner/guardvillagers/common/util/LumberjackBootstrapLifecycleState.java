@@ -229,6 +229,15 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
         markDirty();
     }
 
+    public boolean removeEntry(ServerWorld world, VillageKind kind, long packed) {
+        EntryKey key = new EntryKey(world.getRegistryKey(), kind, packed);
+        if (entries.remove(key) == null) {
+            return false;
+        }
+        markDirty();
+        return true;
+    }
+
     public void removeWorld(RegistryKey<World> worldKey) {
         if (entries.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey))) {
             markDirty();

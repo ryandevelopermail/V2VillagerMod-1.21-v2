@@ -128,6 +128,10 @@ public final class LumberjackBootstrapChopRunner {
         return state != null && state.failed;
     }
 
+    public static void clearState(VillagerEntity villager) {
+        STATES.remove(villager.getUuid());
+    }
+
     @Nullable
     public static BlockPos getPlacedTablePos(VillagerEntity villager) {
         RunnerState state = STATES.get(villager.getUuid());
@@ -186,6 +190,7 @@ public final class LumberjackBootstrapChopRunner {
                 villager.getUuidAsString(),
                 placement.toShortString(),
                 resources);
+        UnemployedLumberjackConversionHook.convert(world, villager, placement, "bootstrap-table-placed");
     }
 
     private static void collectNearbyWoodDrops(ServerWorld world, VillagerEntity villager, List<ItemStack> buffer) {
