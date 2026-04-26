@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -67,6 +68,9 @@ public final class UnemployedLumberjackConversionHook {
             }
 
             LumberjackBootstrapChopRunner.ensureBootstrapCraftingTable(world, villager);
+            if (!villager.isAlive() || villager.isRemoved() || villager.getWorld() != world) {
+                continue;
+            }
             Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager);
             if (craftingTablePos.isEmpty()) {
                 LumberjackBootstrapCoordinator.markNeedsTable(world, villager);
@@ -216,8 +220,15 @@ public final class UnemployedLumberjackConversionHook {
     }
 
     private static void convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
+        convert(world, villager, tablePos, "unemployed lumberjack conversion");
+    }
+
+    static void convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos, String reservationSource) {
         LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
         if (guard == null) {
+            LOGGER.warn("Failed to create lumberjack guard entity for villager={} table={}",
+                    villager.getUuidAsString(),
+                    tablePos.toShortString());
             return;
         }
 
@@ -227,17 +238,26 @@ public final class UnemployedLumberjackConversionHook {
         guard.setPairedCraftingTablePos(tablePos);
         JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
         guard.startChopCountdown(world.getTime(), 0L);
+        LumberjackGuardChopTreesGoal.scheduleSingleTreeRecoverySession(world, guard);
 
-        ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(), VillagerProfession.NONE, "unemployed lumberjack conversion");
+        ConvertedWorkerJobSiteReservationManager.EnsureResult reservationResult = ConvertedWorkerJobSiteReservationManager.ensureReservation(
+                world,
+                tablePos,
+                guard.getUuid(),
+                VillagerProfession.NONE,
+                reservationSource);
 
         world.spawnEntityAndPassengers(guard);
-        LOGGER.info("Converted unemployed villager {} into lumberjack guard {} at crafting table {}",
+        LOGGER.info("Converted unemployed villager {} into lumberjack guard {} at crafting table {} (reservation={}, source={})",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),
-                tablePos.toShortString());
+                tablePos.toShortString(),
+                reservationResult,
+                reservationSource);
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         LumberjackBootstrapCoordinator.markDone(world, villager);
+        LumberjackBootstrapChopRunner.clearState(villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
     }
 

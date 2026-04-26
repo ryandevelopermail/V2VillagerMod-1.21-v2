@@ -178,6 +178,14 @@ public final class LumberjackBootstrapCoordinator {
             state.markRetry(world, scope.key().kind(), scope.key().packed(), world.getTime());
         }
         state.advanceStage(world, scope.key().kind(), scope.key().packed(), stage, world.getTime());
+        if (stage == LumberjackBootstrapLifecycleState.Stage.DONE) {
+            boolean removed = state.removeEntry(world, scope.key().kind(), scope.key().packed());
+            LOGGER.info("lumberjack-bootstrap finalized village={} villager={} stage={} candidateEntryRemoved={}",
+                    scope.key(),
+                    villager.getUuidAsString(),
+                    stage,
+                    removed);
+        }
     }
 
     @Nullable
