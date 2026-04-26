@@ -40,6 +40,7 @@ public final class LumberjackBootstrapChopRunner {
     private static final double PICKUP_RADIUS = 2.5D;
     private static final int CRAFTING_TABLE_PLANK_COST = 4;
     private static final int MAX_PLACEMENT_RETRY_DELAY_TICKS = 20 * 30;
+    private static final int CHOP_PATH_TIMEOUT_TICKS = 20 * 20;
 
     private static final Map<UUID, RunnerState> STATES = new HashMap<>();
 
@@ -67,18 +68,21 @@ public final class LumberjackBootstrapChopRunner {
                     new HashSet<>());
             if (state.targetRoot == null) {
                 state.failed = true;
-                LumberjackBootstrapCoordinator.markFailed(world, villager);
+                LumberjackBootstrapCoordinator.markFailure(world, villager,
+                        LumberjackBootstrapCoordinator.BootstrapFailure.NO_VALID_TREE_FOUND);
                 LOGGER.debug("lumberjack-bootstrap no eligible root for villager={} anchor={}",
                         villager.getUuidAsString(),
                         anchor.toShortString());
                 return;
             }
             LumberjackBootstrapCoordinator.markChoppingOneTree(world, villager);
+            state.pathStartTick = world.getTime();
         }
 
         if (!LumberjackGuardChopTreesGoal.isEligibleTreeRoot(world, state.targetRoot)) {
             state.failed = true;
-            LumberjackBootstrapCoordinator.markFailed(world, villager);
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.NO_VALID_TREE_FOUND);
             LOGGER.debug("lumberjack-bootstrap root became invalid villager={} root={}",
                     villager.getUuidAsString(),
                     state.targetRoot.toShortString());
@@ -87,6 +91,16 @@ public final class LumberjackBootstrapChopRunner {
 
         double distanceSq = villager.squaredDistanceTo(Vec3d.ofCenter(state.targetRoot));
         if (distanceSq > APPROACH_DISTANCE_SQ) {
+            if (world.getTime() - state.pathStartTick > CHOP_PATH_TIMEOUT_TICKS) {
+                state.failed = true;
+                LumberjackBootstrapCoordinator.markFailure(world, villager,
+                        LumberjackBootstrapCoordinator.BootstrapFailure.CHOP_OR_PATH_TIMEOUT);
+                LOGGER.warn("lumberjack-bootstrap path timeout villager={} root={} timeout_ticks={}",
+                        villager.getUuidAsString(),
+                        state.targetRoot.toShortString(),
+                        CHOP_PATH_TIMEOUT_TICKS);
+                return;
+            }
             villager.getNavigation().startMovingTo(state.targetRoot.getX() + 0.5D, state.targetRoot.getY(), state.targetRoot.getZ() + 0.5D, 0.8D);
             return;
         }
@@ -99,7 +113,8 @@ public final class LumberjackBootstrapChopRunner {
 
         if (teardown.brokenLogs() <= 0 || remainingLogs > 0) {
             state.failed = true;
-            LumberjackBootstrapCoordinator.markFailed(world, villager);
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.CHOP_OR_PATH_TIMEOUT);
             LOGGER.warn("lumberjack-bootstrap chop failed villager={} root={} brokenLogs={} remainingLogs={} bufferedStacks={}",
                     villager.getUuidAsString(),
                     state.targetRoot.toShortString(),
@@ -155,22 +170,30 @@ public final class LumberjackBootstrapChopRunner {
 
         PlacementResources resources = countPlacementResources(state.buffer);
         if (!resources.canCraftingTable()) {
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.INSUFFICIENT_WOOD_FOR_TABLE);
             schedulePlacementRetry(state, now);
             return;
         }
 
         BlockPos placement = findPlacementNearVillager(world, villager);
         if (placement == null) {
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.TABLE_PLACEMENT_BLOCKED);
             schedulePlacementRetry(state, now);
             return;
         }
 
         if (!consumeCraftingTableCost(state.buffer)) {
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.INSUFFICIENT_WOOD_FOR_TABLE);
             schedulePlacementRetry(state, now);
             return;
         }
 
         if (!world.setBlockState(placement, Blocks.CRAFTING_TABLE.getDefaultState(), 3)) {
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.TABLE_PLACEMENT_BLOCKED);
             schedulePlacementRetry(state, now);
             return;
         }
@@ -358,6 +381,7 @@ public final class LumberjackBootstrapChopRunner {
         private long nextPlacementAttemptTick;
         private boolean completed;
         private boolean failed;
+        private long pathStartTick;
     }
 
     private record PlacementResources(int tables, int planks, int logs) {

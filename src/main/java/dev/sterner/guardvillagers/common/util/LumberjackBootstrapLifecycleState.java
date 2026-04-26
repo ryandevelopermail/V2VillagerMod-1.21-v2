@@ -39,6 +39,8 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     private static final String RETRY_COUNT_KEY = "RetryCount";
     private static final String CALLBACK_COUNT_KEY = "CallbackCount";
     private static final String PLACED_TABLE_POS_KEY = "PlacedTablePos";
+    private static final String NEXT_RETRY_TICK_KEY = "NextRetryTick";
+    private static final String LAST_FAILURE_KEY = "LastFailureKey";
 
     private final Map<EntryKey, EntryValue> entries = new HashMap<>();
 
@@ -107,7 +109,9 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                     row.getLong(UPDATED_TICK_KEY),
                     row.getInt(RETRY_COUNT_KEY),
                     row.getInt(CALLBACK_COUNT_KEY),
-                    NbtHelper.toBlockPos(row, PLACED_TABLE_POS_KEY).orElse(null)
+                    NbtHelper.toBlockPos(row, PLACED_TABLE_POS_KEY).orElse(null),
+                    row.contains(NEXT_RETRY_TICK_KEY, NbtElement.LONG_TYPE) ? row.getLong(NEXT_RETRY_TICK_KEY) : 0L,
+                    row.contains(LAST_FAILURE_KEY, NbtElement.STRING_TYPE) ? row.getString(LAST_FAILURE_KEY) : ""
             );
             state.entries.put(key, value);
         }
@@ -131,6 +135,10 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
             row.putInt(CALLBACK_COUNT_KEY, entry.getValue().callbackCount());
             if (entry.getValue().placedTablePos() != null) {
                 row.put(PLACED_TABLE_POS_KEY, NbtHelper.fromBlockPos(entry.getValue().placedTablePos()));
+            }
+            row.putLong(NEXT_RETRY_TICK_KEY, entry.getValue().nextRetryTick());
+            if (!entry.getValue().lastFailureKey().isEmpty()) {
+                row.putString(LAST_FAILURE_KEY, entry.getValue().lastFailureKey());
             }
             list.add(row);
         }
@@ -172,7 +180,9 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                     nowTick,
                     retries,
                     callbacks,
-                    existing != null ? existing.placedTablePos() : null
+                    existing != null ? existing.placedTablePos() : null,
+                    existing != null ? existing.nextRetryTick() : 0L,
+                    existing != null ? existing.lastFailureKey() : ""
             );
         }
 
@@ -211,6 +221,40 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
         }
         entries.put(key, existing.withRetryCount(existing.retryCount() + 1).withUpdatedTick(nowTick));
         markDirty();
+    }
+
+    public FailureResult applyFailure(ServerWorld world,
+                                      VillageKind kind,
+                                      long packed,
+                                      String failureKey,
+                                      int delayTicks,
+                                      int maxAttempts,
+                                      boolean terminalFail,
+                                      long nowTick) {
+        EntryKey key = new EntryKey(world.getRegistryKey(), kind, packed);
+        EntryValue existing = entries.get(key);
+        if (existing == null) {
+            return FailureResult.MISSING;
+        }
+        if (existing.stage().isTerminal()) {
+            return FailureResult.TERMINAL;
+        }
+
+        int nextRetries = existing.retryCount() + 1;
+        boolean reachedMaxAttempts = nextRetries >= Math.max(1, maxAttempts);
+        boolean failedTerminally = terminalFail && reachedMaxAttempts;
+        Stage nextStage = failedTerminally ? Stage.FAILED : existing.stage();
+        long nextRetryTick = nowTick + Math.max(1, delayTicks);
+
+        EntryValue next = existing
+                .withRetryCount(nextRetries)
+                .withStage(nextStage)
+                .withUpdatedTick(nowTick)
+                .withNextRetryTick(nextRetryTick)
+                .withLastFailureKey(failureKey == null ? "" : failureKey);
+        entries.put(key, next);
+        markDirty();
+        return failedTerminally ? FailureResult.TERMINAL : FailureResult.RETRY_SCHEDULED;
     }
 
     public void setPlacedTablePos(ServerWorld world, VillageKind kind, long packed, BlockPos placedTablePos, long nowTick) {
@@ -273,27 +317,43 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                              long updatedTick,
                              int retryCount,
                              int callbackCount,
-                             BlockPos placedTablePos) {
+                             BlockPos placedTablePos,
+                             long nextRetryTick,
+                             String lastFailureKey) {
 
         EntryValue withUpdatedTick(long tick) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, tick, retryCount, callbackCount, placedTablePos);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, tick, retryCount, callbackCount, placedTablePos, nextRetryTick, lastFailureKey);
         }
 
         EntryValue withStage(Stage nextStage) {
-            return new EntryValue(candidateUuid, anchor, nextStage, createdTick, updatedTick, retryCount, callbackCount, placedTablePos);
+            return new EntryValue(candidateUuid, anchor, nextStage, createdTick, updatedTick, retryCount, callbackCount, placedTablePos, nextRetryTick, lastFailureKey);
         }
 
         EntryValue withRetryCount(int retries) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retries, callbackCount, placedTablePos);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retries, callbackCount, placedTablePos, nextRetryTick, lastFailureKey);
         }
 
         EntryValue withCallbackCount(int callbacks) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbacks, placedTablePos);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbacks, placedTablePos, nextRetryTick, lastFailureKey);
         }
 
         EntryValue withPlacedTablePos(BlockPos tablePos) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbackCount, tablePos);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbackCount, tablePos, nextRetryTick, lastFailureKey);
         }
+
+        EntryValue withNextRetryTick(long retryTick) {
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbackCount, placedTablePos, retryTick, lastFailureKey);
+        }
+
+        EntryValue withLastFailureKey(String failureKey) {
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbackCount, placedTablePos, nextRetryTick, failureKey == null ? "" : failureKey);
+        }
+    }
+
+    public enum FailureResult {
+        RETRY_SCHEDULED,
+        TERMINAL,
+        MISSING
     }
 
     private record EntryKey(RegistryKey<World> worldKey, VillageKind kind, long packed) {

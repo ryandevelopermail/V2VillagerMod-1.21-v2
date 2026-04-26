@@ -64,6 +64,9 @@ public final class UnemployedLumberjackConversionHook {
             if (!isEligibleUnemployed(villager) || villager.getWorld() != world) {
                 continue;
             }
+            if (LumberjackBootstrapCoordinator.shouldDeferCandidate(world, villager)) {
+                continue;
+            }
 
             LumberjackBootstrapChopRunner.tick(world, villager);
             if (LumberjackBootstrapChopRunner.isFailed(villager) || !LumberjackBootstrapChopRunner.isCompleted(villager)) {
@@ -233,6 +236,8 @@ public final class UnemployedLumberjackConversionHook {
     static void convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos, String reservationSource) {
         LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
         if (guard == null) {
+            LumberjackBootstrapCoordinator.markFailure(world, villager,
+                    LumberjackBootstrapCoordinator.BootstrapFailure.CONVERSION_FAILURE);
             LOGGER.warn("Failed to create lumberjack guard entity for villager={} table={}",
                     villager.getUuidAsString(),
                     tablePos.toShortString());
