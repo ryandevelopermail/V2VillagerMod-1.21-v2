@@ -310,7 +310,9 @@ public class GuardVillagers implements ModInitializer {
                     ProfessionDefinitions.markFallbackCandidates(world);
                 }
                 LumberjackPopulationBalancingService.tick(world);
-                VillageLumberjackSpawnManager.tick(world);
+                if (GuardVillagersConfig.enableLegacyLumberjackSpawnManager) {
+                    VillageLumberjackSpawnManager.tick(world);
+                }
                 VillagePenRegistry.tick(world);
                 LumberjackBootstrapCoordinator.tick(world);
                 runConversionHooksOnSchedule(world);
@@ -368,7 +370,8 @@ public class GuardVillagers implements ModInitializer {
         }
 
         LAST_CONVERSION_EXECUTION_TICK.put(worldKey, worldTick);
-        ProfessionDefinitions.runConversionHooks(world);
+        boolean includeLegacyUnemployedLumberjackHook = !GuardVillagersConfig.enableWorldgenBootstrapLumberjackFlow;
+        ProfessionDefinitions.runConversionHooks(world, includeLegacyUnemployedLumberjackHook);
     }
 
     /** Scan radius (blocks) for per-schedule guard reconciliation — covers normal village spread. */

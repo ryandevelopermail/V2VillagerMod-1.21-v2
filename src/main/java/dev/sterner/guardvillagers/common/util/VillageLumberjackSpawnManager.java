@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
+import dev.sterner.guardvillagers.common.villager.LumberjackBootstrapCoordinator;
 import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
 import dev.sterner.guardvillagers.common.villager.UnemployedLumberjackConversionHook;
 import net.minecraft.block.BlockState;
@@ -286,6 +287,13 @@ public final class VillageLumberjackSpawnManager {
     // -------------------------------------------------------------------------
 
     private static void processBell(ServerWorld world, BlockPos bellPos, String attemptType, long now) {
+        if (LumberjackBootstrapCoordinator.isVillageInActiveBootstrapLifecycle(world, bellPos)) {
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} — skipped while bootstrap lifecycle is active",
+                    attemptType, bellPos.toShortString());
+            NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            return;
+        }
+
         Box bellBox = new Box(bellPos).expand(BELL_EFFECT_RANGE);
 
         List<VillagerEntity> allVillagers = world.getEntitiesByClass(
@@ -725,6 +733,13 @@ public final class VillageLumberjackSpawnManager {
     private static boolean isUnemployed(VillagerEntity villager) {
         if (!villager.isAlive() || villager.isRemoved() || villager.isBaby()) return false;
         VillagerProfession profession = villager.getVillagerData().getProfession();
-        return profession == VillagerProfession.NONE;
+        if (profession != VillagerProfession.NONE) {
+            return false;
+        }
+        if (villager.getWorld() instanceof ServerWorld serverWorld
+                && LumberjackBootstrapCoordinator.isCandidateInActiveBootstrapLifecycle(serverWorld, villager)) {
+            return false;
+        }
+        return true;
     }
 }

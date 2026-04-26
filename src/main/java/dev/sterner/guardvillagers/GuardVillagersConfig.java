@@ -117,6 +117,10 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static float spawnChancePerVillager = 0.5f;
     @Entry
     public static boolean villagerConversionFallbackSweepEnabled = false;
+    @Entry
+    public static boolean enableLegacyLumberjackSpawnManager = true;
+    @Entry
+    public static boolean enableWorldgenBootstrapLumberjackFlow = false;
     @Entry(min=20)
     public static int villagerConversionCandidateMarkIntervalTicks = 1200;
     @Entry(min=20)
