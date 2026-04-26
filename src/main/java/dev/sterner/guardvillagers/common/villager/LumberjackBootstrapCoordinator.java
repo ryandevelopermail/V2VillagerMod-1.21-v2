@@ -157,6 +157,31 @@ public final class LumberjackBootstrapCoordinator {
         // No runtime cache to clear; lifecycle state is persistent.
     }
 
+    public static boolean isVillageInActiveBootstrapLifecycle(ServerWorld world, BlockPos bellPos) {
+        BlockPos normalizedBell = BellChestMappingState.get(world.getServer())
+                .getPrimaryBell(world, bellPos)
+                .toImmutable();
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue entry = state
+                .getEntry(world, LumberjackBootstrapLifecycleState.VillageKind.BELL, normalizedBell.asLong())
+                .orElse(null);
+        return entry != null && !entry.stage().isTerminal();
+    }
+
+    public static boolean isCandidateInActiveBootstrapLifecycle(ServerWorld world, VillagerEntity villager) {
+        VillageScope scope = resolveScope(world, villager);
+        if (scope == null) {
+            return false;
+        }
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue entry = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+        return entry != null
+                && !entry.stage().isTerminal()
+                && entry.candidateUuid().equals(villager.getUuid());
+    }
+
     private static void transitionForVillager(ServerWorld world,
                                               VillagerEntity villager,
                                               LumberjackBootstrapLifecycleState.Stage stage,

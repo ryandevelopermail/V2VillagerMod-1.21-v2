@@ -54,6 +54,9 @@ public final class UnemployedLumberjackConversionHook {
         // loading chunks with unemployed villagers near crafting tables.
 
         for (VillagerEntity villager : candidates) {
+            if (LumberjackBootstrapCoordinator.isCandidateInActiveBootstrapLifecycle(world, villager)) {
+                continue;
+            }
             if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, villager.getBlockPos(), "scheduled-unemployed-conversion")) {
                 continue;
             }
@@ -99,6 +102,10 @@ public final class UnemployedLumberjackConversionHook {
             return false;
         }
         if (profession != VillagerProfession.NONE) {
+            return false;
+        }
+        if (villager.getWorld() instanceof ServerWorld serverWorld
+                && LumberjackBootstrapCoordinator.isCandidateInActiveBootstrapLifecycle(serverWorld, villager)) {
             return false;
         }
         // Do NOT grab a villager that is already heading toward a non-crafting-table job site.

@@ -99,16 +99,27 @@ public final class ProfessionDefinitions {
     }
 
     public static void runConversionHooks(ServerWorld world) {
+        runConversionHooks(world, true);
+    }
+
+    public static void runConversionHooks(ServerWorld world, boolean includeUnemployedLumberjackHook) {
         for (ProfessionDefinition definition : DEFINITIONS) {
             Consumer<ServerWorld> conversionHook = definition.conversionHook();
             if (conversionHook != null) {
                 conversionHook.accept(world);
             }
         }
-        runUnemployedConversionHooks(world);
+        runUnemployedConversionHooks(world, includeUnemployedLumberjackHook);
     }
 
     public static void runUnemployedConversionHooks(ServerWorld world) {
+        runUnemployedConversionHooks(world, true);
+    }
+
+    public static void runUnemployedConversionHooks(ServerWorld world, boolean includeUnemployedLumberjackHook) {
+        if (!includeUnemployedLumberjackHook) {
+            return;
+        }
         for (Consumer<ServerWorld> conversionHook : UNEMPLOYED_CONVERSION_HOOKS) {
             conversionHook.accept(world);
         }
