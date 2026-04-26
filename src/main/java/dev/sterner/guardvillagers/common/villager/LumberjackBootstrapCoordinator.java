@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.common.util.BellChestMappingState;
+import dev.sterner.guardvillagers.common.util.LumberjackBootstrapLifecycleState;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.util.VillageMembershipTracker;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -11,13 +12,12 @@ import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.World;
 import net.minecraft.registry.RegistryKey;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -30,13 +30,19 @@ public final class LumberjackBootstrapCoordinator {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackBootstrapCoordinator.class);
     private static final int REGION_SIZE_BLOCKS = 96;
     private static final int REGION_HALF_EXTENT = REGION_SIZE_BLOCKS / 2;
-
-    /**
-     * World-scoped pending reservation map keyed by logical village region identity.
-     */
-    private static final Map<RegistryKey<World>, Map<VillageKey, UUID>> BOOTSTRAP_PENDING = new HashMap<>();
+    private static final long STALE_SELECTION_RETRY_TICKS = 20L * 30L;
 
     private LumberjackBootstrapCoordinator() {
+    }
+
+    public static void onWorldLoad(ServerWorld world) {
+        // Ensure persistent state object is materialized on world load.
+        LumberjackBootstrapLifecycleState.get(world.getServer());
+    }
+
+    public static void tick(ServerWorld world) {
+        // Reserved for lifecycle state maintenance. Explicit hook keeps lifecycle wiring
+        // consistent with other world managers and allows future pruning without API churn.
     }
 
     public static void attemptSelection(ServerWorld world, VillagerEntity naturalVillager) {
@@ -49,16 +55,29 @@ public final class LumberjackBootstrapCoordinator {
             return;
         }
 
-        Map<VillageKey, UUID> worldPending = BOOTSTRAP_PENDING.computeIfAbsent(world.getRegistryKey(), ignored -> new HashMap<>());
-        UUID pendingUuid = worldPending.get(scope.key());
-        if (pendingUuid != null && isStillEligible(world, pendingUuid, scope.searchBox())) {
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue existing = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+
+        if (existing != null && existing.stage().isTerminal()) {
+            return;
+        }
+
+        if (existing != null && isStillEligible(world, existing.candidateUuid(), scope.searchBox())) {
+            state.selectOrRefresh(world,
+                    scope.key().kind(),
+                    scope.key().packed(),
+                    existing.candidateUuid(),
+                    scope.anchor(),
+                    world.getTime());
             return;
         }
 
         List<VillagerEntity> candidates = world.getEntitiesByClass(
                 VillagerEntity.class,
                 scope.searchBox(),
-                villager -> isEligibleCandidate(villager, worldPending)
+                LumberjackBootstrapCoordinator::isEligibleUnemployed
         );
 
         VillagerEntity selected = candidates.stream()
@@ -69,22 +88,75 @@ public final class LumberjackBootstrapCoordinator {
                 .orElse(null);
 
         if (selected == null) {
-            worldPending.remove(scope.key());
+            if (existing != null && world.getTime() - existing.updatedTick() >= STALE_SELECTION_RETRY_TICKS) {
+                state.markRetry(world, scope.key().kind(), scope.key().packed(), world.getTime());
+                state.advanceStage(world,
+                        scope.key().kind(),
+                        scope.key().packed(),
+                        LumberjackBootstrapLifecycleState.Stage.FAILED,
+                        world.getTime());
+            }
             return;
         }
 
-        worldPending.put(scope.key(), selected.getUuid());
-        LOGGER.debug("lumberjack-bootstrap pending selected village={} villager={} anchor={} candidates={}",
+        LumberjackBootstrapLifecycleState.EntryValue updated = state.selectOrRefresh(
+                world,
+                scope.key().kind(),
+                scope.key().packed(),
+                selected.getUuid(),
+                scope.anchor(),
+                world.getTime()
+        );
+
+        LOGGER.debug("lumberjack-bootstrap pending selected village={} villager={} anchor={} candidates={} stage={} retries={}",
                 scope.key(),
                 selected.getUuidAsString(),
-                naturalVillager.getBlockPos().toShortString(),
-                candidates.size());
+                scope.anchor().toShortString(),
+                candidates.size(),
+                updated.stage(),
+                updated.retryCount());
+    }
+
+    public static void markNeedsTable(ServerWorld world, VillagerEntity villager) {
+        transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.NEEDS_TABLE, true);
+    }
+
+    public static void markReadyToConvert(ServerWorld world, VillagerEntity villager) {
+        transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.READY_TO_CONVERT, false);
+    }
+
+    public static void markDone(ServerWorld world, VillagerEntity villager) {
+        transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.DONE, false);
     }
 
     public static void onWorldUnload(RegistryKey<World> worldKey) {
-        BOOTSTRAP_PENDING.remove(worldKey);
+        // No runtime cache to clear; lifecycle state is persistent.
     }
 
+    private static void transitionForVillager(ServerWorld world,
+                                              VillagerEntity villager,
+                                              LumberjackBootstrapLifecycleState.Stage stage,
+                                              boolean countRetry) {
+        VillageScope scope = resolveScope(world, villager);
+        if (scope == null) {
+            return;
+        }
+
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue entry = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+        if (entry == null || !entry.candidateUuid().equals(villager.getUuid())) {
+            return;
+        }
+
+        if (countRetry) {
+            state.markRetry(world, scope.key().kind(), scope.key().packed(), world.getTime());
+        }
+        state.advanceStage(world, scope.key().kind(), scope.key().packed(), stage, world.getTime());
+    }
+
+    @Nullable
     private static VillageScope resolveScope(ServerWorld world, VillagerEntity villager) {
         GlobalPos homeBell = VillageMembershipTracker.getHomeBell(villager);
         if (homeBell != null && homeBell.dimension().equals(world.getRegistryKey())) {
@@ -93,6 +165,7 @@ public final class LumberjackBootstrapCoordinator {
                     .toImmutable();
             return new VillageScope(
                     VillageKey.forBell(primaryBell),
+                    primaryBell,
                     new Box(primaryBell).expand(VillageGuardStandManager.BELL_EFFECT_RANGE)
             );
         }
@@ -100,6 +173,7 @@ public final class LumberjackBootstrapCoordinator {
         BlockPos center = regionCenter(villager.getBlockPos());
         return new VillageScope(
                 VillageKey.forRegion(toRegionKey(villager.getBlockPos())),
+                center,
                 new Box(
                         center.getX() - REGION_HALF_EXTENT,
                         world.getBottomY(),
@@ -109,13 +183,6 @@ public final class LumberjackBootstrapCoordinator {
                         center.getZ() + REGION_HALF_EXTENT + 1
                 )
         );
-    }
-
-    private static boolean isEligibleCandidate(VillagerEntity villager, Map<VillageKey, UUID> worldPending) {
-        if (!isEligibleUnemployed(villager)) {
-            return false;
-        }
-        return worldPending.values().stream().noneMatch(villager.getUuid()::equals);
     }
 
     private static boolean isStillEligible(ServerWorld world, UUID pendingUuid, Box scope) {
@@ -152,21 +219,16 @@ public final class LumberjackBootstrapCoordinator {
         );
     }
 
-    private record VillageScope(VillageKey key, Box searchBox) {
+    private record VillageScope(VillageKey key, BlockPos anchor, Box searchBox) {
     }
 
-    private record VillageKey(Kind kind, long packed) {
+    private record VillageKey(LumberjackBootstrapLifecycleState.VillageKind kind, long packed) {
         static VillageKey forBell(BlockPos bellPos) {
-            return new VillageKey(Kind.BELL, bellPos.asLong());
+            return new VillageKey(LumberjackBootstrapLifecycleState.VillageKind.BELL, bellPos.asLong());
         }
 
         static VillageKey forRegion(long regionKey) {
-            return new VillageKey(Kind.REGION, regionKey);
-        }
-
-        private enum Kind {
-            BELL,
-            REGION
+            return new VillageKey(LumberjackBootstrapLifecycleState.VillageKind.REGION, regionKey);
         }
     }
 }

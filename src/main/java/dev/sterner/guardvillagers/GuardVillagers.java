@@ -275,6 +275,7 @@ public class GuardVillagers implements ModInitializer {
             VillageBellChestPlacementHelper.reconcileWorldBellChestMappings(world);
             reconcileConvertedWorkerReservations(world, "world-load");
             RecipeDemandIndex.forWorld(world);
+            LumberjackBootstrapCoordinator.onWorldLoad(world);
         });
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
@@ -311,6 +312,7 @@ public class GuardVillagers implements ModInitializer {
                 LumberjackPopulationBalancingService.tick(world);
                 VillageLumberjackSpawnManager.tick(world);
                 VillagePenRegistry.tick(world);
+                LumberjackBootstrapCoordinator.tick(world);
                 runConversionHooksOnSchedule(world);
                 if (world.getTime() % RESERVATION_RECONCILIATION_INTERVAL_TICKS == 0L) {
                     reconcileConvertedWorkerReservations(world, "scheduled");
