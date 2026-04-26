@@ -24,6 +24,7 @@ import dev.sterner.guardvillagers.common.util.VillageBellChestPlacementHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
 import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.LumberjackPopulationBalancingService;
+import dev.sterner.guardvillagers.common.villager.LumberjackBootstrapCoordinator;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
@@ -217,6 +218,9 @@ public class GuardVillagers implements ModInitializer {
                     VillagerConversionCandidateIndex.markCandidate(serverWorld, villagerEntity);
                 }
                 if (villagerEntity.isNatural()) {
+                    if (world instanceof ServerWorld serverWorld) {
+                        LumberjackBootstrapCoordinator.attemptSelection(serverWorld, villagerEntity);
+                    }
                     var spawnChance = MathHelper.clamp(GuardVillagersConfig.spawnChancePerVillager, 0f, 1f);
                     if (world.random.nextFloat() < spawnChance) {
                         GuardEntity guardEntity = GUARD_VILLAGER.create(world);
@@ -275,6 +279,7 @@ public class GuardVillagers implements ModInitializer {
         ServerWorldEvents.UNLOAD.register((server, world) -> {
             LAST_CONVERSION_EXECUTION_TICK.remove(world.getRegistryKey());
             LumberjackPopulationBalancingService.onWorldUnload(world.getRegistryKey());
+            LumberjackBootstrapCoordinator.onWorldUnload(world.getRegistryKey());
             RecipeDemandIndex.clearWorld(world);
             JobBlockPairingHelper.clearWorldCaches(world);
         });
