@@ -63,6 +63,7 @@ public final class UnemployedLumberjackConversionHook {
 
             Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager);
             if (craftingTablePos.isEmpty()) {
+                LumberjackBootstrapCoordinator.markNeedsTable(world, villager);
                 continue;
             }
 
@@ -74,6 +75,7 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
+            LumberjackBootstrapCoordinator.markReadyToConvert(world, villager);
             convert(world, villager, tablePos);
         }
     }
@@ -229,6 +231,7 @@ public final class UnemployedLumberjackConversionHook {
                 tablePos.toShortString());
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
+        LumberjackBootstrapCoordinator.markDone(world, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
     }
 
