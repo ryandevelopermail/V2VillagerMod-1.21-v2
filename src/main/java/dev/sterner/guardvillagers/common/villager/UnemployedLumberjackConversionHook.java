@@ -66,6 +66,7 @@ public final class UnemployedLumberjackConversionHook {
                 continue;
             }
 
+            LumberjackBootstrapChopRunner.ensureBootstrapCraftingTable(world, villager);
             Optional<BlockPos> craftingTablePos = findReachableCraftingTable(world, villager);
             if (craftingTablePos.isEmpty()) {
                 LumberjackBootstrapCoordinator.markNeedsTable(world, villager);
@@ -150,7 +151,7 @@ public final class UnemployedLumberjackConversionHook {
         return path != null && path.reachesTarget();
     }
 
-    private static boolean isCraftingTableAlreadyPaired(ServerWorld world, BlockPos tablePos) {
+    static boolean isCraftingTableAlreadyPaired(ServerWorld world, BlockPos tablePos) {
         // Lumberjacks roam widely so we need a broad box to find the one whose
         // pairedCraftingTablePos points to this exact table. Keep it at BELL_EFFECT_RANGE.
         // The reservation manager is the primary guard; this scan is a secondary safeguard

@@ -38,6 +38,7 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     private static final String UPDATED_TICK_KEY = "UpdatedTick";
     private static final String RETRY_COUNT_KEY = "RetryCount";
     private static final String CALLBACK_COUNT_KEY = "CallbackCount";
+    private static final String PLACED_TABLE_POS_KEY = "PlacedTablePos";
 
     private final Map<EntryKey, EntryValue> entries = new HashMap<>();
 
@@ -105,7 +106,8 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                     row.getLong(CREATED_TICK_KEY),
                     row.getLong(UPDATED_TICK_KEY),
                     row.getInt(RETRY_COUNT_KEY),
-                    row.getInt(CALLBACK_COUNT_KEY)
+                    row.getInt(CALLBACK_COUNT_KEY),
+                    NbtHelper.toBlockPos(row, PLACED_TABLE_POS_KEY).orElse(null)
             );
             state.entries.put(key, value);
         }
@@ -127,6 +129,9 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
             row.putLong(UPDATED_TICK_KEY, entry.getValue().updatedTick());
             row.putInt(RETRY_COUNT_KEY, entry.getValue().retryCount());
             row.putInt(CALLBACK_COUNT_KEY, entry.getValue().callbackCount());
+            if (entry.getValue().placedTablePos() != null) {
+                row.put(PLACED_TABLE_POS_KEY, NbtHelper.fromBlockPos(entry.getValue().placedTablePos()));
+            }
             list.add(row);
         }
         nbt.put(ENTRIES_KEY, list);
@@ -166,7 +171,8 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                     createdTick,
                     nowTick,
                     retries,
-                    callbacks
+                    callbacks,
+                    existing != null ? existing.placedTablePos() : null
             );
         }
 
@@ -207,6 +213,22 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
         markDirty();
     }
 
+    public void setPlacedTablePos(ServerWorld world, VillageKind kind, long packed, BlockPos placedTablePos, long nowTick) {
+        EntryKey key = new EntryKey(world.getRegistryKey(), kind, packed);
+        EntryValue existing = entries.get(key);
+        if (existing == null || existing.stage().isTerminal()) {
+            return;
+        }
+
+        BlockPos immutablePlacedPos = placedTablePos.toImmutable();
+        if (immutablePlacedPos.equals(existing.placedTablePos())) {
+            return;
+        }
+
+        entries.put(key, existing.withPlacedTablePos(immutablePlacedPos).withUpdatedTick(nowTick));
+        markDirty();
+    }
+
     public void removeWorld(RegistryKey<World> worldKey) {
         if (entries.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey))) {
             markDirty();
@@ -241,22 +263,27 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                              long createdTick,
                              long updatedTick,
                              int retryCount,
-                             int callbackCount) {
+                             int callbackCount,
+                             BlockPos placedTablePos) {
 
         EntryValue withUpdatedTick(long tick) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, tick, retryCount, callbackCount);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, tick, retryCount, callbackCount, placedTablePos);
         }
 
         EntryValue withStage(Stage nextStage) {
-            return new EntryValue(candidateUuid, anchor, nextStage, createdTick, updatedTick, retryCount, callbackCount);
+            return new EntryValue(candidateUuid, anchor, nextStage, createdTick, updatedTick, retryCount, callbackCount, placedTablePos);
         }
 
         EntryValue withRetryCount(int retries) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retries, callbackCount);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retries, callbackCount, placedTablePos);
         }
 
         EntryValue withCallbackCount(int callbacks) {
-            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbacks);
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbacks, placedTablePos);
+        }
+
+        EntryValue withPlacedTablePos(BlockPos tablePos) {
+            return new EntryValue(candidateUuid, anchor, stage, createdTick, updatedTick, retryCount, callbackCount, tablePos);
         }
     }
 

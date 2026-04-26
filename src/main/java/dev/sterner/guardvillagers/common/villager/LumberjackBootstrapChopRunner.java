@@ -1,14 +1,20 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
+import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,6 +38,8 @@ public final class LumberjackBootstrapChopRunner {
     private static final int SEARCH_HEIGHT = 8;
     private static final double APPROACH_DISTANCE_SQ = 6.25D;
     private static final double PICKUP_RADIUS = 2.5D;
+    private static final int CRAFTING_TABLE_PLANK_COST = 4;
+    private static final int MAX_PLACEMENT_RETRY_DELAY_TICKS = 20 * 30;
 
     private static final Map<UUID, RunnerState> STATES = new HashMap<>();
 
@@ -102,7 +110,7 @@ public final class LumberjackBootstrapChopRunner {
         }
 
         state.completed = true;
-        LumberjackBootstrapCoordinator.markDone(world, villager);
+        LumberjackBootstrapCoordinator.markNeedsTable(world, villager);
         LOGGER.info("lumberjack-bootstrap chop complete villager={} root={} brokenLogs={} bufferedStacks={}",
                 villager.getUuidAsString(),
                 state.targetRoot.toShortString(),
@@ -118,6 +126,66 @@ public final class LumberjackBootstrapChopRunner {
     public static boolean isFailed(VillagerEntity villager) {
         RunnerState state = STATES.get(villager.getUuid());
         return state != null && state.failed;
+    }
+
+    @Nullable
+    public static BlockPos getPlacedTablePos(VillagerEntity villager) {
+        RunnerState state = STATES.get(villager.getUuid());
+        return state == null ? null : state.placedTablePos;
+    }
+
+    public static void ensureBootstrapCraftingTable(ServerWorld world, VillagerEntity villager) {
+        RunnerState state = STATES.get(villager.getUuid());
+        if (state == null || !state.completed || state.failed) {
+            return;
+        }
+
+        if (state.placedTablePos != null && world.getBlockState(state.placedTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+            return;
+        }
+
+        long now = world.getTime();
+        if (now < state.nextPlacementAttemptTick) {
+            return;
+        }
+
+        PlacementResources resources = countPlacementResources(state.buffer);
+        if (!resources.canCraftingTable()) {
+            schedulePlacementRetry(state, now);
+            return;
+        }
+
+        BlockPos placement = findPlacementNearVillager(world, villager);
+        if (placement == null) {
+            schedulePlacementRetry(state, now);
+            return;
+        }
+
+        if (!consumeCraftingTableCost(state.buffer)) {
+            schedulePlacementRetry(state, now);
+            return;
+        }
+
+        if (!world.setBlockState(placement, Blocks.CRAFTING_TABLE.getDefaultState(), 3)) {
+            schedulePlacementRetry(state, now);
+            return;
+        }
+
+        ConvertedWorkerJobSiteReservationManager.reserve(
+                world,
+                placement,
+                villager.getUuid(),
+                VillagerProfession.NONE,
+                "bootstrap-table-placement");
+        state.placedTablePos = placement;
+        state.placementRetryCount = 0;
+        state.nextPlacementAttemptTick = now;
+        LumberjackBootstrapCoordinator.recordPlacedTable(world, villager, placement);
+        LumberjackBootstrapCoordinator.markReadyToConvert(world, villager);
+        LOGGER.info("lumberjack-bootstrap placed crafting table villager={} pos={} resources={}",
+                villager.getUuidAsString(),
+                placement.toShortString(),
+                resources);
     }
 
     private static void collectNearbyWoodDrops(ServerWorld world, VillagerEntity villager, List<ItemStack> buffer) {
@@ -148,11 +216,148 @@ public final class LumberjackBootstrapChopRunner {
         }
     }
 
+    @Nullable
+    private static BlockPos findPlacementNearVillager(ServerWorld world, VillagerEntity villager) {
+        BlockPos center = villager.getBlockPos();
+        int range = (int) Math.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        BlockPos best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (BlockPos checkPos : BlockPos.iterate(center.add(-range, -1, -range), center.add(range, 1, range))) {
+            if (!center.isWithinDistance(checkPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                continue;
+            }
+
+            BlockPos candidate = checkPos.toImmutable();
+            if (!world.getBlockState(candidate).isReplaceable()) {
+                continue;
+            }
+            if (!world.getBlockState(candidate.down()).isSolidBlock(world, candidate.down())) {
+                continue;
+            }
+            if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, candidate)) {
+                continue;
+            }
+            if (UnemployedLumberjackConversionHook.isCraftingTableAlreadyPaired(world, candidate)) {
+                continue;
+            }
+            if (!isReachable(villager, candidate)) {
+                continue;
+            }
+
+            double distance = center.getSquaredDistance(candidate);
+            if (distance < bestDistance) {
+                best = candidate;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    private static boolean isReachable(VillagerEntity villager, BlockPos targetPos) {
+        var path = villager.getNavigation().findPathTo(targetPos, 0);
+        return path != null && path.reachesTarget();
+    }
+
+    private static void schedulePlacementRetry(RunnerState state, long now) {
+        state.placementRetryCount++;
+        int exponent = Math.min(state.placementRetryCount, 8);
+        int delay = Math.min(1 << exponent, MAX_PLACEMENT_RETRY_DELAY_TICKS);
+        state.nextPlacementAttemptTick = now + delay;
+    }
+
+    private static PlacementResources countPlacementResources(List<ItemStack> buffer) {
+        int tables = countItems(buffer, Items.CRAFTING_TABLE);
+        int planks = countTagged(buffer, ItemTags.PLANKS);
+        int logs = countTagged(buffer, ItemTags.LOGS);
+        return new PlacementResources(tables, planks, logs);
+    }
+
+    private static boolean consumeCraftingTableCost(List<ItemStack> buffer) {
+        if (removeItemCount(buffer, Items.CRAFTING_TABLE, 1)) {
+            return true;
+        }
+
+        int availablePlanks = countTagged(buffer, ItemTags.PLANKS);
+        if (availablePlanks < CRAFTING_TABLE_PLANK_COST) {
+            int logsNeeded = (int) Math.ceil((CRAFTING_TABLE_PLANK_COST - availablePlanks) / 4.0D);
+            if (!removeTaggedCount(buffer, ItemTags.LOGS, logsNeeded)) {
+                return false;
+            }
+            // Convert logs to planks in the bootstrap buffer at 1:4.
+            bufferStack(buffer, new ItemStack(Items.OAK_PLANKS, logsNeeded * 4));
+        }
+        return removeTaggedCount(buffer, ItemTags.PLANKS, CRAFTING_TABLE_PLANK_COST);
+    }
+
+    private static int countItems(List<ItemStack> buffer, Item item) {
+        int total = 0;
+        for (ItemStack stack : buffer) {
+            if (stack.isOf(item)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static int countTagged(List<ItemStack> buffer, net.minecraft.registry.tag.TagKey<net.minecraft.item.Item> tag) {
+        int total = 0;
+        for (ItemStack stack : buffer) {
+            if (stack.isIn(tag)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static boolean removeItemCount(List<ItemStack> buffer, Item item, int amount) {
+        int remaining = amount;
+        for (int i = buffer.size() - 1; i >= 0 && remaining > 0; i--) {
+            ItemStack stack = buffer.get(i);
+            if (!stack.isOf(item)) {
+                continue;
+            }
+            int take = Math.min(stack.getCount(), remaining);
+            stack.decrement(take);
+            remaining -= take;
+            if (stack.isEmpty()) {
+                buffer.remove(i);
+            }
+        }
+        return remaining == 0;
+    }
+
+    private static boolean removeTaggedCount(List<ItemStack> buffer, net.minecraft.registry.tag.TagKey<net.minecraft.item.Item> tag, int amount) {
+        int remaining = amount;
+        for (int i = buffer.size() - 1; i >= 0 && remaining > 0; i--) {
+            ItemStack stack = buffer.get(i);
+            if (!stack.isIn(tag)) {
+                continue;
+            }
+            int take = Math.min(stack.getCount(), remaining);
+            stack.decrement(take);
+            remaining -= take;
+            if (stack.isEmpty()) {
+                buffer.remove(i);
+            }
+        }
+        return remaining == 0;
+    }
+
     private static final class RunnerState {
         @Nullable
         private BlockPos targetRoot;
         private final List<ItemStack> buffer = new ArrayList<>();
+        @Nullable
+        private BlockPos placedTablePos;
+        private int placementRetryCount;
+        private long nextPlacementAttemptTick;
         private boolean completed;
         private boolean failed;
+    }
+
+    private record PlacementResources(int tables, int planks, int logs) {
+        private boolean canCraftingTable() {
+            return tables > 0 || (planks + logs * 4) >= CRAFTING_TABLE_PLANK_COST;
+        }
     }
 }
