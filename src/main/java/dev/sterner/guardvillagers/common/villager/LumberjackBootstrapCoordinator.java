@@ -30,8 +30,6 @@ public final class LumberjackBootstrapCoordinator {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackBootstrapCoordinator.class);
     private static final int REGION_SIZE_BLOCKS = 96;
     private static final int REGION_HALF_EXTENT = REGION_SIZE_BLOCKS / 2;
-    private static final long STALE_SELECTION_RETRY_TICKS = 20L * 30L;
-
     private LumberjackBootstrapCoordinator() {
     }
 
@@ -63,6 +61,9 @@ public final class LumberjackBootstrapCoordinator {
         if (existing != null && existing.stage().isTerminal()) {
             return;
         }
+        if (existing != null && world.getTime() < existing.nextRetryTick()) {
+            return;
+        }
 
         if (existing != null && isStillEligible(world, existing.candidateUuid(), scope.searchBox())) {
             state.selectOrRefresh(world,
@@ -88,14 +89,7 @@ public final class LumberjackBootstrapCoordinator {
                 .orElse(null);
 
         if (selected == null) {
-            if (existing != null && world.getTime() - existing.updatedTick() >= STALE_SELECTION_RETRY_TICKS) {
-                state.markRetry(world, scope.key().kind(), scope.key().packed(), world.getTime());
-                state.advanceStage(world,
-                        scope.key().kind(),
-                        scope.key().packed(),
-                        LumberjackBootstrapLifecycleState.Stage.FAILED,
-                        world.getTime());
-            }
+            reportFailure(world, scope, null, BootstrapFailure.NO_ELIGIBLE_UNEMPLOYED_FOUND);
             return;
         }
 
@@ -131,6 +125,14 @@ public final class LumberjackBootstrapCoordinator {
 
     public static void markFailed(ServerWorld world, VillagerEntity villager) {
         transitionForVillager(world, villager, LumberjackBootstrapLifecycleState.Stage.FAILED, true);
+    }
+
+    public static void markFailure(ServerWorld world, VillagerEntity villager, BootstrapFailure failure) {
+        VillageScope scope = resolveScope(world, villager);
+        if (scope == null) {
+            return;
+        }
+        reportFailure(world, scope, villager, failure);
     }
 
     public static void markDone(ServerWorld world, VillagerEntity villager) {
@@ -180,6 +182,21 @@ public final class LumberjackBootstrapCoordinator {
         return entry != null
                 && !entry.stage().isTerminal()
                 && entry.candidateUuid().equals(villager.getUuid());
+    }
+
+    public static boolean shouldDeferCandidate(ServerWorld world, VillagerEntity villager) {
+        VillageScope scope = resolveScope(world, villager);
+        if (scope == null) {
+            return false;
+        }
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.EntryValue entry = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+        return entry != null
+                && !entry.stage().isTerminal()
+                && entry.candidateUuid().equals(villager.getUuid())
+                && world.getTime() < entry.nextRetryTick();
     }
 
     private static void transitionForVillager(ServerWorld world,
@@ -279,6 +296,38 @@ public final class LumberjackBootstrapCoordinator {
     private record VillageScope(VillageKey key, BlockPos anchor, Box searchBox) {
     }
 
+    private static void reportFailure(ServerWorld world,
+                                      VillageScope scope,
+                                      @Nullable VillagerEntity villager,
+                                      BootstrapFailure failure) {
+        LumberjackBootstrapLifecycleState state = LumberjackBootstrapLifecycleState.get(world.getServer());
+        LumberjackBootstrapLifecycleState.FailureResult result = state.applyFailure(
+                world,
+                scope.key().kind(),
+                scope.key().packed(),
+                failure.logKey(),
+                failure.delayTicks(),
+                failure.maxAttempts(),
+                failure.terminalFail(),
+                world.getTime());
+        LumberjackBootstrapLifecycleState.EntryValue updated = state
+                .getEntry(world, scope.key().kind(), scope.key().packed())
+                .orElse(null);
+        if (updated == null) {
+            return;
+        }
+        String villagerId = villager == null ? "none" : villager.getUuidAsString();
+        LOGGER.warn("lumberjack-bootstrap failure village={} villager={} failure_key={} result={} retry_count={} max_attempts={} terminal_fail={} next_retry_tick={}",
+                scope.key(),
+                villagerId,
+                failure.logKey(),
+                result,
+                updated.retryCount(),
+                failure.maxAttempts(),
+                failure.terminalFail(),
+                updated.nextRetryTick());
+    }
+
     private record VillageKey(LumberjackBootstrapLifecycleState.VillageKind kind, long packed) {
         static VillageKey forBell(BlockPos bellPos) {
             return new VillageKey(LumberjackBootstrapLifecycleState.VillageKind.BELL, bellPos.asLong());
@@ -286,6 +335,43 @@ public final class LumberjackBootstrapCoordinator {
 
         static VillageKey forRegion(long regionKey) {
             return new VillageKey(LumberjackBootstrapLifecycleState.VillageKind.REGION, regionKey);
+        }
+    }
+
+    public enum BootstrapFailure {
+        NO_ELIGIBLE_UNEMPLOYED_FOUND("no_eligible_unemployed_found", 20 * 30, 8, false),
+        NO_VALID_TREE_FOUND("no_valid_tree_found", 20 * 20, 6, true),
+        CHOP_OR_PATH_TIMEOUT("chop_or_path_timeout", 20 * 15, 5, true),
+        INSUFFICIENT_WOOD_FOR_TABLE("insufficient_wood_for_table", 20 * 25, 4, true),
+        TABLE_PLACEMENT_BLOCKED("table_placement_blocked", 20 * 10, 10, true),
+        CONVERSION_FAILURE("conversion_failure", 20 * 30, 3, true);
+
+        private final String logKey;
+        private final int delayTicks;
+        private final int maxAttempts;
+        private final boolean terminalFail;
+
+        BootstrapFailure(String logKey, int delayTicks, int maxAttempts, boolean terminalFail) {
+            this.logKey = logKey;
+            this.delayTicks = delayTicks;
+            this.maxAttempts = maxAttempts;
+            this.terminalFail = terminalFail;
+        }
+
+        public String logKey() {
+            return logKey;
+        }
+
+        public int delayTicks() {
+            return delayTicks;
+        }
+
+        public int maxAttempts() {
+            return maxAttempts;
+        }
+
+        public boolean terminalFail() {
+            return terminalFail;
         }
     }
 }
