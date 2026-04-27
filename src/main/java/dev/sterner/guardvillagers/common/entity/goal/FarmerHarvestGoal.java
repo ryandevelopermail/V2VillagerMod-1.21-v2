@@ -91,6 +91,8 @@ public class FarmerHarvestGoal extends Goal {
 
     private final VillagerEntity villager;
     private final Deque<BlockPos> harvestTargets = new ArrayDeque<>();
+    private final Deque<BlockPos> priorityHarvestTargets = new ArrayDeque<>();
+    private final Set<BlockPos> priorityHarvestMembership = new HashSet<>();
 
     private BlockPos jobPos;
     private BlockPos chestPos;
@@ -184,6 +186,8 @@ public class FarmerHarvestGoal extends Goal {
         this.enabled = true;
         this.stage = Stage.IDLE;
         this.harvestTargets.clear();
+        this.priorityHarvestTargets.clear();
+        this.priorityHarvestMembership.clear();
         this.currentHoeTarget = null;
         this.gatherSeedTargets.clear();
         this.currentGatherTarget = null;
@@ -229,6 +233,17 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
+    public void enqueuePriorityHarvestTarget(BlockPos pos) {
+        if (pos == null) {
+            return;
+        }
+        BlockPos immutablePos = pos.toImmutable();
+        if (priorityHarvestMembership.add(immutablePos)) {
+            priorityHarvestTargets.addLast(immutablePos);
+            requestImmediateWorkCheck();
+        }
+    }
+
     @Override
     public boolean canStart() {
         if (!enabled || !villager.isAlive() || jobPos == null || chestPos == null) {
@@ -242,6 +257,16 @@ public class FarmerHarvestGoal extends Goal {
         }
         if (immediateRunRequested) {
             immediateRunRequested = false;
+        }
+        BlockPos priorityTarget = findNearestValidPriorityHarvestTarget(world);
+        if (priorityTarget != null) {
+            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            long day = world.getTime() / 24000L;
+            if (day != lastHarvestDay) {
+                lastHarvestDay = day;
+                dailyHarvestRun = true;
+            }
+            return true;
         }
         if (world.getTime() < adaptiveThrottleUntilTick) {
             return false;
@@ -421,6 +446,11 @@ public class FarmerHarvestGoal extends Goal {
     @Override
     public void start() {
         villager.setCanPickUpLoot(true);
+        if (villager.getWorld() instanceof ServerWorld world && prioritizeNearestHarvestOverride(world)) {
+            setStage(Stage.HARVEST);
+            moveTo(harvestTargets.peekFirst());
+            return;
+        }
         setStage(Stage.GO_TO_JOB);
         populateHarvestTargets();
         moveTo(jobPos);
@@ -448,6 +478,11 @@ public class FarmerHarvestGoal extends Goal {
 
         switch (stage) {
             case GO_TO_JOB -> {
+                if (prioritizeNearestHarvestOverride(serverWorld)) {
+                    setStage(Stage.HARVEST);
+                    moveTo(harvestTargets.peekFirst());
+                    return;
+                }
                 if (isNear(jobPos)) {
                     setStage(Stage.HARVEST);
                 } else {
@@ -455,6 +490,7 @@ public class FarmerHarvestGoal extends Goal {
                 }
             }
             case HARVEST -> {
+                prioritizeNearestHarvestOverride(serverWorld);
                 if (harvestTargets.isEmpty()) {
                     if (prepareFeeding(serverWorld)) {
                         setStage(Stage.GO_TO_GATE);
@@ -479,6 +515,7 @@ public class FarmerHarvestGoal extends Goal {
                     return;
                 }
                 if (!isMatureCrop(serverWorld.getBlockState(target))) {
+                    removePriorityHarvestTarget(target);
                     harvestTargets.removeFirst();
                     currentTarget = null;
                     return;
@@ -493,6 +530,7 @@ public class FarmerHarvestGoal extends Goal {
                 serverWorld.breakBlock(target, true, villager);
                 attemptReplant(serverWorld, target, harvestedState);
                 collectNearbyDrops(serverWorld, target);
+                removePriorityHarvestTarget(target);
                 harvestTargets.removeFirst();
                 currentTarget = null;
             }
@@ -843,6 +881,46 @@ public class FarmerHarvestGoal extends Goal {
 
         targets.sort(Comparator.comparingDouble(pos -> villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D)));
         harvestTargets.addAll(targets);
+    }
+
+    private boolean prioritizeNearestHarvestOverride(ServerWorld world) {
+        BlockPos nearestPriorityTarget = findNearestValidPriorityHarvestTarget(world);
+        if (nearestPriorityTarget == null) {
+            return false;
+        }
+
+        harvestTargets.removeIf(pos -> pos.equals(nearestPriorityTarget));
+        harvestTargets.addFirst(nearestPriorityTarget);
+        return true;
+    }
+
+    private BlockPos findNearestValidPriorityHarvestTarget(ServerWorld world) {
+        BlockPos nearest = null;
+        double nearestDistance = Double.MAX_VALUE;
+        List<BlockPos> invalidTargets = new ArrayList<>();
+        for (BlockPos pos : priorityHarvestTargets) {
+            if (!isWithinHarvestRange(pos) || !isMatureCrop(world.getBlockState(pos))) {
+                invalidTargets.add(pos);
+                continue;
+            }
+            double distance = villager.squaredDistanceTo(pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearest = pos;
+            }
+        }
+
+        for (BlockPos invalidTarget : invalidTargets) {
+            removePriorityHarvestTarget(invalidTarget);
+        }
+        return nearest;
+    }
+
+    private void removePriorityHarvestTarget(BlockPos pos) {
+        if (pos == null || !priorityHarvestMembership.remove(pos)) {
+            return;
+        }
+        priorityHarvestTargets.removeIf(queuedPos -> queuedPos.equals(pos));
     }
 
     private int countMatureCrops(ServerWorld world) {
