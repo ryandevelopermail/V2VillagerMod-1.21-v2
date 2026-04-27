@@ -317,20 +317,8 @@ public class FarmerHarvestGoal extends Goal {
 
         // Update unseeded farmland obligation state — this persists between canStart() calls
         // so the farmer "remembers" that it has unfinished work even between goal ticks.
-        FarmlandCoverageStats coverage = getFarmlandCoverageStats(world);
+        FarmlandCoverageStats coverage = refreshUnseededFarmlandObligation(world, "canStart");
         int unseededCount = Math.max(0, coverage.accessibleCells() - coverage.seededCells());
-        if (unseededCount > 0) {
-            if (!hasUnseededFarmlandObligation) {
-                // Obligation newly detected — log once at DEBUG per cycle.
-                hasUnseededFarmlandObligation = true;
-                obligationLoggedThisCycle = false;
-            }
-        } else if (coverage.accessibleCells() > 0) {
-            // Coverage is full — obligation satisfied
-            hasUnseededFarmlandObligation = false;
-            obligationLoggedThisCycle = false;
-        }
-        // If accessibleCells == 0 (no farmland at all), leave obligation as-is
 
         // --- OBLIGATION PATH ---
         // Unseeded farmland is an incomplete task. The farmer is obligated to finish it.
@@ -634,8 +622,10 @@ public class FarmerHarvestGoal extends Goal {
                     break;
                 }
                 pendingSeedGatherEndReason = null;
-                finishDailyRunIfNeeded(serverWorld);
-                setStage(Stage.DONE);
+                if (tryCompleteRunOrContinueObligation(serverWorld, "deposit_no_followup")) {
+                    finishDailyRunIfNeeded(serverWorld);
+                    setStage(Stage.DONE);
+                }
             }
             case HOE_GROUND -> {
                 if (hoeTargets.isEmpty()) {
@@ -644,8 +634,10 @@ public class FarmerHarvestGoal extends Goal {
                     // sees the newly created farmland rather than stale pre-hoe data.
                     coverageCacheTime = -1L;
                     if (!routePostDepositFlow(serverWorld, true)) {
-                        finishDailyRunIfNeeded(serverWorld);
-                        setStage(Stage.DONE);
+                        if (tryCompleteRunOrContinueObligation(serverWorld, "post_hoe_no_followup")) {
+                            finishDailyRunIfNeeded(serverWorld);
+                            setStage(Stage.DONE);
+                        }
                     }
                     return;
                 }
@@ -690,22 +682,18 @@ public class FarmerHarvestGoal extends Goal {
             case PLANT_FARMLAND -> {
                 if (plantTargets.isEmpty()) {
                     // Recheck coverage — if all farmland is now seeded, clear the obligation
-                    FarmlandCoverageStats postPlantCoverage = getFarmlandCoverageStats(serverWorld);
+                    FarmlandCoverageStats postPlantCoverage = refreshUnseededFarmlandObligation(serverWorld, "post_plant_stage_empty");
                     if (postPlantCoverage.hasFullCoverage()) {
-                        hasUnseededFarmlandObligation = false;
-                        obligationLoggedThisCycle = false;
                         LOGGER.debug("Farmer {} farmland obligation satisfied — coverage full ({}/{})",
                                 villager.getUuidAsString(), postPlantCoverage.seededCells(), postPlantCoverage.accessibleCells());
-                    } else if (postPlantCoverage.accessibleCells() > postPlantCoverage.seededCells()) {
-                        // Still unseeded farmland — keep obligation active
+                    } else {
                         LOGGER.debug("Farmer {} farmland still partially unseeded ({}/{}) — obligation remains",
                                 villager.getUuidAsString(), postPlantCoverage.seededCells(), postPlantCoverage.accessibleCells());
                     }
-                    if (dailyHarvestRun) {
-                        notifyDailyHarvestComplete(serverWorld);
-                        dailyHarvestRun = false;
+                    if (tryCompleteRunOrContinueObligation(serverWorld, "plant_stage_empty")) {
+                        finishDailyRunIfNeeded(serverWorld);
+                        setStage(Stage.DONE);
                     }
-                    setStage(Stage.DONE);
                     return;
                 }
                 BlockPos target = plantTargets.peekFirst();
@@ -718,11 +706,10 @@ public class FarmerHarvestGoal extends Goal {
                     Item seedItem = findFirstPlantableInInventory(prioritizeWheatSeedsForPlanting);
                     if (seedItem == null) {
                         plantTargets.clear();
-                        if (dailyHarvestRun) {
-                            notifyDailyHarvestComplete(serverWorld);
-                            dailyHarvestRun = false;
+                        if (tryCompleteRunOrContinueObligation(serverWorld, "plant_stage_out_of_inventory_seeds")) {
+                            finishDailyRunIfNeeded(serverWorld);
+                            setStage(Stage.DONE);
                         }
-                        setStage(Stage.DONE);
                         return;
                     }
                     Block cropBlock = getCropBlockForItem(seedItem);
@@ -849,16 +836,16 @@ public class FarmerHarvestGoal extends Goal {
                 LOGGER.debug("Farmer {} seed_gather_end_deposit_start reason={}", villager.getUuidAsString(), pendingSeedGatherEndReason == null ? "unknown" : pendingSeedGatherEndReason);
                 DepositSummary summary = depositPlantablesAndSeeds(serverWorld);
                 LOGGER.debug("Farmer {} seed_gather_end_deposit_result moved={} remaining={}", villager.getUuidAsString(), summary.movedCount(), summary.remainingCount());
-
-                populatePlantTargets(serverWorld);
-                if (!plantTargets.isEmpty() && (hasPlantablesInInventory() || ensureWheatSeedStartup(serverWorld))) {
-                    setStage(Stage.PLANT_FARMLAND);
+                refreshUnseededFarmlandObligation(serverWorld, "seed_gather_end_exit");
+                if (routePostDepositFlow(serverWorld, false)) {
                     return;
                 }
 
                 pendingSeedGatherEndReason = null;
-                finishDailyRunIfNeeded(serverWorld);
-                setStage(Stage.DONE);
+                if (tryCompleteRunOrContinueObligation(serverWorld, "seed_gather_end_deposit_no_followup")) {
+                    finishDailyRunIfNeeded(serverWorld);
+                    setStage(Stage.DONE);
+                }
             }
             case IDLE, DONE -> {
             }
@@ -1284,6 +1271,7 @@ public class FarmerHarvestGoal extends Goal {
 
     private boolean routePostDepositFlow(ServerWorld world, boolean afterHoeing) {
         populatePlantTargets(world);
+        FarmlandCoverageStats coverage = refreshUnseededFarmlandObligation(world, "routePostDepositFlow");
         BootstrapPreflight bootstrapPreflight = evaluateBootstrapPreflight(world, afterHoeing);
 
         if (!hoeTargets.isEmpty()) {
@@ -1300,6 +1288,16 @@ public class FarmerHarvestGoal extends Goal {
 
         prioritizeWheatSeedsForPlanting = false;
         pickUpPlantablesFromChest(world);
+        boolean seedsInsufficientAcrossSources = !hasPlantablesForPlanting() && !hasSeedsInChest(world);
+        if (hasUnseededFarmlandObligation && !coverage.hasFullCoverage() && seedsInsufficientAcrossSources) {
+            wheatSeedForagingRequested = true;
+            bootstrapSeedGatherRequested = true;
+            logWheatSeedForageIntent("post-deposit unseeded-farmland obligation", hasPlantablesForPlanting());
+            if (canEnterSeedForageStage(world, "post-deposit unseeded-farmland obligation")) {
+                setStage(Stage.GATHER_WHEAT_SEEDS);
+                return true;
+            }
+        }
         if (!plantTargets.isEmpty()) {
             if (hasPlantablesInInventory() && !requiresWheatSeedStartup()) {
                 if (hasRequiredWheatSeedReserve(world)) {
@@ -2055,6 +2053,52 @@ public class FarmerHarvestGoal extends Goal {
         long remaining = Math.max(0L, nextSeedForageRetryTick - world.getTime());
         LOGGER.debug("Farmer {} wheat seed forage re-entry blocked by cooldown (context: {}, remainingTicks: {}, retries: {})",
                 villager.getUuidAsString(), context, remaining, seedForageRetryCount);
+    }
+
+    private FarmlandCoverageStats refreshUnseededFarmlandObligation(ServerWorld world, String context) {
+        FarmlandCoverageStats coverage = getFarmlandCoverageStats(world);
+        int unseededPlots = Math.max(0, coverage.accessibleCells() - coverage.seededCells());
+        if (unseededPlots > 0) {
+            if (!hasUnseededFarmlandObligation) {
+                hasUnseededFarmlandObligation = true;
+                obligationLoggedThisCycle = false;
+            }
+        } else if (coverage.accessibleCells() > 0) {
+            hasUnseededFarmlandObligation = false;
+            obligationLoggedThisCycle = false;
+        }
+        logCoverageInvariant(context, coverage);
+        return coverage;
+    }
+
+    private void logCoverageInvariant(String context, FarmlandCoverageStats coverage) {
+        int accessiblePlots = coverage.accessibleCells();
+        int seededPlots = coverage.seededCells();
+        int unseededPlots = Math.max(0, accessiblePlots - seededPlots);
+        LOGGER.debug("Farmer {} coverage_invariant context={} accessiblePlots={} seededPlots={} unseededPlots={} obligationActive={}",
+                villager.getUuidAsString(), context, accessiblePlots, seededPlots, unseededPlots, hasUnseededFarmlandObligation);
+    }
+
+    private boolean tryCompleteRunOrContinueObligation(ServerWorld world, String context) {
+        FarmlandCoverageStats coverage = refreshUnseededFarmlandObligation(world, context);
+        if (!hasUnseededFarmlandObligation || coverage.hasFullCoverage()) {
+            return true;
+        }
+
+        if (isSeedForageRetryCoolingDown(world)) {
+            LOGGER.debug("Farmer {} allowing DONE with active unseeded obligation due to scheduled forage retry (context={} retryAt={} currentTick={})",
+                    villager.getUuidAsString(), context, nextSeedForageRetryTick, world.getTime());
+            return true;
+        }
+
+        LOGGER.debug("Farmer {} blocking DONE due to active unseeded obligation (context={} unseededPlots={})",
+                villager.getUuidAsString(), context, Math.max(0, coverage.accessibleCells() - coverage.seededCells()));
+        if (isNear(chestPos) && routePostDepositFlow(world, false)) {
+            return false;
+        }
+        setStage(Stage.RETURN_TO_CHEST);
+        moveTo(chestPos);
+        return false;
     }
 
 
