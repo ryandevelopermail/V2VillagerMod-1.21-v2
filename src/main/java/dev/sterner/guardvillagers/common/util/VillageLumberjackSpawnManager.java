@@ -24,6 +24,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.ServerWorldAccess;
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -157,6 +158,8 @@ public final class VillageLumberjackSpawnManager {
      * grown yet.
      */
     private static final int TREES_NEEDED_PER_LUMBERJACK = 4;
+    /** Deterministic escalation threshold for direct fallback spawn path. */
+    private static final int ESCALATION_RETRY_THRESHOLD = 3;
 
     private VillageLumberjackSpawnManager() {
     }
@@ -307,6 +310,7 @@ public final class VillageLumberjackSpawnManager {
             LOGGER.debug("lumberjack-spawn attempt={} bell={} — skipped: auto-spawn already completed previously",
                     attemptType, bellPos.toShortString());
             NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            lifecycleState.clearSpawnRetryCount(world, bellPos);
             return;
         }
         if (LumberjackBootstrapCoordinator.isVillageInActiveBootstrapLifecycle(world, bellPos)) {
@@ -341,6 +345,7 @@ public final class VillageLumberjackSpawnManager {
 
         if (effectiveExisting >= desired) {
             NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            lifecycleState.clearSpawnRetryCount(world, bellPos);
             LOGGER.debug("lumberjack-spawn attempt={} bell={} professionals={} total={} desired={} active={} pending={} effective={} — skip placement",
                     attemptType, bellPos.toShortString(), professionals, totalVillagers, desired, existing, pendingUnclaimedTables, effectiveExisting);
             return;
@@ -363,7 +368,12 @@ public final class VillageLumberjackSpawnManager {
 
         // Attempt one table + conversion per scan cycle (pace ourselves).
         // Pass the pre-computed table list so tryPlaceTableAndConvert doesn't re-scan.
-        tryPlaceTableAndConvert(world, bellPos, attemptType, nearbyTables, activeLumberjacks, desired);
+        boolean spawned = tryPlaceTableAndConvert(world, bellPos, attemptType, nearbyTables);
+        if (spawned) {
+            NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            lifecycleState.clearSpawnRetryCount(world, bellPos);
+            return;
+        }
         long retryIntervalTicks = Math.max(20L, GuardVillagersConfig.lumberjackSpawnRetryIntervalTicks);
         NEXT_RETRY_TICK_BY_BELL.put(bellPos, now + retryIntervalTicks);
     }
@@ -386,13 +396,11 @@ public final class VillageLumberjackSpawnManager {
      * the table — placing the table next to a natural chest first would pre-pair the
      * lumberjack to the wrong chest and disrupt its workflow.
      */
-    private static void tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType,
-                                                List<BlockPos> existingTables,
-                                                List<LumberjackGuardEntity> activeLumberjacks,
-                                                int desiredLumberjackCount) {
+    private static boolean tryPlaceTableAndConvert(ServerWorld world, BlockPos bellPos, String attemptType,
+                                                   List<BlockPos> existingTables) {
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, bellPos, attemptType)) {
             LOGGER.debug("lumberjack-spawn attempt={} bell={} — population balancer denied at pre-placement", attemptType, bellPos.toShortString());
-            return;
+            return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "population-balancer-denied");
         }
 
         // Step 1: find or spawn an unemployed villager.
@@ -404,7 +412,7 @@ public final class VillageLumberjackSpawnManager {
             if (candidate == null) {
                 LOGGER.debug("lumberjack-spawn attempt={} bell={} — could not find or spawn unemployed villager; aborting",
                         attemptType, bellPos.toShortString());
-                return;
+                return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "no-candidate-villager");
             }
             LOGGER.info("lumberjack-spawn attempt={} bell={} — spawned unemployed villager {} for conversion",
                     attemptType, bellPos.toShortString(), candidate.getUuidAsString());
@@ -419,7 +427,7 @@ public final class VillageLumberjackSpawnManager {
         if (tablePos == null) {
             LOGGER.debug("lumberjack-spawn attempt={} bell={} — no open floor slot within 3 blocks of villager {}; aborting",
                     attemptType, bellPos.toShortString(), candidate.getUuidAsString());
-            return;
+            return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "no-table-placement-slot");
         }
 
         world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
@@ -427,7 +435,43 @@ public final class VillageLumberjackSpawnManager {
                 attemptType, tablePos.toShortString(), candidate.getUuidAsString(), bellPos.toShortString());
 
         // Step 3: immediately force-convert (vanilla cannot produce custom entity types).
-        forceConvert(world, candidate, tablePos, bellPos);
+        ConversionResult conversionResult = forceConvert(world, candidate, tablePos, bellPos);
+        if (!conversionResult.success()) {
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — conversion failed (reason={})",
+                    attemptType, bellPos.toShortString(), conversionResult.reason());
+            return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables,
+                    "conversion-blocked:" + conversionResult.reason());
+        }
+        return true;
+    }
+
+    private static boolean handleFailedCycleAndMaybeEscalate(ServerWorld world,
+                                                             BlockPos bellPos,
+                                                             String attemptType,
+                                                             List<BlockPos> existingTables,
+                                                             String failureReason) {
+        LumberjackBootstrapLifecycleState lifecycleState = LumberjackBootstrapLifecycleState.get(world.getServer());
+        int retryCount = lifecycleState.incrementSpawnRetryCount(world, bellPos);
+        LOGGER.info("lumberjack-spawn attempt={} bell={} — failed cycle reason={} retry_count={} escalation_threshold={}",
+                attemptType, bellPos.toShortString(), failureReason, retryCount, ESCALATION_RETRY_THRESHOLD);
+        if (retryCount < ESCALATION_RETRY_THRESHOLD) {
+            return false;
+        }
+
+        LOGGER.info("lumberjack-spawn attempt={} bell={} — escalation triggered after {} failed cycles; starting direct fallback",
+                attemptType, bellPos.toShortString(), retryCount);
+        FallbackSpawnResult fallbackResult = runDirectFallbackSpawn(world, bellPos, attemptType, existingTables);
+        if (fallbackResult.success()) {
+            lifecycleState.clearSpawnRetryCount(world, bellPos);
+            NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — escalation success guard={} table={}",
+                    attemptType, bellPos.toShortString(), fallbackResult.guardUuid(), fallbackResult.tablePos().toShortString());
+            return true;
+        }
+
+        LOGGER.warn("lumberjack-spawn attempt={} bell={} — escalation failed reason={}",
+                attemptType, bellPos.toShortString(), fallbackResult.reason());
+        return false;
     }
 
     /**
@@ -516,37 +560,35 @@ public final class VillageLumberjackSpawnManager {
     // Force-conversion (no reachability gate)
     // -------------------------------------------------------------------------
 
-    private static void forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos, BlockPos bellPos) {
+    private static ConversionResult forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos, BlockPos bellPos) {
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "force-convert")) {
             LOGGER.debug("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
-            return;
+            return ConversionResult.failure("population-balancer-denied");
         }
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
             LOGGER.debug("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
-            return;
+            return ConversionResult.failure("table-already-reserved");
         }
         String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
         if (exclusionReason != null) {
             LOGGER.debug("lumberjack-spawn conversion rejected at {}: {}",
                     tablePos.toShortString(), exclusionReason);
-            return;
+            return ConversionResult.failure("placement-exclusion:" + exclusionReason);
         }
         if (!isStandablePlacement(world, tablePos, false)) {
             LOGGER.debug("lumberjack-spawn conversion rejected at {}: invalid support/headroom (uneven or obstructed)",
                     tablePos.toShortString());
-            return;
+            return ConversionResult.failure("invalid-standable-placement");
         }
 
         LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
         if (guard == null) {
             LOGGER.warn("lumberjack-spawn could not create LumberjackGuardEntity at {}", tablePos.toShortString());
-            return;
+            return ConversionResult.failure("guard-entity-create-failed");
         }
 
         GuardConversionHelper.initializeConvertedGuard(world, villager, guard, tablePos);
-        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
-        clearAllEquipment(guard);
-        LumberjackConversionInitializer.initializePostConversion(world, guard, tablePos, "manual", null);
+        initializeSpawnedLumberjackState(world, guard, tablePos, "manual");
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(),
                 VillagerProfession.NONE, "lumberjack-spawn-manager force-convert");
@@ -561,6 +603,72 @@ public final class VillageLumberjackSpawnManager {
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
+        return ConversionResult.success(guard, tablePos);
+    }
+
+    private static FallbackSpawnResult runDirectFallbackSpawn(ServerWorld world,
+                                                              BlockPos bellPos,
+                                                              String attemptType,
+                                                              List<BlockPos> existingTables) {
+        BlockPos safeSpawnPos = findSafeVillagerSpawnNearBell(world, bellPos);
+        if (safeSpawnPos == null) {
+            return FallbackSpawnResult.failure("no-safe-spawn-position");
+        }
+
+        BlockPos tablePos = findFreeSlotNearVillager(world, safeSpawnPos, existingTables);
+        if (tablePos == null) {
+            return FallbackSpawnResult.failure("no-table-placement-slot-near-fallback-spawn");
+        }
+
+        if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, bellPos, attemptType + "_direct_fallback")) {
+            return FallbackSpawnResult.failure("population-balancer-denied-direct-fallback");
+        }
+
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+            return FallbackSpawnResult.failure("table-already-reserved");
+        }
+        String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
+        if (exclusionReason != null) {
+            return FallbackSpawnResult.failure("placement-exclusion:" + exclusionReason);
+        }
+        if (!isStandablePlacement(world, tablePos, false)) {
+            return FallbackSpawnResult.failure("invalid-standable-placement");
+        }
+
+        world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
+        LOGGER.info("lumberjack-spawn attempt={} bell={} — escalation placed crafting table at {} near fallback spawn {}",
+                attemptType, bellPos.toShortString(), tablePos.toShortString(), safeSpawnPos.toShortString());
+
+        LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
+        if (guard == null) {
+            return FallbackSpawnResult.failure("guard-entity-create-failed");
+        }
+
+        guard.refreshPositionAndAngles(
+                safeSpawnPos.getX() + 0.5D, safeSpawnPos.getY(), safeSpawnPos.getZ() + 0.5D,
+                world.random.nextFloat() * 360.0F, 0.0F);
+        guard.initialize((ServerWorldAccess) world, world.getLocalDifficulty(safeSpawnPos), SpawnReason.MOB_SUMMONED, null);
+        initializeSpawnedLumberjackState(world, guard, tablePos, "manual-direct-fallback");
+
+        ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(),
+                VillagerProfession.NONE, "lumberjack-spawn-manager direct-fallback");
+        world.spawnEntityAndPassengers(guard);
+        LumberjackBootstrapLifecycleState lifecycleState = LumberjackBootstrapLifecycleState.get(world.getServer());
+        lifecycleState.markAutoLumberjackSpawnedEver(world, bellPos, guard.getUuid(), world.getTime());
+        lifecycleState.clearSpawnRetryCount(world, bellPos);
+        NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+
+        VillageGuardStandManager.handleGuardSpawn(world, guard, null);
+        return FallbackSpawnResult.success(guard, tablePos);
+    }
+
+    private static void initializeSpawnedLumberjackState(ServerWorld world,
+                                                         LumberjackGuardEntity guard,
+                                                         BlockPos tablePos,
+                                                         String conversionSource) {
+        GuardConversionHelper.applyStandardEquipmentDropChances(guard);
+        clearAllEquipment(guard);
+        LumberjackConversionInitializer.initializePostConversion(world, guard, tablePos, conversionSource, null);
     }
 
     private static void clearAllEquipment(LumberjackGuardEntity guard) {
@@ -741,6 +849,29 @@ public final class VillageLumberjackSpawnManager {
         double dy = a.getY() - b.getY();
         double dz = a.getZ() - b.getZ();
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    private record ConversionResult(boolean success, String reason, @Nullable LumberjackGuardEntity guard, @Nullable BlockPos tablePos) {
+        static ConversionResult success(LumberjackGuardEntity guard, BlockPos tablePos) {
+            return new ConversionResult(true, "success", guard, tablePos);
+        }
+
+        static ConversionResult failure(String reason) {
+            return new ConversionResult(false, reason, null, null);
+        }
+    }
+
+    private record FallbackSpawnResult(boolean success,
+                                       String reason,
+                                       @Nullable String guardUuid,
+                                       @Nullable BlockPos tablePos) {
+        static FallbackSpawnResult success(LumberjackGuardEntity guard, BlockPos tablePos) {
+            return new FallbackSpawnResult(true, "success", guard.getUuidAsString(), tablePos);
+        }
+
+        static FallbackSpawnResult failure(String reason) {
+            return new FallbackSpawnResult(false, reason, null, null);
+        }
     }
 
     // -------------------------------------------------------------------------
