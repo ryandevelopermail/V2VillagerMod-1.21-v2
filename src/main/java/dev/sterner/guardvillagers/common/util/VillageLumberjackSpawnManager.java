@@ -18,11 +18,13 @@ import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.ServerWorldAccess;
+import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,8 +34,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import net.minecraft.registry.tag.BlockTags;
 
 /**
  * Periodically ensures enough lumberjacks exist relative to village population.
@@ -687,7 +687,9 @@ public final class VillageLumberjackSpawnManager {
             }
 
             BlockState state = world.getBlockState(checkPos);
-            if (state.isIn(BlockTags.VILLAGER_JOB_SITES)) {
+            if (PointOfInterestTypes.getTypeForState(state)
+                    .map(type -> type.isIn(PointOfInterestTypeTags.VILLAGER_JOB_SITE))
+                    .orElse(false)) {
                 return "within " + PLACEMENT_EXCLUSION_RADIUS + " blocks of job block at " + checkPos.toShortString();
             }
             if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) {
