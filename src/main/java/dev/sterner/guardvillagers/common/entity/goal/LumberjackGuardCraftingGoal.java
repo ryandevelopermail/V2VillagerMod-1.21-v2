@@ -32,12 +32,19 @@ public class LumberjackGuardCraftingGoal extends Goal {
     private static final int BOOTSTRAP_CHEST_PLANK_REQUIREMENT = 8;
     private static final int BOOTSTRAP_AXE_PLANK_REQUIREMENT = 3;
     private static final int BOOTSTRAP_AXE_STICK_REQUIREMENT = 2;
+    private static final long UNPAIRED_RECOVERY_THRESHOLD_TICKS = 20L * 60L * 3L;
+    private static final long UNREADY_PROMOTION_WARNING_THRESHOLD_TICKS = 20L * 60L * 2L;
+    private static final int FORCED_RECOVERY_CHEST_SCAN_RADIUS = 2;
 
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
     private int craftedToday;
     private int promotionCraftedToday;
     private boolean basePairingEstablished;
+    private long unpairedSinceTick = Long.MIN_VALUE;
+    private long promotionDemandUnreadySinceTick = Long.MIN_VALUE;
+    private boolean promotionDemandUnreadyWarningEmitted;
+    private int recentPlacementFailureCount;
 
     public LumberjackGuardCraftingGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
@@ -118,6 +125,8 @@ public class LumberjackGuardCraftingGoal extends Goal {
             basePairingEstablished = tryPlaceAndBindChest(world);
         }
 
+        updatePairingRecoveryWindow(world, tablePos);
+
         Inventory chestInventory = resolveChestInventory(world);
         performWoodConversion(chestInventory);
         // craftPriorityOutputs now returns the number of promotion items crafted this visit.
@@ -132,6 +141,37 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.DEPOSITING);
+    }
+
+    private void updatePairingRecoveryWindow(ServerWorld world, BlockPos tablePos) {
+        if (this.guard.getPairedChestPos() != null) {
+            unpairedSinceTick = Long.MIN_VALUE;
+            recentPlacementFailureCount = 0;
+            return;
+        }
+
+        long now = world.getTime();
+        if (unpairedSinceTick == Long.MIN_VALUE) {
+            unpairedSinceTick = now;
+            return;
+        }
+
+        if (now - unpairedSinceTick < UNPAIRED_RECOVERY_THRESHOLD_TICKS) {
+            return;
+        }
+
+        Inventory chestInventory = resolveChestInventory(world);
+        int chestOnHand = countByItem(chestInventory, Items.CHEST) + countByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
+        boolean recovered = tryPlaceAndBindChestForRecovery(world, this.guard, chestInventory, FORCED_RECOVERY_CHEST_SCAN_RADIUS);
+        LOGGER.warn("lumberjack_pairing_recovery guard_uuid={} table_pos={} chest_on_hand={} recent_placement_failures={} unpaired_ticks={} forced_scan_radius={} recovered={}",
+                this.guard.getUuidAsString(),
+                tablePos.toShortString(),
+                chestOnHand,
+                recentPlacementFailureCount,
+                now - unpairedSinceTick,
+                FORCED_RECOVERY_CHEST_SCAN_RADIUS,
+                recovered);
+        unpairedSinceTick = now;
     }
 
     @Override
@@ -251,8 +291,11 @@ public class LumberjackGuardCraftingGoal extends Goal {
         }
 
         if (!demandEnabled || !isBasePairingReadyForDemand()) {
+            maybeWarnOnExtendedPromotionDemandWithoutPairing(world, chestInventory);
             return 0;
         }
+        promotionDemandUnreadySinceTick = Long.MIN_VALUE;
+        promotionDemandUnreadyWarningEmitted = false;
 
         // Batch-craft all available promotion demands in one visit (up to the promotion daily limit).
         // Previously only one item was crafted per visit, causing promotion to stretch over many chop
@@ -294,6 +337,43 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return promotionCraftsThisVisit;
     }
 
+    private void maybeWarnOnExtendedPromotionDemandWithoutPairing(ServerWorld world, Inventory chestInventory) {
+        LumberjackChestTriggerController.UpgradeDemand demand = LumberjackChestTriggerController.resolveNextUpgradeDemand(world, this.guard);
+        if (demand == null) {
+            promotionDemandUnreadySinceTick = Long.MIN_VALUE;
+            promotionDemandUnreadyWarningEmitted = false;
+            return;
+        }
+
+        boolean promotionDemand = demand.equals(LumberjackChestTriggerController.UpgradeDemand.v1Chest())
+                || demand.equals(LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable());
+        if (!promotionDemand) {
+            promotionDemandUnreadySinceTick = Long.MIN_VALUE;
+            promotionDemandUnreadyWarningEmitted = false;
+            return;
+        }
+
+        long now = world.getTime();
+        if (promotionDemandUnreadySinceTick == Long.MIN_VALUE) {
+            promotionDemandUnreadySinceTick = now;
+            return;
+        }
+        if (promotionDemandUnreadyWarningEmitted || now - promotionDemandUnreadySinceTick < UNREADY_PROMOTION_WARNING_THRESHOLD_TICKS) {
+            return;
+        }
+
+        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        int chestOnHand = countByItem(chestInventory, Items.CHEST) + countByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
+        LOGGER.warn("lumberjack_pairing_not_ready_for_promotion guard_uuid={} demand_output={} table_pos={} chest_on_hand={} recent_placement_failures={} demand_unready_ticks={}",
+                this.guard.getUuidAsString(),
+                demand.outputItem(),
+                tablePos == null ? "none" : tablePos.toShortString(),
+                chestOnHand,
+                recentPlacementFailureCount,
+                now - promotionDemandUnreadySinceTick);
+        promotionDemandUnreadyWarningEmitted = true;
+    }
+
     private boolean isBootstrapSession() {
         return this.guard.getPairedChestPos() == null;
     }
@@ -303,10 +383,23 @@ public class LumberjackGuardCraftingGoal extends Goal {
     }
 
     private boolean tryPlaceAndBindChest(ServerWorld world) {
-        return tryPlaceAndBindChestForRecovery(world, this.guard, resolveChestInventory(world));
+        boolean placed = tryPlaceAndBindChestForRecovery(world, this.guard, resolveChestInventory(world));
+        if (placed) {
+            recentPlacementFailureCount = 0;
+        } else if (this.guard.getPairedChestPos() == null) {
+            recentPlacementFailureCount++;
+        }
+        return placed;
     }
 
     public static boolean tryPlaceAndBindChestForRecovery(ServerWorld world, LumberjackGuardEntity guard, Inventory chestInventory) {
+        return tryPlaceAndBindChestForRecovery(world, guard, chestInventory, 1);
+    }
+
+    public static boolean tryPlaceAndBindChestForRecovery(ServerWorld world,
+                                                          LumberjackGuardEntity guard,
+                                                          Inventory chestInventory,
+                                                          int searchRadius) {
         BlockPos pairedChestPos = guard.getPairedChestPos();
         if (pairedChestPos != null) {
             return resolveChestInventoryForGuard(world, guard) != null;
@@ -328,8 +421,8 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
         boolean hadBlockedCandidates = false;
         boolean hadUnsupportedCandidates = false;
-        for (Direction direction : Direction.Type.HORIZONTAL) {
-            BlockPos candidate = tablePos.offset(direction);
+        int boundedRadius = Math.max(1, searchRadius);
+        for (BlockPos candidate : iteratePlacementCandidates(tablePos, boundedRadius)) {
             BlockPos below = candidate.down();
             if (!world.getBlockState(candidate).isAir()) {
                 hadBlockedCandidates = true;
@@ -346,23 +439,23 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
             guard.setPairedChestPos(candidate);
             guard.setBootstrapComplete(false);
-            LOGGER.debug("LumberjackCrafting {}: placed and paired chest at {}",
-                    guard.getUuidAsString(), candidate.toShortString());
+            LOGGER.info("lumberjack_chest_pairing_success guard_uuid={} table_pos={} chest_pos={} scan_radius={}",
+                    guard.getUuidAsString(), tablePos.toShortString(), candidate.toShortString(), boundedRadius);
             return true;
         }
 
         if (hadBlockedCandidates && hadUnsupportedCandidates) {
-            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates blocked or unsupported around table {}",
-                    guard.getUuidAsString(), tablePos.toShortString());
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — candidates blocked or unsupported around table {} (scanRadius={})",
+                    guard.getUuidAsString(), tablePos.toShortString(), boundedRadius);
         } else if (hadBlockedCandidates) {
-            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates blocked around table {}",
-                    guard.getUuidAsString(), tablePos.toShortString());
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — candidates blocked around table {} (scanRadius={})",
+                    guard.getUuidAsString(), tablePos.toShortString(), boundedRadius);
         } else if (hadUnsupportedCandidates) {
-            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates lacked solid support around table {}",
-                    guard.getUuidAsString(), tablePos.toShortString());
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — candidates lacked solid support around table {} (scanRadius={})",
+                    guard.getUuidAsString(), tablePos.toShortString(), boundedRadius);
         } else {
-            LOGGER.debug("LumberjackCrafting {}: chest placement failed — no valid adjacent candidate around table {}",
-                    guard.getUuidAsString(), tablePos.toShortString());
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — no valid candidate around table {} (scanRadius={})",
+                    guard.getUuidAsString(), tablePos.toShortString(), boundedRadius);
         }
 
         if (chestInventory != null) {
@@ -380,6 +473,33 @@ public class LumberjackGuardCraftingGoal extends Goal {
         LOGGER.debug("LumberjackCrafting {}: buffered unplaced chest item after placement failure",
                 guard.getUuidAsString());
         return false;
+    }
+
+    private static List<BlockPos> iteratePlacementCandidates(BlockPos tablePos, int searchRadius) {
+        if (searchRadius <= 1) {
+            return List.of(
+                    tablePos.offset(Direction.NORTH),
+                    tablePos.offset(Direction.SOUTH),
+                    tablePos.offset(Direction.WEST),
+                    tablePos.offset(Direction.EAST)
+            );
+        }
+
+        List<BlockPos> candidates = new java.util.ArrayList<>();
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            candidates.add(tablePos.offset(direction));
+        }
+        for (int radius = 2; radius <= searchRadius; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.abs(dx) != radius && Math.abs(dz) != radius) {
+                        continue;
+                    }
+                    candidates.add(tablePos.add(dx, 0, dz));
+                }
+            }
+        }
+        return candidates;
     }
 
     public static boolean ensureChestCraftingSuppliesForRecovery(LumberjackGuardEntity guard, Inventory chestInventory) {

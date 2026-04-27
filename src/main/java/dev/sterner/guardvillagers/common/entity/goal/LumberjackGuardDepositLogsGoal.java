@@ -38,10 +38,14 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
     private static final int DISTRIBUTION_ATTEMPT_INTERVAL_TICKS = 20;
     private static final int MAX_DISTRIBUTION_ATTEMPTS_PER_VISIT = 6;
     static final int BUTCHER_LOG_TRANSFER_CLAMP = 4;
+    private static final long UNPAIRED_RECOVERY_WARN_THRESHOLD_TICKS = 20L * 60L * 3L;
+    private static final int FORCED_RECOVERY_SCAN_RADIUS = 2;
 
     private final LumberjackGuardEntity guard;
     private long nextDistributionAttemptTick;
     private int distributionAttempts;
+    private long unpairedWhileTableSinceTick = Long.MIN_VALUE;
+    private int recentRecoveryPlacementFailures;
     private final EnumMap<LumberjackDemandPlanner.MaterialType, Integer> materialRecipientCursor =
             new EnumMap<>(LumberjackDemandPlanner.MaterialType.class);
 
@@ -110,6 +114,7 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         }
         BlockPos chestPos = this.guard.getPairedChestPos();
         if (chestPos == null) {
+            logExtendedUnpairedState(world, "paired chest missing");
             if (attemptChestRecovery(world, "paired chest missing", false, null)) {
                 return;
             }
@@ -123,6 +128,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             this.guard.getNavigation().startMovingTo(chestPos.getX() + 0.5D, chestPos.getY(), chestPos.getZ() + 0.5D, 0.8D);
             return;
         }
+        unpairedWhileTableSinceTick = Long.MIN_VALUE;
+        recentRecoveryPlacementFailures = 0;
 
         Inventory chestInventory = getChestInventory(world, chestPos);
         if (chestInventory == null) {
@@ -523,17 +530,27 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
         LumberjackGuardCraftingGoal.ensureChestCraftingSuppliesForRecovery(this.guard, pairedChestInventory);
 
         int availablePlanks = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS));
-        boolean hasChest = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isOf(Items.CHEST)) > 0;
+        int chestOnHand = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isOf(Items.CHEST));
+        boolean hasChest = chestOnHand > 0;
+        LOGGER.info("lumberjack_deposit_recovery_state guard_uuid={} reason=\"{}\" table_pos={} chest_on_hand={} recent_placement_failures={} clear_invalid_pairing={}",
+                this.guard.getUuidAsString(),
+                reason,
+                tablePos.toShortString(),
+                chestOnHand,
+                recentRecoveryPlacementFailures,
+                clearInvalidPairing);
 
         if ((!hasChest && availablePlanks >= RECOVERY_CHEST_PLANK_REQUIREMENT)
                 || (hasChest && this.guard.getPairedChestPos() == null)) {
             if (LumberjackGuardCraftingGoal.craftChestForRecovery(this.guard, pairedChestInventory)
-                    && LumberjackGuardCraftingGoal.tryPlaceAndBindChestForRecovery(world, this.guard, pairedChestInventory)) {
+                    && LumberjackGuardCraftingGoal.tryPlaceAndBindChestForRecovery(world, this.guard, pairedChestInventory, FORCED_RECOVERY_SCAN_RADIUS)) {
                 LOGGER.info("Lumberjack Guard {} recovered chest during deposit after {}",
                         this.guard.getUuidAsString(), reason);
+                recentRecoveryPlacementFailures = 0;
                 this.guard.setWorkflowStage(LumberjackGuardEntity.WorkflowStage.MOVING_TO_CHEST);
                 return true;
             }
+            recentRecoveryPlacementFailures++;
         }
 
         int planksAfterConversion = countInInventoryAndBuffer(pairedChestInventory, stack -> stack.isIn(ItemTags.PLANKS));
@@ -561,6 +578,35 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
                     this.guard.getUuidAsString(), reason, previousChestPos);
         }
         return false;
+    }
+
+    private void logExtendedUnpairedState(ServerWorld world, String reason) {
+        BlockPos tablePos = this.guard.getPairedCraftingTablePos();
+        if (tablePos == null) {
+            unpairedWhileTableSinceTick = Long.MIN_VALUE;
+            return;
+        }
+
+        long now = world.getTime();
+        if (unpairedWhileTableSinceTick == Long.MIN_VALUE) {
+            unpairedWhileTableSinceTick = now;
+            return;
+        }
+
+        long duration = now - unpairedWhileTableSinceTick;
+        if (duration < UNPAIRED_RECOVERY_WARN_THRESHOLD_TICKS) {
+            return;
+        }
+
+        int chestOnHand = countInInventoryAndBuffer(null, stack -> stack.isOf(Items.CHEST));
+        LOGGER.warn("lumberjack_deposit_unpaired_extended guard_uuid={} table_pos={} chest_on_hand={} recent_placement_failures={} unpaired_ticks={} reason=\"{}\"",
+                this.guard.getUuidAsString(),
+                tablePos.toShortString(),
+                chestOnHand,
+                recentRecoveryPlacementFailures,
+                duration,
+                reason);
+        unpairedWhileTableSinceTick = now;
     }
 
     private int countInInventoryAndBuffer(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
