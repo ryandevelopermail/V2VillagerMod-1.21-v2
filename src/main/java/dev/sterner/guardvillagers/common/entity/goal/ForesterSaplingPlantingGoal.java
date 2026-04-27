@@ -72,6 +72,8 @@ public class ForesterSaplingPlantingGoal extends Goal {
     private static final int MIN_SAPLING_SPACING = 6;
     /** Max saplings planted in a single run. */
     private static final int MAX_SAPLINGS_PER_RUN = 8;
+    /** Chest saplings below this reserve are protected stock and not withdrawn for planting runs. */
+    private static final int PROTECTED_CHEST_SAPLING_RESERVE = 8;
     /** Y range above/below the anchor to scan. */
     private static final int SCAN_Y_RANGE = 10;
 
@@ -435,14 +437,21 @@ public class ForesterSaplingPlantingGoal extends Goal {
      */
     private void takeSaplingsFromChest(ServerWorld world, Inventory chestInv) {
         int beforeCount = countSaplingsInInventory(chestInv);
+        int withdrawableSaplings = Math.max(0, beforeCount - PROTECTED_CHEST_SAPLING_RESERVE);
+        if (withdrawableSaplings <= 0) {
+            LOGGER.info("[forester-planting] {} sapling withdraw blocked: protected reserve in effect (chestSaplings={} reserve={})",
+                    villager.getUuidAsString(), beforeCount, PROTECTED_CHEST_SAPLING_RESERVE);
+            return;
+        }
         int takenTotal = 0;
         Inventory villagerInv = villager.getInventory();
         for (int i = 0; i < chestInv.size() && !isVillagerInventoryFull(villagerInv)
-                && takenTotal < MAX_SAPLINGS_PER_RUN; i++) {
+                && takenTotal < MAX_SAPLINGS_PER_RUN
+                && takenTotal < withdrawableSaplings; i++) {
             ItemStack stack = chestInv.getStack(i);
             if (stack.isEmpty() || !stack.isIn(ItemTags.SAPLINGS)) continue;
 
-            int toTake = Math.min(stack.getCount(), MAX_SAPLINGS_PER_RUN - takenTotal);
+            int toTake = Math.min(stack.getCount(), Math.min(MAX_SAPLINGS_PER_RUN - takenTotal, withdrawableSaplings - takenTotal));
             ItemStack taken = stack.split(toTake);
             chestInv.markDirty();
             if (heldSaplingItem == null) heldSaplingItem = taken.getItem();

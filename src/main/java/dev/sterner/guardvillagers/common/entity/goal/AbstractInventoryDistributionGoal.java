@@ -2,9 +2,11 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -14,9 +16,17 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
+import net.minecraft.registry.Registries;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.GlobalPos;
+import net.minecraft.village.VillagerProfession;
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -25,6 +35,8 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 public abstract class AbstractInventoryDistributionGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(AbstractInventoryDistributionGoal.class);
+    private static final Identifier FORESTER_PROFESSION_ID = Identifier.of("morevillagers", "woodworker");
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     protected static final int PATH_RETRY_INTERVAL_TICKS = 20;
     protected static final double TARGET_REACH_SQUARED = 4.0D;
@@ -397,12 +409,19 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (!isOverflowModeActive(world, sourceInventory)) {
             return false;
         }
-        if (getOverflowRecipients(world).isEmpty() && resolveOverflowFallbackQmChest(world).isEmpty()) {
+        List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
+        Optional<BlockPos> qmFallback = recipients.isEmpty() ? resolveOverflowFallbackQmChest(world) : Optional.empty();
+        if (recipients.isEmpty() && qmFallback.isEmpty()) {
             return false;
         }
+        boolean foresterRecipientsExist = hasEligibleForesterRecipients(world);
 
         for (int slot = 0; slot < sourceInventory.size(); slot++) {
-            if (selector.test(sourceInventory.getStack(slot))) {
+            ItemStack stack = sourceInventory.getStack(slot);
+            if (!selector.test(stack)) {
+                continue;
+            }
+            if (!isSaplingBlockedForOverflowRouting(world, stack, !recipients.isEmpty(), qmFallback.isPresent(), foresterRecipientsExist, false)) {
                 return true;
             }
         }
@@ -419,10 +438,14 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (recipients.isEmpty() && fallbackQmChest.isEmpty()) {
             return false;
         }
+        boolean foresterRecipientsExist = hasEligibleForesterRecipients(world);
 
         for (int slot = 0; slot < sourceInventory.size(); slot++) {
             ItemStack stack = sourceInventory.getStack(slot);
             if (!selector.test(stack)) {
+                continue;
+            }
+            if (isSaplingBlockedForOverflowRouting(world, stack, !recipients.isEmpty(), fallbackQmChest.isPresent(), foresterRecipientsExist, true)) {
                 continue;
             }
 
@@ -435,9 +458,11 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                 DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
                 pendingTargetId = recipient.recipient().getUuid();
                 pendingTargetPos = recipient.chestPos();
+                auditSaplingRouting(world, extracted, "librarian_overflow", recipient.chestPos(), "allowed_overflow_to_librarian");
             } else {
                 pendingTargetId = null;
                 pendingTargetPos = fallbackQmChest.get();
+                auditSaplingRouting(world, extracted, "qm_overflow_fallback", pendingTargetPos, "allowed_overflow_to_qm_fallback");
             }
             pendingOverflowTransfer = true;
             return true;
@@ -456,15 +481,23 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             if (fallbackQmChest.isEmpty()) {
                 return false;
             }
+            if (isSaplingBlockedForOverflowRouting(world, pendingItem, false, true, hasEligibleForesterRecipients(world), true)) {
+                return false;
+            }
             pendingTargetId = null;
             pendingTargetPos = fallbackQmChest.get();
+            auditSaplingRouting(world, pendingItem, "qm_overflow_fallback", pendingTargetPos, "allowed_overflow_refresh_qm_fallback");
             return true;
+        }
+        if (isSaplingBlockedForOverflowRouting(world, pendingItem, true, false, hasEligibleForesterRecipients(world), true)) {
+            return false;
         }
 
         if (pendingTargetId != null) {
             for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
                 if (recipient.recipient().getUuid().equals(pendingTargetId)) {
                     pendingTargetPos = recipient.chestPos();
+                    auditSaplingRouting(world, pendingItem, "librarian_overflow", pendingTargetPos, "allowed_overflow_refresh_existing");
                     return true;
                 }
             }
@@ -473,6 +506,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
+        auditSaplingRouting(world, pendingItem, "librarian_overflow", pendingTargetPos, "allowed_overflow_refresh_retarget");
         return true;
     }
 
@@ -537,6 +571,73 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     protected enum OverflowRecipientType {
         LIBRARIAN
+    }
+
+    protected boolean isSaplingBlockedForOverflowRouting(ServerWorld world, ItemStack stack, boolean hasLibrarianRecipients, boolean hasQmFallback, boolean foresterRecipientsExist, boolean audit) {
+        if (!stack.isIn(ItemTags.SAPLINGS)) {
+            return false;
+        }
+
+        if (hasQmFallback) {
+            if (audit) {
+                auditSaplingRouting(world, stack, "qm_overflow_fallback", null, "blocked_generic_redistribution_sapling_protection");
+            }
+            return true;
+        }
+
+        if (hasLibrarianRecipients && foresterRecipientsExist) {
+            if (audit) {
+                auditSaplingRouting(world, stack, "librarian_overflow", null, "blocked_librarian_overflow_forester_recipient_exists");
+            }
+            return true;
+        }
+        return false;
+    }
+
+    protected boolean shouldProtectSaplingsFromGenericRedistribution(ServerWorld world, ItemStack stack) {
+        if (!stack.isIn(ItemTags.SAPLINGS)) {
+            return false;
+        }
+        auditSaplingRouting(world, stack, "generic_redistribution", null, "blocked_generic_redistribution_sapling_protection");
+        return true;
+    }
+
+    protected void auditSaplingRouting(ServerWorld world, ItemStack stack, String recipientChosen, @Nullable BlockPos recipientPos, String rule) {
+        if (!stack.isIn(ItemTags.SAPLINGS)) {
+            return;
+        }
+        LOGGER.info("sapling-routing audit: sourceProfession={} sourceVillager={} recipient={} recipientPos={} rule={}",
+                villager.getVillagerData().getProfession(),
+                villager.getUuidAsString(),
+                recipientChosen,
+                recipientPos != null ? recipientPos.toShortString() : "none",
+                rule);
+    }
+
+    protected boolean hasEligibleForesterRecipients(ServerWorld world) {
+        Optional<VillagerProfession> foresterProfession = Registries.VILLAGER_PROFESSION.getOrEmpty(FORESTER_PROFESSION_ID);
+        if (foresterProfession.isEmpty()) {
+            return false;
+        }
+
+        Box scanBox = new Box(villager.getBlockPos()).expand(getOverflowRecipientScanRange());
+        for (VillagerEntity candidate : world.getEntitiesByClass(VillagerEntity.class, scanBox,
+                entity -> entity != villager
+                        && entity.isAlive()
+                        && entity.getVillagerData().getProfession() == foresterProfession.get())) {
+            Optional<GlobalPos> jobSiteMemory = candidate.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
+            if (jobSiteMemory.isEmpty()) {
+                continue;
+            }
+            GlobalPos jobSite = jobSiteMemory.get();
+            if (!jobSite.dimension().equals(world.getRegistryKey())) {
+                continue;
+            }
+            if (JobBlockPairingHelper.findNearbyChest(world, jobSite.pos()).isPresent()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     protected abstract boolean isDistributableItem(ItemStack stack);

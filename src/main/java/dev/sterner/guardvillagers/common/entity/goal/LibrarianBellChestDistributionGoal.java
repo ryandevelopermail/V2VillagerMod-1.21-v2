@@ -32,7 +32,17 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        return hasDistributableItem(inventory) && resolveBellChestTarget(world).isPresent();
+        if (resolveBellChestTarget(world).isEmpty()) {
+            return false;
+        }
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!isDistributableItem(stack) || shouldProtectSaplingsFromGenericRedistribution(world, stack)) {
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     @Override
@@ -46,7 +56,17 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
             return false;
         }
 
-        ItemStack extracted = extractSingleDistributableItem(inventory);
+        ItemStack extracted = ItemStack.EMPTY;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!isDistributableItem(stack) || shouldProtectSaplingsFromGenericRedistribution(world, stack)) {
+                continue;
+            }
+            extracted = stack.split(1);
+            inventory.setStack(slot, stack);
+            inventory.markDirty();
+            break;
+        }
         if (extracted.isEmpty()) {
             return false;
         }
@@ -54,12 +74,16 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
         pendingItem = extracted;
         pendingTargetPos = targetChest.get();
         pendingTargetId = null;
+        auditSaplingRouting(world, extracted, "qm_overflow_fallback", pendingTargetPos, "allowed_librarian_bell_chest_distribution");
         return true;
     }
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
         if (pendingItem.isEmpty()) {
+            return false;
+        }
+        if (shouldProtectSaplingsFromGenericRedistribution(world, pendingItem)) {
             return false;
         }
 
