@@ -46,9 +46,12 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     private static final String SPAWNED_EVER_KEY = "SpawnedEver";
     private static final String SPAWNED_UUID_KEY = "SpawnedUuid";
     private static final String SPAWNED_TICK_KEY = "SpawnedTick";
+    private static final String SPAWN_RETRY_COUNT_BY_BELL_KEY = "SpawnRetryCountByBell";
+    private static final String RETRY_COUNT_VALUE_KEY = "RetryCountValue";
 
     private final Map<EntryKey, EntryValue> entries = new HashMap<>();
     private final Map<BellKey, AutoSpawnMarker> autoSpawnedEverByBell = new HashMap<>();
+    private final Map<BellKey, Integer> spawnRetryCountByBell = new HashMap<>();
 
     public static LumberjackBootstrapLifecycleState get(MinecraftServer server) {
         return server.getOverworld().getPersistentStateManager().getOrCreate(getType(), STATE_ID);
@@ -154,6 +157,28 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
                     new BellKey(worldKey, bellPos.get().toImmutable()),
                     new AutoSpawnMarker(row.getBoolean(SPAWNED_EVER_KEY), spawnedUuid, spawnedTick));
         }
+        NbtList retryCountList = nbt.getList(SPAWN_RETRY_COUNT_BY_BELL_KEY, NbtElement.COMPOUND_TYPE);
+        for (NbtElement element : retryCountList) {
+            if (!(element instanceof NbtCompound row)) {
+                continue;
+            }
+            if (!row.contains(DIMENSION_KEY, NbtElement.STRING_TYPE)
+                    || !row.contains(BELL_POS_KEY, NbtElement.COMPOUND_TYPE)
+                    || !row.contains(RETRY_COUNT_VALUE_KEY, NbtElement.INT_TYPE)) {
+                continue;
+            }
+            Identifier dimensionId = Identifier.tryParse(row.getString(DIMENSION_KEY));
+            if (dimensionId == null) {
+                continue;
+            }
+            Optional<BlockPos> bellPos = NbtHelper.toBlockPos(row, BELL_POS_KEY);
+            if (bellPos.isEmpty()) {
+                continue;
+            }
+            int retryCount = Math.max(0, row.getInt(RETRY_COUNT_VALUE_KEY));
+            RegistryKey<World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimensionId);
+            state.spawnRetryCountByBell.put(new BellKey(worldKey, bellPos.get().toImmutable()), retryCount);
+        }
         return state;
     }
 
@@ -196,6 +221,16 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
             autoSpawnedList.add(row);
         }
         nbt.put(AUTO_SPAWNED_EVER_BY_BELL_KEY, autoSpawnedList);
+
+        NbtList retryCountList = new NbtList();
+        for (Map.Entry<BellKey, Integer> entry : spawnRetryCountByBell.entrySet()) {
+            NbtCompound row = new NbtCompound();
+            row.putString(DIMENSION_KEY, entry.getKey().worldKey().getValue().toString());
+            row.put(BELL_POS_KEY, NbtHelper.fromBlockPos(entry.getKey().bellPos()));
+            row.putInt(RETRY_COUNT_VALUE_KEY, Math.max(0, entry.getValue()));
+            retryCountList.add(row);
+        }
+        nbt.put(SPAWN_RETRY_COUNT_BY_BELL_KEY, retryCountList);
         return nbt;
     }
 
@@ -216,6 +251,24 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
         }
         autoSpawnedEverByBell.put(key, new AutoSpawnMarker(true, spawnedUuid, nowTick));
         markDirty();
+    }
+
+    public int incrementSpawnRetryCount(ServerWorld world, BlockPos bellPos) {
+        BellKey key = new BellKey(world.getRegistryKey(), bellPos.toImmutable());
+        int nextCount = spawnRetryCountByBell.getOrDefault(key, 0) + 1;
+        spawnRetryCountByBell.put(key, nextCount);
+        markDirty();
+        return nextCount;
+    }
+
+    public int getSpawnRetryCount(ServerWorld world, BlockPos bellPos) {
+        return spawnRetryCountByBell.getOrDefault(new BellKey(world.getRegistryKey(), bellPos.toImmutable()), 0);
+    }
+
+    public void clearSpawnRetryCount(ServerWorld world, BlockPos bellPos) {
+        if (spawnRetryCountByBell.remove(new BellKey(world.getRegistryKey(), bellPos.toImmutable())) != null) {
+            markDirty();
+        }
     }
 
     public Optional<EntryValue> getEntry(ServerWorld world, VillageKind kind, long packed) {
@@ -357,6 +410,7 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     public void removeWorld(RegistryKey<World> worldKey) {
         boolean changed = entries.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey));
         changed |= autoSpawnedEverByBell.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey));
+        changed |= spawnRetryCountByBell.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey));
         if (changed) {
             markDirty();
         }
