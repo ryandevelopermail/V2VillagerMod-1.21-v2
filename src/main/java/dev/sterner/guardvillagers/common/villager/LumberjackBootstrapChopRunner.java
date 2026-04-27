@@ -237,11 +237,20 @@ public final class LumberjackBootstrapChopRunner {
         List<ItemEntity> nearbyItems = world.getEntitiesByClass(
                 ItemEntity.class,
                 pickupBox,
-                entity -> entity.isAlive() && !entity.getStack().isEmpty() && entity.getStack().isIn(ItemTags.LOGS));
+                entity -> entity.isAlive() && !entity.getStack().isEmpty() && isGatherableBootstrapTreeDrop(entity.getStack()));
         for (ItemEntity itemEntity : nearbyItems) {
             bufferStack(buffer, itemEntity.getStack().copy());
             itemEntity.discard();
         }
+    }
+
+    static boolean isGatherableBootstrapTreeDrop(ItemStack stack) {
+        return stack.isIn(ItemTags.LOGS)
+                || stack.isIn(ItemTags.PLANKS)
+                || stack.isOf(Items.STICK)
+                || stack.isOf(Items.CHARCOAL)
+                || stack.isIn(ItemTags.SAPLINGS)
+                || stack.isOf(Items.APPLE);
     }
 
     private static void bufferStack(List<ItemStack> buffer, ItemStack incoming) {
