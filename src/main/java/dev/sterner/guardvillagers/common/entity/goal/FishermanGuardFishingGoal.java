@@ -39,6 +39,10 @@ public class FishermanGuardFishingGoal extends Goal {
     private static final double TARGET_REACH_SQUARED = 4.0D;
     private static final int MIN_SESSION_TICKS = 20 * 60;
     private static final int MAX_SESSION_TICKS = 20 * 60 * 3;
+    private static final int TARGET_TIMEOUT_TICKS = 20 * 30;
+    private static final int NAV_IDLE_RESELECT_THRESHOLD = 5;
+    private static final int STAGE_IDLE_WATCHDOG_TICKS = 20 * 20;
+    private static final int BUTCHER_DELIVERY_FISH_THRESHOLD = 1;
 
     private final FishermanGuardEntity guard;
     private Stage stage = Stage.IDLE;
@@ -53,6 +57,13 @@ public class FishermanGuardFishingGoal extends Goal {
     private long nextSessionAttemptTick;
     private @Nullable ButcherTransferTarget butcherTransferTarget;
     private final Map<BlockPos, Long> invalidWaterTargetCooldowns = new HashMap<>();
+    private long targetAcquiredTick;
+    private int movingNavIdleStreak;
+    private long lastProgressTick;
+    private int sessionCastAttempts;
+    private int sessionFishCaught;
+    private int sessionDeliveryAttempts;
+    private int sessionDeliverySuccesses;
 
     public FishermanGuardFishingGoal(FishermanGuardEntity guard) {
         this.guard = guard;
@@ -79,7 +90,8 @@ public class FishermanGuardFishingGoal extends Goal {
 
         this.targetWaterPos = target.waterPos();
         this.targetStandPos = target.standPos();
-        return true;
+        this.targetAcquiredTick = world.getTime();
+        return isCurrentTargetStillViable(world);
     }
 
     @Override
@@ -95,6 +107,12 @@ public class FishermanGuardFishingGoal extends Goal {
         this.localDeliveryLoot.clear();
         this.halfwayLogged = false;
         this.butcherTransferTarget = null;
+        this.movingNavIdleStreak = 0;
+        this.lastProgressTick = this.guard.getWorld().getTime();
+        this.sessionCastAttempts = 0;
+        this.sessionFishCaught = 0;
+        this.sessionDeliveryAttempts = 0;
+        this.sessionDeliverySuccesses = 0;
         if (this.targetStandPos != null) {
             moveTo(this.targetStandPos);
         }
@@ -118,6 +136,8 @@ public class FishermanGuardFishingGoal extends Goal {
             return;
         }
 
+        runStageIdleWatchdog(world);
+
         switch (this.stage) {
             case MOVING_TO_WATER -> tickMovingToWater(world);
             case FISHING -> tickFishing(world);
@@ -137,10 +157,23 @@ public class FishermanGuardFishingGoal extends Goal {
 
         this.guard.getLookControl().lookAt(this.targetWaterPos.getX() + 0.5D, this.targetWaterPos.getY() + 0.5D, this.targetWaterPos.getZ() + 0.5D);
         if (this.targetStandPos != null && isNear(this.targetStandPos)) {
-            this.stage = Stage.FISHING;
+            transitionToStage(Stage.FISHING, world);
             this.sessionStartTick = world.getTime();
             this.sessionDurationTicks = MathHelper.nextInt(this.guard.getRandom(), MIN_SESSION_TICKS, MAX_SESSION_TICKS);
-            LOGGER.info("fisherman started fishing session - will complete in {} ticks", this.sessionDurationTicks);
+            LOGGER.info("fisherman [{}] started fishing session target={} stand={} duration_ticks={}",
+                    this.guard.getUuidAsString(),
+                    this.targetWaterPos.toShortString(),
+                    this.targetStandPos.toShortString(),
+                    this.sessionDurationTicks);
+            return;
+        }
+
+        if ((world.getTime() - this.targetAcquiredTick) >= TARGET_TIMEOUT_TICKS) {
+            blacklistInvalidCurrentTarget(world, "target timeout while moving");
+            if (!retargetToNextViableWater(world)) {
+                this.stage = Stage.DONE;
+                this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+            }
             return;
         }
 
@@ -154,6 +187,15 @@ public class FishermanGuardFishingGoal extends Goal {
         }
 
         if (this.guard.getNavigation().isIdle()) {
+            this.movingNavIdleStreak++;
+            if (this.movingNavIdleStreak >= NAV_IDLE_RESELECT_THRESHOLD) {
+                blacklistInvalidCurrentTarget(world, "repeated nav idle while moving");
+                if (!retargetToNextViableWater(world)) {
+                    this.stage = Stage.DONE;
+                    this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+                }
+                return;
+            }
             if (this.targetStandPos != null && !moveTo(this.targetStandPos)) {
                 blacklistInvalidCurrentTarget(world, "pathfinder could not move to stand position");
                 if (!retargetToNextViableWater(world)) {
@@ -161,6 +203,9 @@ public class FishermanGuardFishingGoal extends Goal {
                     this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
                 }
             }
+        } else {
+            this.movingNavIdleStreak = 0;
+            markProgress(world);
         }
     }
 
@@ -171,6 +216,7 @@ public class FishermanGuardFishingGoal extends Goal {
         }
 
         long elapsed = world.getTime() - this.sessionStartTick;
+        this.sessionCastAttempts++;
         if (!this.halfwayLogged && elapsed >= this.sessionDurationTicks / 2L) {
             this.halfwayLogged = true;
             LOGGER.info("fishing session 50% complete");
@@ -182,17 +228,18 @@ public class FishermanGuardFishingGoal extends Goal {
 
         this.sessionLoot.clear();
         this.sessionLoot.addAll(generateSessionLoot(world));
+        this.sessionFishCaught = this.sessionLoot.stream().mapToInt(ItemStack::getCount).sum();
         logSessionCompletion();
         splitSessionLoot(world);
 
-        if (!this.butcherDeliveryLoot.isEmpty()) {
+        if (isButcherDeliveryThresholdMet()) {
             this.butcherTransferTarget = findNearestButcherTransferTarget(world);
             if (this.butcherTransferTarget != null) {
                 LOGGER.info("fisherman [{}] delivering cookable fish to butcher smoker {} chest {}",
                         this.guard.getUuidAsString(),
                         this.butcherTransferTarget.smokerPos().toShortString(),
                         this.butcherTransferTarget.chestPos().toShortString());
-                this.stage = Stage.DELIVERING_TO_BUTCHER;
+                transitionToStage(Stage.DELIVERING_TO_BUTCHER, world);
                 moveTo(this.butcherTransferTarget.chestPos());
                 return;
             }
@@ -203,7 +250,7 @@ public class FishermanGuardFishingGoal extends Goal {
             this.butcherDeliveryLoot.clear();
         }
 
-        this.stage = Stage.RETURNING_TO_STORAGE;
+        transitionToStage(Stage.RETURNING_TO_STORAGE, world);
         BlockPos storage = getPreferredStoragePos();
         if (storage != null) {
             moveTo(storage);
@@ -218,6 +265,7 @@ public class FishermanGuardFishingGoal extends Goal {
 
         BlockPos butcherChestPos = this.butcherTransferTarget.chestPos();
         if (isNear(butcherChestPos)) {
+            this.sessionDeliveryAttempts++;
             List<ItemStack> remaining = depositLoot(world, butcherChestPos, this.butcherDeliveryLoot);
             this.butcherDeliveryLoot.clear();
             if (!remaining.isEmpty()) {
@@ -227,7 +275,10 @@ public class FishermanGuardFishingGoal extends Goal {
                 this.localDeliveryLoot.addAll(remaining);
             }
 
-            this.stage = Stage.RETURNING_TO_STORAGE;
+            if (remaining.isEmpty()) {
+                this.sessionDeliverySuccesses++;
+            }
+            transitionToStage(Stage.RETURNING_TO_STORAGE, world);
             BlockPos localStorage = getPreferredStoragePos();
             if (localStorage != null) {
                 moveTo(localStorage);
@@ -236,7 +287,10 @@ public class FishermanGuardFishingGoal extends Goal {
         }
 
         if (this.guard.getNavigation().isIdle()) {
+            this.sessionDeliveryAttempts++;
             moveTo(butcherChestPos);
+        } else {
+            markProgress(world);
         }
     }
 
@@ -244,7 +298,7 @@ public class FishermanGuardFishingGoal extends Goal {
         BlockPos storage = getPreferredStoragePos();
         if (storage == null) {
             this.localDeliveryLoot.clear();
-            this.stage = Stage.DONE;
+            transitionToStage(Stage.DONE, world);
             this.nextSessionAttemptTick = world.getTime() + MathHelper.nextInt(this.guard.getRandom(), 200, 600);
             return;
         }
@@ -253,13 +307,15 @@ public class FishermanGuardFishingGoal extends Goal {
             List<ItemStack> remaining = depositLoot(world, storage, this.localDeliveryLoot);
             this.localDeliveryLoot.clear();
             this.localDeliveryLoot.addAll(remaining);
-            this.stage = Stage.DONE;
+            transitionToStage(Stage.DONE, world);
             this.nextSessionAttemptTick = world.getTime() + MathHelper.nextInt(this.guard.getRandom(), 200, 600);
             return;
         }
 
         if (this.guard.getNavigation().isIdle()) {
             moveTo(storage);
+        } else {
+            markProgress(world);
         }
     }
 
@@ -277,6 +333,16 @@ public class FishermanGuardFishingGoal extends Goal {
         LOGGER.info("fisherman [{}] fishing session complete, they caught:\n{}",
                 this.guard.getUuidAsString(),
                 caught);
+        LOGGER.info("fisherman [{}] session telemetry target={} stand={} casts={} fish_caught={} butcher_stacks={} local_stacks={} delivery_attempts={} delivery_successes={}",
+                this.guard.getUuidAsString(),
+                this.targetWaterPos != null ? this.targetWaterPos.toShortString() : "none",
+                this.targetStandPos != null ? this.targetStandPos.toShortString() : "none",
+                this.sessionCastAttempts,
+                this.sessionFishCaught,
+                this.butcherDeliveryLoot.size(),
+                this.localDeliveryLoot.size(),
+                this.sessionDeliveryAttempts,
+                this.sessionDeliverySuccesses);
     }
 
     private List<ItemStack> generateSessionLoot(ServerWorld world) {
@@ -518,6 +584,9 @@ public class FishermanGuardFishingGoal extends Goal {
         if (!world.getBlockState(waterPos.up()).isAir()) {
             return false;
         }
+        if (!hasOpenWaterVolume(world, waterPos)) {
+            return false;
+        }
 
         boolean skyVisible = world.isSkyVisible(waterPos.up());
         int topY = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, waterPos.getX(), waterPos.getZ()) - 1;
@@ -533,7 +602,7 @@ public class FishermanGuardFishingGoal extends Goal {
                 continue;
             }
             Path path = this.guard.getNavigation().findPathTo(standPos, 0);
-            if (path == null) {
+            if (path == null || !path.reachesTarget()) {
                 continue;
             }
             return new FishingTarget(waterPos, standPos.toImmutable());
@@ -561,7 +630,8 @@ public class FishermanGuardFishingGoal extends Goal {
         if (!isStandableAdjacentBlock(world, this.targetStandPos)) {
             return false;
         }
-        return this.guard.getNavigation().findPathTo(this.targetStandPos, 0) != null;
+        Path path = this.guard.getNavigation().findPathTo(this.targetStandPos, 0);
+        return path != null && path.reachesTarget();
     }
 
     private boolean retargetToNextViableWater(ServerWorld world) {
@@ -573,6 +643,9 @@ public class FishermanGuardFishingGoal extends Goal {
         }
         this.targetWaterPos = replacement.waterPos();
         this.targetStandPos = replacement.standPos();
+        this.targetAcquiredTick = world.getTime();
+        this.movingNavIdleStreak = 0;
+        markProgress(world);
         moveTo(this.targetStandPos);
         return true;
     }
@@ -600,6 +673,59 @@ public class FishermanGuardFishingGoal extends Goal {
 
     private void cleanupExpiredInvalidWaterTargetCooldowns(long worldTime) {
         this.invalidWaterTargetCooldowns.entrySet().removeIf(entry -> entry.getValue() <= worldTime);
+    }
+
+    private boolean hasOpenWaterVolume(ServerWorld world, BlockPos waterPos) {
+        int sameLevelWater = 0;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                BlockPos check = waterPos.add(dx, 0, dz);
+                if (world.getBlockState(check).isOf(Blocks.WATER) && world.getBlockState(check.up()).isAir()) {
+                    sameLevelWater++;
+                }
+            }
+        }
+        if (sameLevelWater < 9) {
+            return false;
+        }
+
+        return world.getBlockState(waterPos.up()).isAir() && world.getBlockState(waterPos.up(2)).isAir();
+    }
+
+    private boolean isButcherDeliveryThresholdMet() {
+        int butcherFishCount = this.butcherDeliveryLoot.stream().mapToInt(ItemStack::getCount).sum();
+        return butcherFishCount >= BUTCHER_DELIVERY_FISH_THRESHOLD;
+    }
+
+    private void runStageIdleWatchdog(ServerWorld world) {
+        if (this.stage == Stage.DONE || this.stage == Stage.IDLE || this.stage == Stage.FISHING) {
+            return;
+        }
+        if ((world.getTime() - this.lastProgressTick) < STAGE_IDLE_WATCHDOG_TICKS) {
+            return;
+        }
+
+        LOGGER.warn("fisherman [{}] stage idle watchdog triggered stage={} target={} stand={}, forcing target reacquisition",
+                this.guard.getUuidAsString(),
+                this.stage,
+                this.targetWaterPos != null ? this.targetWaterPos.toShortString() : "none",
+                this.targetStandPos != null ? this.targetStandPos.toShortString() : "none");
+
+        if (!retargetToNextViableWater(world)) {
+            this.stage = Stage.DONE;
+            this.nextSessionAttemptTick = world.getTime() + GuardVillagersConfig.fishermanInvalidWaterRescanCooldownTicks;
+            return;
+        }
+        transitionToStage(Stage.MOVING_TO_WATER, world);
+    }
+
+    private void transitionToStage(Stage nextStage, ServerWorld world) {
+        this.stage = nextStage;
+        this.lastProgressTick = world.getTime();
+    }
+
+    private void markProgress(ServerWorld world) {
+        this.lastProgressTick = world.getTime();
     }
 
     private enum Stage {
