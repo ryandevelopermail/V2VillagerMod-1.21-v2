@@ -15,12 +15,14 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.List;
-import java.util.function.BooleanSupplier;
 
 public class LumberjackGuardCraftingGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardCraftingGoal.class);
     // Per-day cap for axe/tool-upgrade outputs (does not apply to V1 chest / V2 table promotion).
     private static final int DAILY_CRAFT_LIMIT = 4;
     // Higher per-day cap specifically for V1 chest and V2 crafting table promotion outputs.
@@ -213,17 +215,31 @@ public class LumberjackGuardCraftingGoal extends Goal {
      */
     private int craftPriorityOutputs(ServerWorld world, Inventory chestInventory, boolean demandEnabled) {
         if (isBootstrapSession()) {
-            boolean meaningfulAction = craftBootstrapChestAndAttemptPlacementIfNeeded(
-                    shouldCraftBootstrapChest(chestInventory),
-                    () -> craftIfPossible(chestInventory, BOOTSTRAP_CHEST_PLANK_REQUIREMENT, 0, Items.CHEST),
-                    () -> {
-                        boolean placed = tryPlaceAndBindChest(world);
-                        if (placed) {
-                            basePairingEstablished = true;
-                        }
-                        return placed;
+            boolean meaningfulAction = false;
+
+            boolean shouldAttemptChestPlacement = this.guard.getPairedChestPos() == null
+                    && hasChestOnHand(chestInventory, this.guard.getGatheredStackBuffer());
+            if (shouldAttemptChestPlacement) {
+                boolean placed = tryPlaceAndBindChest(world);
+                if (placed) {
+                    basePairingEstablished = true;
+                }
+                meaningfulAction = true;
+            } else if (this.guard.getPairedChestPos() == null && shouldCraftBootstrapChest(chestInventory)) {
+                boolean craftedChest = craftIfPossible(chestInventory, BOOTSTRAP_CHEST_PLANK_REQUIREMENT, 0, Items.CHEST);
+                if (craftedChest) {
+                    LOGGER.debug("LumberjackCrafting {}: crafted bootstrap chest; attempting immediate placement",
+                            this.guard.getUuidAsString());
+                    meaningfulAction = true;
+                    boolean placed = tryPlaceAndBindChest(world);
+                    if (placed) {
+                        basePairingEstablished = true;
                     }
-            );
+                } else {
+                    LOGGER.debug("LumberjackCrafting {}: bootstrap chest craft fallback failed (need {} planks)",
+                            this.guard.getUuidAsString(), BOOTSTRAP_CHEST_PLANK_REQUIREMENT);
+                }
+            }
 
             if (shouldCraftBootstrapAxe(chestInventory) && craftIfPossible(chestInventory, BOOTSTRAP_AXE_PLANK_REQUIREMENT, BOOTSTRAP_AXE_STICK_REQUIREMENT, Items.WOODEN_AXE)) {
                 meaningfulAction = true;
@@ -278,21 +294,6 @@ public class LumberjackGuardCraftingGoal extends Goal {
         return promotionCraftsThisVisit;
     }
 
-    static boolean craftBootstrapChestAndAttemptPlacementIfNeeded(boolean shouldCraftBootstrapChest, BooleanSupplier craftChestAction, BooleanSupplier placeChestAction) {
-        if (!shouldCraftBootstrapChest) {
-            return false;
-        }
-
-        boolean craftedChest = craftChestAction.getAsBoolean();
-        if (!craftedChest) {
-            return false;
-        }
-
-        placeChestAction.getAsBoolean();
-        return true;
-    }
-
-
     private boolean isBootstrapSession() {
         return this.guard.getPairedChestPos() == null;
     }
@@ -313,42 +314,71 @@ public class LumberjackGuardCraftingGoal extends Goal {
 
         BlockPos tablePos = guard.getPairedCraftingTablePos();
         if (tablePos == null) {
+            LOGGER.debug("LumberjackCrafting {}: chest placement skipped — no paired crafting table",
+                    guard.getUuidAsString());
             return false;
         }
 
         ItemStack chestStack = takeOneChestForPlacement(guard, chestInventory);
         if (chestStack.isEmpty()) {
+            LOGGER.debug("LumberjackCrafting {}: chest placement skipped — no chest item in chest inventory/buffer",
+                    guard.getUuidAsString());
             return false;
         }
 
+        boolean hadBlockedCandidates = false;
+        boolean hadUnsupportedCandidates = false;
         for (Direction direction : Direction.Type.HORIZONTAL) {
             BlockPos candidate = tablePos.offset(direction);
             BlockPos below = candidate.down();
             if (!world.getBlockState(candidate).isAir()) {
+                hadBlockedCandidates = true;
                 continue;
             }
             if (!world.getBlockState(below).isSolidBlock(world, below)) {
+                hadUnsupportedCandidates = true;
                 continue;
             }
             if (!world.setBlockState(candidate, Blocks.CHEST.getDefaultState())) {
+                hadBlockedCandidates = true;
                 continue;
             }
 
             guard.setPairedChestPos(candidate);
             guard.setBootstrapComplete(false);
+            LOGGER.debug("LumberjackCrafting {}: placed and paired chest at {}",
+                    guard.getUuidAsString(), candidate.toShortString());
             return true;
+        }
+
+        if (hadBlockedCandidates && hadUnsupportedCandidates) {
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates blocked or unsupported around table {}",
+                    guard.getUuidAsString(), tablePos.toShortString());
+        } else if (hadBlockedCandidates) {
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates blocked around table {}",
+                    guard.getUuidAsString(), tablePos.toShortString());
+        } else if (hadUnsupportedCandidates) {
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — all adjacent candidates lacked solid support around table {}",
+                    guard.getUuidAsString(), tablePos.toShortString());
+        } else {
+            LOGGER.debug("LumberjackCrafting {}: chest placement failed — no valid adjacent candidate around table {}",
+                    guard.getUuidAsString(), tablePos.toShortString());
         }
 
         if (chestInventory != null) {
             ItemStack remainder = insertIntoInventoryStatic(chestInventory, chestStack);
             if (remainder.isEmpty()) {
                 chestInventory.markDirty();
+                LOGGER.debug("LumberjackCrafting {}: returned unplaced chest item to paired inventory",
+                        guard.getUuidAsString());
                 return false;
             }
             chestStack = remainder;
         }
 
         addToBufferStatic(guard, chestStack);
+        LOGGER.debug("LumberjackCrafting {}: buffered unplaced chest item after placement failure",
+                guard.getUuidAsString());
         return false;
     }
 
@@ -462,6 +492,10 @@ public class LumberjackGuardCraftingGoal extends Goal {
     private boolean shouldCraftBootstrapChest(Inventory chestInventory) {
         int chestsOnHand = countByItem(chestInventory, Items.CHEST) + countByItem(this.guard.getGatheredStackBuffer(), Items.CHEST);
         return chestsOnHand < 1;
+    }
+
+    private boolean hasChestOnHand(Inventory chestInventory, List<ItemStack> guardBuffer) {
+        return countByItem(chestInventory, Items.CHEST) + countByItem(guardBuffer, Items.CHEST) > 0;
     }
 
     private void equipBootstrapAxeFromSupplies(Inventory chestInventory) {
