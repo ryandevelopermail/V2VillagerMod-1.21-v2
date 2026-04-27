@@ -114,6 +114,8 @@ public final class VillageLumberjackSpawnManager {
 
     /** Minimum gap between any two crafting tables (avoids stacking). */
     private static final int TABLE_MIN_SPACING = 4;
+    /** Minimum spacing from job blocks/chests/crafting tables for new placements/conversions. */
+    private static final double PLACEMENT_EXCLUSION_RADIUS = 6.0D;
 
     /** Ratio: one lumberjack per N professionals. */
     private static final int RATIO_PROFESSIONALS = 3;
@@ -126,7 +128,7 @@ public final class VillageLumberjackSpawnManager {
      * No matter how large the village gets, we never force more than this many
      * lumberjacks — prevents an explosion of crafting tables.
      */
-    private static final int MAX_FORCED_LUMBERJACKS = 3;
+    private static final int MAX_FORCED_LUMBERJACKS = 1;
 
     /**
      * Fix 1 — stale-table guard.
@@ -257,6 +259,12 @@ public final class VillageLumberjackSpawnManager {
                     continue;
                 }
                 if (pairedToLiving.contains(tablePos)) {
+                    continue;
+                }
+                String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
+                if (exclusionReason != null) {
+                    LOGGER.debug("lumberjack-orphan-sweep bell={} table={} — skipped: {}",
+                            bellPos.toShortString(), tablePos.toShortString(), exclusionReason);
                     continue;
                 }
 
@@ -422,11 +430,27 @@ public final class VillageLumberjackSpawnManager {
                 for (int dz = -range; dz <= range; dz++) {
                     BlockPos candidate = villagerPos.add(dx, dy, dz);
                     if (candidate.equals(villagerPos)) continue;
-                    if (!villagerPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) continue;
-                    if (!world.getBlockState(candidate).isReplaceable()) continue;
-                    BlockPos below = candidate.down();
-                    if (!world.getBlockState(below).isSolidBlock(world, below)) continue;
-                    if (isTooCloseToExistingTable(candidate, existingTables)) continue;
+                    if (!villagerPos.isWithinDistance(candidate, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+                        logPlacementReject("spawn-candidate", candidate, "outside pairing range from villager");
+                        continue;
+                    }
+                    if (!world.getBlockState(candidate).isReplaceable()) {
+                        logPlacementReject("spawn-candidate", candidate, "target block not replaceable");
+                        continue;
+                    }
+                    if (!isStandablePlacement(world, candidate, false)) {
+                        logPlacementReject("spawn-candidate", candidate, "invalid support/headroom (uneven or obstructed)");
+                        continue;
+                    }
+                    if (isTooCloseToExistingTable(candidate, existingTables)) {
+                        logPlacementReject("spawn-candidate", candidate, "too close to an existing crafting table");
+                        continue;
+                    }
+                    String exclusionReason = placementExclusionReason(world, candidate, candidate);
+                    if (exclusionReason != null) {
+                        logPlacementReject("spawn-candidate", candidate, exclusionReason);
+                        continue;
+                    }
                     candidates.add(candidate.toImmutable());
                 }
             }
@@ -486,6 +510,17 @@ public final class VillageLumberjackSpawnManager {
         }
         if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
             LOGGER.debug("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
+            return;
+        }
+        String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
+        if (exclusionReason != null) {
+            LOGGER.debug("lumberjack-spawn conversion rejected at {}: {}",
+                    tablePos.toShortString(), exclusionReason);
+            return;
+        }
+        if (!isStandablePlacement(world, tablePos, false)) {
+            LOGGER.debug("lumberjack-spawn conversion rejected at {}: invalid support/headroom (uneven or obstructed)",
+                    tablePos.toShortString());
             return;
         }
 
@@ -607,11 +642,66 @@ public final class VillageLumberjackSpawnManager {
     }
 
     private static boolean isSafeVillagerSpawnPos(ServerWorld world, BlockPos pos) {
+        if (!isStandablePlacement(world, pos, true)) {
+            logPlacementReject("villager-spawn", pos, "invalid support/headroom (uneven or obstructed)");
+            return false;
+        }
+        String exclusionReason = placementExclusionReason(world, pos, null);
+        if (exclusionReason != null) {
+            logPlacementReject("villager-spawn", pos, exclusionReason);
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean isStandablePlacement(ServerWorld world, BlockPos pos, boolean requireReplaceableFeet) {
+        if (requireReplaceableFeet && !world.getBlockState(pos).isReplaceable()) {
+            return false;
+        }
+        if (!world.getBlockState(pos.up()).isReplaceable()) {
+            return false;
+        }
         BlockPos below = pos.down();
         if (!world.getBlockState(below).isSolidBlock(world, below)) {
             return false;
         }
-        return world.getBlockState(pos).isReplaceable() && world.getBlockState(pos.up()).isReplaceable();
+        // Reject one-off/uneven terrain by requiring contiguous support around the floor block.
+        for (BlockPos edgeSupport : new BlockPos[]{below.north(), below.south(), below.east(), below.west()}) {
+            if (!world.getBlockState(edgeSupport).isSolidBlock(world, edgeSupport)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String placementExclusionReason(ServerWorld world, BlockPos candidate, BlockPos ignorePos) {
+        int exclusion = (int) Math.ceil(PLACEMENT_EXCLUSION_RADIUS);
+        for (BlockPos checkPos : BlockPos.iterate(
+                candidate.add(-exclusion, -exclusion, -exclusion),
+                candidate.add(exclusion, exclusion, exclusion))) {
+            if (!candidate.isWithinDistance(checkPos, PLACEMENT_EXCLUSION_RADIUS)) {
+                continue;
+            }
+            if (ignorePos != null && checkPos.equals(ignorePos)) {
+                continue;
+            }
+
+            BlockState state = world.getBlockState(checkPos);
+            if (state.isIn(BlockTags.VILLAGER_JOB_SITES)) {
+                return "within " + PLACEMENT_EXCLUSION_RADIUS + " blocks of job block at " + checkPos.toShortString();
+            }
+            if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) {
+                return "within " + PLACEMENT_EXCLUSION_RADIUS + " blocks of chest at " + checkPos.toShortString();
+            }
+            if (state.isOf(Blocks.CRAFTING_TABLE)) {
+                return "within " + PLACEMENT_EXCLUSION_RADIUS + " blocks of crafting table at " + checkPos.toShortString();
+            }
+        }
+        return null;
+    }
+
+    private static void logPlacementReject(String context, BlockPos pos, String reason) {
+        LOGGER.debug("lumberjack-spawn {} rejected {}: {}", context, pos.toShortString(), reason);
     }
 
     private static double squaredDistance(BlockPos a, BlockPos b) {
