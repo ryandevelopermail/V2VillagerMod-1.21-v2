@@ -18,13 +18,11 @@ import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.item.ItemStack;
-import net.minecraft.registry.tag.PointOfInterestTypeTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.ServerWorldAccess;
-import net.minecraft.world.poi.PointOfInterestTypes;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -674,6 +672,22 @@ public final class VillageLumberjackSpawnManager {
         return true;
     }
 
+    private static boolean isVillagerJobSiteBlock(BlockState state) {
+        return state.isOf(Blocks.BLAST_FURNACE)
+                || state.isOf(Blocks.SMOKER)
+                || state.isOf(Blocks.CARTOGRAPHY_TABLE)
+                || state.isOf(Blocks.BREWING_STAND)
+                || state.isOf(Blocks.COMPOSTER)
+                || state.isOf(Blocks.BARREL)
+                || state.isOf(Blocks.FLETCHING_TABLE)
+                || state.isOf(Blocks.LECTERN)
+                || state.isOf(Blocks.CAULDRON)
+                || state.isOf(Blocks.STONECUTTER)
+                || state.isOf(Blocks.LOOM)
+                || state.isOf(Blocks.SMITHING_TABLE)
+                || state.isOf(Blocks.GRINDSTONE);
+    }
+
     private static String placementExclusionReason(ServerWorld world, BlockPos candidate, BlockPos ignorePos) {
         int exclusion = (int) Math.ceil(PLACEMENT_EXCLUSION_RADIUS);
         for (BlockPos checkPos : BlockPos.iterate(
@@ -687,9 +701,7 @@ public final class VillageLumberjackSpawnManager {
             }
 
             BlockState state = world.getBlockState(checkPos);
-            if (PointOfInterestTypes.getTypeForState(state)
-                    .map(type -> type.isIn(PointOfInterestTypeTags.VILLAGER_JOB_SITE))
-                    .orElse(false)) {
+            if (isVillagerJobSiteBlock(state)) {
                 return "within " + PLACEMENT_EXCLUSION_RADIUS + " blocks of job block at " + checkPos.toShortString();
             }
             if (state.isOf(Blocks.CHEST) || state.isOf(Blocks.TRAPPED_CHEST)) {
