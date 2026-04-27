@@ -41,8 +41,14 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     private static final String PLACED_TABLE_POS_KEY = "PlacedTablePos";
     private static final String NEXT_RETRY_TICK_KEY = "NextRetryTick";
     private static final String LAST_FAILURE_KEY = "LastFailureKey";
+    private static final String AUTO_SPAWNED_EVER_BY_BELL_KEY = "AutoSpawnedEverByBell";
+    private static final String BELL_POS_KEY = "BellPos";
+    private static final String SPAWNED_EVER_KEY = "SpawnedEver";
+    private static final String SPAWNED_UUID_KEY = "SpawnedUuid";
+    private static final String SPAWNED_TICK_KEY = "SpawnedTick";
 
     private final Map<EntryKey, EntryValue> entries = new HashMap<>();
+    private final Map<BellKey, AutoSpawnMarker> autoSpawnedEverByBell = new HashMap<>();
 
     public static LumberjackBootstrapLifecycleState get(MinecraftServer server) {
         return server.getOverworld().getPersistentStateManager().getOrCreate(getType(), STATE_ID);
@@ -115,6 +121,39 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
             );
             state.entries.put(key, value);
         }
+        NbtList autoSpawnedList = nbt.getList(AUTO_SPAWNED_EVER_BY_BELL_KEY, NbtElement.COMPOUND_TYPE);
+        for (NbtElement element : autoSpawnedList) {
+            if (!(element instanceof NbtCompound row)) {
+                continue;
+            }
+            if (!row.contains(DIMENSION_KEY, NbtElement.STRING_TYPE)
+                    || !row.contains(BELL_POS_KEY, NbtElement.COMPOUND_TYPE)
+                    || !row.contains(SPAWNED_EVER_KEY, NbtElement.BYTE_TYPE)) {
+                continue;
+            }
+            Identifier dimensionId = Identifier.tryParse(row.getString(DIMENSION_KEY));
+            if (dimensionId == null) {
+                continue;
+            }
+            Optional<BlockPos> bellPos = NbtHelper.toBlockPos(row, BELL_POS_KEY);
+            if (bellPos.isEmpty()) {
+                continue;
+            }
+
+            RegistryKey<World> worldKey = RegistryKey.of(RegistryKeys.WORLD, dimensionId);
+            UUID spawnedUuid = null;
+            if (row.contains(SPAWNED_UUID_KEY, NbtElement.STRING_TYPE)) {
+                try {
+                    spawnedUuid = UUID.fromString(row.getString(SPAWNED_UUID_KEY));
+                } catch (IllegalArgumentException ignored) {
+                    spawnedUuid = null;
+                }
+            }
+            long spawnedTick = row.contains(SPAWNED_TICK_KEY, NbtElement.LONG_TYPE) ? row.getLong(SPAWNED_TICK_KEY) : 0L;
+            state.autoSpawnedEverByBell.put(
+                    new BellKey(worldKey, bellPos.get().toImmutable()),
+                    new AutoSpawnMarker(row.getBoolean(SPAWNED_EVER_KEY), spawnedUuid, spawnedTick));
+        }
         return state;
     }
 
@@ -143,7 +182,40 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
             list.add(row);
         }
         nbt.put(ENTRIES_KEY, list);
+
+        NbtList autoSpawnedList = new NbtList();
+        for (Map.Entry<BellKey, AutoSpawnMarker> entry : autoSpawnedEverByBell.entrySet()) {
+            NbtCompound row = new NbtCompound();
+            row.putString(DIMENSION_KEY, entry.getKey().worldKey().getValue().toString());
+            row.put(BELL_POS_KEY, NbtHelper.fromBlockPos(entry.getKey().bellPos()));
+            row.putBoolean(SPAWNED_EVER_KEY, entry.getValue().spawnedEver());
+            if (entry.getValue().spawnedUuid() != null) {
+                row.putString(SPAWNED_UUID_KEY, entry.getValue().spawnedUuid().toString());
+            }
+            row.putLong(SPAWNED_TICK_KEY, entry.getValue().spawnedTick());
+            autoSpawnedList.add(row);
+        }
+        nbt.put(AUTO_SPAWNED_EVER_BY_BELL_KEY, autoSpawnedList);
         return nbt;
+    }
+
+    public boolean hasAutoLumberjackSpawnedEver(ServerWorld world, BlockPos bellPos) {
+        AutoSpawnMarker marker = autoSpawnedEverByBell.get(new BellKey(world.getRegistryKey(), bellPos.toImmutable()));
+        return marker != null && marker.spawnedEver();
+    }
+
+    public Optional<AutoSpawnMarker> getAutoLumberjackSpawnMarker(ServerWorld world, BlockPos bellPos) {
+        return Optional.ofNullable(autoSpawnedEverByBell.get(new BellKey(world.getRegistryKey(), bellPos.toImmutable())));
+    }
+
+    public void markAutoLumberjackSpawnedEver(ServerWorld world, BlockPos bellPos, UUID spawnedUuid, long nowTick) {
+        BellKey key = new BellKey(world.getRegistryKey(), bellPos.toImmutable());
+        AutoSpawnMarker existing = autoSpawnedEverByBell.get(key);
+        if (existing != null && existing.spawnedEver() && existing.spawnedUuid() != null && existing.spawnedUuid().equals(spawnedUuid)) {
+            return;
+        }
+        autoSpawnedEverByBell.put(key, new AutoSpawnMarker(true, spawnedUuid, nowTick));
+        markDirty();
     }
 
     public Optional<EntryValue> getEntry(ServerWorld world, VillageKind kind, long packed) {
@@ -283,7 +355,9 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     }
 
     public void removeWorld(RegistryKey<World> worldKey) {
-        if (entries.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey))) {
+        boolean changed = entries.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey));
+        changed |= autoSpawnedEverByBell.entrySet().removeIf(entry -> entry.getKey().worldKey().equals(worldKey));
+        if (changed) {
             markDirty();
         }
     }
@@ -357,5 +431,11 @@ public class LumberjackBootstrapLifecycleState extends PersistentState {
     }
 
     private record EntryKey(RegistryKey<World> worldKey, VillageKind kind, long packed) {
+    }
+
+    private record BellKey(RegistryKey<World> worldKey, BlockPos bellPos) {
+    }
+
+    public record AutoSpawnMarker(boolean spawnedEver, UUID spawnedUuid, long spawnedTick) {
     }
 }

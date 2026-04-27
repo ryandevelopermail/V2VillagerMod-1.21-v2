@@ -231,8 +231,15 @@ public final class VillageLumberjackSpawnManager {
      */
     private static void sweepOrphanedTables(ServerWorld world, java.util.Set<BlockPos> bellPositions) {
         int tableSearchRadius = CHEST_SCAN_RANGE + TABLE_ADJACENT_RANGE + 2;
+        LumberjackBootstrapLifecycleState lifecycleState = LumberjackBootstrapLifecycleState.get(world.getServer());
 
         for (BlockPos bellPos : bellPositions) {
+            if (lifecycleState.hasAutoLumberjackSpawnedEver(world, bellPos)) {
+                LOGGER.debug("lumberjack-orphan-sweep bell={} — skipped: auto-spawn already completed previously",
+                        bellPos.toShortString());
+                NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+                continue;
+            }
             List<BlockPos> nearbyTables = findExistingTablesNear(world, bellPos, tableSearchRadius);
             if (nearbyTables.isEmpty()) {
                 continue;
@@ -283,7 +290,7 @@ public final class VillageLumberjackSpawnManager {
 
                 LOGGER.info("lumberjack-orphan-sweep bell={} table={} — converting orphaned table with villager {}",
                         bellPos.toShortString(), tablePos.toShortString(), candidate.getUuidAsString());
-                forceConvert(world, candidate, tablePos);
+                forceConvert(world, candidate, tablePos, bellPos);
                 // One conversion per bell per sweep to pace ourselves.
                 break;
             }
@@ -295,6 +302,13 @@ public final class VillageLumberjackSpawnManager {
     // -------------------------------------------------------------------------
 
     private static void processBell(ServerWorld world, BlockPos bellPos, String attemptType, long now) {
+        LumberjackBootstrapLifecycleState lifecycleState = LumberjackBootstrapLifecycleState.get(world.getServer());
+        if (lifecycleState.hasAutoLumberjackSpawnedEver(world, bellPos)) {
+            LOGGER.debug("lumberjack-spawn attempt={} bell={} — skipped: auto-spawn already completed previously",
+                    attemptType, bellPos.toShortString());
+            NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
+            return;
+        }
         if (LumberjackBootstrapCoordinator.isVillageInActiveBootstrapLifecycle(world, bellPos)) {
             LOGGER.debug("lumberjack-spawn attempt={} bell={} — skipped while bootstrap lifecycle is active",
                     attemptType, bellPos.toShortString());
@@ -413,7 +427,7 @@ public final class VillageLumberjackSpawnManager {
                 attemptType, tablePos.toShortString(), candidate.getUuidAsString(), bellPos.toShortString());
 
         // Step 3: immediately force-convert (vanilla cannot produce custom entity types).
-        forceConvert(world, candidate, tablePos);
+        forceConvert(world, candidate, tablePos, bellPos);
     }
 
     /**
@@ -502,7 +516,7 @@ public final class VillageLumberjackSpawnManager {
     // Force-conversion (no reachability gate)
     // -------------------------------------------------------------------------
 
-    private static void forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
+    private static void forceConvert(ServerWorld world, VillagerEntity villager, BlockPos tablePos, BlockPos bellPos) {
         if (!LumberjackPopulationBalancingService.shouldAllowCreationAttempts(world, tablePos, "force-convert")) {
             LOGGER.debug("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
             return;
@@ -538,6 +552,9 @@ public final class VillageLumberjackSpawnManager {
                 VillagerProfession.NONE, "lumberjack-spawn-manager force-convert");
 
         world.spawnEntityAndPassengers(guard);
+        LumberjackBootstrapLifecycleState.get(world.getServer())
+                .markAutoLumberjackSpawnedEver(world, bellPos, guard.getUuid(), world.getTime());
+        NEXT_RETRY_TICK_BY_BELL.remove(bellPos);
         LOGGER.info("lumberjack-spawn converted {} → lumberjack {} at table {}",
                 villager.getUuidAsString(), guard.getUuidAsString(), tablePos.toShortString());
 
