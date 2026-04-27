@@ -78,6 +78,9 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_RESCAN_COOLDOWN_TICKS = 100;
     private static final int STALE_TERRITORY_MATURE_DETECTION_THRESHOLD = 3;
     private static final int STALE_TERRITORY_RESCAN_COOLDOWN_TICKS = 200;
+    private static final int TERRITORY_CROP_SCAN_BUDGET = 96;
+    private static final int TERRITORY_HARVEST_POPULATE_BUDGET = 320;
+    private static final int TERRITORY_BROAD_SCAN_COOLDOWN_TICKS = 200;
     /** Minimum eligible territory plots required before the farmer will do any work.
      *  Kept low (2) so fresh setups with just a few dirt+water blocks aren't permanently gated.
      *  The territory cache builds incrementally — a high value causes indefinite stand-still on new farms. */
@@ -156,6 +159,13 @@ public class FarmerHarvestGoal extends Goal {
      */
     private boolean obligationLoggedThisCycle = false;
     private final Set<BlockPos> eligibleTerritory = new HashSet<>();
+    private final Deque<BlockPos> territoryCropScanQueue = new ArrayDeque<>();
+    private final Set<BlockPos> territoryCropScanMembership = new HashSet<>();
+    private final Set<BlockPos> matureCropCandidates = new HashSet<>();
+    private final Set<BlockPos> plantedCropCandidates = new HashSet<>();
+    private boolean territoryCropCandidatesDirty = false;
+    private boolean pendingTerritoryBroadScan = true;
+    private long nextTerritoryBroadScanTick = 0L;
     private long nextBootstrapScanTick = 0L;
     private int bootstrapScanCursor = 0;
     private long lastTerritoryInvalidationTick = 0L;
@@ -188,6 +198,13 @@ public class FarmerHarvestGoal extends Goal {
         this.obligationLoggedThisCycle = false;
         this.nextIncrementalSeedPickupTick = 0L;
         this.eligibleTerritory.clear();
+        this.territoryCropScanQueue.clear();
+        this.territoryCropScanMembership.clear();
+        this.matureCropCandidates.clear();
+        this.plantedCropCandidates.clear();
+        this.territoryCropCandidatesDirty = true;
+        this.pendingTerritoryBroadScan = true;
+        this.nextTerritoryBroadScanTick = 0L;
         this.bootstrapScanCursor = 0;
         this.nextBootstrapScanTick = 0L;
         this.lastTerritoryInvalidationTick = 0L;
@@ -814,20 +831,13 @@ public class FarmerHarvestGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             return;
         }
-
         harvestTargets.clear();
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
+        scanTerritoryCropCandidates(serverWorld, TERRITORY_HARVEST_POPULATE_BUDGET);
         ArrayList<BlockPos> targets = new ArrayList<>();
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
-                continue;
-            }
-            BlockState state = serverWorld.getBlockState(pos);
-            if (isMatureCrop(state)) {
-                targets.add(pos.toImmutable());
+        for (BlockPos soilPos : matureCropCandidates) {
+            BlockPos cropPos = soilPos.up();
+            if (isWithinHarvestRange(cropPos) && isMatureCrop(serverWorld.getBlockState(cropPos))) {
+                targets.add(cropPos.toImmutable());
             }
         }
 
@@ -836,27 +846,80 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private int countMatureCrops(ServerWorld world) {
-        int count = 0;
-        int radius = HARVEST_RADIUS;
-        int radiusSquared = radius * radius;
-        BlockPos start = jobPos.add(-radius, -radius, -radius);
-        BlockPos end = jobPos.add(radius, radius, radius);
-        for (BlockPos pos : BlockPos.iterate(start, end)) {
-            if (pos.getSquaredDistance(jobPos) > radiusSquared) {
-                continue;
-            }
-            if (isMatureCrop(world.getBlockState(pos))) {
-                count++;
-                if (count > 1) {
-                    return count;
-                }
-            }
-        }
-        return count;
+        scanTerritoryCropCandidates(world, TERRITORY_CROP_SCAN_BUDGET);
+        return Math.min(2, matureCropCandidates.size());
     }
 
     private int countPlantedCropBlocks(ServerWorld world) {
-        int count = 0;
+        scanTerritoryCropCandidates(world, TERRITORY_CROP_SCAN_BUDGET);
+        return Math.min(2, plantedCropCandidates.size());
+    }
+
+    private void scanTerritoryCropCandidates(ServerWorld world, int scanBudget) {
+        ensureEligibleTerritoryCache(world, false);
+        syncTerritoryCropCandidates();
+        maybeRunTerritoryBroadRecoveryScan(world);
+        if (territoryCropScanQueue.isEmpty() || scanBudget <= 0) {
+            LOGGER.debug("Farmer {} crop scan metrics scanCandidates={} visitedThisTick={} matureFound={}",
+                    villager.getUuidAsString(), territoryCropScanMembership.size(), 0, matureCropCandidates.size());
+            return;
+        }
+
+        int visitedThisTick = 0;
+        int matureFound = 0;
+        int plannedVisits = Math.min(scanBudget, territoryCropScanQueue.size());
+        for (int i = 0; i < plannedVisits; i++) {
+            BlockPos pos = territoryCropScanQueue.pollFirst();
+            if (pos == null) {
+                break;
+            }
+            if (!eligibleTerritory.contains(pos)) {
+                territoryCropScanMembership.remove(pos);
+                matureCropCandidates.remove(pos);
+                plantedCropCandidates.remove(pos);
+                continue;
+            }
+
+            BlockState state = world.getBlockState(pos.up());
+            boolean planted = state.getBlock() instanceof CropBlock;
+            if (planted) {
+                plantedCropCandidates.add(pos);
+            } else {
+                plantedCropCandidates.remove(pos);
+            }
+            if (planted && isMatureCrop(state)) {
+                matureCropCandidates.add(pos);
+                matureFound++;
+            } else {
+                matureCropCandidates.remove(pos);
+            }
+            territoryCropScanQueue.addLast(pos);
+            visitedThisTick++;
+        }
+        LOGGER.debug("Farmer {} crop scan metrics scanCandidates={} visitedThisTick={} matureFound={}",
+                villager.getUuidAsString(), territoryCropScanMembership.size(), visitedThisTick, matureFound);
+    }
+
+    private void syncTerritoryCropCandidates() {
+        if (!territoryCropCandidatesDirty) {
+            return;
+        }
+        territoryCropScanQueue.removeIf(pos -> !eligibleTerritory.contains(pos));
+        territoryCropScanMembership.removeIf(pos -> !eligibleTerritory.contains(pos));
+        matureCropCandidates.removeIf(pos -> !eligibleTerritory.contains(pos));
+        plantedCropCandidates.removeIf(pos -> !eligibleTerritory.contains(pos));
+        for (BlockPos pos : eligibleTerritory) {
+            if (territoryCropScanMembership.add(pos)) {
+                territoryCropScanQueue.addLast(pos);
+            }
+        }
+        territoryCropCandidatesDirty = false;
+    }
+
+    private void maybeRunTerritoryBroadRecoveryScan(ServerWorld world) {
+        if (!pendingTerritoryBroadScan || world.getTime() < nextTerritoryBroadScanTick) {
+            return;
+        }
         int radius = HARVEST_RADIUS;
         int radiusSquared = radius * radius;
         BlockPos start = jobPos.add(-radius, -radius, -radius);
@@ -865,14 +928,21 @@ public class FarmerHarvestGoal extends Goal {
             if (pos.getSquaredDistance(jobPos) > radiusSquared) {
                 continue;
             }
-            if (world.getBlockState(pos).getBlock() instanceof CropBlock) {
-                count++;
-                if (count > 1) {
-                    return count;
-                }
+            BlockPos soilPos = pos.down();
+            if (!eligibleTerritory.contains(soilPos)) {
+                continue;
+            }
+            BlockState state = world.getBlockState(pos);
+            if (!(state.getBlock() instanceof CropBlock)) {
+                continue;
+            }
+            plantedCropCandidates.add(soilPos.toImmutable());
+            if (isMatureCrop(state)) {
+                matureCropCandidates.add(soilPos.toImmutable());
             }
         }
-        return count;
+        pendingTerritoryBroadScan = false;
+        nextTerritoryBroadScanTick = world.getTime() + TERRITORY_BROAD_SCAN_COOLDOWN_TICKS;
     }
 
     private boolean isMatureCrop(BlockState state) {
@@ -1786,6 +1856,8 @@ public class FarmerHarvestGoal extends Goal {
                 LOGGER.debug("Farmer {} forcing territory cache rescan (eligibleTerritoryCount={} matureCropCount={} streak={})",
                         villager.getUuidAsString(), eligibleTerritoryCount, matureCropSignalCount, tinyTerritoryMatureDetectionStreak);
                 ensureEligibleTerritoryCache(world, true);
+                pendingTerritoryBroadScan = true;
+                nextTerritoryBroadScanTick = world.getTime();
                 nextForcedTerritoryRescanTick = world.getTime() + STALE_TERRITORY_RESCAN_COOLDOWN_TICKS;
                 tinyTerritoryMatureDetectionStreak = 0;
             }
@@ -2096,6 +2168,13 @@ public class FarmerHarvestGoal extends Goal {
         int invalidPercent = (invalid * 100) / sampled;
         if (invalidPercent >= BOOTSTRAP_INVALIDATION_PERCENT) {
             eligibleTerritory.clear();
+            territoryCropScanQueue.clear();
+            territoryCropScanMembership.clear();
+            matureCropCandidates.clear();
+            plantedCropCandidates.clear();
+            territoryCropCandidatesDirty = true;
+            pendingTerritoryBroadScan = true;
+            nextTerritoryBroadScanTick = now;
             bootstrapScanCursor = 0;
             nextBootstrapScanTick = now + BOOTSTRAP_RESCAN_COOLDOWN_TICKS;
             cachedCoverage = null;
@@ -2110,6 +2189,7 @@ public class FarmerHarvestGoal extends Goal {
         int layers = BOOTSTRAP_SCAN_MAX_Y_OFFSET - BOOTSTRAP_SCAN_MIN_Y_OFFSET + 1;
         int total = diameter * diameter * layers;
         int scanned = 0;
+        boolean territoryChanged = false;
         while (scanned < BOOTSTRAP_SCAN_BLOCK_BUDGET && bootstrapScanCursor < total) {
             int index = bootstrapScanCursor++;
             int layerSize = diameter * diameter;
@@ -2125,12 +2205,19 @@ public class FarmerHarvestGoal extends Goal {
 
             if (horizontalDistanceSquared(pos, jobPos) <= BOOTSTRAP_SCAN_RADIUS * BOOTSTRAP_SCAN_RADIUS) {
                 if (isEligibleTerritoryCell(world, pos)) {
-                    eligibleTerritory.add(pos.toImmutable());
+                    if (eligibleTerritory.add(pos.toImmutable())) {
+                        territoryChanged = true;
+                    }
                 } else {
-                    eligibleTerritory.remove(pos);
+                    if (eligibleTerritory.remove(pos)) {
+                        territoryChanged = true;
+                    }
                 }
             }
             scanned++;
+        }
+        if (territoryChanged) {
+            territoryCropCandidatesDirty = true;
         }
         adaptiveScanVolumeWindow += scanned;
         cachedCoverage = null;
