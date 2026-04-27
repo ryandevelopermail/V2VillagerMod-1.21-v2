@@ -147,6 +147,22 @@ public final class LumberjackBootstrapChopRunner {
         STATES.remove(villager.getUuid());
     }
 
+    public static List<ItemStack> drainBufferedDrops(VillagerEntity villager) {
+        RunnerState state = STATES.get(villager.getUuid());
+        if (state == null || state.buffer.isEmpty()) {
+            return List.of();
+        }
+
+        List<ItemStack> drained = new ArrayList<>(state.buffer.size());
+        for (ItemStack stack : state.buffer) {
+            if (!stack.isEmpty()) {
+                drained.add(stack.copy());
+            }
+        }
+        state.buffer.clear();
+        return drained;
+    }
+
     @Nullable
     public static BlockPos getPlacedTablePos(VillagerEntity villager) {
         RunnerState state = STATES.get(villager.getUuid());
