@@ -45,6 +45,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
     private Stage stage = Stage.IDLE;
     private boolean forceReturnToJob;
     private Item lastCraftedOutputItem;
+    private int sessionCobbleInput;
+    private int sessionWallsOutput;
+    private int sessionSuppressedNonWallCount;
 
     public MasonGuardStonecuttingGoal(MasonGuardEntity guard) {
         this.guard = guard;
@@ -91,6 +94,9 @@ public class MasonGuardStonecuttingGoal extends Goal {
 
     @Override
     public void start() {
+        this.sessionCobbleInput = 0;
+        this.sessionWallsOutput = 0;
+        this.sessionSuppressedNonWallCount = 0;
         this.stage = this.forceReturnToJob ? Stage.RETURN_TO_JOB : Stage.GO_TO_STONECUTTER;
         moveTo(guard.getPairedJobPos());
     }
@@ -98,6 +104,8 @@ public class MasonGuardStonecuttingGoal extends Goal {
     @Override
     public void stop() {
         guard.getNavigation().stop();
+        LOGGER.debug("MasonStonecutting {} session counters: cobble_input={} walls_output={} suppressed_non_wall_count={}",
+                guard.getUuidAsString(), sessionCobbleInput, sessionWallsOutput, sessionSuppressedNonWallCount);
         this.stage = Stage.DONE;
     }
 
@@ -144,9 +152,21 @@ public class MasonGuardStonecuttingGoal extends Goal {
                     return;
                 }
 
-                MasonRecipe recipe = pickRandomRecipe(craftableRecipes, wallPolicy);
+                List<MasonRecipe> selectableRecipes = applyWallActiveCobblestoneGuard(craftableRecipes, inventory, wallPolicy);
+                if (selectableRecipes.isEmpty()) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                MasonRecipe recipe = pickRandomRecipe(selectableRecipes, wallPolicy);
                 if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
                         && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
+                    if (isCobblestoneIngredient(getPrimaryIngredient(recipe.recipe()))) {
+                        this.sessionCobbleInput += recipe.batchInputCount();
+                    }
+                    if (recipe.output().getItem() == Items.COBBLESTONE_WALL) {
+                        this.sessionWallsOutput += recipe.batchOutputCount();
+                    }
                     this.lastCraftedOutputItem = recipe.output().getItem();
                     inventory.markDirty();
                 }
@@ -186,8 +206,17 @@ public class MasonGuardStonecuttingGoal extends Goal {
             recipes.add(new MasonRecipe(recipe, result, batchInputCount, batchOutputCount));
         }
         if (cobblestoneWallLock && suppressedCobblestoneNonWallRecipeCount > 0) {
-            LOGGER.info("MasonStonecutting {}: suppressed {} cobblestone slab/stair outputs while wall project is active",
+            this.sessionSuppressedNonWallCount += suppressedCobblestoneNonWallRecipeCount;
+            LOGGER.info("MasonStonecutting {}: suppressed {} cobblestone non-wall outputs while wall project is active",
                     guard.getUuidAsString(), suppressedCobblestoneNonWallRecipeCount);
+        }
+        if (cobblestoneWallLock) {
+            List<MasonRecipe> prioritizedWalls = recipes.stream()
+                    .filter(recipe -> recipe.output().getItem() == Items.COBBLESTONE_WALL)
+                    .toList();
+            if (!prioritizedWalls.isEmpty()) {
+                return prioritizedWalls;
+            }
         }
         return recipes;
     }
@@ -197,7 +226,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 craftableRecipes.stream().map(recipe -> recipe.output().getItem()).collect(Collectors.toList()),
                 this.lastCraftedOutputItem,
                 guard.getRandom().nextInt(Math.max(1, craftableRecipes.size())),
-                false
+                wallPolicy.mode() == WallProjectPolicyResolver.PolicyMode.WALLS_ONLY
         );
         if (selectedIndex >= 0) {
             return craftableRecipes.get(selectedIndex);
@@ -294,7 +323,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
         if (!cobblestoneWallLock || !isCobblestoneIngredient(ingredient)) {
             return false;
         }
-        return outputItem == Items.COBBLESTONE_SLAB || outputItem == Items.COBBLESTONE_STAIRS;
+        return outputItem != Items.COBBLESTONE_WALL;
     }
 
     private static boolean isCobblestoneIngredient(Ingredient ingredient) {
@@ -308,6 +337,30 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 searchBox,
                 lumberjack -> lumberjack.isAlive() && lumberjack.getPairedFurnaceModifierPos() == null
         ).isEmpty();
+    }
+
+    private List<MasonRecipe> applyWallActiveCobblestoneGuard(
+            List<MasonRecipe> craftableRecipes,
+            Inventory inventory,
+            WallProjectPolicyResolver.PolicyDecision wallPolicy
+    ) {
+        if (wallPolicy.mode() != WallProjectPolicyResolver.PolicyMode.WALLS_ONLY || countItem(inventory, Items.COBBLESTONE) <= 0) {
+            return craftableRecipes;
+        }
+        return craftableRecipes.stream()
+                .filter(recipe -> !shouldSuppressForCobblestoneWallLock(getPrimaryIngredient(recipe.recipe()), recipe.output().getItem(), true))
+                .toList();
+    }
+
+    private static int countItem(Inventory inventory, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private boolean consumeIngredient(Inventory inventory, StonecuttingRecipe recipe, int amount) {
