@@ -7,6 +7,7 @@ import dev.sterner.guardvillagers.common.entity.goal.FarmerBonemealGoal;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.CropBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -36,8 +37,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Set<BlockPos>> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+    private static final Map<VillagerEntity, BlockPos> FARMING_AREAS_BY_VILLAGER = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> LAST_HARVEST_WAKE_TICKS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> LAST_CRAFT_WAKE_TICKS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, Long> LAST_CROP_WAKE_TICKS = new WeakHashMap<>();
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -53,6 +56,7 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         FarmerHarvestGoal harvestGoal = upsertGoal(GOALS, villager, HARVEST_GOAL_PRIORITY,
                 () -> new FarmerHarvestGoal(villager, jobPos, chestPos));
         harvestGoal.setTargets(jobPos, chestPos);
+        registerFarmingArea(villager, jobPos);
 
         FarmerBonemealGoal bonemealGoal = upsertGoal(BONEMEAL_GOALS, villager, BONEMEAL_GOAL_PRIORITY,
                 () -> new FarmerBonemealGoal(villager, jobPos, chestPos));
@@ -89,6 +93,8 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
 
     @Override
     public void onCraftingTablePaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
+        registerFarmingArea(villager, jobPos);
+
         FarmerCraftingGoal craftingGoal = upsertGoal(CRAFTING_GOALS, villager, CRAFTING_GOAL_PRIORITY,
                 () -> new FarmerCraftingGoal(villager, jobPos, chestPos, craftingTablePos));
         craftingGoal.setTargets(jobPos, chestPos, craftingTablePos);
@@ -134,6 +140,59 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
                 continue;
             }
             triggerChestWakeups(world, villager);
+        }
+    }
+
+    public static void onCropStateTransitionToMature(ServerWorld world, BlockPos cropPos, BlockState oldState, BlockState newState) {
+        if (!isCropMaturityTransition(oldState, newState)) {
+            return;
+        }
+        triggerCropWakeups(world, cropPos);
+    }
+
+    public static void onBonemealGrowthApplied(ServerWorld world, BlockPos cropPos, BlockState oldState) {
+        BlockState currentState = world.getBlockState(cropPos);
+        if (!isCropMaturityTransition(oldState, currentState)) {
+            return;
+        }
+        triggerCropWakeups(world, cropPos);
+    }
+
+    private static boolean isCropMaturityTransition(BlockState oldState, BlockState newState) {
+        if (!(oldState.getBlock() instanceof CropBlock oldCrop) || !(newState.getBlock() instanceof CropBlock newCrop)) {
+            return false;
+        }
+        return !oldCrop.isMature(oldState) && newCrop.isMature(newState);
+    }
+
+    private static void triggerCropWakeups(ServerWorld world, BlockPos cropPos) {
+        if (FARMING_AREAS_BY_VILLAGER.isEmpty()) {
+            return;
+        }
+
+        long now = world.getTime();
+        Set<Map.Entry<VillagerEntity, BlockPos>> snapshot = Set.copyOf(FARMING_AREAS_BY_VILLAGER.entrySet());
+        for (Map.Entry<VillagerEntity, BlockPos> entry : snapshot) {
+            VillagerEntity villager = entry.getKey();
+            BlockPos farmingAreaCenter = entry.getValue();
+            if (!villager.isAlive() || villager.getWorld() != world) {
+                unregisterFarmingArea(villager);
+                continue;
+            }
+            if (farmingAreaCenter == null || !isWithinHarvestArea(cropPos, farmingAreaCenter)) {
+                continue;
+            }
+            FarmerHarvestGoal harvest = GOALS.get(villager);
+            if (harvest == null) {
+                continue;
+            }
+            long lastWakeTick = LAST_CROP_WAKE_TICKS.getOrDefault(villager, Long.MIN_VALUE);
+            if (now - lastWakeTick >= HARVEST_WAKE_DEBOUNCE_TICKS) {
+                harvest.requestImmediateWorkCheck();
+                LAST_CROP_WAKE_TICKS.put(villager, now);
+            } else {
+                harvest.requestCheckNoSoonerThan(lastWakeTick + HARVEST_WAKE_MAX_COALESCE_DELAY_TICKS);
+            }
         }
     }
 
@@ -191,6 +250,8 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         Set<BlockPos> existing = CHEST_REGISTRATIONS.remove(villager);
         LAST_HARVEST_WAKE_TICKS.remove(villager);
         LAST_CRAFT_WAKE_TICKS.remove(villager);
+        LAST_CROP_WAKE_TICKS.remove(villager);
+        unregisterFarmingArea(villager);
         if (existing == null) {
             return;
         }
@@ -229,5 +290,25 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         }
 
         return positions;
+    }
+
+    private static boolean isWithinHarvestArea(BlockPos cropPos, BlockPos jobPos) {
+        final int harvestRadius = 50;
+        return Math.abs(cropPos.getX() - jobPos.getX()) <= harvestRadius
+                && Math.abs(cropPos.getZ() - jobPos.getZ()) <= harvestRadius
+                && Math.abs(cropPos.getY() - jobPos.getY()) <= 3;
+    }
+
+    private static void registerFarmingArea(VillagerEntity villager, BlockPos jobPos) {
+        if (jobPos == null) {
+            unregisterFarmingArea(villager);
+            return;
+        }
+        FARMING_AREAS_BY_VILLAGER.put(villager, jobPos.toImmutable());
+    }
+
+    private static void unregisterFarmingArea(VillagerEntity villager) {
+        FARMING_AREAS_BY_VILLAGER.remove(villager);
+        LAST_CROP_WAKE_TICKS.remove(villager);
     }
 }
