@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
@@ -248,7 +249,9 @@ public final class UnemployedLumberjackConversionHook {
         GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         clearAllEquipment(guard);
         guard.setPairedCraftingTablePos(tablePos);
-        JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
+        if (GuardVillagersConfig.lumberjackAutoPairNearbyChestOnConvert) {
+            JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
+        }
         guard.startChopCountdown(world.getTime(), 0L);
         LumberjackGuardChopTreesGoal.scheduleSingleTreeRecoverySession(world, guard);
 

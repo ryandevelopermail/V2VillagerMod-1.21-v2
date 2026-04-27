@@ -222,6 +222,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int lumberjackGovernorConsecutiveBackpressureDefersSnapshotThreshold = 3;
     @Entry
     public static boolean lumberjackVerboseLogging = false;
+    @Entry
+    public static boolean lumberjackAutoPairNearbyChestOnConvert = false;
     @Entry(min=1)
     public static int lumberjackAdaptiveThrottleLoadThreshold = 26000;
     @Entry(min=20)
