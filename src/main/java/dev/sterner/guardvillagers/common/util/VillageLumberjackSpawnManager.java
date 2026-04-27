@@ -160,6 +160,8 @@ public final class VillageLumberjackSpawnManager {
     private static final int TREES_NEEDED_PER_LUMBERJACK = 4;
     /** Deterministic escalation threshold for direct fallback spawn path. */
     private static final int ESCALATION_RETRY_THRESHOLD = 3;
+    /** Bounded number of candidate positions/villagers we evaluate per cycle before retrying later. */
+    private static final int MAX_CANDIDATE_ATTEMPTS_PER_CYCLE = 8;
 
     private VillageLumberjackSpawnManager() {
     }
@@ -270,10 +272,10 @@ public final class VillageLumberjackSpawnManager {
                 if (pairedToLiving.contains(tablePos)) {
                     continue;
                 }
-                String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
-                if (exclusionReason != null) {
+                String validationFailure = validatePlacementCandidate(world, tablePos, false, tablePos);
+                if (validationFailure != null) {
                     LOGGER.debug("lumberjack-orphan-sweep bell={} table={} — skipped: {}",
-                            bellPos.toShortString(), tablePos.toShortString(), exclusionReason);
+                            bellPos.toShortString(), tablePos.toShortString(), validationFailure);
                     continue;
                 }
 
@@ -403,46 +405,49 @@ public final class VillageLumberjackSpawnManager {
             return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "population-balancer-denied");
         }
 
-        // Step 1: find or spawn an unemployed villager.
-        Box bellBox = new Box(bellPos).expand(UNEMPLOYED_SCAN_RANGE);
-        VillagerEntity candidate = findNearestUnemployed(world, bellPos);
-        if (candidate == null) {
-            // Spawn a fresh unemployed villager at a safe position near the bell.
-            candidate = spawnUnemployedVillagerNearBell(world, bellPos);
-            if (candidate == null) {
+        List<VillagerEntity> villagerCandidates = findUnemployedCandidatesNear(world, bellPos);
+        if (villagerCandidates.isEmpty()) {
+            VillagerEntity spawned = spawnUnemployedVillagerNearBell(world, bellPos);
+            if (spawned == null) {
                 LOGGER.debug("lumberjack-spawn attempt={} bell={} — could not find or spawn unemployed villager; aborting",
                         attemptType, bellPos.toShortString());
                 return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "no-candidate-villager");
             }
+            villagerCandidates.add(spawned);
             LOGGER.info("lumberjack-spawn attempt={} bell={} — spawned unemployed villager {} for conversion",
-                    attemptType, bellPos.toShortString(), candidate.getUuidAsString());
-        } else {
-            LOGGER.info("lumberjack-spawn attempt={} bell={} — found unemployed villager {} at {}",
+                    attemptType, bellPos.toShortString(), spawned.getUuidAsString());
+        }
+
+        int attemptedVillagers = 0;
+        for (VillagerEntity candidate : villagerCandidates) {
+            if (attemptedVillagers >= MAX_CANDIDATE_ATTEMPTS_PER_CYCLE) {
+                break;
+            }
+            attemptedVillagers++;
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — evaluating unemployed villager {} at {} (candidate {}/{})",
                     attemptType, bellPos.toShortString(), candidate.getUuidAsString(),
-                    candidate.getBlockPos().toShortString());
-        }
+                    candidate.getBlockPos().toShortString(), attemptedVillagers, MAX_CANDIDATE_ATTEMPTS_PER_CYCLE);
 
-        // Step 2: place a crafting table within 3 blocks of that villager.
-        BlockPos tablePos = findFreeSlotNearVillager(world, candidate.getBlockPos(), existingTables);
-        if (tablePos == null) {
-            LOGGER.debug("lumberjack-spawn attempt={} bell={} — no open floor slot within 3 blocks of villager {}; aborting",
-                    attemptType, bellPos.toShortString(), candidate.getUuidAsString());
-            return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "no-table-placement-slot");
-        }
+            BlockPos tablePos = findFreeSlotNearVillager(world, candidate.getBlockPos(), existingTables, MAX_CANDIDATE_ATTEMPTS_PER_CYCLE);
+            if (tablePos == null) {
+                LOGGER.debug("lumberjack-spawn attempt={} bell={} — no valid table slot near villager {}; trying next candidate",
+                        attemptType, bellPos.toShortString(), candidate.getUuidAsString());
+                continue;
+            }
 
-        world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
-        LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} beside villager {} near bell {}",
-                attemptType, tablePos.toShortString(), candidate.getUuidAsString(), bellPos.toShortString());
+            world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
+            LOGGER.info("lumberjack-spawn attempt={} placed crafting table at {} beside villager {} near bell {}",
+                    attemptType, tablePos.toShortString(), candidate.getUuidAsString(), bellPos.toShortString());
 
-        // Step 3: immediately force-convert (vanilla cannot produce custom entity types).
-        ConversionResult conversionResult = forceConvert(world, candidate, tablePos, bellPos);
-        if (!conversionResult.success()) {
-            LOGGER.info("lumberjack-spawn attempt={} bell={} — conversion failed (reason={})",
+            ConversionResult conversionResult = forceConvert(world, candidate, tablePos, bellPos);
+            if (conversionResult.success()) {
+                return true;
+            }
+
+            LOGGER.info("lumberjack-spawn attempt={} bell={} — conversion failed (reason={}); trying next candidate",
                     attemptType, bellPos.toShortString(), conversionResult.reason());
-            return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables,
-                    "conversion-blocked:" + conversionResult.reason());
         }
-        return true;
+        return handleFailedCycleAndMaybeEscalate(world, bellPos, attemptType, existingTables, "candidates-exhausted");
     }
 
     private static boolean handleFailedCycleAndMaybeEscalate(ServerWorld world,
@@ -479,7 +484,10 @@ public final class VillageLumberjackSpawnManager {
      * of the given villager position. Air above, solid floor below, not too close to an
      * existing table.
      */
-    private static BlockPos findFreeSlotNearVillager(ServerWorld world, BlockPos villagerPos, List<BlockPos> existingTables) {
+    private static BlockPos findFreeSlotNearVillager(ServerWorld world,
+                                                     BlockPos villagerPos,
+                                                     List<BlockPos> existingTables,
+                                                     int maxAttempts) {
         int range = (int) Math.floor(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
         List<BlockPos> candidates = new ArrayList<>();
         for (int dx = -range; dx <= range; dx++) {
@@ -491,21 +499,13 @@ public final class VillageLumberjackSpawnManager {
                         logPlacementReject("spawn-candidate", candidate, "outside pairing range from villager");
                         continue;
                     }
-                    if (!world.getBlockState(candidate).isReplaceable()) {
-                        logPlacementReject("spawn-candidate", candidate, "target block not replaceable");
-                        continue;
-                    }
-                    if (!isStandablePlacement(world, candidate, false)) {
-                        logPlacementReject("spawn-candidate", candidate, "invalid support/headroom (uneven or obstructed)");
+                    String validationFailure = validatePlacementCandidate(world, candidate, true, candidate);
+                    if (validationFailure != null) {
+                        logPlacementReject("spawn-candidate", candidate, validationFailure);
                         continue;
                     }
                     if (isTooCloseToExistingTable(candidate, existingTables)) {
                         logPlacementReject("spawn-candidate", candidate, "too close to an existing crafting table");
-                        continue;
-                    }
-                    String exclusionReason = placementExclusionReason(world, candidate, candidate);
-                    if (exclusionReason != null) {
-                        logPlacementReject("spawn-candidate", candidate, exclusionReason);
                         continue;
                     }
                     candidates.add(candidate.toImmutable());
@@ -516,7 +516,19 @@ public final class VillageLumberjackSpawnManager {
         // Prefer positions at the same Y as the villager (most likely to be the floor they stand on).
         candidates.sort((a, b) -> Integer.compare(
                 Math.abs(a.getY() - villagerPos.getY()), Math.abs(b.getY() - villagerPos.getY())));
-        return candidates.get(0);
+        int attempts = 0;
+        for (BlockPos candidate : candidates) {
+            if (attempts >= maxAttempts) {
+                break;
+            }
+            attempts++;
+            String validationFailure = validatePlacementCandidate(world, candidate, true, candidate);
+            if (validationFailure == null) {
+                return candidate;
+            }
+            logPlacementReject("spawn-candidate", candidate, validationFailure);
+        }
+        return null;
     }
 
     /**
@@ -565,20 +577,10 @@ public final class VillageLumberjackSpawnManager {
             LOGGER.debug("lumberjack-spawn population balancer blocked conversion at {}", tablePos.toShortString());
             return ConversionResult.failure("population-balancer-denied");
         }
-        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            LOGGER.debug("lumberjack-spawn table {} already reserved — skipping", tablePos.toShortString());
-            return ConversionResult.failure("table-already-reserved");
-        }
-        String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
-        if (exclusionReason != null) {
-            LOGGER.debug("lumberjack-spawn conversion rejected at {}: {}",
-                    tablePos.toShortString(), exclusionReason);
-            return ConversionResult.failure("placement-exclusion:" + exclusionReason);
-        }
-        if (!isStandablePlacement(world, tablePos, false)) {
-            LOGGER.debug("lumberjack-spawn conversion rejected at {}: invalid support/headroom (uneven or obstructed)",
-                    tablePos.toShortString());
-            return ConversionResult.failure("invalid-standable-placement");
+        String validationFailure = validatePlacementCandidate(world, tablePos, false, tablePos);
+        if (validationFailure != null) {
+            LOGGER.debug("lumberjack-spawn conversion rejected at {}: {}", tablePos.toShortString(), validationFailure);
+            return ConversionResult.failure("invalid-placement:" + validationFailure);
         }
 
         LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
@@ -615,7 +617,7 @@ public final class VillageLumberjackSpawnManager {
             return FallbackSpawnResult.failure("no-safe-spawn-position");
         }
 
-        BlockPos tablePos = findFreeSlotNearVillager(world, safeSpawnPos, existingTables);
+        BlockPos tablePos = findFreeSlotNearVillager(world, safeSpawnPos, existingTables, MAX_CANDIDATE_ATTEMPTS_PER_CYCLE);
         if (tablePos == null) {
             return FallbackSpawnResult.failure("no-table-placement-slot-near-fallback-spawn");
         }
@@ -624,15 +626,9 @@ public final class VillageLumberjackSpawnManager {
             return FallbackSpawnResult.failure("population-balancer-denied-direct-fallback");
         }
 
-        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
-            return FallbackSpawnResult.failure("table-already-reserved");
-        }
-        String exclusionReason = placementExclusionReason(world, tablePos, tablePos);
-        if (exclusionReason != null) {
-            return FallbackSpawnResult.failure("placement-exclusion:" + exclusionReason);
-        }
-        if (!isStandablePlacement(world, tablePos, false)) {
-            return FallbackSpawnResult.failure("invalid-standable-placement");
+        String validationFailure = validatePlacementCandidate(world, tablePos, true, tablePos);
+        if (validationFailure != null) {
+            return FallbackSpawnResult.failure("invalid-placement:" + validationFailure);
         }
 
         world.setBlockState(tablePos, Blocks.CRAFTING_TABLE.getDefaultState());
@@ -755,27 +751,48 @@ public final class VillageLumberjackSpawnManager {
     }
 
     private static VillagerEntity findNearestUnemployed(ServerWorld world, BlockPos center) {
-        Box scanBox = new Box(center).expand(UNEMPLOYED_SCAN_RANGE);
-        List<VillagerEntity> candidates = world.getEntitiesByClass(
-                VillagerEntity.class, scanBox, VillageLumberjackSpawnManager::isUnemployed);
+        List<VillagerEntity> candidates = findUnemployedCandidatesNear(world, center);
         if (candidates.isEmpty()) return null;
-        candidates.sort((a, b) -> Double.compare(
-                a.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5),
-                b.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5)));
         return candidates.get(0);
     }
 
+    private static List<VillagerEntity> findUnemployedCandidatesNear(ServerWorld world, BlockPos center) {
+        Box scanBox = new Box(center).expand(UNEMPLOYED_SCAN_RANGE);
+        List<VillagerEntity> candidates = world.getEntitiesByClass(
+                VillagerEntity.class, scanBox, VillageLumberjackSpawnManager::isUnemployed);
+        candidates.sort((a, b) -> Double.compare(
+                a.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5),
+                b.squaredDistanceTo(center.getX() + 0.5, center.getY() + 0.5, center.getZ() + 0.5)));
+        return candidates;
+    }
+
     private static boolean isSafeVillagerSpawnPos(ServerWorld world, BlockPos pos) {
-        if (!isStandablePlacement(world, pos, true)) {
-            logPlacementReject("villager-spawn", pos, "invalid support/headroom (uneven or obstructed)");
-            return false;
-        }
-        String exclusionReason = placementExclusionReason(world, pos, null);
-        if (exclusionReason != null) {
-            logPlacementReject("villager-spawn", pos, exclusionReason);
+        String validationFailure = validatePlacementCandidate(world, pos, true, null);
+        if (validationFailure != null) {
+            logPlacementReject("villager-spawn", pos, validationFailure);
             return false;
         }
         return true;
+    }
+
+    private static String validatePlacementCandidate(ServerWorld world,
+                                                     BlockPos pos,
+                                                     boolean requireReplaceableFeet,
+                                                     @Nullable BlockPos exclusionIgnorePos) {
+        if (ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, pos)) {
+            return "table-already-reserved";
+        }
+        if (requireReplaceableFeet && !world.getBlockState(pos).isReplaceable()) {
+            return "target block not replaceable";
+        }
+        if (!isStandablePlacement(world, pos, requireReplaceableFeet)) {
+            return "invalid support/headroom (uneven or obstructed)";
+        }
+        String exclusionReason = placementExclusionReason(world, pos, exclusionIgnorePos);
+        if (exclusionReason != null) {
+            return exclusionReason;
+        }
+        return null;
     }
 
     private static boolean isStandablePlacement(ServerWorld world, BlockPos pos, boolean requireReplaceableFeet) {
@@ -842,13 +859,6 @@ public final class VillageLumberjackSpawnManager {
 
     private static void logPlacementReject(String context, BlockPos pos, String reason) {
         LOGGER.debug("lumberjack-spawn {} rejected {}: {}", context, pos.toShortString(), reason);
-    }
-
-    private static double squaredDistance(BlockPos a, BlockPos b) {
-        double dx = a.getX() - b.getX();
-        double dy = a.getY() - b.getY();
-        double dz = a.getZ() - b.getZ();
-        return dx * dx + dy * dy + dz * dz;
     }
 
     private record ConversionResult(boolean success, String reason, @Nullable LumberjackGuardEntity guard, @Nullable BlockPos tablePos) {
