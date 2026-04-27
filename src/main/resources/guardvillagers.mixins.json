@@ -13,7 +13,8 @@
     "FindPointOfInterestTaskMixin",
     "TakeJobSiteTaskMixin",
     "VillagerTaskListProviderMixin",
-    "StructureTemplateMixin"
+    "StructureTemplateMixin",
+    "CropBlockMixin"
   ],
   "injectors": {
     "defaultRequire": 1

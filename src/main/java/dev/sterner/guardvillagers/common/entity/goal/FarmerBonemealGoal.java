@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.villager.behavior.FarmerBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.CropBlock;
@@ -121,7 +122,9 @@ public class FarmerBonemealGoal extends Goal {
             return;
         }
 
+        BlockState beforeBonemealState = world.getBlockState(currentTarget);
         if (tryApplyBonemeal(world, currentTarget) && consumeOneBonemeal(chestInv.get())) {
+            FarmerBehavior.onBonemealGrowthApplied(world, currentTarget, beforeBonemealState);
             actionsThisRun++;
         }
 
