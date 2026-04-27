@@ -1714,9 +1714,6 @@ public class MasonWallBuilderGoal extends Goal {
                 ? REPEATED_FAILURE_SEGMENT_BLACKLIST_TICKS
                 : SEGMENT_COOLDOWN_TICKS;
         requeueSegmentWithCooldown(world, segmentTarget, "hard_stuck_watchdog", cooldownTicks, "cooldown_requeue", repeatedFailures);
-        if (repeatedFailures >= REPEATED_FAILURE_BLACKLIST_THRESHOLD) {
-            markSegmentDeferred(world, segmentTarget, "hard_stuck_watchdog_blacklisted");
-        }
         activeMoveTarget = null;
         resetActiveMoveProgressTracking(world);
         resetPathFailureState();
