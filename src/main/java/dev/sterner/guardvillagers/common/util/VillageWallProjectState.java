@@ -16,6 +16,7 @@ import net.minecraft.world.PersistentState;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -41,6 +42,8 @@ public class VillageWallProjectState extends PersistentState {
     private static final String MASON_UUID_KEY = "MasonUuid";
     private static final String SEGMENTS_PLACED_KEY = "SegmentsPlaced";
     private static final String SESSIONS_RUN_KEY = "SessionsRun";
+    private static final String CONSECUTIVE_ASSIGNMENTS_KEY = "ConsecutiveAssignments";
+    private static final String WALL_STOCK_CONSUMED_KEY = "WallStockConsumed";
 
     private final Map<GlobalPos, WallProject> projects = new HashMap<>();
     private final Map<GlobalPos, Map<BlockPos, SegmentClaim>> segmentClaims = new HashMap<>();
@@ -184,9 +187,24 @@ public class VillageWallProjectState extends PersistentState {
         WallProject current = projects.get(key);
         if (current == null) return;
         Map<UUID, ParticipationStats> participation = new HashMap<>(current.participation());
+        UUID previousBuilder = current.currentBuilderUuid();
+        participation.replaceAll((uuid, stats) -> {
+            if (uuid.equals(builderUuid)) {
+                return stats;
+            }
+            return new ParticipationStats(stats.segmentsPlaced(), stats.sessionsRun(), 0, stats.wallStockConsumed());
+        });
         participation.compute(builderUuid, (uuid, existing) -> {
-            if (existing == null) return new ParticipationStats(0, 1);
-            return new ParticipationStats(existing.segmentsPlaced(), existing.sessionsRun() + 1);
+            if (existing == null) return new ParticipationStats(0, 1, 1, 0);
+            int nextConsecutiveAssignments = Objects.equals(previousBuilder, builderUuid)
+                    ? existing.consecutiveAssignments()
+                    : existing.consecutiveAssignments() + 1;
+            return new ParticipationStats(
+                    existing.segmentsPlaced(),
+                    existing.sessionsRun() + 1,
+                    Math.max(1, nextConsecutiveAssignments),
+                    existing.wallStockConsumed()
+            );
         });
         projects.put(key, current.withAssignment(builderUuid, nowTick, nowTick, participation));
         markDirty();
@@ -207,8 +225,13 @@ public class VillageWallProjectState extends PersistentState {
         if (current == null) return;
         Map<UUID, ParticipationStats> participation = new HashMap<>(current.participation());
         participation.compute(builderUuid, (uuid, existing) -> {
-            if (existing == null) return new ParticipationStats(1, 0);
-            return new ParticipationStats(existing.segmentsPlaced() + 1, existing.sessionsRun());
+            if (existing == null) return new ParticipationStats(1, 0, 0, 1);
+            return new ParticipationStats(
+                    existing.segmentsPlaced() + 1,
+                    existing.sessionsRun(),
+                    existing.consecutiveAssignments(),
+                    existing.wallStockConsumed() + 1
+            );
         });
         UUID assigned = current.currentBuilderUuid();
         long assignmentStart = current.assignmentStartTick();
@@ -327,7 +350,7 @@ public class VillageWallProjectState extends PersistentState {
 
     public record PerimeterSignature(int poiCount, int poiHash) {}
 
-    public record ParticipationStats(int segmentsPlaced, int sessionsRun) {}
+    public record ParticipationStats(int segmentsPlaced, int sessionsRun, int consecutiveAssignments, int wallStockConsumed) {}
 
     public record ProjectAssignmentSnapshot(UUID builderUuid, long assignmentStartTick, long lastSegmentPlacedTick) {}
 
@@ -383,7 +406,18 @@ public class VillageWallProjectState extends PersistentState {
             if (uuid == null) continue;
             int segmentsPlaced = participationRow.getInt(SEGMENTS_PLACED_KEY);
             int sessionsRun = participationRow.getInt(SESSIONS_RUN_KEY);
-            stats.put(uuid, new ParticipationStats(Math.max(0, segmentsPlaced), Math.max(0, sessionsRun)));
+            int consecutiveAssignments = participationRow.contains(CONSECUTIVE_ASSIGNMENTS_KEY, NbtElement.INT_TYPE)
+                    ? participationRow.getInt(CONSECUTIVE_ASSIGNMENTS_KEY)
+                    : 0;
+            int wallStockConsumed = participationRow.contains(WALL_STOCK_CONSUMED_KEY, NbtElement.INT_TYPE)
+                    ? participationRow.getInt(WALL_STOCK_CONSUMED_KEY)
+                    : Math.max(0, segmentsPlaced);
+            stats.put(uuid, new ParticipationStats(
+                    Math.max(0, segmentsPlaced),
+                    Math.max(0, sessionsRun),
+                    Math.max(0, consecutiveAssignments),
+                    Math.max(0, wallStockConsumed)
+            ));
         }
         return Map.copyOf(stats);
     }
@@ -395,6 +429,8 @@ public class VillageWallProjectState extends PersistentState {
             row.putString(MASON_UUID_KEY, entry.getKey().toString());
             row.putInt(SEGMENTS_PLACED_KEY, Math.max(0, entry.getValue().segmentsPlaced()));
             row.putInt(SESSIONS_RUN_KEY, Math.max(0, entry.getValue().sessionsRun()));
+            row.putInt(CONSECUTIVE_ASSIGNMENTS_KEY, Math.max(0, entry.getValue().consecutiveAssignments()));
+            row.putInt(WALL_STOCK_CONSUMED_KEY, Math.max(0, entry.getValue().wallStockConsumed()));
             list.add(row);
         }
         return list;

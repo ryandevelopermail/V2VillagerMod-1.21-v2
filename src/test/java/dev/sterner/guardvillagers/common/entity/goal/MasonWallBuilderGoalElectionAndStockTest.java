@@ -18,10 +18,10 @@ class MasonWallBuilderGoalElectionAndStockTest {
         UUID masonB = UUID.randomUUID();
         UUID masonC = UUID.randomUUID();
         MasonWallBuilderGoal.ElectionDecision decision = MasonWallBuilderGoal.electBuilderCandidate(List.of(
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonA, "mason-a", true, false, 128, 9.0D, 0, 0),
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonB, "mason-b", true, true, 64, 4.0D, 0, 0),
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonC, "mason-c", true, true, 32, 1.0D, 0, 0)
-        ));
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonA, "mason-a", true, false, 128, 9.0D, 0, 0, 0, 0),
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonB, "mason-b", true, true, 64, 4.0D, 0, 0, 0, 0),
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonC, "mason-c", true, true, 32, 1.0D, 0, 0, 0, 0)
+        ), null, 1);
 
         assertEquals(masonB, decision.electedBuilderUuid());
         assertEquals(64, decision.electedStoneCount());
@@ -34,11 +34,11 @@ class MasonWallBuilderGoalElectionAndStockTest {
         UUID tieBreakByStone = UUID.randomUUID();
         UUID tieBreakByDistance = UUID.randomUUID();
         MasonWallBuilderGoal.ElectionDecision decision = MasonWallBuilderGoal.electBuilderCandidate(List.of(
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(tieBreakByStone, "stone-rich", true, true, 90, 25.0D, 6, 3),
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(tieBreakByDistance, "closer", true, true, 90, 9.0D, 6, 3),
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(lowParticipation, "fair-choice", true, true, 20, 49.0D, 1, 1)
-        ));
-        assertEquals(lowParticipation, decision.electedBuilderUuid());
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(tieBreakByStone, "stone-rich", true, true, 90, 25.0D, 6, 3, 0, 0),
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(tieBreakByDistance, "closer", true, true, 90, 9.0D, 6, 3, 0, 0),
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(lowParticipation, "fair-choice", true, true, 20, 49.0D, 1, 1, 0, 0)
+        ), null, 1);
+        assertEquals(tieBreakByDistance, decision.electedBuilderUuid());
     }
 
     @Test
@@ -70,9 +70,9 @@ class MasonWallBuilderGoalElectionAndStockTest {
         UUID masonA = UUID.randomUUID();
         UUID masonB = UUID.randomUUID();
         MasonWallBuilderGoal.ElectionDecision decision = MasonWallBuilderGoal.electBuilderCandidate(List.of(
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonA, "mason-a", true, false, 80, 1.0D, 0, 0),
-                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonB, "mason-b", false, true, 70, 2.0D, 0, 0)
-        ));
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonA, "mason-a", true, false, 80, 1.0D, 0, 0, 0, 0),
+                new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonB, "mason-b", false, true, 70, 2.0D, 0, 0, 0, 0)
+        ), null, 1);
 
         assertNull(decision.electedBuilderUuid());
         assertTrue(decision.shouldLogNoEligibleBuilder());
@@ -88,9 +88,27 @@ class MasonWallBuilderGoalElectionAndStockTest {
                 net.minecraft.util.math.BlockPos.ORIGIN,
                 400L,
                 100L,
-                48.0D
+                48.0D,
+                120L
         );
         assertEquals(MasonWallBuilderGoal.AssignmentStatusKind.UNHEALTHY, stalled.status());
         assertTrue(stalled.reason().contains("missing"));
+    }
+
+    @Test
+    void election_rotatesToNextEligibleBuilderAfterPreviousAssignment() {
+        UUID masonA = UUID.randomUUID();
+        UUID masonB = UUID.randomUUID();
+        UUID masonC = UUID.randomUUID();
+        MasonWallBuilderGoal.ElectionDecision decision = MasonWallBuilderGoal.electBuilderCandidate(
+                List.of(
+                        new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonA, "mason-a", true, true, 10, 9.0D, 0, 0, 0, 0),
+                        new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonB, "mason-b", true, true, 10, 9.0D, 0, 0, 0, 0),
+                        new MasonWallBuilderGoal.ElectionCandidateSnapshot(masonC, "mason-c", true, true, 10, 9.0D, 0, 0, 0, 0)
+                ),
+                new dev.sterner.guardvillagers.common.util.VillageWallProjectState.ProjectAssignmentSnapshot(masonA, 0L, 0L),
+                1
+        );
+        assertEquals(masonB, decision.electedBuilderUuid());
     }
 }

@@ -57,11 +57,10 @@ import java.util.stream.Stream;
  *   <li>Scan configured POI set (job sites only, jobs+beds, or all POIs) within
  *       the configured mason wall footprint radius of the nearest QM chest
  *       → compute axis-aligned bounding rectangle → expand outward per config.</li>
- *   <li>Elect the mason with the most cobblestone as the builder; non-builders transfer their
- *       stone into the elected mason's paired chest, then resume normal goals.</li>
- *   <li>The elected builder must have enough cobblestone for ALL planned perimeter placements
- *       (excluding gap positions) before placing any block. Planning uses a deterministic
- *       3-layer perimeter (base/base+1/base+2) with strict layer-first ordering.</li>
+ *   <li>Assign a short-lived build slice to one eligible mason at a time using rotating
+ *       round-robin scheduling among local project participants.</li>
+ *   <li>The active mason places from its own paired chest stock while the project-level claim
+ *       system prevents concurrent double-placement collisions.</li>
  *   <li>Gap rules: skip DIRT_PATH positions; always leave at least 1 forced gap so the wall
  *       is never fully closed; reserve one position per face (4 total) for lumberjack fence
  *       gates (stored in entity NBT, not placed here).</li>
@@ -192,6 +191,7 @@ public class MasonWallBuilderGoal extends Goal {
     private static final double WALL_STAGING_REACH_SQ = 4.0D * 4.0D;
     private static final long SAME_CYCLE_IN_FLIGHT_LOCK_TICKS = 600L;
     private static final long FOOTPRINT_PLANNING_DEBUG_LOG_INTERVAL_TICKS = 200L;
+    private static final long ASSIGNMENT_SLICE_TICKS = 120L;
     // Maximum range for scanning peers
     private static final double PEER_SCAN_RANGE = VillageGuardStandManager.BELL_EFFECT_RANGE;
 
@@ -911,13 +911,15 @@ public class MasonWallBuilderGoal extends Goal {
                 wallProjectState.getParticipationStats(world.getRegistryKey(), anchorPos);
         Optional<VillageWallProjectState.ProjectAssignmentSnapshot> assignmentOpt =
                 wallProjectState.getAssignmentSnapshot(world.getRegistryKey(), anchorPos);
+        long stallTicks = Math.max(20, GuardVillagersConfig.masonWallBuilderAssignmentStallTicks / 2L);
         AssignmentStatus assignmentStatus = evaluateAssignmentStatus(
                 assignmentOpt.orElse(null),
                 masonsByUuid,
                 anchorPos,
                 world.getTime(),
-                Math.max(40, GuardVillagersConfig.masonWallBuilderAssignmentStallTicks),
-                PEER_SCAN_RANGE
+                stallTicks,
+                PEER_SCAN_RANGE,
+                ASSIGNMENT_SLICE_TICKS
         );
         if (assignmentStatus.status() != AssignmentStatusKind.HEALTHY && assignmentStatus.snapshot() != null) {
             LOGGER.info("MasonWallBuilder {}: scheduler_event=stalled anchor={} assignedBuilder={} reason={} lastProgressTick={} now={}",
@@ -930,14 +932,6 @@ public class MasonWallBuilderGoal extends Goal {
             wallProjectState.clearAssignment(world.getRegistryKey(), anchorPos);
             assignmentOpt = Optional.empty();
         }
-        if (assignmentStatus.status() == AssignmentStatusKind.HEALTHY && assignmentStatus.snapshot() != null
-                && !guard.getUuid().equals(assignmentStatus.snapshot().builderUuid())) {
-            LOGGER.debug("MasonWallBuilder {}: acting as donor_only to assigned builder {}",
-                    guard.getUuidAsString(),
-                    assignmentStatus.snapshot().builderUuid());
-            return false;
-        }
-
         // 5. Count cobblestone across all peers (including self)
         int myWalls = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE_WALL);
         int myCobblestone = countItemInChest(world, guard.getPairedChestPos(), Items.COBBLESTONE);
@@ -976,7 +970,7 @@ public class MasonWallBuilderGoal extends Goal {
         logDetailed("MasonWallBuilder {}: readiness check passed (requiredToStart={}, requiredTotal={}, wallsAvailable={}, cobblestoneConvertible={}, plannedStartConversions={})",
                 guard.getUuidAsString(), requiredToStartSession, requiredWallSegments, totalWalls, totalCobblestone, plannedConversions);
 
-        // 6. Elect builder — only masons with both chest + job pairing are eligible.
+        // 6. Select active slice builder with rotation — only masons with both chest + job pairing are eligible.
         List<ElectionCandidateSnapshot> electionCandidates = new ArrayList<>();
         for (MasonGuardEntity peer : allMasons) {
             BlockPos peerChestPos = peer.getPairedChestPos();
@@ -984,7 +978,7 @@ public class MasonWallBuilderGoal extends Goal {
                     + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
             VillageWallProjectState.ParticipationStats stats = participationByMason.getOrDefault(
                     peer.getUuid(),
-                    new VillageWallProjectState.ParticipationStats(0, 0)
+                    new VillageWallProjectState.ParticipationStats(0, 0, 0, 0)
             );
             electionCandidates.add(new ElectionCandidateSnapshot(
                     peer.getUuid(),
@@ -994,16 +988,23 @@ public class MasonWallBuilderGoal extends Goal {
                     peerStone,
                     peer.getBlockPos().getSquaredDistance(anchorPos),
                     stats.segmentsPlaced(),
-                    stats.sessionsRun()
+                    stats.sessionsRun(),
+                    stats.consecutiveAssignments(),
+                    stats.wallStockConsumed()
             ));
         }
-        ElectionDecision electionDecision = electBuilderCandidate(electionCandidates);
+        ElectionDecision electionDecision = electBuilderCandidate(
+                electionCandidates,
+                assignmentOpt.orElse(null),
+                requiredToStartSession
+        );
         for (ElectionCandidateSnapshot excluded : electionDecision.excludedCandidates()) {
-            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing (hasChest={}, hasJob={})",
+            LOGGER.debug("MasonWallBuilder {}: election exclusion candidate={} reason=missing pairing_or_stock (hasChest={}, hasJob={}, stone={})",
                     guard.getUuidAsString(),
                     excluded.candidateId(),
                     excluded.hasPairedChest(),
-                    excluded.hasPairedJob());
+                    excluded.hasPairedJob(),
+                    excluded.stoneCount());
         }
 
         MasonGuardEntity electedBuilder = null;
@@ -1035,37 +1036,14 @@ public class MasonWallBuilderGoal extends Goal {
         }
 
         if (electedBuilder != guard) {
-            // This mason is a donor — it will offer its stone to the elected builder
-            // The elected builder's own goal tick will handle collecting
-            // We just need to mark ourselves as a donor (no goal action needed this cycle)
-            LOGGER.debug("MasonWallBuilder {}: acting as donor to elected builder {}",
+            LOGGER.debug("MasonWallBuilder {}: assignment_slice_waiting selectedBuilder={}",
                     guard.getUuidAsString(), electedBuilder.getUuidAsString());
-            return false; // Non-builder masons don't run this goal this cycle
+            return false;
         }
 
-        // This mason is the elected builder
+        // This mason is the elected slice holder.
         isElectedBuilder = true;
-
-        // 7. Build transfer list from peers
         pendingTransfers = new ArrayList<>();
-        for (MasonGuardEntity peer : peers) {
-            if (peer == guard) continue;
-            BlockPos peerChestPos = peer.getPairedChestPos();
-            if (peerChestPos == null) {
-                LOGGER.debug("MasonWallBuilder {}: transfer exclusion candidate={} reason=missing paired chest",
-                        guard.getUuidAsString(), peer.getUuidAsString());
-                continue;
-            }
-            if (peer.getPairedJobPos() == null) {
-                LOGGER.debug("MasonWallBuilder {}: transfer donor candidate={} has no paired job but remains eligible (paired chest present)",
-                        guard.getUuidAsString(), peer.getUuidAsString());
-            }
-            int peerStone = countItemInChest(world, peerChestPos, Items.COBBLESTONE_WALL)
-                    + countItemInChest(world, peerChestPos, Items.COBBLESTONE);
-            if (peerStone > 0) {
-                pendingTransfers.add(new TransferTask(peerChestPos, guard.getPairedChestPos(), peerStone));
-            }
-        }
 
         // 8. Store segments on guard for NBT persistence
         pendingSegments = new ArrayList<>(activeUnbuilt);
@@ -1087,8 +1065,13 @@ public class MasonWallBuilderGoal extends Goal {
         guard.setWallGatePositions(gatePositions);
         guard.setWallBuildPending(true, Math.min(MAX_SEGMENTS_PER_SORTIE, requiredWallSegments));
 
-        LOGGER.info("MasonWallBuilder {}: elected builder={} (stone={}); {} segments to place, {} transfers pending",
-                guard.getUuidAsString(), electedBuilder.getUuidAsString(), electedStone, pendingSegments.size(), pendingTransfers.size());
+        LOGGER.info("MasonWallBuilder {}: elected builder={} (stone={}, consecutiveAssignments={}, stockConsumed={}); {} segments to place",
+                guard.getUuidAsString(),
+                electedBuilder.getUuidAsString(),
+                electedStone,
+                electionDecision.electedConsecutiveAssignments(),
+                electionDecision.electedWallStockConsumed(),
+                pendingSegments.size());
         return true;
     }
 
@@ -6824,7 +6807,8 @@ public class MasonWallBuilderGoal extends Goal {
                                                      BlockPos anchorPos,
                                                      long nowTick,
                                                      long stallTicks,
-                                                     double maxRange) {
+                                                     double maxRange,
+                                                     long sliceTicks) {
         if (snapshot == null) {
             return new AssignmentStatus(AssignmentStatusKind.NONE, null, "no_assignment");
         }
@@ -6841,29 +6825,38 @@ public class MasonWallBuilderGoal extends Goal {
         if (snapshot.lastSegmentPlacedTick() >= 0L && (nowTick - snapshot.lastSegmentPlacedTick()) > stallTicks) {
             return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "stall_timeout");
         }
+        if (snapshot.assignmentStartTick() >= 0L && (nowTick - snapshot.assignmentStartTick()) >= sliceTicks) {
+            return new AssignmentStatus(AssignmentStatusKind.UNHEALTHY, snapshot, "slice_expired");
+        }
         return new AssignmentStatus(AssignmentStatusKind.HEALTHY, snapshot, "healthy");
     }
 
-    static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates) {
-        ElectionCandidateSnapshot elected = null;
+    static ElectionDecision electBuilderCandidate(List<ElectionCandidateSnapshot> candidates,
+                                                  VillageWallProjectState.ProjectAssignmentSnapshot snapshot,
+                                                  int minStoneToStartSlice) {
+        List<ElectionCandidateSnapshot> eligible = new ArrayList<>();
         List<ElectionCandidateSnapshot> excluded = new ArrayList<>();
         for (ElectionCandidateSnapshot candidate : candidates) {
-            if (!candidate.hasPairedChest() || !candidate.hasPairedJob()) {
+            if (!candidate.hasPairedChest() || !candidate.hasPairedJob() || candidate.stoneCount() < minStoneToStartSlice) {
                 excluded.add(candidate);
                 continue;
             }
-            if (elected == null
-                    || candidate.sessionsRun() < elected.sessionsRun()
-                    || (candidate.sessionsRun() == elected.sessionsRun() && candidate.segmentsPlaced() < elected.segmentsPlaced())
-                    || (candidate.sessionsRun() == elected.sessionsRun()
-                    && candidate.segmentsPlaced() == elected.segmentsPlaced()
-                    && candidate.stoneCount() > elected.stoneCount())
-                    || (candidate.sessionsRun() == elected.sessionsRun()
-                    && candidate.segmentsPlaced() == elected.segmentsPlaced()
-                    && candidate.stoneCount() == elected.stoneCount()
-                    && candidate.distanceSqToAnchor() < elected.distanceSqToAnchor())) {
-                elected = candidate;
+            eligible.add(candidate);
+        }
+        eligible.sort(Comparator.comparing(ElectionCandidateSnapshot::candidateId));
+        ElectionCandidateSnapshot elected = null;
+        if (!eligible.isEmpty()) {
+            UUID previousBuilder = snapshot == null ? null : snapshot.builderUuid();
+            int startIndex = 0;
+            if (previousBuilder != null) {
+                for (int i = 0; i < eligible.size(); i++) {
+                    if (previousBuilder.equals(eligible.get(i).builderUuid())) {
+                        startIndex = Math.floorMod(i + 1, eligible.size());
+                        break;
+                    }
+                }
             }
+            elected = eligible.get(startIndex);
         }
         return new ElectionDecision(
                 elected == null ? null : elected.builderUuid(),
@@ -6871,6 +6864,8 @@ public class MasonWallBuilderGoal extends Goal {
                 elected == null ? -1 : elected.sessionsRun(),
                 elected == null ? -1 : elected.segmentsPlaced(),
                 elected == null ? -1.0D : elected.distanceSqToAnchor(),
+                elected == null ? -1 : elected.consecutiveAssignments(),
+                elected == null ? -1 : elected.wallStockConsumed(),
                 excluded,
                 elected == null
         );
@@ -7527,13 +7522,17 @@ public class MasonWallBuilderGoal extends Goal {
                                      int stoneCount,
                                      double distanceSqToAnchor,
                                      int segmentsPlaced,
-                                     int sessionsRun) {}
+                                     int sessionsRun,
+                                     int consecutiveAssignments,
+                                     int wallStockConsumed) {}
 
     record ElectionDecision(UUID electedBuilderUuid,
                             int electedStoneCount,
                             int electedSessionsRun,
                             int electedSegmentsPlaced,
                             double electedDistanceSq,
+                            int electedConsecutiveAssignments,
+                            int electedWallStockConsumed,
                             List<ElectionCandidateSnapshot> excludedCandidates,
                             boolean shouldLogNoEligibleBuilder) {}
 
