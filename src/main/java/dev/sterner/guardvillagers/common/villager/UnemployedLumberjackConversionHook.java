@@ -1,20 +1,15 @@
 package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
-import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardChopTreesGoal;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
-import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
@@ -30,7 +25,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public final class UnemployedLumberjackConversionHook {
     private static final double CRAFTING_TABLE_SEARCH_RANGE = JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE;
@@ -252,12 +246,13 @@ public final class UnemployedLumberjackConversionHook {
         GuardConversionHelper.initializeConvertedGuard(world, villager, guard, tablePos);
         GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         clearAllEquipment(guard);
-        guard.setPairedCraftingTablePos(tablePos);
-        if (GuardVillagersConfig.lumberjackAutoPairNearbyChestOnConvert) {
-            JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
-        }
-        guard.startChopCountdown(world.getTime(), 0L);
-        LumberjackGuardChopTreesGoal.scheduleSingleTreeRecoverySession(world, guard);
+        List<ItemStack> bootstrapDrops = LumberjackBootstrapChopRunner.drainBufferedDrops(villager);
+        LumberjackConversionInitializer.initializePostConversion(
+                world,
+                guard,
+                tablePos,
+                "natural-bootstrap",
+                bootstrapDrops);
 
         ConvertedWorkerJobSiteReservationManager.EnsureResult reservationResult = ConvertedWorkerJobSiteReservationManager.ensureReservation(
                 world,
@@ -276,95 +271,8 @@ public final class UnemployedLumberjackConversionHook {
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         LumberjackBootstrapCoordinator.markDone(world, villager);
-        transferBootstrapBufferedDrops(world, villager, guard);
         LumberjackBootstrapChopRunner.clearState(villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
-    }
-
-    private static void transferBootstrapBufferedDrops(ServerWorld world, VillagerEntity villager, LumberjackGuardEntity guard) {
-        List<ItemStack> drained = LumberjackBootstrapChopRunner.drainBufferedDrops(villager);
-        if (drained.isEmpty()) {
-            return;
-        }
-
-        int drainedItemCount = drained.stream().mapToInt(ItemStack::getCount).sum();
-        String summary = drained.stream()
-                .map(stack -> stack.getCount() + "x" + stack.getItem().toString())
-                .collect(Collectors.joining(", "));
-
-        int insertedToChestItemCount = 0;
-        int insertedToBufferItemCount = 0;
-        Inventory pairedChestInventory = resolvePairedChestInventory(world, guard.getPairedChestPos());
-        for (ItemStack stack : drained) {
-            ItemStack remaining = stack.copy();
-            if (pairedChestInventory != null) {
-                remaining = insertIntoInventory(pairedChestInventory, remaining);
-                insertedToChestItemCount += (stack.getCount() - remaining.getCount());
-            }
-            if (!remaining.isEmpty()) {
-                addToBuffer(guard.getGatheredStackBuffer(), remaining);
-                insertedToBufferItemCount += remaining.getCount();
-            }
-        }
-        if (pairedChestInventory != null) {
-            pairedChestInventory.markDirty();
-        }
-
-        LOGGER.info("Transferred bootstrap drops during lumberjack conversion villager={} guard={} stacks={} items={} chest_items={} buffer_items={} summary=[{}]",
-                villager.getUuidAsString(),
-                guard.getUuidAsString(),
-                drained.size(),
-                drainedItemCount,
-                insertedToChestItemCount,
-                insertedToBufferItemCount,
-                summary);
-    }
-
-    private static Inventory resolvePairedChestInventory(ServerWorld world, BlockPos chestPos) {
-        if (chestPos == null) {
-            return null;
-        }
-
-        BlockState state = world.getBlockState(chestPos);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return null;
-        }
-        return ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
-    }
-
-    private static ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
-        ItemStack remaining = stack.copy();
-        for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                inventory.setStack(slot, remaining);
-                remaining = ItemStack.EMPTY;
-            } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), remaining.getCount());
-                if (transfer > 0) {
-                    existing.increment(transfer);
-                    remaining.decrement(transfer);
-                    inventory.setStack(slot, existing);
-                }
-            }
-        }
-        return remaining;
-    }
-
-    private static void addToBuffer(List<ItemStack> buffer, ItemStack incoming) {
-        for (ItemStack existing : buffer) {
-            if (ItemStack.areItemsAndComponentsEqual(existing, incoming) && existing.getCount() < existing.getMaxCount()) {
-                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), incoming.getCount());
-                existing.increment(transfer);
-                incoming.decrement(transfer);
-                if (incoming.isEmpty()) {
-                    return;
-                }
-            }
-        }
-        if (!incoming.isEmpty()) {
-            buffer.add(incoming);
-        }
     }
 
     private static void clearAllEquipment(LumberjackGuardEntity guard) {
