@@ -53,6 +53,8 @@ public class ForesterSaplingProvisionGoal extends Goal {
      * the player drops in saplings or the forester picks up tree drops.
      */
     private static final int CHEST_SAPLING_CAP = 32;
+    /** Saplings in this reserve band are considered protected baseline stock. */
+    private static final int PROTECTED_CHEST_SAPLING_STOCK = 8;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
@@ -135,10 +137,14 @@ public class ForesterSaplingProvisionGoal extends Goal {
                     villager.getUuidAsString(), chestSaplings, CHEST_SAPLING_CAP);
             return false;
         }
-        if (!hasEmptySlot(inv.get())) {
-            LOGGER.debug("[forester-provision] {} skipping — chest full (no empty slots)",
+        if (!hasInsertCapacityForSapling(inv.get())) {
+            LOGGER.debug("[forester-provision] {} skipping — chest has no sapling insert capacity",
                     villager.getUuidAsString());
             return false;
+        }
+        if (chestSaplings < PROTECTED_CHEST_SAPLING_STOCK) {
+            LOGGER.info("[forester-provision] {} protected-stock recovery active — chest saplings {}/{} (protected minimum={})",
+                    villager.getUuidAsString(), chestSaplings, CHEST_SAPLING_CAP, PROTECTED_CHEST_SAPLING_STOCK);
         }
         LOGGER.info("[forester-provision] {} READY to provision — chest has {}/{} saplings, day={}",
                 villager.getUuidAsString(), chestSaplings, CHEST_SAPLING_CAP, currentDay);
@@ -254,6 +260,19 @@ public class ForesterSaplingProvisionGoal extends Goal {
     private boolean hasEmptySlot(Inventory inv) {
         for (int i = 0; i < inv.size(); i++) {
             if (inv.getStack(i).isEmpty()) return true;
+        }
+        return false;
+    }
+
+    private boolean hasInsertCapacityForSapling(Inventory inv) {
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) {
+                return true;
+            }
+            if (stack.isIn(ItemTags.SAPLINGS) && stack.getCount() < stack.getMaxCount()) {
+                return true;
+            }
         }
         return false;
     }
