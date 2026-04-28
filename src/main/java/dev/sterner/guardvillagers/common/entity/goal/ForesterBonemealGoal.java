@@ -212,19 +212,19 @@ public class ForesterBonemealGoal extends Goal {
         int maxRing = Math.min(configuredMax, MAX_PLANT_DISTANCE);
         List<BlockPos> found = new ArrayList<>();
 
-        for (int ring = MIN_PLANT_DISTANCE; ring <= maxRing; ring += 4) {
-            int ringMax = Math.min(ring + 3, maxRing);
-            for (BlockPos candidate : BlockPos.iterate(
-                    center.add(-ringMax, -SCAN_Y_RANGE, -ringMax),
-                    center.add(ringMax, SCAN_Y_RANGE, ringMax))) {
-                double dx = candidate.getX() - center.getX();
-                double dz = candidate.getZ() - center.getZ();
-                double horizDist = Math.sqrt(dx * dx + dz * dz);
-                if (horizDist < ring || horizDist > ringMax) continue;
-                if (!isValidSaplingTarget(world, candidate)) continue;
-                found.add(candidate.toImmutable());
-            }
+        int minDistanceSq = MIN_PLANT_DISTANCE * MIN_PLANT_DISTANCE;
+        int maxDistanceSq = maxRing * maxRing;
+        for (BlockPos candidate : BlockPos.iterate(
+                center.add(-maxRing, -SCAN_Y_RANGE, -maxRing),
+                center.add(maxRing, SCAN_Y_RANGE, maxRing))) {
+            int dx = candidate.getX() - center.getX();
+            int dz = candidate.getZ() - center.getZ();
+            int horizontalDistanceSq = dx * dx + dz * dz;
+            if (horizontalDistanceSq < minDistanceSq || horizontalDistanceSq > maxDistanceSq) continue;
+            if (!isValidSaplingTarget(world, candidate)) continue;
+            found.add(candidate.toImmutable());
         }
+        found.sort(java.util.Comparator.comparingDouble(pos -> pos.getSquaredDistance(villager.getPos())));
         return found;
     }
 

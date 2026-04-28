@@ -55,7 +55,9 @@ public class MoreVillagersHunterCombatGoal extends Goal {
     private BlockPos jobPos;
     private BlockPos chestPos;
     private LivingEntity target;
+    private BlockPos currentNavigationTarget;
     private long nextTargetScanTick;
+    private long lastPathRequestTick = Long.MIN_VALUE;
     private int attackCooldown;
 
     public MoreVillagersHunterCombatGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -68,6 +70,8 @@ public class MoreVillagersHunterCombatGoal extends Goal {
         this.jobPos = jobPos.toImmutable();
         this.chestPos = chestPos.toImmutable();
         this.target = null;
+        this.currentNavigationTarget = null;
+        this.lastPathRequestTick = Long.MIN_VALUE;
     }
 
     public void requestImmediateCheck() {
@@ -111,6 +115,8 @@ public class MoreVillagersHunterCombatGoal extends Goal {
         villager.getNavigation().stop();
         villager.setTarget(null);
         target = null;
+        currentNavigationTarget = null;
+        lastPathRequestTick = Long.MIN_VALUE;
     }
 
     @Override
@@ -148,7 +154,7 @@ public class MoreVillagersHunterCombatGoal extends Goal {
         villager.setTarget(target);
         villager.getLookControl().lookAt(target, 30.0F, 30.0F);
         if (villager.squaredDistanceTo(target) > ATTACK_REACH_SQUARED) {
-            villager.getNavigation().startMovingTo(target, MOVE_SPEED);
+            moveTo(target);
             return;
         }
 
@@ -173,7 +179,7 @@ public class MoreVillagersHunterCombatGoal extends Goal {
         }
 
         if (villager.squaredDistanceTo(chestPos.getX() + 0.5D, chestPos.getY() + 0.5D, chestPos.getZ() + 0.5D) > CHEST_REACH_SQUARED) {
-            villager.getNavigation().startMovingTo(chestPos.getX() + 0.5D, chestPos.getY() + 0.5D, chestPos.getZ() + 0.5D, MOVE_SPEED);
+            moveTo(chestPos);
             return;
         }
 
@@ -276,6 +282,29 @@ public class MoreVillagersHunterCombatGoal extends Goal {
             }
         }
         return remaining;
+    }
+
+    private void moveTo(BlockPos pos) {
+        moveTo(pos.toImmutable(), () -> villager.getNavigation().startMovingTo(
+                pos.getX() + 0.5D, pos.getY() + 0.5D, pos.getZ() + 0.5D, MOVE_SPEED));
+    }
+
+    private void moveTo(LivingEntity entity) {
+        moveTo(entity.getBlockPos(), () -> villager.getNavigation().startMovingTo(entity, MOVE_SPEED));
+    }
+
+    private void moveTo(BlockPos targetPos, java.util.function.BooleanSupplier pathRequest) {
+        long currentTick = villager.getWorld().getTime();
+        boolean shouldRequestPath = !targetPos.equals(currentNavigationTarget)
+                || villager.getNavigation().isIdle()
+                || currentTick - lastPathRequestTick >= TARGET_SCAN_INTERVAL_TICKS;
+        if (!shouldRequestPath) {
+            return;
+        }
+        if (pathRequest.getAsBoolean()) {
+            currentNavigationTarget = targetPos.toImmutable();
+            lastPathRequestTick = currentTick;
+        }
     }
 
     private static boolean hasHunterDrop(Inventory inventory) {
