@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.compat.morevillagers.behavior;
 
+import dev.sterner.guardvillagers.common.entity.goal.MoreVillagersHunterCombatGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MoreVillagersHunterNoSleepGoal;
+import dev.sterner.guardvillagers.common.entity.goal.MoreVillagersHunterStringDistributionGoal;
 import dev.sterner.guardvillagers.common.villager.behavior.AbstractPairedProfessionBehavior;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.server.world.ServerWorld;
@@ -15,21 +18,26 @@ import java.util.WeakHashMap;
 /**
  * Behavior for the MoreVillagers Hunter profession.
  * Job block: morevillagers:hunting_post
- *
- * Planned behaviors (not yet implemented):
- *  - Hunt nearby passive/neutral mobs and collect drops (bones, spider eyes, gunpowder)
- *  - Process mob drops (cook meat, craft fermented spider eyes) at crafting table
- *  - Distribute collected drops to other villager chests
- *  - Possibly equip a bow/sword from the chest (similar to ButcherBehavior weapon check)
  */
 public class MoreVillagersHunter extends AbstractPairedProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(MoreVillagersHunter.class);
-    private static final String PROFESSION_ID = "morevillagers:hunter";
     private static final int PRIMARY_GOAL_PRIORITY = 3;
-    private static final int CRAFTING_GOAL_PRIORITY = 4;
     private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
+    private static final int NO_SLEEP_GOAL_PRIORITY = 1;
 
+    private static final Map<VillagerEntity, MoreVillagersHunterCombatGoal> HUNT_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, MoreVillagersHunterStringDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
+    private static final Map<VillagerEntity, MoreVillagersHunterNoSleepGoal> NO_SLEEP_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListenerRegistration> CHEST_LISTENERS = new WeakHashMap<>();
+
+    @Override
+    public void onJobSiteReady(ServerWorld world, VillagerEntity villager, BlockPos jobPos) {
+        if (!villager.isAlive() || !isHunterJobBlock(world, jobPos)) {
+            return;
+        }
+        upsertGoal(NO_SLEEP_GOALS, villager, NO_SLEEP_GOAL_PRIORITY,
+                () -> new MoreVillagersHunterNoSleepGoal(villager));
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -42,13 +50,29 @@ public class MoreVillagersHunter extends AbstractPairedProfessionBehavior {
         LOGGER.info("[morevillagers-compat] Hunter {} paired chest at {} for job site {}",
                 villager.getUuidAsString(), chestPos.toShortString(), jobPos.toShortString());
 
-        // TODO: register hunt goal (target passive/neutral mobs, collect drops)
-        // TODO: register distribution goal
-        // TODO: check chest for weapon and equip (see ButcherBehavior.tryConvertWithWeapon pattern)
+        upsertGoal(NO_SLEEP_GOALS, villager, NO_SLEEP_GOAL_PRIORITY,
+                () -> new MoreVillagersHunterNoSleepGoal(villager));
+
+        MoreVillagersHunterCombatGoal huntGoal = upsertGoal(HUNT_GOALS, villager, PRIMARY_GOAL_PRIORITY,
+                () -> new MoreVillagersHunterCombatGoal(villager, jobPos, chestPos));
+        huntGoal.setTargets(jobPos, chestPos);
+        huntGoal.requestImmediateCheck();
+
+        MoreVillagersHunterStringDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
+                () -> new MoreVillagersHunterStringDistributionGoal(villager, jobPos, chestPos, null));
+        distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        distributionGoal.requestImmediateDistribution();
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS,
-                (w, v) -> sender -> {
-                    // TODO: trigger immediate re-check on chest change
+                (serverWorld, pairedVillager) -> sender -> {
+                    MoreVillagersHunterCombatGoal hunt = HUNT_GOALS.get(pairedVillager);
+                    if (hunt != null) {
+                        hunt.requestImmediateCheck();
+                    }
+                    MoreVillagersHunterStringDistributionGoal distribution = DISTRIBUTION_GOALS.get(pairedVillager);
+                    if (distribution != null) {
+                        distribution.requestImmediateDistribution();
+                    }
                 });
     }
 
@@ -63,7 +87,10 @@ public class MoreVillagersHunter extends AbstractPairedProfessionBehavior {
         LOGGER.info("[morevillagers-compat] Hunter {} paired crafting table at {} for job site {}",
                 villager.getUuidAsString(), craftingTablePos.toShortString(), jobPos.toShortString());
 
-        // TODO: register crafting goal (fermented spider eyes, magma cream, blaze powder)
+        MoreVillagersHunterStringDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
+                () -> new MoreVillagersHunterStringDistributionGoal(villager, jobPos, chestPos, craftingTablePos));
+        distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
+        distributionGoal.requestImmediateDistribution();
     }
 
     private static boolean isHunterJobBlock(ServerWorld world, BlockPos pos) {
