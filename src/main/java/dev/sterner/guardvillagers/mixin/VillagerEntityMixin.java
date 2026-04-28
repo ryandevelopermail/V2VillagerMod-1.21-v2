@@ -42,6 +42,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     private static final String LEATHERWORKER_LAST_CRAFTED_KEY = "GuardVillagersLastLeatherworkerCrafted";
     private static final String SHEPHERD_HAS_CONSTRUCTED_PEN_KEY = "GuardVillagersShepherdHasConstructedPen";
     private static final String SHEPHERD_OWNED_PEN_ANCHOR_KEY = "GuardVillagersShepherdOwnedPenAnchor";
+    private static final String SHEPHERD_HAS_SEEDED_LEAD_KEY = "GuardVillagersShepherdHasSeededLead";
     private static final Logger LOGGER = LoggerFactory.getLogger(VillagerEntityMixin.class);
     private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_BASE_COOLDOWN_TICKS = 100L;
     private static final long GUARDVILLAGERS_RESERVED_POI_CLEANUP_MAX_COOLDOWN_TICKS = 1600L;
@@ -102,6 +103,9 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Nullable
     private BlockPos guardvillagers$ownedPenAnchor;
 
+    @Unique
+    private boolean guardvillagers$hasSeededLead;
+
     @Override
     public GlobalPos guardvillagers$getHomeBellPos() {
         return guardvillagers$homeBellPos;
@@ -130,6 +134,16 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Override
     public void guardvillagers$setOwnedPenAnchor(@Nullable BlockPos ownedPenAnchor) {
         guardvillagers$ownedPenAnchor = ownedPenAnchor == null ? null : ownedPenAnchor.toImmutable();
+    }
+
+    @Override
+    public boolean guardvillagers$hasSeededLead() {
+        return guardvillagers$hasSeededLead;
+    }
+
+    @Override
+    public void guardvillagers$setHasSeededLead(boolean hasSeededLead) {
+        guardvillagers$hasSeededLead = hasSeededLead;
     }
 
     @Override
@@ -176,6 +190,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Inject(method = "readCustomDataFromNbt", at = @At("TAIL"))
     private void guardvillagers$readShepherdPenState(NbtCompound nbt, CallbackInfo ci) {
         guardvillagers$hasConstructedPen = nbt.getBoolean(SHEPHERD_HAS_CONSTRUCTED_PEN_KEY);
+        guardvillagers$hasSeededLead = nbt.getBoolean(SHEPHERD_HAS_SEEDED_LEAD_KEY);
         if (nbt.contains(SHEPHERD_OWNED_PEN_ANCHOR_KEY, 10)) {
             guardvillagers$ownedPenAnchor = NbtHelper.toBlockPos(nbt, SHEPHERD_OWNED_PEN_ANCHOR_KEY).orElse(null);
         } else {
@@ -259,6 +274,7 @@ public class VillagerEntityMixin implements ArmorerStandMemoryHolder, Weaponsmit
     @Inject(method = "writeCustomDataToNbt", at = @At("TAIL"))
     private void guardvillagers$writeShepherdPenState(NbtCompound nbt, CallbackInfo ci) {
         nbt.putBoolean(SHEPHERD_HAS_CONSTRUCTED_PEN_KEY, guardvillagers$hasConstructedPen);
+        nbt.putBoolean(SHEPHERD_HAS_SEEDED_LEAD_KEY, guardvillagers$hasSeededLead);
         if (guardvillagers$ownedPenAnchor != null) {
             nbt.put(SHEPHERD_OWNED_PEN_ANCHOR_KEY, NbtHelper.fromBlockPos(guardvillagers$ownedPenAnchor));
         } else {

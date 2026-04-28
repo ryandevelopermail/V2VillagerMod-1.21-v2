@@ -12,4 +12,8 @@ public interface ShepherdPenStateHolder {
     BlockPos guardvillagers$getOwnedPenAnchor();
 
     void guardvillagers$setOwnedPenAnchor(@Nullable BlockPos ownedPenAnchor);
+
+    boolean guardvillagers$hasSeededLead();
+
+    void guardvillagers$setHasSeededLead(boolean hasSeededLead);
 }
