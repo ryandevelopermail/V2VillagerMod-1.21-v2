@@ -24,18 +24,24 @@ import java.util.Optional;
 
 public class FarmerBonemealGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
+    private static final double CHEST_REACH_SQ = 3.5D * 3.5D;
     private static final double TARGET_REACH_SQ = 2.5D * 2.5D;
     private static final int PATH_RETRY_TICKS = 20;
+    private static final long BONEMEAL_COOLDOWN_TICKS = 24000L;
 
     private final VillagerEntity villager;
     private BlockPos jobPos;
     private BlockPos chestPos;
 
+    private Stage stage = Stage.IDLE;
     private final Deque<BlockPos> targets = new ArrayDeque<>();
     private BlockPos currentTarget;
     private BlockPos currentNavTarget;
     private long lastPathRequestTick = Long.MIN_VALUE;
+    private long nextUseTick;
     private int actionsThisRun;
+
+    private enum Stage { IDLE, FETCH_FROM_CHEST, MOVE_TO_TARGET, APPLY, RETURN_TO_CHEST, DONE }
 
     public FarmerBonemealGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -49,6 +55,8 @@ public class FarmerBonemealGoal extends Goal {
         this.chestPos = chestPos != null ? chestPos.toImmutable() : null;
         this.targets.clear();
         this.currentTarget = null;
+        this.stage = Stage.IDLE;
+        this.nextUseTick = 0L;
         this.actionsThisRun = 0;
     }
 
@@ -56,31 +64,26 @@ public class FarmerBonemealGoal extends Goal {
     public boolean canStart() {
         if (!GuardVillagersConfig.farmerBonemealEnabled || !villager.isAlive() || jobPos == null || chestPos == null) return false;
         if (!(villager.getWorld() instanceof ServerWorld world) || !world.isDay()) return false;
+        if (world.getTime() < nextUseTick) return false;
 
         Optional<Inventory> chestInv = getChestInventory(world);
         if (chestInv.isEmpty() || countBonemeal(chestInv.get()) <= 0) return false;
 
-        List<BlockPos> found = findTargets(world);
-        if (found.isEmpty()) return false;
         targets.clear();
-        targets.addAll(found);
+        currentTarget = null;
         actionsThisRun = 0;
         return true;
     }
 
     @Override
     public boolean shouldContinue() {
-        return villager.isAlive()
-                && actionsThisRun < GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession
-                && currentTarget != null;
+        return villager.isAlive() && stage != Stage.IDLE && stage != Stage.DONE;
     }
 
     @Override
     public void start() {
-        currentTarget = targets.pollFirst();
-        if (currentTarget != null) {
-            moveTo(currentTarget);
-        }
+        stage = Stage.FETCH_FROM_CHEST;
+        moveTo(chestPos);
     }
 
     @Override
@@ -88,67 +91,120 @@ public class FarmerBonemealGoal extends Goal {
         villager.getNavigation().stop();
         currentNavTarget = null;
         lastPathRequestTick = Long.MIN_VALUE;
+        if (villager.getWorld() instanceof ServerWorld world) {
+            if (stage == Stage.DONE) {
+                nextUseTick = world.getTime() + BONEMEAL_COOLDOWN_TICKS;
+            } else if (stage != Stage.IDLE) {
+                getChestInventory(world).ifPresent(this::depositAllBonemealFromVillager);
+            }
+        }
         currentTarget = null;
         targets.clear();
         actionsThisRun = 0;
+        stage = Stage.IDLE;
     }
 
     @Override
     public void tick() {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
-            currentTarget = null;
-            return;
-        }
-        if (!world.isDay() || currentTarget == null) {
-            currentTarget = null;
+            stage = Stage.DONE;
             return;
         }
 
-        if (!isValidCropTarget(world, currentTarget)) {
-            advanceTarget(world);
-            return;
-        }
-
-        if (!isNear(currentTarget, TARGET_REACH_SQ)) {
-            if (!moveTo(currentTarget)) {
+        switch (stage) {
+            case FETCH_FROM_CHEST -> {
+                if (!isNear(chestPos, CHEST_REACH_SQ)) {
+                    moveTo(chestPos);
+                    return;
+                }
+                Optional<Inventory> chestInv = getChestInventory(world);
+                if (chestInv.isEmpty() || countBonemeal(chestInv.get()) <= 0) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                takeAllBonemealFromChest(chestInv.get());
+                if (countBonemeal(villager.getInventory()) <= 0) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                targets.clear();
+                targets.addAll(findTargets(world));
                 advanceTarget(world);
             }
-            return;
+            case MOVE_TO_TARGET -> {
+                if (currentTarget == null) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    return;
+                }
+                if (!isValidCropTarget(world, currentTarget)) {
+                    advanceTarget(world);
+                    return;
+                }
+                if (isNear(currentTarget, TARGET_REACH_SQ)) {
+                    stage = Stage.APPLY;
+                } else if (!moveTo(currentTarget)) {
+                    advanceTarget(world);
+                }
+            }
+            case APPLY -> {
+                if (currentTarget == null) {
+                    stage = Stage.RETURN_TO_CHEST;
+                    return;
+                }
+                if (countBonemeal(villager.getInventory()) <= 0) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                if (isValidCropTarget(world, currentTarget)) {
+                    BlockState beforeBonemealState = world.getBlockState(currentTarget);
+                    if (tryApplyBonemeal(world, currentTarget) && consumeOneBonemeal(villager.getInventory())) {
+                        FarmerBehavior.onBonemealGrowthApplied(world, currentTarget, beforeBonemealState);
+                        actionsThisRun++;
+                    }
+                }
+                if (countBonemeal(villager.getInventory()) <= 0) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                advanceTarget(world);
+            }
+            case RETURN_TO_CHEST -> {
+                if (countBonemeal(villager.getInventory()) <= 0) {
+                    stage = Stage.DONE;
+                    return;
+                }
+                if (isNear(chestPos, CHEST_REACH_SQ)) {
+                    getChestInventory(world).ifPresent(this::depositAllBonemealFromVillager);
+                    stage = Stage.DONE;
+                } else {
+                    moveTo(chestPos);
+                }
+            }
+            case DONE -> {
+                nextUseTick = world.getTime() + BONEMEAL_COOLDOWN_TICKS;
+                currentTarget = null;
+                targets.clear();
+                actionsThisRun = 0;
+                stage = Stage.IDLE;
+            }
+            default -> {
+            }
         }
-
-        Optional<Inventory> chestInv = getChestInventory(world);
-        if (chestInv.isEmpty() || countBonemeal(chestInv.get()) <= 0) {
-            currentTarget = null;
-            return;
-        }
-
-        BlockState beforeBonemealState = world.getBlockState(currentTarget);
-        if (tryApplyBonemeal(world, currentTarget) && consumeOneBonemeal(chestInv.get())) {
-            FarmerBehavior.onBonemealGrowthApplied(world, currentTarget, beforeBonemealState);
-            actionsThisRun++;
-        }
-
-        if (actionsThisRun >= GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession
-                || countBonemeal(chestInv.get()) <= 0) {
-            currentTarget = null;
-            return;
-        }
-
-        advanceTarget(world);
     }
 
     private void advanceTarget(ServerWorld world) {
         while ((currentTarget = targets.pollFirst()) != null) {
             if (isValidCropTarget(world, currentTarget)) {
+                stage = Stage.MOVE_TO_TARGET;
                 moveTo(currentTarget);
                 return;
             }
         }
+        stage = countBonemeal(villager.getInventory()) > 0 ? Stage.RETURN_TO_CHEST : Stage.DONE;
     }
 
     private List<BlockPos> findTargets(ServerWorld world) {
         int radius = Math.max(1, GuardVillagersConfig.farmerBonemealScanRadius);
-        int maxTargets = GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession;
         List<BlockPos> found = new ArrayList<>();
 
         for (BlockPos pos : BlockPos.iterate(jobPos.add(-radius, -1, -radius), jobPos.add(radius, 2, radius))) {
@@ -158,9 +214,6 @@ public class FarmerBonemealGoal extends Goal {
         }
 
         found.sort(Comparator.comparingDouble(p -> p.getSquaredDistance(villager.getPos())));
-        if (found.size() > maxTargets) {
-            return new ArrayList<>(found.subList(0, maxTargets));
-        }
         return found;
     }
 
@@ -205,6 +258,87 @@ public class FarmerBonemealGoal extends Goal {
             return true;
         }
         return false;
+    }
+
+    private void takeAllBonemealFromChest(Inventory chestInv) {
+        Inventory villagerInv = villager.getInventory();
+        for (int slot = 0; slot < chestInv.size(); slot++) {
+            ItemStack stack = chestInv.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.BONE_MEAL)) continue;
+
+            ItemStack extracted = stack.copy();
+            ItemStack remaining = insertStack(villagerInv, extracted);
+            int moved = extracted.getCount() - remaining.getCount();
+            if (moved <= 0) continue;
+
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                chestInv.setStack(slot, ItemStack.EMPTY);
+            }
+            chestInv.markDirty();
+            villagerInv.markDirty();
+
+            if (!remaining.isEmpty()) {
+                return;
+            }
+        }
+    }
+
+    private void depositAllBonemealFromVillager(Inventory chestInv) {
+        Inventory villagerInv = villager.getInventory();
+        for (int slot = 0; slot < villagerInv.size(); slot++) {
+            ItemStack stack = villagerInv.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.BONE_MEAL)) continue;
+
+            ItemStack original = stack.copy();
+            ItemStack remaining = insertStack(chestInv, original);
+            int moved = original.getCount() - remaining.getCount();
+            if (moved <= 0) continue;
+
+            stack.decrement(moved);
+            if (stack.isEmpty()) {
+                villagerInv.setStack(slot, ItemStack.EMPTY);
+            }
+            chestInv.markDirty();
+            villagerInv.markDirty();
+        }
+    }
+
+    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack toInsert = remaining.copy();
+                toInsert.setCount(moved);
+                inventory.setStack(slot, toInsert);
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining) || !inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+
+        return remaining;
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {

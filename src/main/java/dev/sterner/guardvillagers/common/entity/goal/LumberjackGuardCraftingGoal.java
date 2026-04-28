@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 public class LumberjackGuardCraftingGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardCraftingGoal.class);
@@ -49,6 +50,18 @@ public class LumberjackGuardCraftingGoal extends Goal {
     public LumberjackGuardCraftingGoal(LumberjackGuardEntity guard) {
         this.guard = guard;
         this.setControls(EnumSet.of(Control.MOVE));
+    }
+
+    static boolean craftBootstrapChestAndAttemptPlacementIfNeeded(
+            boolean shouldCraftBootstrapChest,
+            BooleanSupplier craftChest,
+            BooleanSupplier attemptPlacement
+    ) {
+        if (!shouldCraftBootstrapChest || !craftChest.getAsBoolean()) {
+            return false;
+        }
+        attemptPlacement.getAsBoolean();
+        return true;
     }
 
     @Override
