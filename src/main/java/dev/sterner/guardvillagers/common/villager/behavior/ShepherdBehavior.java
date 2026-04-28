@@ -7,6 +7,7 @@ import dev.sterner.guardvillagers.common.entity.goal.ShepherdFenceCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdFencePlacerGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdSpecialGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ShepherdToLibrarianDistributionGoal;
+import dev.sterner.guardvillagers.common.util.ShepherdPenStateHolder;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import net.minecraft.block.BlockState;
@@ -94,6 +95,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         specialGoal.requestImmediateCheck();
         LAST_WAKE_TICKS.put(villager, world.getTime());
+        ensureSeedLead(villager);
 
         ShepherdToLibrarianDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
         if (distributionGoal == null) {
@@ -132,6 +134,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             fencePlacerGoal.setTargets(jobPos, chestPos);
         }
         fencePlacerGoal.requestImmediateCheck();
+        specialGoal.setFenceConstructionRequester(fencePlacerGoal::requestImmediateCheck);
 
         updateChestListener(world, villager, chestPos);
     }
@@ -148,6 +151,7 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
         goal.requestImmediateCraft(world);
+        ensureSeedLead(villager);
 
         // Bed crafting (requires crafting table)
         ShepherdBedCraftingGoal bedCraftingGoal = BED_CRAFTING_GOALS.get(villager);
@@ -183,6 +187,53 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         }
         distributionGoal.requestImmediateDistribution();
         updateChestListener(world, villager, chestPos);
+    }
+
+    private static void ensureSeedLead(VillagerEntity villager) {
+        if (!(villager instanceof ShepherdPenStateHolder holder) || holder.guardvillagers$hasSeededLead()) {
+            return;
+        }
+        ItemStack lead = new ItemStack(Items.LEAD);
+        ItemStack remaining = insertStack(villager.getInventory(), lead);
+        if (remaining.isEmpty()) {
+            holder.guardvillagers$setHasSeededLead(true);
+            villager.getInventory().markDirty();
+        }
+    }
+
+    private static ItemStack insertStack(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack inserted = remaining.copy();
+                inserted.setCount(moved);
+                inventory.setStack(slot, inserted);
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining) || !inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            int moved = Math.min(space, remaining.getCount());
+            existing.increment(moved);
+            remaining.decrement(moved);
+        }
+        return remaining;
     }
 
     private void updateChestListener(ServerWorld world, VillagerEntity villager, BlockPos chestPos) {

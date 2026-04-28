@@ -6,7 +6,10 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FenceBlock;
 import net.minecraft.block.FenceGateBlock;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.Leashable;
 import net.minecraft.entity.ai.goal.Goal;
+import net.minecraft.entity.ai.pathing.Path;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.passive.AnimalEntity;
 import net.minecraft.entity.passive.SheepEntity;
@@ -29,6 +32,7 @@ import net.minecraft.world.chunk.ChunkSection;
 import net.minecraft.world.chunk.ChunkStatus;
 import net.minecraft.util.DyeColor;
 import net.minecraft.util.Hand;
+import net.minecraft.world.Difficulty;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -81,6 +85,11 @@ public class ShepherdSpecialGoal extends Goal {
     private static final long GATHER_EXIT_PEN_RETRY_TICKS = 200L;
     private static final int BACKUP_SHEAR_MIN_TARGETS = 3;
     private static final int BACKUP_SHEAR_MAX_TARGETS = 6;
+    private static final int LEAD_SHEEP_SCAN_RANGE = 150;
+    private static final int LEAD_GATHER_LIMIT = 3;
+    private static final double LEAD_ATTACH_RANGE_SQUARED = 6.25D;
+    private static final double LEAD_GATHER_SPEED = 0.62D;
+    private static final int LEAD_PEN_SETTLE_TICKS = 80;
 
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
@@ -133,6 +142,7 @@ public class ShepherdSpecialGoal extends Goal {
     private BlockPos gatherExitTarget;
     private boolean gatherHalfLogged;
     private final List<AnimalEntity> activeHerd = new ArrayList<>();
+    private final List<SheepEntity> leadGatherTargets = new ArrayList<>();
     private BlockPos cachedNearestPenTarget;
     private BlockPos cachedNearestPenGatePos;
     private BlockPos cachedNearestGroundBanner;
@@ -142,6 +152,10 @@ public class ShepherdSpecialGoal extends Goal {
     private int observedChestShearsCount = -1;
     private final int expensiveSpatialRefreshIntervalTicks;
     private long nextExpensiveSpatialRefreshTick = Long.MIN_VALUE;
+    private long lastLeadGatherScanDay = -1L;
+    private int leadTargetIndex;
+    private long leadPenHoldStartTick;
+    private Runnable fenceConstructionRequester;
 
     public ShepherdSpecialGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -165,6 +179,10 @@ public class ShepherdSpecialGoal extends Goal {
 
     public void requestImmediateCheck() {
         nextCheckTime = 0L;
+    }
+
+    public void setFenceConstructionRequester(Runnable fenceConstructionRequester) {
+        this.fenceConstructionRequester = fenceConstructionRequester;
     }
 
     public void requestCheckNoSoonerThan(long targetTick) {
@@ -227,7 +245,7 @@ public class ShepherdSpecialGoal extends Goal {
             return false;
         }
 
-        if (nextTask == TaskType.WHEAT_GATHER && !world.isDay()) {
+        if ((nextTask == TaskType.WHEAT_GATHER || nextTask == TaskType.LEAD_GATHER) && !canGatherDuringCurrentTime(world)) {
             return false;
         }
 
@@ -383,6 +401,34 @@ public class ShepherdSpecialGoal extends Goal {
             return;
         }
 
+        if (taskType == TaskType.LEAD_GATHER) {
+            PenTarget gatherPen = resolveNearestGatherPen(world);
+            if (gatherPen == null || leadGatherTargets.isEmpty() || !equipLeadForGathering()) {
+                stage = Stage.DONE;
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                return;
+            }
+
+            penTarget = gatherPen.center();
+            penGatePos = gatherPen.gate();
+            gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+            leadTargetIndex = 0;
+            leadPenHoldStartTick = 0L;
+            activeHerd.clear();
+            LOGGER.info("Shepherd {} starting lead gather with {} sheep toward pen gate {}",
+                    villager.getUuidAsString(),
+                    leadGatherTargets.size(),
+                    penGatePos == null ? "unknown" : penGatePos.toShortString());
+            stage = Stage.LEAD_MOVE_TO_SHEEP;
+            SheepEntity firstTarget = getCurrentLeadTarget(world);
+            if (firstTarget == null) {
+                stage = Stage.DONE;
+                return;
+            }
+            moveTo(firstTarget.getBlockPos(), LEAD_GATHER_SPEED);
+            return;
+        }
+
         PenTarget gatherPen = resolveNearestGatherPen(world);
         if (gatherPen == null) {
             LOGGER.info("Shepherd {} has wheat available but no eligible paired pen was found; leaving wheat in chest",
@@ -423,6 +469,9 @@ public class ShepherdSpecialGoal extends Goal {
 
     @Override
     public void stop() {
+        if (taskType == TaskType.LEAD_GATHER) {
+            detachLeadGatherTargets(false);
+        }
         villager.getNavigation().stop();
         currentNavigationTarget = null;
         lastPathRequestTick = Long.MIN_VALUE;
@@ -448,6 +497,9 @@ public class ShepherdSpecialGoal extends Goal {
         currentShearBannerPos = null;
         shearsChestReturnStartTick = 0L;
         activeHerd.clear();
+        leadGatherTargets.clear();
+        leadTargetIndex = 0;
+        leadPenHoldStartTick = 0L;
         gatherCircleWaypoints.clear();
         gatherCircleWaypointIndex = 0;
         gatherCircleStartIndex = 0;
@@ -680,6 +732,134 @@ public class ShepherdSpecialGoal extends Goal {
                 shearsChestReturnStartTick = world.getTime();
                 moveTo(chestPos);
             }
+            case LEAD_MOVE_TO_SHEEP -> {
+                if (penGatePos == null || penTarget == null || !ensureLeadDisplayed()) {
+                    detachLeadGatherTargets(false);
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                SheepEntity target = getCurrentLeadTarget(world);
+                if (target == null) {
+                    if (activeHerd.isEmpty()) {
+                        stage = Stage.DONE;
+                        return;
+                    }
+                    stage = Stage.LEAD_MOVE_TO_GATE;
+                    moveTo(penGatePos, LEAD_GATHER_SPEED);
+                    return;
+                }
+
+                if (villager.squaredDistanceTo(target) <= LEAD_ATTACH_RANGE_SQUARED) {
+                    attachLeadGatherTarget(target);
+                    leadTargetIndex++;
+                    SheepEntity nextTarget = getCurrentLeadTarget(world);
+                    if (nextTarget == null) {
+                        stage = Stage.LEAD_MOVE_TO_GATE;
+                        moveTo(penGatePos, LEAD_GATHER_SPEED);
+                    } else {
+                        moveTo(nextTarget.getBlockPos(), LEAD_GATHER_SPEED);
+                    }
+                    return;
+                }
+
+                moveTo(target.getBlockPos(), LEAD_GATHER_SPEED);
+            }
+            case LEAD_MOVE_TO_GATE -> {
+                if (penGatePos == null || penTarget == null || activeHerd.isEmpty()) {
+                    detachLeadGatherTargets(false);
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                if (!ensureLeadDisplayed()) {
+                    detachLeadGatherTargets(false);
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                ensureGateOpen(world, penGatePos);
+                keepLeadGatherTargetsMoving();
+                if (isNear(penGatePos)) {
+                    BlockPos insideTarget = resolveInsideGateTarget(world, penGatePos, penTarget);
+                    stage = Stage.LEAD_MOVE_TO_CENTER;
+                    moveTo(insideTarget == null ? penTarget : insideTarget, LEAD_GATHER_SPEED);
+                } else {
+                    moveTo(penGatePos, LEAD_GATHER_SPEED);
+                }
+            }
+            case LEAD_MOVE_TO_CENTER -> {
+                if (penTarget == null || penGatePos == null || activeHerd.isEmpty()) {
+                    detachLeadGatherTargets(false);
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                ensureGateOpen(world, penGatePos);
+                keepLeadGatherTargetsMoving();
+                if (!isNear(penTarget)) {
+                    moveTo(penTarget, LEAD_GATHER_SPEED);
+                    return;
+                }
+
+                if (leadPenHoldStartTick == 0L) {
+                    leadPenHoldStartTick = world.getTime();
+                    villager.getNavigation().stop();
+                    currentNavigationTarget = null;
+                    lastPathRequestTick = Long.MIN_VALUE;
+                    return;
+                }
+
+                if (world.getTime() - leadPenHoldStartTick < LEAD_PEN_SETTLE_TICKS && !isHerdInsidePen(world, penTarget)) {
+                    return;
+                }
+
+                detachLeadGatherTargets(false);
+                gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                gatherExitPenStuckStartTick = 0L;
+                stage = Stage.LEAD_EXIT_AND_CLOSE;
+            }
+            case LEAD_EXIT_AND_CLOSE -> {
+                if (penGatePos == null) {
+                    stage = Stage.DONE;
+                    return;
+                }
+
+                boolean isInsidePen = penTarget != null
+                        ? isInsideSpecificPen(world, villager.getBlockPos(), penTarget)
+                        : isInsideFencePen(world, villager.getBlockPos());
+
+                if (isInsidePen) {
+                    ensureGateOpen(world, penGatePos);
+                    if (gatherExitTarget == null) {
+                        gatherExitTarget = resolveOutsideGateTarget(world, penGatePos, penTarget);
+                    }
+                    moveTo(gatherExitTarget == null ? penGatePos : gatherExitTarget, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                BlockState gateState = world.getBlockState(penGatePos);
+                boolean gateOpen = gateState.getBlock() instanceof FenceGateBlock && gateState.get(FenceGateBlock.OPEN);
+                double distanceFromGateSquared = villager.squaredDistanceTo(
+                        penGatePos.getX() + 0.5D,
+                        penGatePos.getY() + 0.5D,
+                        penGatePos.getZ() + 0.5D);
+
+                if (gateOpen && distanceFromGateSquared > GATE_INTERACT_RANGE_SQUARED) {
+                    moveTo(penGatePos, FAST_GATE_CLOSE_SPEED);
+                    return;
+                }
+
+                if (gateOpen) {
+                    openGate(world, penGatePos, false);
+                    LOGGER.info("Shepherd {} closed pen gate at {} after lead gather", villager.getUuidAsString(), penGatePos.toShortString());
+                }
+
+                activeHerd.clear();
+                leadGatherTargets.clear();
+                nextCheckTime = world.getTime() + nextRandomCheckInterval();
+                stage = Stage.DONE;
+            }
             case GATHER_CIRCLE -> {
                 if (gatherBannerPos == null || !ensureGatherWheatDisplayed(world)) {
                     stage = Stage.DONE;
@@ -898,6 +1078,7 @@ public class ShepherdSpecialGoal extends Goal {
         boolean hasBannerInInventoryOrHand = hasBannerInInventoryOrHand();
         boolean hasShearsInInventoryOrHand = hasShearsInInventoryOrHand();
         boolean hasWheatInInventoryOrOffhand = hasWheatInInventoryOrOffhand();
+        boolean hasLeadInInventoryOrHand = hasLeadInInventoryOrHand();
 
         boolean hasBannerInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isIn(ItemTags.BANNERS));
         boolean hasShearsInChest = inventory != null && hasMatchingItem(inventory, stack -> stack.isOf(Items.SHEARS));
@@ -913,7 +1094,10 @@ public class ShepherdSpecialGoal extends Goal {
                 return TaskType.BANNER;
             }
             TaskType fallbackTask = selectNonBannerTaskType(hasShearsAvailable, hasWheatAvailable, false);
-            if (fallbackTask != TaskType.WHEAT_GATHER && hasWheatAvailable && resolveNearestGatherPen(world) != null) {
+            if (fallbackTask == null && hasLeadInInventoryOrHand && shouldStartLeadGather(world)) {
+                fallbackTask = TaskType.LEAD_GATHER;
+            }
+            if (fallbackTask == null && hasWheatAvailable && resolveNearestGatherPen(world) != null) {
                 fallbackTask = TaskType.WHEAT_GATHER;
             }
             logBannerFallbackSelection(true, false, fallbackTask);
@@ -922,6 +1106,10 @@ public class ShepherdSpecialGoal extends Goal {
 
         if (hasShearsAvailable) {
             return TaskType.SHEARS;
+        }
+
+        if (hasLeadInInventoryOrHand && shouldStartLeadGather(world)) {
+            return TaskType.LEAD_GATHER;
         }
 
         if (hasWheatAvailable && resolveNearestGatherPen(world) != null) {
@@ -997,6 +1185,47 @@ public class ShepherdSpecialGoal extends Goal {
         return hasMatchingItem(villagerInventory, stack -> stack.isOf(Items.WHEAT))
                 || villager.getMainHandStack().isOf(Items.WHEAT)
                 || villager.getOffHandStack().isOf(Items.WHEAT);
+    }
+
+    private boolean hasLeadInInventoryOrHand() {
+        Inventory villagerInventory = villager.getInventory();
+        return hasMatchingItem(villagerInventory, stack -> stack.isOf(Items.LEAD))
+                || villager.getMainHandStack().isOf(Items.LEAD)
+                || villager.getOffHandStack().isOf(Items.LEAD);
+    }
+
+    private boolean equipLeadForGathering() {
+        if (ensureLeadDisplayed()) {
+            return true;
+        }
+
+        Inventory inventory = villager.getInventory();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (stack.isEmpty() || !stack.isOf(Items.LEAD)) {
+                continue;
+            }
+            ItemStack extracted = stack.split(1);
+            if (villager.getMainHandStack().isEmpty()) {
+                villager.setStackInHand(Hand.MAIN_HAND, extracted);
+            } else if (villager.getOffHandStack().isEmpty()) {
+                villager.setStackInHand(Hand.OFF_HAND, extracted);
+            } else {
+                stack.increment(1);
+                inventory.setStack(slot, stack);
+                return false;
+            }
+            if (stack.isEmpty()) {
+                inventory.setStack(slot, ItemStack.EMPTY);
+            }
+            inventory.markDirty();
+            return true;
+        }
+        return false;
+    }
+
+    private boolean ensureLeadDisplayed() {
+        return villager.getMainHandStack().isOf(Items.LEAD) || villager.getOffHandStack().isOf(Items.LEAD);
     }
 
     private ItemStack getBannerInInventoryOrHand() {
@@ -1191,6 +1420,134 @@ public class ShepherdSpecialGoal extends Goal {
     private boolean hasShearableSheepNearby(ServerWorld world) {
         Box box = new Box(villager.getBlockPos()).expand(SHEEP_SCAN_RANGE);
         return !world.getEntitiesByClass(SheepEntity.class, box, entity -> entity.isAlive() && entity.isShearable()).isEmpty();
+    }
+
+    private boolean canGatherDuringCurrentTime(ServerWorld world) {
+        return world.isDay() || world.getDifficulty() == Difficulty.PEACEFUL;
+    }
+
+    private boolean shouldStartLeadGather(ServerWorld world) {
+        if (!canGatherDuringCurrentTime(world)) {
+            return false;
+        }
+
+        long day = world.getTime() / 24000L;
+        if (lastLeadGatherScanDay == day) {
+            return false;
+        }
+        lastLeadGatherScanDay = day;
+
+        PenTarget gatherPen = resolveNearestGatherPen(world);
+        if (gatherPen == null) {
+            requestFenceConstructionIfMaterialsAvailable(world);
+            return false;
+        }
+        if (!isReachable(gatherPen.gate())) {
+            LOGGER.debug("Shepherd {} skipped lead gather: pen gate {} is not reachable",
+                    villager.getUuidAsString(),
+                    gatherPen.gate() == null ? "unknown" : gatherPen.gate().toShortString());
+            return false;
+        }
+
+        leadGatherTargets.clear();
+        leadGatherTargets.addAll(findLeadGatherTargets(world, gatherPen));
+        if (leadGatherTargets.isEmpty()) {
+            LOGGER.debug("Shepherd {} daily lead gather scan found no reachable sheep within {} blocks",
+                    villager.getUuidAsString(),
+                    LEAD_SHEEP_SCAN_RANGE);
+            return false;
+        }
+        return true;
+    }
+
+    private void requestFenceConstructionIfMaterialsAvailable(ServerWorld world) {
+        Inventory inventory = getChestInventory(world).orElse(null);
+        if (inventory == null) {
+            return;
+        }
+        int fences = countTag(inventory, ItemTags.FENCES);
+        int gates = countTag(inventory, ItemTags.FENCE_GATES);
+        int planks = countTag(inventory, ItemTags.PLANKS);
+        int sticks = countItem(inventory, Items.STICK);
+        boolean hasPlacedMaterials = fences >= ShepherdFenceCraftingGoal.FENCE_TARGET && gates >= 1;
+        int missingFences = Math.max(0, ShepherdFenceCraftingGoal.FENCE_TARGET - fences);
+        int neededFenceCrafts = (missingFences + 2) / 3;
+        int neededPlanks = neededFenceCrafts * 6 + (gates >= 1 ? 0 : 2);
+        int neededSticks = neededFenceCrafts * 2 + (gates >= 1 ? 0 : 2);
+        boolean hasCraftingMaterials = planks >= neededPlanks && sticks >= neededSticks;
+        if ((hasPlacedMaterials || hasCraftingMaterials) && fenceConstructionRequester != null) {
+            fenceConstructionRequester.run();
+            LOGGER.info("Shepherd {} requested pen construction check before lead gather (fences={} gates={} planks={} sticks={})",
+                    villager.getUuidAsString(), fences, gates, planks, sticks);
+        }
+    }
+
+    private List<SheepEntity> findLeadGatherTargets(ServerWorld world, PenTarget gatherPen) {
+        if (gatherPen == null || gatherPen.center() == null) {
+            return List.of();
+        }
+        Box box = new Box(villager.getBlockPos()).expand(LEAD_SHEEP_SCAN_RANGE, 24.0D, LEAD_SHEEP_SCAN_RANGE);
+        List<SheepEntity> candidates = new ArrayList<>(world.getEntitiesByClass(
+                SheepEntity.class,
+                box,
+                sheep -> isLeadGatherCandidate(world, sheep, gatherPen.center())));
+        candidates.sort(Comparator.comparingDouble(entity -> entity.squaredDistanceTo(villager)));
+
+        List<SheepEntity> selected = new ArrayList<>();
+        for (SheepEntity sheep : candidates) {
+            if (!isReachable(sheep.getBlockPos())) {
+                continue;
+            }
+            selected.add(sheep);
+            if (selected.size() >= LEAD_GATHER_LIMIT) {
+                break;
+            }
+        }
+        return selected;
+    }
+
+    private boolean isLeadGatherCandidate(ServerWorld world, SheepEntity sheep, BlockPos penCenter) {
+        if (!sheep.isAlive()) {
+            return false;
+        }
+        if (isInsideSpecificPen(world, sheep.getBlockPos(), penCenter) || isInsideFencePen(world, sheep.getBlockPos())) {
+            return false;
+        }
+        if (sheep instanceof Leashable leashable && leashable.isLeashed()) {
+            Entity holder = leashable.getLeashHolder();
+            return holder == villager;
+        }
+        return true;
+    }
+
+    private boolean isReachable(BlockPos targetPos) {
+        if (targetPos == null) {
+            return false;
+        }
+        Path path = villager.getNavigation().findPathTo(targetPos, 0);
+        return path != null && path.reachesTarget();
+    }
+
+    private int countTag(Inventory inventory, net.minecraft.registry.tag.TagKey<Item> tag) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isIn(tag)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private int countItem(Inventory inventory, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     private void depositSpecialItems(ServerWorld world) {
@@ -2407,6 +2764,61 @@ public class ShepherdSpecialGoal extends Goal {
         }
     }
 
+    private SheepEntity getCurrentLeadTarget(ServerWorld world) {
+        while (leadTargetIndex < leadGatherTargets.size()) {
+            SheepEntity sheep = leadGatherTargets.get(leadTargetIndex);
+            if (sheep != null
+                    && sheep.isAlive()
+                    && (penTarget == null || !isInsideSpecificPen(world, sheep.getBlockPos(), penTarget))) {
+                return sheep;
+            }
+            leadTargetIndex++;
+        }
+        return null;
+    }
+
+    private void attachLeadGatherTarget(SheepEntity sheep) {
+        if (!(sheep instanceof Leashable leashable)) {
+            return;
+        }
+        Entity holder = leashable.getLeashHolder();
+        if (leashable.isLeashed() && holder != villager) {
+            return;
+        }
+        if (!leashable.isLeashed()) {
+            leashable.attachLeash(villager, true);
+            LOGGER.info("Shepherd {} leashed sheep {} for gather run",
+                    villager.getUuidAsString(),
+                    sheep.getUuidAsString());
+        }
+        if (!activeHerd.contains(sheep)) {
+            activeHerd.add(sheep);
+        }
+    }
+
+    private void keepLeadGatherTargetsMoving() {
+        for (AnimalEntity animal : activeHerd) {
+            if (!animal.isAlive()) {
+                continue;
+            }
+            animal.getLookControl().lookAt(villager, 30.0F, 30.0F);
+            if (animal.squaredDistanceTo(villager) > 9.0D) {
+                animal.getNavigation().startMovingTo(villager, 1.05D);
+            }
+        }
+    }
+
+    private void detachLeadGatherTargets(boolean dropItem) {
+        for (AnimalEntity animal : activeHerd) {
+            if (!(animal instanceof Leashable leashable) || !leashable.isLeashed()) {
+                continue;
+            }
+            if (leashable.getLeashHolder() == villager) {
+                leashable.detachLeash(true, dropItem);
+            }
+        }
+    }
+
     private boolean isGatherTargetAnimal(AnimalEntity animal) {
         if (!animal.isAlive() || !animal.canEat()) {
             return false;
@@ -2615,6 +3027,10 @@ public class ShepherdSpecialGoal extends Goal {
         GO_TO_SHEEP,
         GO_TO_PEN,
         SHEARS_EXIT_PEN,
+        LEAD_MOVE_TO_SHEEP,
+        LEAD_MOVE_TO_GATE,
+        LEAD_MOVE_TO_CENTER,
+        LEAD_EXIT_AND_CLOSE,
         GATHER_CIRCLE,
         GATHER_MOVE_TO_GATE,
         GATHER_MOVE_TO_BANNER,
@@ -2627,6 +3043,7 @@ public class ShepherdSpecialGoal extends Goal {
     enum TaskType {
         SHEARS,
         BANNER,
+        LEAD_GATHER,
         WHEAT_GATHER
     }
 
