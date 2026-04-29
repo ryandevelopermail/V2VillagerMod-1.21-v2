@@ -26,10 +26,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
     private static final long HARVEST_WAKE_MAX_COALESCE_DELAY_TICKS = 40L;
     private static final long CRAFT_WAKE_DEBOUNCE_TICKS = 10L;
     private static final long CRAFT_WAKE_MAX_COALESCE_DELAY_TICKS = 40L;
-    private static final int HARVEST_GOAL_PRIORITY = 3;
-    private static final int DISTRIBUTION_GOAL_PRIORITY = 4;
-    private static final int CRAFTING_GOAL_PRIORITY = 5;
-    private static final int BONEMEAL_GOAL_PRIORITY = 6;
+    private static final int DISTRIBUTION_GOAL_PRIORITY = 3;
+    private static final int CRAFTING_GOAL_PRIORITY = 4;
+    private static final int BONEMEAL_GOAL_PRIORITY = 5;
+    private static final int HARVEST_GOAL_PRIORITY = 6;
     private static final Map<VillagerEntity, FarmerHarvestGoal> GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FarmerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FarmerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
@@ -61,10 +61,12 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         FarmerBonemealGoal bonemealGoal = upsertGoal(BONEMEAL_GOALS, villager, BONEMEAL_GOAL_PRIORITY,
                 () -> new FarmerBonemealGoal(villager, jobPos, chestPos));
         bonemealGoal.setTargets(jobPos, chestPos);
+        bonemealGoal.setHarvestGoal(harvestGoal);
 
         FarmerDistributionGoal distributionGoal = upsertGoal(DISTRIBUTION_GOALS, villager, DISTRIBUTION_GOAL_PRIORITY,
                 () -> new FarmerDistributionGoal(villager, jobPos, chestPos, null));
         distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
+        distributionGoal.setHarvestGoal(harvestGoal);
         distributionGoal.requestImmediateDistribution();
         LAST_HARVEST_WAKE_TICKS.put(villager, world.getTime());
 
@@ -72,6 +74,7 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         if (craftingGoal != null) {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
             harvestGoal.setCraftingGoal(craftingGoal);
+            craftingGoal.setHarvestGoal(harvestGoal);
         }
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
@@ -109,6 +112,12 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
         FarmerHarvestGoal harvestGoal = GOALS.get(villager);
         if (harvestGoal != null) {
             harvestGoal.setCraftingGoal(craftingGoal);
+            craftingGoal.setHarvestGoal(harvestGoal);
+            distributionGoal.setHarvestGoal(harvestGoal);
+            FarmerBonemealGoal bonemealGoal = BONEMEAL_GOALS.get(villager);
+            if (bonemealGoal != null) {
+                bonemealGoal.setHarvestGoal(harvestGoal);
+            }
         }
 
         updateChestListener(world, villager, chestPos, CHEST_LISTENERS, (serverWorld, pairedVillager) -> sender -> {
@@ -188,9 +197,10 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
             }
             long lastWakeTick = LAST_CROP_WAKE_TICKS.getOrDefault(villager, Long.MIN_VALUE);
             if (now - lastWakeTick >= HARVEST_WAKE_DEBOUNCE_TICKS) {
-                harvest.requestImmediateWorkCheck();
+                harvest.enqueuePriorityHarvestTarget(cropPos);
                 LAST_CROP_WAKE_TICKS.put(villager, now);
             } else {
+                harvest.enqueuePriorityHarvestTarget(cropPos);
                 harvest.requestCheckNoSoonerThan(lastWakeTick + HARVEST_WAKE_MAX_COALESCE_DELAY_TICKS);
             }
         }

@@ -103,6 +103,9 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (chestPos == null) {
             return false;
         }
+        if (isBlockedByDeferredWorkflow(world)) {
+            return false;
+        }
         if (!immediateCheckPending && world.getTime() < nextCheckTime) {
             return false;
         }
@@ -217,6 +220,10 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected void scheduleNextCooldown(ServerWorld world) {
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
         immediateCheckPending = false;
+    }
+
+    protected boolean isBlockedByDeferredWorkflow(ServerWorld world) {
+        return false;
     }
 
     protected Optional<Inventory> getChestInventory(ServerWorld world) {

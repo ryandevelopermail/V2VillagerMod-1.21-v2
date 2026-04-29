@@ -134,8 +134,9 @@ public class MoreVillagersOceanographerPaperCraftingGoal extends Goal {
             return;
         }
 
-        if (consumeSugarCane(chestInventory.get(), 3)) {
-            insertStack(chestInventory.get(), new ItemStack(Items.PAPER, 3));
+        ItemStack output = new ItemStack(Items.PAPER, 3);
+        if (canInsertOutput(chestInventory.get(), output) && consumeSugarCane(chestInventory.get(), 3)) {
+            insertStack(chestInventory.get(), output);
             chestInventory.get().markDirty();
             CraftingCheckLogger.report(world, "Oceanographer", formatCraftedResult(lastCheckCount));
         }
@@ -221,6 +222,37 @@ public class MoreVillagersOceanographerPaperCraftingGoal extends Goal {
             remaining.decrement(moved);
         }
         return remaining;
+    }
+
+    private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            if (remaining.isEmpty()) {
+                return true;
+            }
+
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                if (!inventory.isValid(slot, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                remaining.decrement(moved);
+                continue;
+            }
+
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining) || !inventory.isValid(slot, remaining)) {
+                continue;
+            }
+
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space <= 0) {
+                continue;
+            }
+            int moved = Math.min(space, remaining.getCount());
+            remaining.decrement(moved);
+        }
+        return remaining.isEmpty();
     }
 
     private void moveTo(BlockPos target) {

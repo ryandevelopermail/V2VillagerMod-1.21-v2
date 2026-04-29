@@ -90,6 +90,9 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
         if (jobPos == null || chestPos == null) {
             return false;
         }
+        if (isBlockedByDeferredWorkflow(world)) {
+            return false;
+        }
         if (requiresCraftingTable() && !hasCraftingTable(world)) {
             return false;
         }
@@ -221,6 +224,10 @@ public abstract class AbstractCraftingGoal<R> extends Goal {
 
     protected boolean shouldBypassCooldown(ServerWorld world, boolean immediateCheckPending) {
         return immediateCheckPending;
+    }
+
+    protected boolean isBlockedByDeferredWorkflow(ServerWorld world) {
+        return false;
     }
 
     protected boolean requiresCraftingTable() {

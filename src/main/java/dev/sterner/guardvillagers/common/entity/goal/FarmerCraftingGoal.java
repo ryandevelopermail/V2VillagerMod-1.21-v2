@@ -16,6 +16,7 @@ import java.util.function.Predicate;
 public class FarmerCraftingGoal extends AbstractCraftingGoal<FarmerCraftingGoal.Recipe> {
     private boolean guaranteedCraftPending;
     private long guaranteedCraftDay = -1L;
+    private FarmerHarvestGoal harvestGoal;
 
     public FarmerCraftingGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -56,6 +57,15 @@ public class FarmerCraftingGoal extends AbstractCraftingGoal<FarmerCraftingGoal.
     public void notifyDailyHarvestComplete(long day) {
         guaranteedCraftPending = true;
         guaranteedCraftDay = day;
+    }
+
+    public void setHarvestGoal(FarmerHarvestGoal harvestGoal) {
+        this.harvestGoal = harvestGoal;
+    }
+
+    @Override
+    protected boolean isBlockedByDeferredWorkflow(ServerWorld world) {
+        return harvestGoal != null && harvestGoal.hasPendingPriorityHarvestTarget(world);
     }
 
     @Override

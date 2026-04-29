@@ -15,9 +15,19 @@ import java.util.Optional;
 
 public class FarmerDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
+    private FarmerHarvestGoal harvestGoal;
 
     public FarmerDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
+    }
+
+    public void setHarvestGoal(FarmerHarvestGoal harvestGoal) {
+        this.harvestGoal = harvestGoal;
+    }
+
+    @Override
+    protected boolean isBlockedByDeferredWorkflow(ServerWorld world) {
+        return harvestGoal != null && harvestGoal.hasPendingPriorityHarvestTarget(world);
     }
 
     @Override
