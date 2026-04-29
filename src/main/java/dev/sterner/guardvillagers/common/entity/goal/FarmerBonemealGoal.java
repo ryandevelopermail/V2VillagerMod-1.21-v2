@@ -40,6 +40,7 @@ public class FarmerBonemealGoal extends Goal {
     private long lastPathRequestTick = Long.MIN_VALUE;
     private long nextUseTick;
     private int actionsThisRun;
+    private FarmerHarvestGoal harvestGoal;
 
     private enum Stage { IDLE, FETCH_FROM_CHEST, MOVE_TO_TARGET, APPLY, RETURN_TO_CHEST, DONE }
 
@@ -60,10 +61,15 @@ public class FarmerBonemealGoal extends Goal {
         this.actionsThisRun = 0;
     }
 
+    public void setHarvestGoal(FarmerHarvestGoal harvestGoal) {
+        this.harvestGoal = harvestGoal;
+    }
+
     @Override
     public boolean canStart() {
         if (!GuardVillagersConfig.farmerBonemealEnabled || !villager.isAlive() || jobPos == null || chestPos == null) return false;
         if (!(villager.getWorld() instanceof ServerWorld world) || !world.isDay()) return false;
+        if (harvestGoal != null && harvestGoal.hasPendingPriorityHarvestTarget(world)) return false;
         if (world.getTime() < nextUseTick) return false;
 
         Optional<Inventory> chestInv = getChestInventory(world);

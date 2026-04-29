@@ -244,6 +244,10 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
+    public boolean hasPendingPriorityHarvestTarget(ServerWorld world) {
+        return findNearestValidPriorityHarvestTarget(world) != null;
+    }
+
     @Override
     public boolean canStart() {
         if (!enabled || !villager.isAlive() || jobPos == null || chestPos == null) {
@@ -516,8 +520,8 @@ public class FarmerHarvestGoal extends Goal {
 
                 BlockState harvestedState = serverWorld.getBlockState(target);
                 serverWorld.breakBlock(target, true, villager);
-                attemptReplant(serverWorld, target, harvestedState);
                 collectNearbyDrops(serverWorld, target);
+                attemptReplant(serverWorld, target, harvestedState);
                 removePriorityHarvestTarget(target);
                 harvestTargets.removeFirst();
                 currentTarget = null;
@@ -1050,13 +1054,13 @@ public class FarmerHarvestGoal extends Goal {
             return;
         }
 
-        Inventory inventory = villager.getInventory();
-        if (!consumeSeed(inventory, seedItem) && !consumeSeedFromChest(world, seedItem)) {
+        BlockState replantedState = crop.getDefaultState();
+        if (!replantedState.canPlaceAt(world, pos)) {
             return;
         }
 
-        BlockState replantedState = crop.getDefaultState();
-        if (!replantedState.canPlaceAt(world, pos)) {
+        Inventory inventory = villager.getInventory();
+        if (!consumeSeed(inventory, seedItem) && !consumeSeedFromChest(world, seedItem)) {
             return;
         }
 
