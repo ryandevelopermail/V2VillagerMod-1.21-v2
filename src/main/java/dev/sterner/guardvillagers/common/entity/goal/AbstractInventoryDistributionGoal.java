@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.InventoryTransferSafety;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
@@ -253,58 +254,16 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected ItemStack insertStack(Inventory inventory, ItemStack stack) {
-        ItemStack remaining = stack.copy();
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            if (remaining.isEmpty()) {
-                return ItemStack.EMPTY;
-            }
-
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                if (!inventory.isValid(slot, remaining)) {
-                    continue;
-                }
-                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
-                ItemStack toInsert = remaining.copy();
-                toInsert.setCount(moved);
-                inventory.setStack(slot, toInsert);
-                remaining.decrement(moved);
-                continue;
-            }
-
-            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                continue;
-            }
-
-            if (!inventory.isValid(slot, remaining)) {
-                continue;
-            }
-
-            int space = existing.getMaxCount() - existing.getCount();
-            if (space <= 0) {
-                continue;
-            }
-
-            int moved = Math.min(space, remaining.getCount());
-            existing.increment(moved);
-            remaining.decrement(moved);
-        }
-
-        return remaining;
+        return InventoryTransferSafety.insertStack(inventory, stack);
     }
 
     protected void returnPendingItem(ServerWorld world) {
         if (pendingItem.isEmpty()) {
             return;
         }
-        ItemStack remaining = insertStack(getChestInventory(world).orElse(villager.getInventory()), pendingItem);
-        if (!remaining.isEmpty()) {
-            ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
-            if (!villagerRemaining.isEmpty()) {
-                villager.dropStack(villagerRemaining);
-            }
-            villager.getInventory().markDirty();
-        }
+        List<ItemStack> recoveryPayload = new java.util.ArrayList<>();
+        recoveryPayload.add(pendingItem.copy());
+        InventoryTransferSafety.recoverPayload(villager, getChestInventory(world).orElse(null), recoveryPayload);
         clearPendingState();
     }
 
