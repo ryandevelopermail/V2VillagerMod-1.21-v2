@@ -61,6 +61,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                 && java.util.Objects.equals(updatedCraftingTablePos, this.craftingTablePos)) {
             return;
         }
+        recoverPendingItem();
         this.jobPos = updatedJobPos;
         this.chestPos = updatedChestPos;
         this.craftingTablePos = updatedCraftingTablePos;
@@ -118,6 +119,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     @Override
     public void stop() {
+        recoverPendingItem();
         villager.getNavigation().stop();
         currentNavigationTarget = null;
         lastPathRequestTick = Long.MIN_VALUE;
@@ -256,9 +258,26 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         if (pendingItem.isEmpty()) {
             return;
         }
+        recoverPendingItem(getChestInventory(world).orElse(null));
+    }
+
+    private void recoverPendingItem() {
+        if (pendingItem.isEmpty()) {
+            return;
+        }
+        Inventory sourceInventory = villager.getWorld() instanceof ServerWorld world
+                ? getChestInventory(world).orElse(null)
+                : null;
+        recoverPendingItem(sourceInventory);
+    }
+
+    private void recoverPendingItem(@Nullable Inventory sourceInventory) {
+        if (pendingItem.isEmpty()) {
+            return;
+        }
         List<ItemStack> recoveryPayload = new java.util.ArrayList<>();
         recoveryPayload.add(pendingItem.copy());
-        InventoryTransferSafety.recoverPayload(villager, getChestInventory(world).orElse(null), recoveryPayload);
+        InventoryTransferSafety.recoverPayload(villager, sourceInventory, recoveryPayload);
         clearPendingState();
     }
 

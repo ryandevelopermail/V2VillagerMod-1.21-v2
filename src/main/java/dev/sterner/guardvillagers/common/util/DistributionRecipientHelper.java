@@ -75,14 +75,14 @@ public final class DistributionRecipientHelper {
             return active;
         }
 
-        double wideRange = resolveWideRange(shortRange);
-        if (wideRange <= shortRange) {
+        double operatingRange = Math.max(shortRange, GuardVillagersConfig.quartermasterScanRange);
+        if (operatingRange <= shortRange) {
             return List.of();
         }
         return QuartermasterGoal.retainActiveQuartermasterRecipients(
                 world,
                 collectEligibleVillagerRecipients(
-                        world, source, wideRange, VillagerProfession.LIBRARIAN, Blocks.LECTERN));
+                        world, source, operatingRange, VillagerProfession.LIBRARIAN, Blocks.LECTERN));
     }
 
     public static List<RecipientRecord> findEligibleShepherdRecipients(ServerWorld world, VillagerEntity source, double range) {
