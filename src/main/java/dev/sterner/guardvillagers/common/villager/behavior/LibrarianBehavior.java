@@ -1,7 +1,6 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
-import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
@@ -29,12 +28,10 @@ import java.util.WeakHashMap;
 public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(LibrarianBehavior.class);
     private static final int CRAFTING_GOAL_PRIORITY = 4;
-    private static final int DISTRIBUTION_GOAL_PRIORITY = 5;
     private static final int QUARTERMASTER_GOAL_PRIORITY = 3;
     private static final long INVENTORY_MUTATION_DEBOUNCE_TICKS = 30L;
     private static final long QUARTERMASTER_PAIR_REVALIDATION_GUARD_TICKS = 1L;
     private static final Map<VillagerEntity, LibrarianCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
-    private static final Map<VillagerEntity, LibrarianBellChestDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, QuartermasterGoal> QUARTERMASTER_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, BlockPos> PAIRED_CHEST_POS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
@@ -78,15 +75,6 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             craftingGoal.setTargets(jobPos, chestPos, craftingGoal.getCraftingTablePos());
         }
 
-        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal == null) {
-            distributionGoal = new LibrarianBellChestDistributionGoal(villager, jobPos, chestPos, null);
-            DISTRIBUTION_GOALS.put(villager, distributionGoal);
-            GoalSelector selector = villager.goalSelector;
-            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
-        } else {
-            distributionGoal.setTargets(jobPos, chestPos, distributionGoal.getCraftingTablePos());
-        }
         updateChestWatcher(world, villager, chestPos);
         scheduleImmediateInventoryRefresh(world, villager, true);
 
@@ -124,15 +112,6 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
             goal.setTargets(jobPos, chestPos, craftingTablePos);
         }
 
-        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal == null) {
-            distributionGoal = new LibrarianBellChestDistributionGoal(villager, jobPos, chestPos, craftingTablePos);
-            DISTRIBUTION_GOALS.put(villager, distributionGoal);
-            GoalSelector selector = villager.goalSelector;
-            selector.add(DISTRIBUTION_GOAL_PRIORITY, distributionGoal);
-        } else {
-            distributionGoal.setTargets(jobPos, chestPos, craftingTablePos);
-        }
         updateChestWatcher(world, villager, chestPos);
         scheduleImmediateInventoryRefresh(world, villager, true);
         syncQuartermasterState(world, villager, jobPos, chestPos, "pairing_refresh");
@@ -214,10 +193,6 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         LibrarianCraftingGoal goal = CRAFTING_GOALS.get(villager);
         if (goal != null) {
             goal.requestImmediateCraft(world);
-        }
-        LibrarianBellChestDistributionGoal distributionGoal = DISTRIBUTION_GOALS.get(villager);
-        if (distributionGoal != null) {
-            distributionGoal.requestImmediateDistribution();
         }
         QuartermasterGoal quartermasterGoal = QUARTERMASTER_GOALS.get(villager);
         if (quartermasterGoal != null) {

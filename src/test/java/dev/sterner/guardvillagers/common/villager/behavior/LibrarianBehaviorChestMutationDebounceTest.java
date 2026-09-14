@@ -1,6 +1,5 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
-import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -25,7 +24,6 @@ class LibrarianBehaviorChestMutationDebounceTest {
     @AfterEach
     void clearStaticState() throws Exception {
         map("CRAFTING_GOALS").clear();
-        map("DISTRIBUTION_GOALS").clear();
         map("QUARTERMASTER_GOALS").clear();
         map("CHEST_WATCHERS_BY_POS").clear();
         map("LAST_IMMEDIATE_REQUEST_TICK").clear();
@@ -38,13 +36,11 @@ class LibrarianBehaviorChestMutationDebounceTest {
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity villager = mock(VillagerEntity.class);
         LibrarianCraftingGoal craftingGoal = mock(LibrarianCraftingGoal.class);
-        LibrarianBellChestDistributionGoal distributionGoal = mock(LibrarianBellChestDistributionGoal.class);
         QuartermasterGoal quartermasterGoal = mock(QuartermasterGoal.class);
         BlockPos firstHalf = new BlockPos(10, 64, 10);
         BlockPos secondHalf = firstHalf.east();
 
         map("CRAFTING_GOALS").put(villager, craftingGoal);
-        map("DISTRIBUTION_GOALS").put(villager, distributionGoal);
         map("QUARTERMASTER_GOALS").put(villager, quartermasterGoal);
         watcherMap().put(firstHalf, new HashSet<>(Set.of(villager)));
         watcherMap().put(secondHalf, new HashSet<>(Set.of(villager)));
@@ -59,7 +55,6 @@ class LibrarianBehaviorChestMutationDebounceTest {
         LibrarianBehavior.onChestInventoryMutated(world, secondHalf);
 
         verify(craftingGoal, times(2)).requestImmediateCraft(world);
-        verify(distributionGoal, times(2)).requestImmediateDistribution();
         verify(quartermasterGoal, times(2)).requestImmediatePrerequisiteRevalidation();
         verify(quartermasterGoal, times(2)).requestImmediateDemandReplan();
     }
@@ -70,10 +65,8 @@ class LibrarianBehaviorChestMutationDebounceTest {
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity villager = mock(VillagerEntity.class);
         LibrarianCraftingGoal craftingGoal = mock(LibrarianCraftingGoal.class);
-        LibrarianBellChestDistributionGoal distributionGoal = mock(LibrarianBellChestDistributionGoal.class);
 
         map("CRAFTING_GOALS").put(villager, craftingGoal);
-        map("DISTRIBUTION_GOALS").put(villager, distributionGoal);
 
         when(world.getTime()).thenReturn(200L, 205L);
 
@@ -81,7 +74,6 @@ class LibrarianBehaviorChestMutationDebounceTest {
         invokeScheduleImmediateRefresh(behavior, world, villager, true);
 
         verify(craftingGoal, times(2)).requestImmediateCraft(world);
-        verify(distributionGoal, times(2)).requestImmediateDistribution();
     }
 
     @Test

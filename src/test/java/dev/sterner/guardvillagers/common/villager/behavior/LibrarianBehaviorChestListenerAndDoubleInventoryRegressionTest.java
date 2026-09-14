@@ -1,6 +1,5 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
-import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import net.minecraft.block.BlockState;
@@ -39,7 +38,6 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
     @AfterEach
     void clearStaticState() throws Exception {
         map("CRAFTING_GOALS").clear();
-        map("DISTRIBUTION_GOALS").clear();
         map("QUARTERMASTER_GOALS").clear();
         map("PAIRED_CHEST_POS").clear();
         map("CHEST_REGISTRATIONS").clear();
@@ -51,16 +49,14 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
     }
 
     @Test
-    void singleChestMutation_wakesLibrarianCraftingAndDistribution() throws Exception {
+    void singleChestMutation_wakesLibrarianCrafting() throws Exception {
         LibrarianBehavior behavior = new LibrarianBehavior();
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity villager = mockLibrarian(world);
         LibrarianCraftingGoal craftingGoal = mock(LibrarianCraftingGoal.class);
-        LibrarianBellChestDistributionGoal distributionGoal = mock(LibrarianBellChestDistributionGoal.class);
         BlockPos chestPos = new BlockPos(8, 64, 8);
 
         map("CRAFTING_GOALS").put(villager, craftingGoal);
-        map("DISTRIBUTION_GOALS").put(villager, distributionGoal);
         when(world.getBlockState(chestPos)).thenReturn(chestState(ChestType.SINGLE, Direction.NORTH));
         when(world.getTime()).thenReturn(200L);
 
@@ -68,7 +64,6 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
         LibrarianBehavior.onChestInventoryMutated(world, chestPos);
 
         verify(craftingGoal).requestImmediateCraft(world);
-        verify(distributionGoal).requestImmediateDistribution();
         assertTrue(map("CHEST_REGISTRATIONS").containsKey(villager));
         assertEquals(Set.of(villager), watcherMap().get(chestPos));
     }
@@ -79,13 +74,11 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity villager = mockLibrarian(world);
         LibrarianCraftingGoal craftingGoal = mock(LibrarianCraftingGoal.class);
-        LibrarianBellChestDistributionGoal distributionGoal = mock(LibrarianBellChestDistributionGoal.class);
         QuartermasterGoal quartermasterGoal = mock(QuartermasterGoal.class);
         BlockPos chestPos = new BlockPos(21, 64, 20);
         BlockPos secondPos = chestPos.east();
 
         map("CRAFTING_GOALS").put(villager, craftingGoal);
-        map("DISTRIBUTION_GOALS").put(villager, distributionGoal);
         map("QUARTERMASTER_GOALS").put(villager, quartermasterGoal);
         when(world.getBlockState(chestPos)).thenReturn(chestState(ChestType.LEFT, Direction.NORTH));
         when(world.getBlockState(secondPos)).thenReturn(chestState(ChestType.RIGHT, Direction.NORTH));
@@ -96,7 +89,6 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
         LibrarianBehavior.onChestInventoryMutated(world, secondPos);
 
         verify(craftingGoal, times(2)).requestImmediateCraft(world);
-        verify(distributionGoal, times(2)).requestImmediateDistribution();
         verify(quartermasterGoal, times(2)).requestImmediatePrerequisiteRevalidation();
         verify(quartermasterGoal, times(2)).requestImmediateDemandReplan();
         assertEquals(Set.of(villager), watcherMap().get(chestPos));
@@ -133,6 +125,8 @@ class LibrarianBehaviorChestListenerAndDoubleInventoryRegressionTest {
                 .values().iterator().next();
         assertEquals(Set.of(villager.getUuid()), activeByAnchor.get(chestPos));
         verify(goalSelector, times(1)).add(eq(3), any(QuartermasterGoal.class));
+        verify(goalSelector, times(1)).add(eq(4), any(LibrarianCraftingGoal.class));
+        verify(goalSelector, never()).add(eq(5), any());
         verify(goalSelector, never()).remove(any(QuartermasterGoal.class));
     }
 

@@ -168,29 +168,7 @@ public class QuartermasterGoal extends Goal {
      * included here. Logs and planks are particularly important because the bell chest
      * is the primary routing hub for the Lumberjack→Shepherd plank pipeline.
      */
-    private static final Predicate<ItemStack> SURPLUS_HAUL_WHITELIST = stack -> {
-        if (stack.isEmpty()) return false;
-        // Accept any log type
-        if (stack.isIn(net.minecraft.registry.tag.ItemTags.LOGS)) return true;
-        // Accept any plank type
-        if (stack.isIn(ItemTags.PLANKS)) return true;
-        // Accept any wool type
-        if (stack.isIn(net.minecraft.registry.tag.ItemTags.WOOL)) return true;
-        // Accept saplings (routed to Forester chests)
-        if (stack.isIn(ItemTags.SAPLINGS)) return true;
-        // Accept specific bulk construction/farming materials
-        net.minecraft.item.Item item = stack.getItem();
-        return item == Items.COBBLESTONE
-                || item == Items.STONE
-                || item == Items.GRAVEL
-                || item == Items.SAND
-                || item == Items.WHEAT
-                || item == Items.WHEAT_SEEDS
-                || item == Items.HAY_BLOCK
-                || item == Items.COAL
-                || item == Items.CHARCOAL
-                || item == Items.STICK;
-    };
+    private static final Predicate<ItemStack> SURPLUS_HAUL_WHITELIST = QuartermasterOverflowPolicy::canCollect;
     private static final ProfessionReclaimPolicy LUMBERJACK_RECLAIM_POLICY = ProfessionReclaimPolicy.of(
             stack -> stack.isIn(ItemTags.LOGS)
                     || stack.isIn(ItemTags.PLANKS)

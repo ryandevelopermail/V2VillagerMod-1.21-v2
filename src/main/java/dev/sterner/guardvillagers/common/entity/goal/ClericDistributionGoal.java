@@ -35,9 +35,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
         List<DistributionRecipientHelper.RecipientRecord> recipients =
                 DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
@@ -58,15 +55,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         if (inventory == null) {
             return false;
         }
-        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            LOGGER.info("Cleric {} started overflow distribution of {} to librarian {} at {}",
-                    villager.getUuidAsString(),
-                    pendingItem.getItem(),
-                    pendingTargetId,
-                    pendingTargetPos.toShortString());
-            return true;
-        }
-
         List<DistributionRecipientHelper.RecipientRecord> recipients =
                 DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
@@ -102,9 +90,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, this::isDistributableItem)) {
-            return true;
-        }
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
@@ -135,9 +120,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
@@ -197,11 +179,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     private boolean isHealingSplashPotion(ItemStack stack) {
         return stack.isOf(Items.SPLASH_POTION)
                 && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
-    }
-
-    @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
     }
 
     @Override
