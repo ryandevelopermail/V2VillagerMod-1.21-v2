@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.InventoryTransferSafety;
 import dev.sterner.guardvillagers.common.util.QuartermasterDemandPlanner;
@@ -53,21 +54,22 @@ import java.util.function.Predicate;
 /**
  * Cluster 3 — Quartermaster Goal (added to a Librarian villager after double-chest promotion).
  *
- * <p>The Quartermaster is a <em>proactive material accelerator</em> on top of the existing
- * librarian distribution goal.  It polls the village state every
+ * <p>The Quartermaster owns the village's central-storage intake and demand-driven
+ * redistribution. It polls the village state every
  * {@link #CHECK_INTERVAL_TICKS} ticks and performs one of the following priority-ordered
  * actions:
  *
  * <ol>
- *   <li><b>Mason building wall</b> → haul stone from bell chest to mason's paired chest.</li>
- *   <li><b>Lumberjack crafting (planks)</b> → haul planks/wood from bell chest to lumberjack's chest.</li>
+ *   <li><b>Mason building wall</b> → haul stone from central storage to the mason's paired chest.</li>
+ *   <li><b>Lumberjack crafting (planks)</b> → haul planks/wood from central storage to the lumberjack's chest.</li>
  *   <li><b>Weaponsmith planks</b> → haul planks to weaponsmith chest for wood weapon crafting.</li>
  *   <li><b>Lumberjack furnace stone</b> → haul 8 cobblestone to lumberjack for furnace crafting (skipped if furnace already exists near job site).</li>
- *   <li><b>Village chest low</b> → haul from any over-stocked profession chest to bell chest.</li>
+ *   <li><b>Profession chest near capacity</b> → pull policy-approved overflow into central storage.</li>
  * </ol>
  *
- * <p>The Quartermaster's paired chest is used as the transit buffer.  The bell chest is
- * resolved via {@link BellChestMappingState}.
+ * <p>The Quartermaster's paired double chest is both its working inventory and the
+ * village's central-storage bank. Profession goals still own explicit producer-to-consumer
+ * dependencies; generic overflow intake happens only here.
  */
 public class QuartermasterGoal extends Goal {
 
@@ -91,8 +93,10 @@ public class QuartermasterGoal extends Goal {
     private static final int LUMBERJACK_FURNACE_STONE_AMOUNT = 8;
     /** Radius around lumberjack job site to check for an existing furnace. */
     private static final int FURNACE_CHECK_RADIUS = 5;
-    /** Bell chest is considered "low" if total items < this. */
-    private static final int BELL_CHEST_LOW_THRESHOLD = 128;
+    /** Central storage is considered "low" if total items are below this legacy refill threshold. */
+    private static final int CENTRAL_STORAGE_LOW_THRESHOLD = 128;
+    /** Profession chests at or above this capacity receive bank-independent overflow relief. */
+    private static final double OVERFLOW_SOURCE_FULLNESS_THRESHOLD = 0.80D;
     /** Amount to transfer per haul trip. */
     private static final int HAUL_AMOUNT = 16;
     /** Maximum number of items owned by one in-memory transfer. */
@@ -156,18 +160,7 @@ public class QuartermasterGoal extends Goal {
             ACTIVE_QM_BY_WORLD_ANCHOR = new HashMap<>();
     private static final Map<QmBootstrapKey, Boolean> BOOTSTRAP_COMPLETE_BY_QM = new HashMap<>();
 
-    /**
-     * Item whitelist for Priority-3 surplus haul.
-     *
-     * <p>Priority-3 hauls from ANY over-stocked chest near a villager. Without this
-     * safelist the QM would drain Cleric potions, Fletcher arrows, Armorer iron gear,
-     * Fisherman fish, Cartographer maps, Butcher meat — all specialist trade goods —
-     * into the generic bell chest. This makes those professions silently stop trading.
-     *
-     * <p>Only "generic village bulk" materials that are safe to redistribute are
-     * included here. Logs and planks are particularly important because the bell chest
-     * is the primary routing hub for the Lumberjack→Shepherd plank pipeline.
-     */
+    /** Generic bulk-item boundary for Quartermaster-owned central-storage overflow intake. */
     private static final Predicate<ItemStack> SURPLUS_HAUL_WHITELIST = QuartermasterOverflowPolicy::canCollect;
     private static final ProfessionReclaimPolicy LUMBERJACK_RECLAIM_POLICY = ProfessionReclaimPolicy.of(
             stack -> stack.isIn(ItemTags.LOGS)
@@ -259,8 +252,11 @@ public class QuartermasterGoal extends Goal {
     private boolean payloadInTransit = false;
     /** How {@link #takePayloadFromInventory} should drain the source chest. */
     private TransferMode transferMode = TransferMode.SINGLE_STACK;
-    private final List<BlockPos> cachedSurplusCandidates = new ArrayList<>();
-    private final List<BlockPos> rebuildingSurplusCandidates = new ArrayList<>();
+    /** Reserve rechecked at pickup time for a profession-overflow transfer. */
+    private int sourceItemReserve = 0;
+    private boolean enforceSourceItemReserve = false;
+    private final List<OverflowCandidate> cachedSurplusCandidates = new ArrayList<>();
+    private final List<OverflowCandidate> rebuildingSurplusCandidates = new ArrayList<>();
     private int surplusCandidateCursor = 0;
     private int pairingRebuildCursor = 0;
     private int cachedPairingCount = -1;
@@ -540,18 +536,7 @@ public class QuartermasterGoal extends Goal {
         transferPayload.clear();
         payloadInTransit = false;
         transferMode = TransferMode.FULL_CHEST;
-    }
-
-    /**
-     * Plans a whitelisted chest haul. Each trip takes one bounded batch accepted by
-     * {@link #SURPLUS_HAUL_WHITELIST}. Used for Priority-3 surplus redistribution.
-     */
-    private void planWhitelistedChestHaul(BlockPos source, BlockPos dest) {
-        sourcePos = source;
-        destPos = dest;
-        transferPayload.clear();
-        payloadInTransit = false;
-        transferMode = TransferMode.WHITELISTED_CHEST;
+        enforceSourceItemReserve = false;
     }
 
     /**
@@ -566,6 +551,13 @@ public class QuartermasterGoal extends Goal {
         payloadInTransit = false;
         if (!stack.isEmpty()) transferPayload.add(stack.copy());
         transferMode = TransferMode.SINGLE_STACK;
+        enforceSourceItemReserve = false;
+    }
+
+    private void planProfessionOverflowHaul(OverflowTransfer transfer, BlockPos dest) {
+        planSingleStackHaul(transfer.sourcePos(), dest, transfer.stack());
+        sourceItemReserve = transfer.reserveCount();
+        enforceSourceItemReserve = true;
     }
 
     // -------------------------------------------------------------------------
@@ -573,7 +565,7 @@ public class QuartermasterGoal extends Goal {
     // -------------------------------------------------------------------------
 
     private boolean tryPlanTransfer(ServerWorld world) {
-        BlockPos qmChestPos = resolveBellChestPos(world);
+        BlockPos qmChestPos = resolveCentralStoragePos();
 
         // Bootstrap is sticky: once it starts visiting chests it takes exclusive priority
         // until every discovered natural village chest has been drained. This ensures the
@@ -688,21 +680,26 @@ public class QuartermasterGoal extends Goal {
             }
         }
 
-        // Priority 3: QM chest is low → haul entire whitelisted contents from a surplus chest.
-        if (qmChestPos != null) {
-            int qmTotal = countAllItems(world, qmChestPos);
-            if (qmTotal < BELL_CHEST_LOW_THRESHOLD) {
-                Optional<BlockPos> surplusChest = findSurplusChest(world, qmChestPos);
-                if (surplusChest.isPresent()) {
-                    // Whitelisted haul — takePayloadFromInventory will drain SURPLUS_HAUL_WHITELIST items only.
-                    planWhitelistedChestHaul(surplusChest.get(), qmChestPos);
-                    LOGGER.debug("QM {}: hauling surplus chest {} to QM chest", villager.getUuidAsString(), surplusChest.get().toShortString());
-                    return true;
-                }
-            }
+        // Priority 3: relieve high-fullness profession chests into central storage.
+        // This is intentionally after explicit demand/top-up work and is not gated by bank stock.
+        if (qmChestPos != null && tryPlanOverflowTransfer(world, qmChestPos)) {
+            return true;
         }
 
         return false;
+    }
+
+    boolean tryPlanOverflowTransfer(ServerWorld world, BlockPos centralStoragePos) {
+        Optional<OverflowTransfer> overflowTransfer = findOverflowTransfer(world, centralStoragePos);
+        if (overflowTransfer.isEmpty()) {
+            return false;
+        }
+        OverflowTransfer transfer = overflowTransfer.get();
+        planProfessionOverflowHaul(transfer, centralStoragePos);
+        LOGGER.debug("QM {}: pulling {}x{} overflow from {} to central storage",
+                villager.getUuidAsString(), transfer.stack().getCount(), transfer.stack().getItem(),
+                transfer.sourcePos().toShortString());
+        return true;
     }
 
     private boolean tryPlanDemandQueueTransfer(ServerWorld world, BlockPos bellChestPos) {
@@ -1585,32 +1582,22 @@ public class QuartermasterGoal extends Goal {
         return Optional.empty();
     }
 
-    private Optional<BlockPos> findSurplusChest(ServerWorld world, BlockPos bellChestPos) {
+    private Optional<OverflowTransfer> findOverflowTransfer(ServerWorld world, BlockPos centralStoragePos) {
         SurplusScanBudget budget = new SurplusScanBudget(
                 MAX_SURPLUS_CANDIDATE_CHESTS_PER_CYCLE,
                 MAX_SURPLUS_INVENTORIES_PER_CYCLE);
 
         rebuildSurplusCandidateCacheIncrementally(world);
 
-        // Find any chest near job-site villagers with more items than threshold.
-        // Must exclude:
-        //   - bellChestPos  (we're trying to fill it, not drain it further)
-        //   - chestPos      (the QM's own transit buffer — draining it causes haul loops)
-        //   - mason paired chests  (draining them undoes Priority 1 stone hauls)
-        //   - lumberjack paired chests (draining them undoes Priority 2 plank hauls)
+        // Exclude central storage itself and guard-owned workflow chests. Profession
+        // villager chests are filtered below by their reclaim policies and reserves.
         Box box = new Box(jobPos).expand(getScanRange());
-
-        // Build the protected set of specialist chests we must never drain.
         Set<BlockPos> protectedChests = new HashSet<>();
-        if (bellChestPos != null) {
-            protectedChests.add(bellChestPos);
-            // If the bell chest is a double-chest, protect both halves. Otherwise the QM could
-            // treat the other half as a surplus source and haul items from it into bellChestPos,
-            // which both resolve to the same DoubleInventory — a no-op loop.
-            findDoubleChestOtherHalf(world, bellChestPos).ifPresent(protectedChests::add);
+        if (centralStoragePos != null) {
+            protectedChests.add(centralStoragePos);
+            findDoubleChestOtherHalf(world, centralStoragePos).ifPresent(protectedChests::add);
         }
         protectedChests.add(chestPos);
-        // Also protect the QM's own double-chest other half if present.
         findDoubleChestOtherHalf(world, chestPos).ifPresent(protectedChests::add);
         for (MasonGuardEntity mason : world.getEntitiesByClass(MasonGuardEntity.class, box, MasonGuardEntity::isAlive)) {
             if (mason.getPairedChestPos() != null) {
@@ -1624,7 +1611,9 @@ public class QuartermasterGoal extends Goal {
                 findDoubleChestOtherHalf(world, lj.getPairedChestPos()).ifPresent(protectedChests::add);
             }
         }
-        Optional<BlockPos> fromCache = scanSurplusCandidatesWithBudget(world, protectedChests, budget);
+        boolean centralStorageLow = countAllItems(world, centralStoragePos) < CENTRAL_STORAGE_LOW_THRESHOLD;
+        Optional<OverflowTransfer> fromCache = scanSurplusCandidatesWithBudget(
+                world, protectedChests, centralStorageLow, budget);
         if (fromCache.isPresent()) {
             lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
             return fromCache;
@@ -1632,7 +1621,8 @@ public class QuartermasterGoal extends Goal {
 
         // Fallback discovery: only used while cache is empty or stale, and still budget-limited.
         if (cachedSurplusCandidates.isEmpty() || candidateCacheStale) {
-            Optional<BlockPos> fallback = scanFallbackPairingsWithBudget(world, protectedChests, budget);
+            Optional<OverflowTransfer> fallback = scanFallbackPairingsWithBudget(
+                    world, protectedChests, centralStorageLow, budget);
             if (fallback.isPresent()) {
                 lastSurplusScanMetrics = budget.toMetrics(cachedSurplusCandidates.size(), candidateCacheStale);
                 return fallback;
@@ -1659,10 +1649,9 @@ public class QuartermasterGoal extends Goal {
             scanned++;
             if (pairing.villagerUuid().equals(quartermasterUuid)) continue;
             if (!pairing.jobPos().isWithinDistance(jobPos, getScanRange())) continue;
-            if (pairing.profession() == VillagerProfession.SHEPHERD) continue;
             BlockPos candidate = pairing.chestPos();
             if (candidate != null) {
-                rebuildingSurplusCandidates.add(candidate.toImmutable());
+                rebuildingSurplusCandidates.add(new OverflowCandidate(candidate.toImmutable(), pairing.profession()));
             }
         }
         if (pairingRebuildCursor >= pairings.size()) {
@@ -1679,28 +1668,35 @@ public class QuartermasterGoal extends Goal {
         }
     }
 
-    private Optional<BlockPos> scanSurplusCandidatesWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+    private Optional<OverflowTransfer> scanSurplusCandidatesWithBudget(ServerWorld world,
+                                                                       Set<BlockPos> protectedChests,
+                                                                       boolean centralStorageLow,
+                                                                       SurplusScanBudget budget) {
         if (cachedSurplusCandidates.isEmpty()) return Optional.empty();
 
         int scanStart = Math.floorMod(surplusCandidateCursor, cachedSurplusCandidates.size());
         while (budget.canCheckAnotherCandidate()) {
-            BlockPos candidate = cachedSurplusCandidates.get(surplusCandidateCursor);
+            OverflowCandidate candidate = cachedSurplusCandidates.get(surplusCandidateCursor);
             surplusCandidateCursor = (surplusCandidateCursor + 1) % cachedSurplusCandidates.size();
 
             budget.recordCandidateCheck();
-            if (protectedChests.contains(candidate)) continue;
+            if (protectedChests.contains(candidate.chestPos())) continue;
             if (!budget.canInspectAnotherInventory()) break;
 
             budget.recordInventoryInspection();
-            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                return Optional.of(candidate);
+            Optional<OverflowTransfer> transfer = findEligibleOverflowTransfer(world, candidate, centralStorageLow);
+            if (transfer.isPresent()) {
+                return transfer;
             }
             if (surplusCandidateCursor == scanStart) break;
         }
         return Optional.empty();
     }
 
-    private Optional<BlockPos> scanFallbackPairingsWithBudget(ServerWorld world, Set<BlockPos> protectedChests, SurplusScanBudget budget) {
+    private Optional<OverflowTransfer> scanFallbackPairingsWithBudget(ServerWorld world,
+                                                                      Set<BlockPos> protectedChests,
+                                                                      boolean centralStorageLow,
+                                                                      SurplusScanBudget budget) {
         List<JobBlockPairingHelper.CachedVillagerChestPairing> pairings = JobBlockPairingHelper.getCachedVillagerChestPairings(world);
         if (pairings.isEmpty()) return Optional.empty();
 
@@ -1717,11 +1713,6 @@ public class QuartermasterGoal extends Goal {
                 if (pairingRebuildCursor == scanStart) break;
                 continue;
             }
-            if (pairing.profession() == VillagerProfession.SHEPHERD) {
-                if (pairingRebuildCursor == scanStart) break;
-                continue;
-            }
-
             BlockPos candidate = pairing.chestPos();
             if (candidate == null) {
                 if (pairingRebuildCursor == scanStart) break;
@@ -1736,12 +1727,76 @@ public class QuartermasterGoal extends Goal {
             if (!budget.canInspectAnotherInventory()) break;
 
             budget.recordInventoryInspection();
-            if (countWhitelistedItems(world, candidate) > BELL_CHEST_LOW_THRESHOLD * 2) {
-                return Optional.of(candidate);
+            Optional<OverflowTransfer> transfer = findEligibleOverflowTransfer(
+                    world, new OverflowCandidate(candidate.toImmutable(), pairing.profession()), centralStorageLow);
+            if (transfer.isPresent()) {
+                return transfer;
             }
             if (pairingRebuildCursor == scanStart) break;
         }
         return Optional.empty();
+    }
+
+    private Optional<OverflowTransfer> findEligibleOverflowTransfer(ServerWorld world,
+                                                                     OverflowCandidate candidate,
+                                                                     boolean centralStorageLow) {
+        Optional<Inventory> inventory = getInventory(world, candidate.chestPos());
+        if (inventory.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Inventory source = inventory.get();
+        ProfessionReclaimPolicy policy = PROFESSION_RECLAIM_POLICIES.getOrDefault(
+                candidate.profession(), ProfessionReclaimPolicy.none());
+        Map<net.minecraft.item.Item, Integer> totals = totalsByItem(source);
+        int totalEligible = 0;
+        for (Map.Entry<net.minecraft.item.Item, Integer> entry : totals.entrySet()) {
+            ItemStack stack = new ItemStack(entry.getKey());
+            if (!SURPLUS_HAUL_WHITELIST.test(stack) || !policy.canReleaseToCentral(stack)) {
+                continue;
+            }
+            totalEligible += Math.max(0,
+                    entry.getValue() - policy.reserveCount(entry.getKey()));
+        }
+
+        boolean highFullness = getInventoryFullness(source) >= OVERFLOW_SOURCE_FULLNESS_THRESHOLD;
+        boolean legacyLowBankSurplus = centralStorageLow && totalEligible > CENTRAL_STORAGE_LOW_THRESHOLD * 2;
+        if (!highFullness && !legacyLowBankSurplus) {
+            return Optional.empty();
+        }
+
+        for (int slot = 0; slot < source.size(); slot++) {
+            ItemStack stack = source.getStack(slot);
+            if (stack.isEmpty() || !SURPLUS_HAUL_WHITELIST.test(stack) || !policy.canReleaseToCentral(stack)) {
+                continue;
+            }
+            int reserve = policy.reserveCount(stack.getItem());
+            int reclaimable = Math.max(0, totals.getOrDefault(stack.getItem(), 0) - reserve);
+            int toMove = Math.min(Math.min(reclaimable, stack.getCount()), HAUL_AMOUNT);
+            if (toMove > 0) {
+                return Optional.of(new OverflowTransfer(
+                        candidate.chestPos(), stack.copyWithCount(toMove), reserve));
+            }
+        }
+        return Optional.empty();
+    }
+
+    private double getInventoryFullness(Inventory inventory) {
+        if (inventory.size() <= 0) {
+            return 0.0D;
+        }
+        double usedCapacity = 0.0D;
+        double totalCapacity = 0.0D;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            int slotCapacity = stack.isEmpty()
+                    ? inventory.getMaxCountPerStack()
+                    : Math.min(inventory.getMaxCountPerStack(), stack.getMaxCount());
+            if (slotCapacity <= 0) continue;
+            totalCapacity += slotCapacity;
+            usedCapacity += Math.min(stack.getCount(), slotCapacity);
+        }
+        return totalCapacity <= 0.0D ? 0.0D : usedCapacity / totalCapacity;
     }
 
     // -------------------------------------------------------------------------
@@ -1757,8 +1812,6 @@ public class QuartermasterGoal extends Goal {
      *       drain exactly those items from the source slot-by-slot.</li>
      *   <li>{@link TransferMode#FULL_CHEST} — take one bounded source stack for
      *       bootstrap consolidation.</li>
-     *   <li>{@link TransferMode#WHITELISTED_CHEST} — take one bounded source stack
-     *       accepted by {@link #SURPLUS_HAUL_WHITELIST}.</li>
      * </ul>
      *
      * @return {@code true} if at least one item was taken; {@code false} if nothing was
@@ -1786,6 +1839,16 @@ public class QuartermasterGoal extends Goal {
                 ItemStack wanted = transferPayload.get(p);
                 if (wanted.isEmpty()) continue;
                 int needed = wanted.getCount();
+                if (enforceSourceItemReserve) {
+                    int liveTotal = 0;
+                    for (int slotIndex = 0; slotIndex < inventory.size(); slotIndex++) {
+                        ItemStack liveStack = inventory.getStack(slotIndex);
+                        if (!liveStack.isEmpty() && liveStack.isOf(wanted.getItem())) {
+                            liveTotal += liveStack.getCount();
+                        }
+                    }
+                    needed = Math.min(needed, Math.max(0, liveTotal - sourceItemReserve));
+                }
                 int capacity = InventoryTransferSafety.insertableCount(destinationInventory, wanted, needed);
                 needed = Math.min(needed, capacity);
                 int taken = 0;
@@ -1813,11 +1876,9 @@ public class QuartermasterGoal extends Goal {
             return anyTaken;
         }
 
-        // FULL_CHEST or WHITELISTED_CHEST use one live-capacity-bounded stack per trip.
+        // FULL_CHEST uses one live-capacity-bounded stack per trip.
         transferPayload.clear();
-        Predicate<ItemStack> filter = (transferMode == TransferMode.WHITELISTED_CHEST)
-                ? SURPLUS_HAUL_WHITELIST
-                : stack -> !stack.isEmpty();
+        Predicate<ItemStack> filter = stack -> !stack.isEmpty();
 
         for (int i = 0; i < inventory.size(); i++) {
             ItemStack slot = inventory.getStack(i);
@@ -1972,24 +2033,6 @@ public class QuartermasterGoal extends Goal {
     }
 
     /**
-     * Counts only items that pass {@link #SURPLUS_HAUL_WHITELIST} in the chest at {@code pos}.
-     * Used by {@link #findSurplusChest} to avoid treating specialist chests as "surplus" just
-     * because they contain many arrows, potions, or other high-count trade goods.
-     */
-    private int countWhitelistedItems(ServerWorld world, BlockPos pos) {
-        Optional<Inventory> inv = getInventory(world, pos);
-        if (inv.isEmpty()) return 0;
-        int count = 0;
-        for (int i = 0; i < inv.get().size(); i++) {
-            ItemStack stack = inv.get().getStack(i);
-            if (!stack.isEmpty() && SURPLUS_HAUL_WHITELIST.test(stack)) {
-                count += stack.getCount();
-            }
-        }
-        return count;
-    }
-
-    /**
      * If the chest at {@code pos} is one half of a double-chest, returns the position of the
      * other half. Returns empty for single chests or non-chest blocks.
      * Used to add both halves to protected sets so the QM never hauls within the same double-chest.
@@ -2025,13 +2068,12 @@ public class QuartermasterGoal extends Goal {
         return Optional.empty();
     }
 
-    private BlockPos resolveBellChestPos(ServerWorld world) {
-        // The QM's own paired chest IS the village bank. No bell lookup needed.
+    private BlockPos resolveCentralStoragePos() {
         return chestPos;
     }
 
     // -------------------------------------------------------------------------
-    // Static utility — used by ArmorerIronRoutingGoal to defer when QM is present
+    // Static utilities — active-presence gating and central-storage recipient resolution
     // -------------------------------------------------------------------------
 
     /**
@@ -2085,6 +2127,48 @@ public class QuartermasterGoal extends Goal {
         }
         LOGGER.debug("Quartermaster presence check: false (anchor={} range={})", anchor.toShortString(), range);
         return false;
+    }
+
+    /**
+     * Retains only currently registered Quartermasters and rewrites their destination
+     * to the registered central-storage chest. Ordinary Librarians are deliberately
+     * excluded even though they share the same profession and lectern validation path.
+     */
+    public static List<DistributionRecipientHelper.RecipientRecord>
+    retainActiveQuartermasterRecipients(
+            ServerWorld world,
+            List<DistributionRecipientHelper.RecipientRecord> librarians) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null || byAnchor.isEmpty() || librarians.isEmpty()) {
+            return List.of();
+        }
+
+        List<DistributionRecipientHelper.RecipientRecord> active = new ArrayList<>();
+        for (DistributionRecipientHelper.RecipientRecord librarian : librarians) {
+            UUID librarianId = librarian.recipient().getUuid();
+            BlockPos registeredAnchor = null;
+            for (Map.Entry<BlockPos, Set<UUID>> entry : byAnchor.entrySet()) {
+                if (entry.getValue().contains(librarianId)) {
+                    registeredAnchor = entry.getKey();
+                    break;
+                }
+            }
+            if (registeredAnchor == null) continue;
+
+            Entity entity = world.getEntity(librarianId);
+            if (!(entity instanceof VillagerEntity villager)
+                    || !villager.isAlive()
+                    || villager.isRemoved()
+                    || villager.getVillagerData().getProfession() != VillagerProfession.LIBRARIAN
+                    || !hasInstalledQuartermasterGoal(villager)) {
+                unregisterActiveQuartermaster(world, registeredAnchor, librarianId);
+                continue;
+            }
+            active.add(new DistributionRecipientHelper.RecipientRecord(
+                    librarian.recipient(), librarian.jobPos(), registeredAnchor.toImmutable(),
+                    librarian.sourceSquaredDistance()));
+        }
+        return List.copyOf(active);
     }
 
     private static boolean hasInstalledQuartermasterGoal(VillagerEntity villager) {
@@ -2189,6 +2273,8 @@ public class QuartermasterGoal extends Goal {
             Inventory inventory,
             Map<net.minecraft.item.Item, Integer> totalByItem
     ) {}
+    private record OverflowCandidate(BlockPos chestPos, VillagerProfession profession) {}
+    private record OverflowTransfer(BlockPos sourcePos, ItemStack stack, int reserveCount) {}
 
     private record ProfessionReclaimPolicy(Predicate<ItemStack> reclaimable, Map<net.minecraft.item.Item, Integer> reserveByItem) {
         static ProfessionReclaimPolicy of(Predicate<ItemStack> reclaimable, Map<net.minecraft.item.Item, Integer> reserveByItem) {
@@ -2201,6 +2287,10 @@ public class QuartermasterGoal extends Goal {
 
         boolean canReclaim(ItemStack stack) {
             return reclaimable.test(stack);
+        }
+
+        boolean canReleaseToCentral(ItemStack stack) {
+            return canReclaim(stack) || reserveByItem.containsKey(stack.getItem());
         }
 
         int reserveCount(net.minecraft.item.Item item) {
@@ -2219,11 +2309,9 @@ public class QuartermasterGoal extends Goal {
      *       drain exactly those items from source.</li>
      *   <li>{@code FULL_CHEST} — payload is empty at planning time; take one bounded
      *       source stack for bootstrap consolidation.</li>
-     *   <li>{@code WHITELISTED_CHEST} — payload is empty at planning time; take one bounded
-     *       source stack accepted by {@link #SURPLUS_HAUL_WHITELIST}.</li>
      * </ul>
      */
-    private enum TransferMode { SINGLE_STACK, FULL_CHEST, WHITELISTED_CHEST }
+    private enum TransferMode { SINGLE_STACK, FULL_CHEST }
 
     private static final class LumberjackDrainCycleMetrics {
         private final int eligibleChestCount;

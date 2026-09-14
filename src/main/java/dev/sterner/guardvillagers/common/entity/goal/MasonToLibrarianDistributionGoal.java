@@ -48,7 +48,7 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
         return isInventoryAtLeastFull(inventory, SOURCE_CHEST_FULLNESS_TRIGGER)
                 && hasDistributableItem(inventory)
-                && !DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty();
+                && !DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty();
     }
 
     @Override
@@ -56,7 +56,7 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
         if (inventory == null) {
             return false;
         }
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -87,7 +87,7 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
             return false;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }

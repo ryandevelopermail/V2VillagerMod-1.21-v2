@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.util;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.villager.behavior.CartographerBehavior;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -55,8 +56,33 @@ public final class DistributionRecipientHelper {
         return findEligibleVillagerRecipients(world, source, range, VillagerProfession.LIBRARIAN, Blocks.LECTERN);
     }
 
-    public static List<RecipientRecord> findEligibleLibrarianRecipientsForClerics(ServerWorld world, VillagerEntity source, double range) {
-        return findEligibleVillagerRecipients(world, source, range, VillagerProfession.LIBRARIAN, Blocks.LECTERN);
+    /**
+     * Finds only Librarians that are currently promoted and registered as Quartermasters.
+     * Central-storage routes must use this resolver so an ordinary Librarian's crafting
+     * chest cannot become an accidental terminal sink.
+     */
+    public static List<RecipientRecord> findEligibleQuartermasterRecipients(ServerWorld world, VillagerEntity source, double range) {
+        if (range <= 0.0D || !source.isAlive()) {
+            return List.of();
+        }
+
+        double shortRange = resolveShortRange(range);
+        List<RecipientRecord> active = QuartermasterGoal.retainActiveQuartermasterRecipients(
+                world,
+                collectEligibleVillagerRecipients(
+                        world, source, shortRange, VillagerProfession.LIBRARIAN, Blocks.LECTERN));
+        if (!active.isEmpty()) {
+            return active;
+        }
+
+        double wideRange = resolveWideRange(shortRange);
+        if (wideRange <= shortRange) {
+            return List.of();
+        }
+        return QuartermasterGoal.retainActiveQuartermasterRecipients(
+                world,
+                collectEligibleVillagerRecipients(
+                        world, source, wideRange, VillagerProfession.LIBRARIAN, Blocks.LECTERN));
     }
 
     public static List<RecipientRecord> findEligibleShepherdRecipients(ServerWorld world, VillagerEntity source, double range) {

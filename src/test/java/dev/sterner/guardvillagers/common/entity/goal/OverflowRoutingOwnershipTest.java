@@ -67,7 +67,7 @@ class OverflowRoutingOwnershipTest {
     }
 
     @Test
-    void fullMasonChest_preservesExplicitLibrarianDependency() {
+    void fullMasonChest_routesExplicitCentralStorageDependencyToQuartermaster() {
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity mason = mock(VillagerEntity.class);
         VillagerEntity librarian = mock(VillagerEntity.class);
@@ -81,11 +81,47 @@ class OverflowRoutingOwnershipTest {
         TestMasonDistributionGoal goal = new TestMasonDistributionGoal(mason);
 
         try (MockedStatic<DistributionRecipientHelper> recipients = Mockito.mockStatic(DistributionRecipientHelper.class)) {
-            recipients.when(() -> DistributionRecipientHelper.findEligibleLibrarianRecipients(world, mason, 24.0D))
+            recipients.when(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, mason, 24.0D))
                     .thenReturn(List.of(recipient));
 
             assertTrue(goal.canStartForTest(world, source));
-            recipients.verify(() -> DistributionRecipientHelper.findEligibleLibrarianRecipients(world, mason, 24.0D));
+            recipients.verify(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, mason, 24.0D));
+            recipients.verifyNoMoreInteractions();
+        }
+    }
+
+    @Test
+    void clericAndShepherdCentralStorageRoutes_targetQuartermasterResolver() {
+        ServerWorld world = mock(ServerWorld.class);
+        VillagerEntity cleric = mock(VillagerEntity.class);
+        VillagerEntity shepherd = mock(VillagerEntity.class);
+        VillagerEntity quartermaster = mock(VillagerEntity.class);
+        UUID quartermasterId = UUID.randomUUID();
+        BlockPos centralStorage = new BlockPos(20, 64, 20);
+        DistributionRecipientHelper.RecipientRecord recipient = new DistributionRecipientHelper.RecipientRecord(
+                quartermaster, new BlockPos(20, 64, 21), centralStorage, 16.0D);
+        when(quartermaster.getUuid()).thenReturn(quartermasterId);
+
+        TestClericDistributionGoal clericGoal = new TestClericDistributionGoal(cleric);
+        TestShepherdDistributionGoal shepherdGoal = new TestShepherdDistributionGoal(shepherd);
+        SimpleInventory clericInventory = new SimpleInventory(new ItemStack(Items.POTION));
+        SimpleInventory shepherdInventory = new SimpleInventory(new ItemStack(Items.WHITE_WOOL));
+
+        try (MockedStatic<DistributionRecipientHelper> recipients = Mockito.mockStatic(DistributionRecipientHelper.class)) {
+            recipients.when(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, cleric, 24.0D))
+                    .thenReturn(List.of(recipient));
+            recipients.when(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, shepherd, 24.0D))
+                    .thenReturn(List.of(recipient));
+
+            assertTrue(clericGoal.select(world, clericInventory));
+            assertEquals(quartermasterId, clericGoal.pendingRecipient());
+            assertEquals(centralStorage, clericGoal.pendingChest());
+            assertTrue(shepherdGoal.select(world, shepherdInventory));
+            assertEquals(quartermasterId, shepherdGoal.pendingRecipient());
+            assertEquals(centralStorage, shepherdGoal.pendingChest());
+
+            recipients.verify(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, cleric, 24.0D));
+            recipients.verify(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, shepherd, 24.0D));
             recipients.verifyNoMoreInteractions();
         }
     }
@@ -131,6 +167,42 @@ class OverflowRoutingOwnershipTest {
 
         boolean canStartForTest(ServerWorld world, Inventory source) {
             return canStartWithInventory(world, source);
+        }
+    }
+
+    private static final class TestClericDistributionGoal extends ClericDistributionGoal {
+        private TestClericDistributionGoal(VillagerEntity cleric) {
+            super(cleric, BlockPos.ORIGIN, BlockPos.ORIGIN, null);
+        }
+
+        boolean select(ServerWorld world, Inventory source) {
+            return selectPendingTransfer(world, source);
+        }
+
+        UUID pendingRecipient() {
+            return pendingTargetId;
+        }
+
+        BlockPos pendingChest() {
+            return pendingTargetPos;
+        }
+    }
+
+    private static final class TestShepherdDistributionGoal extends ShepherdToLibrarianDistributionGoal {
+        private TestShepherdDistributionGoal(VillagerEntity shepherd) {
+            super(shepherd, BlockPos.ORIGIN, BlockPos.ORIGIN, null);
+        }
+
+        boolean select(ServerWorld world, Inventory source) {
+            return selectPendingTransfer(world, source);
+        }
+
+        UUID pendingRecipient() {
+            return pendingTargetId;
+        }
+
+        BlockPos pendingChest() {
+            return pendingTargetPos;
         }
     }
 }

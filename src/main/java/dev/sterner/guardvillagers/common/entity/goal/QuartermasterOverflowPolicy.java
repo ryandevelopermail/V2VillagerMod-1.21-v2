@@ -8,8 +8,9 @@ import net.minecraft.registry.tag.ItemTags;
  * Defines which surplus items central storage may collect.
  *
  * <p>The Quartermaster is the sole owner of generic overflow intake into central storage.
- * Profession distribution goals keep their explicit producer-to-consumer routes, including
- * deliberately item-scoped Librarian dependencies.
+ * This is the outer safelist; source-profession reclaim rules and reserves further narrow
+ * what a particular chest may release. Profession goals keep their explicit
+ * producer-to-consumer routes, including deliberately item-scoped Librarian dependencies.
  */
 final class QuartermasterOverflowPolicy {
     private QuartermasterOverflowPolicy() {

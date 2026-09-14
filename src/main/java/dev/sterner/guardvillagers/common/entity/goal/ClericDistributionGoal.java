@@ -36,9 +36,9 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} skipped distribution: no valid librarian recipients found", villager.getUuidAsString());
+            LOGGER.debug("Cleric {} skipped distribution: no active Quartermaster recipient found", villager.getUuidAsString());
             return false;
         }
 
@@ -56,9 +56,9 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
             return false;
         }
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} skipped distribution: no valid librarian recipients available", villager.getUuidAsString());
+            LOGGER.debug("Cleric {} skipped distribution: no active Quartermaster recipient available", villager.getUuidAsString());
             return false;
         }
 
@@ -77,7 +77,7 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
 
-            LOGGER.info("Cleric {} started potion distribution of {} to librarian {} at {}",
+            LOGGER.info("Cleric {} started potion distribution of {} to Quartermaster {} at {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem(),
                     recipient.recipient().getUuidAsString(),
@@ -95,9 +95,9 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         }
 
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} has no valid librarian target for pending {}",
+            LOGGER.debug("Cleric {} has no active Quartermaster target for pending {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem());
             return false;
@@ -135,7 +135,7 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
         targetInventory.get().markDirty();
         if (remaining.isEmpty()) {
-            LOGGER.info("Cleric {} transferred {} to librarian chest {}",
+            LOGGER.info("Cleric {} transferred {} to Quartermaster chest {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem(),
                     pendingTargetPos.toShortString());

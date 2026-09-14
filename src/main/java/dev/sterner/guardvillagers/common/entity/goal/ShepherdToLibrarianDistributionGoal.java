@@ -38,7 +38,7 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
             if (!isDistributableItem(stack)) {
                 continue;
             }
-            if (!DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty()) {
+            if (!DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty()) {
                 return true;
             }
         }
@@ -50,7 +50,7 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
         if (inventory == null) {
             return false;
         }
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -81,7 +81,7 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
             return false;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }
