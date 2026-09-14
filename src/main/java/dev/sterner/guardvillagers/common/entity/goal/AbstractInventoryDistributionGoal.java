@@ -2,8 +2,8 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.util.InventoryTransferSafety;
 import dev.sterner.guardvillagers.common.util.UniversalDistributionRouter;
-import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
@@ -22,16 +22,13 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.function.Predicate;
 
 public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
     protected static final int PATH_RETRY_INTERVAL_TICKS = 20;
     protected static final double TARGET_REACH_SQUARED = 4.0D;
     protected static final double MOVE_SPEED = 0.6D;
-    protected static final double DEFAULT_OVERFLOW_FULLNESS_TRIGGER = 0.825D;
-    protected static final double DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE = 24.0D;
-    protected static final int DEFAULT_OVERFLOW_QM_SEARCH_RADIUS = 300;
+    protected static final double DEFAULT_UNIVERSAL_RECIPIENT_SCAN_RANGE = 24.0D;
     protected static final int IMMEDIATE_REQUEST_DEBOUNCE_TICKS = 30;
 
     protected final VillagerEntity villager;
@@ -48,7 +45,6 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected long lastPathRequestTick = Long.MIN_VALUE;
     protected long lastImmediateRequestTick = Long.MIN_VALUE;
     protected boolean pendingUniversalRoute;
-    protected boolean pendingOverflowTransfer;
 
     protected AbstractInventoryDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         this.villager = villager;
@@ -65,6 +61,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                 && java.util.Objects.equals(updatedCraftingTablePos, this.craftingTablePos)) {
             return;
         }
+        recoverPendingItem();
         this.jobPos = updatedJobPos;
         this.chestPos = updatedChestPos;
         this.craftingTablePos = updatedCraftingTablePos;
@@ -122,6 +119,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     @Override
     public void stop() {
+        recoverPendingItem();
         villager.getNavigation().stop();
         currentNavigationTarget = null;
         lastPathRequestTick = Long.MIN_VALUE;
@@ -253,58 +251,33 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected ItemStack insertStack(Inventory inventory, ItemStack stack) {
-        ItemStack remaining = stack.copy();
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            if (remaining.isEmpty()) {
-                return ItemStack.EMPTY;
-            }
-
-            ItemStack existing = inventory.getStack(slot);
-            if (existing.isEmpty()) {
-                if (!inventory.isValid(slot, remaining)) {
-                    continue;
-                }
-                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
-                ItemStack toInsert = remaining.copy();
-                toInsert.setCount(moved);
-                inventory.setStack(slot, toInsert);
-                remaining.decrement(moved);
-                continue;
-            }
-
-            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
-                continue;
-            }
-
-            if (!inventory.isValid(slot, remaining)) {
-                continue;
-            }
-
-            int space = existing.getMaxCount() - existing.getCount();
-            if (space <= 0) {
-                continue;
-            }
-
-            int moved = Math.min(space, remaining.getCount());
-            existing.increment(moved);
-            remaining.decrement(moved);
-        }
-
-        return remaining;
+        return InventoryTransferSafety.insertStack(inventory, stack);
     }
 
     protected void returnPendingItem(ServerWorld world) {
         if (pendingItem.isEmpty()) {
             return;
         }
-        ItemStack remaining = insertStack(getChestInventory(world).orElse(villager.getInventory()), pendingItem);
-        if (!remaining.isEmpty()) {
-            ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
-            if (!villagerRemaining.isEmpty()) {
-                villager.dropStack(villagerRemaining);
-            }
-            villager.getInventory().markDirty();
+        recoverPendingItem(getChestInventory(world).orElse(null));
+    }
+
+    private void recoverPendingItem() {
+        if (pendingItem.isEmpty()) {
+            return;
         }
+        Inventory sourceInventory = villager.getWorld() instanceof ServerWorld world
+                ? getChestInventory(world).orElse(null)
+                : null;
+        recoverPendingItem(sourceInventory);
+    }
+
+    private void recoverPendingItem(@Nullable Inventory sourceInventory) {
+        if (pendingItem.isEmpty()) {
+            return;
+        }
+        List<ItemStack> recoveryPayload = new java.util.ArrayList<>();
+        recoveryPayload.add(pendingItem.copy());
+        InventoryTransferSafety.recoverPayload(villager, sourceInventory, recoveryPayload);
         clearPendingState();
     }
 
@@ -313,7 +286,6 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = null;
         pendingTargetPos = null;
         pendingUniversalRoute = false;
-        pendingOverflowTransfer = false;
         clearPendingTargetState();
     }
 
@@ -360,165 +332,6 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         return maxCapacity > 0L ? (double) usedCapacity / (double) maxCapacity : 0.0D;
     }
 
-    protected double getSourceChestFullnessTrigger() {
-        return 0.0D;
-    }
-
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.empty();
-    }
-
-    protected double getOverflowFullnessTrigger() {
-        return DEFAULT_OVERFLOW_FULLNESS_TRIGGER;
-    }
-
-    protected double getOverflowRecipientScanRange() {
-        int configured = GuardVillagersConfig.overflowRecipientScanRange;
-        return configured > 0 ? configured : DEFAULT_OVERFLOW_RECIPIENT_SCAN_RANGE;
-    }
-
-    protected boolean isOverflowModeActive(ServerWorld world, Inventory sourceInventory) {
-        Optional<OverflowRecipientType> recipientType = getOverflowRecipientType();
-        return recipientType.isPresent() && isInventoryAtLeastFull(sourceInventory, getOverflowFullnessTrigger());
-    }
-
-    protected List<DistributionRecipientHelper.RecipientRecord> getOverflowRecipients(ServerWorld world) {
-        Optional<OverflowRecipientType> recipientType = getOverflowRecipientType();
-        if (recipientType.isEmpty()) {
-            return List.of();
-        }
-        if (recipientType.get() == OverflowRecipientType.LIBRARIAN) {
-            return DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, getOverflowRecipientScanRange());
-        }
-        return List.of();
-    }
-
-    protected boolean canStartOverflowTransfer(ServerWorld world, Inventory sourceInventory, Predicate<ItemStack> selector) {
-        if (!isOverflowModeActive(world, sourceInventory)) {
-            return false;
-        }
-        if (getOverflowRecipients(world).isEmpty() && resolveOverflowFallbackQmChest(world).isEmpty()) {
-            return false;
-        }
-
-        for (int slot = 0; slot < sourceInventory.size(); slot++) {
-            if (selector.test(sourceInventory.getStack(slot))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    protected boolean trySelectOverflowTransfer(ServerWorld world, Inventory sourceInventory, Predicate<ItemStack> selector) {
-        if (!isOverflowModeActive(world, sourceInventory)) {
-            return false;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
-        Optional<BlockPos> fallbackQmChest = recipients.isEmpty() ? resolveOverflowFallbackQmChest(world) : Optional.empty();
-        if (recipients.isEmpty() && fallbackQmChest.isEmpty()) {
-            return false;
-        }
-
-        for (int slot = 0; slot < sourceInventory.size(); slot++) {
-            ItemStack stack = sourceInventory.getStack(slot);
-            if (!selector.test(stack)) {
-                continue;
-            }
-
-            ItemStack extracted = stack.split(1);
-            sourceInventory.setStack(slot, stack);
-            sourceInventory.markDirty();
-
-            pendingItem = extracted;
-            if (!recipients.isEmpty()) {
-                DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
-                pendingTargetId = recipient.recipient().getUuid();
-                pendingTargetPos = recipient.chestPos();
-            } else {
-                pendingTargetId = null;
-                pendingTargetPos = fallbackQmChest.get();
-            }
-            pendingOverflowTransfer = true;
-            return true;
-        }
-        return false;
-    }
-
-    protected boolean refreshOverflowTarget(ServerWorld world, Predicate<ItemStack> selector) {
-        if (!pendingOverflowTransfer || !selector.test(pendingItem)) {
-            return false;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = getOverflowRecipients(world);
-        if (recipients.isEmpty()) {
-            Optional<BlockPos> fallbackQmChest = resolveOverflowFallbackQmChest(world);
-            if (fallbackQmChest.isEmpty()) {
-                return false;
-            }
-            pendingTargetId = null;
-            pendingTargetPos = fallbackQmChest.get();
-            return true;
-        }
-
-        if (pendingTargetId != null) {
-            for (DistributionRecipientHelper.RecipientRecord recipient : recipients) {
-                if (recipient.recipient().getUuid().equals(pendingTargetId)) {
-                    pendingTargetPos = recipient.chestPos();
-                    return true;
-                }
-            }
-        }
-
-        DistributionRecipientHelper.RecipientRecord recipient = recipients.getFirst();
-        pendingTargetId = recipient.recipient().getUuid();
-        pendingTargetPos = recipient.chestPos();
-        return true;
-    }
-
-    protected int getOverflowQmSearchRadius() {
-        int configured = GuardVillagersConfig.overflowFallbackQmSearchRadius;
-        return configured > 0 ? configured : DEFAULT_OVERFLOW_QM_SEARCH_RADIUS;
-    }
-
-    protected Optional<BlockPos> resolveOverflowFallbackQmChest(ServerWorld world) {
-        BlockPos origin = getDistributionCenter();
-        VillageAnchorState anchorState = VillageAnchorState.get(world.getServer());
-        Optional<BlockPos> nearestQm = anchorState.getNearestQmChest(world, origin, getOverflowQmSearchRadius());
-        if (nearestQm.isEmpty()) {
-            return Optional.empty();
-        }
-
-        BlockPos target = nearestQm.get();
-        if (target.equals(chestPos)) {
-            return Optional.empty();
-        }
-        if (getChestInventoryAt(world, target).isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(target.toImmutable());
-    }
-
-    protected boolean executeOverflowTransfer(ServerWorld world) {
-        if (!pendingOverflowTransfer || pendingItem.isEmpty() || pendingTargetPos == null) {
-            return false;
-        }
-
-        Optional<Inventory> targetInventory = getChestInventoryAt(world, pendingTargetPos);
-        if (targetInventory.isEmpty()) {
-            return false;
-        }
-
-        ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
-        targetInventory.get().markDirty();
-        if (remaining.isEmpty()) {
-            return true;
-        }
-
-        pendingItem = remaining;
-        return false;
-    }
-
     protected Optional<Inventory> getChestInventoryAt(ServerWorld world, BlockPos position) {
         BlockState state = world.getBlockState(position);
         if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
@@ -535,18 +348,9 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         DONE
     }
 
-    protected enum OverflowRecipientType {
-        LIBRARIAN
-    }
-
     protected abstract boolean isDistributableItem(ItemStack stack);
 
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        double fullnessTrigger = getSourceChestFullnessTrigger();
-        if (fullnessTrigger > 0.0D && !isInventoryAtLeastFull(inventory, fullnessTrigger)) {
-            return false;
-        }
-
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -584,7 +388,6 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
             pendingTargetId = stand.get().getUuid();
             pendingTargetPos = stand.get().getBlockPos();
             pendingUniversalRoute = false;
-            pendingOverflowTransfer = false;
             return true;
         }
         return false;
@@ -595,7 +398,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     }
 
     protected double getUniversalRecipientRange() {
-        return getOverflowRecipientScanRange();
+        int configured = GuardVillagersConfig.overflowRecipientScanRange;
+        return configured > 0 ? configured : DEFAULT_UNIVERSAL_RECIPIENT_SCAN_RANGE;
     }
 
     protected Optional<UniversalDistributionRouter.ResolvedRoute> resolveUniversalRoute(ServerWorld world, Inventory inventory) {
@@ -649,7 +453,6 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         pendingTargetId = recipient.recipient().getUuid();
         pendingTargetPos = recipient.chestPos();
         pendingUniversalRoute = true;
-        pendingOverflowTransfer = false;
         return true;
     }
 

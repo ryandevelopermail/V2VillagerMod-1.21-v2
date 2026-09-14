@@ -280,14 +280,13 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int quartermasterScanRange = 128;
     @Entry
     public static int armorerFallbackScanRange = 128;
+    // Legacy name retained for config compatibility; this now scopes direct universal routing only.
     @Entry
     public static int overflowRecipientScanRange = 96;
     @Entry(min=16)
     public static int professionalRecipientScanRange = 32;
     @Entry(min=16)
     public static int professionalRecipientWideScanRange = 64;
-    @Entry
-    public static int overflowFallbackQmSearchRadius = 128;
     @Entry(min=16)
     public static int quartermasterNaturalVillagePoiScanRadius = 64;
     @Entry(min=1)
@@ -302,7 +301,6 @@ public class GuardVillagersConfig extends MidnightConfig {
         if (professionalRecipientWideScanRange < professionalRecipientScanRange) {
             professionalRecipientWideScanRange = professionalRecipientScanRange;
         }
-        overflowFallbackQmSearchRadius = clamp(overflowFallbackQmSearchRadius, MIN_HEAVY_SCAN_RANGE, MAX_HEAVY_SCAN_RANGE);
         quartermasterNaturalVillagePoiScanRadius = clamp(
                 quartermasterNaturalVillagePoiScanRadius,
                 MIN_QUARTERMASTER_NATURAL_VILLAGE_POI_SCAN_RADIUS,

@@ -35,13 +35,10 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} skipped distribution: no valid librarian recipients found", villager.getUuidAsString());
+            LOGGER.debug("Cleric {} skipped distribution: no active Quartermaster recipient found", villager.getUuidAsString());
             return false;
         }
 
@@ -58,19 +55,10 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         if (inventory == null) {
             return false;
         }
-        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            LOGGER.info("Cleric {} started overflow distribution of {} to librarian {} at {}",
-                    villager.getUuidAsString(),
-                    pendingItem.getItem(),
-                    pendingTargetId,
-                    pendingTargetPos.toShortString());
-            return true;
-        }
-
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} skipped distribution: no valid librarian recipients available", villager.getUuidAsString());
+            LOGGER.debug("Cleric {} skipped distribution: no active Quartermaster recipient available", villager.getUuidAsString());
             return false;
         }
 
@@ -89,7 +77,7 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
 
-            LOGGER.info("Cleric {} started potion distribution of {} to librarian {} at {}",
+            LOGGER.info("Cleric {} started potion distribution of {} to Quartermaster {} at {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem(),
                     recipient.recipient().getUuidAsString(),
@@ -102,17 +90,14 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, this::isDistributableItem)) {
-            return true;
-        }
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
 
         List<DistributionRecipientHelper.RecipientRecord> recipients =
-                DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(world, villager, RECIPIENT_SCAN_RANGE);
+                DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
-            LOGGER.debug("Cleric {} has no valid librarian target for pending {}",
+            LOGGER.debug("Cleric {} has no active Quartermaster target for pending {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem());
             return false;
@@ -135,9 +120,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
@@ -153,7 +135,7 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
         targetInventory.get().markDirty();
         if (remaining.isEmpty()) {
-            LOGGER.info("Cleric {} transferred {} to librarian chest {}",
+            LOGGER.info("Cleric {} transferred {} to Quartermaster chest {}",
                     villager.getUuidAsString(),
                     pendingItem.getItem(),
                     pendingTargetPos.toShortString());
@@ -197,11 +179,6 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     private boolean isHealingSplashPotion(ItemStack stack) {
         return stack.isOf(Items.SPLASH_POTION)
                 && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
-    }
-
-    @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
     }
 
     @Override
