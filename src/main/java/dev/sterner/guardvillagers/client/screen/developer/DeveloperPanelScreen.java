@@ -7,12 +7,13 @@ import net.minecraft.client.gui.widget.ClickableWidget;
 import net.minecraft.text.Text;
 
 public final class DeveloperPanelScreen extends Screen {
-    private static final int PANEL_WIDTH = 300;
+    private static final int MAX_PANEL_WIDTH = 430;
     private static final int PANEL_HEIGHT = 230;
     private final WorldSetupTab worldSetupTab = new WorldSetupTab();
     private DeveloperPanelTab activeTab = worldSetupTab;
     private int panelLeft;
     private int panelTop;
+    private int panelWidth;
 
     public DeveloperPanelScreen() {
         super(Text.translatable("screen.guardvillagers.developer_panel"));
@@ -20,9 +21,10 @@ public final class DeveloperPanelScreen extends Screen {
 
     @Override
     protected void init() {
-        panelLeft = (width - PANEL_WIDTH) / 2;
+        panelWidth = Math.min(MAX_PANEL_WIDTH, width - 16);
+        panelLeft = (width - panelWidth) / 2;
         panelTop = Math.max(12, (height - PANEL_HEIGHT) / 2);
-        activeTab.init(this, panelLeft + 12, panelTop + 42, PANEL_WIDTH - 24, PANEL_HEIGHT - 54);
+        activeTab.init(this, panelLeft + 12, panelTop + 42, panelWidth - 24, PANEL_HEIGHT - 54);
     }
 
     public <T extends ClickableWidget> T addPanelWidget(T widget) {
@@ -40,8 +42,8 @@ public final class DeveloperPanelScreen extends Screen {
     @Override
     public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {
         super.renderBackground(context, mouseX, mouseY, delta);
-        context.fill(panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelTop + PANEL_HEIGHT, 0xD0101010);
-        context.fill(panelLeft, panelTop, panelLeft + PANEL_WIDTH, panelTop + 34, 0xE0252525);
+        context.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + PANEL_HEIGHT, 0xD0101010);
+        context.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + 34, 0xE0252525);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, panelTop + 10, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, activeTab.title(), panelLeft + 14, panelTop + 27, 0xA0A0A0);
         activeTab.render(context, mouseX, mouseY, delta);

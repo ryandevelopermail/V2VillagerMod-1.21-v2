@@ -11,7 +11,7 @@ import net.minecraft.world.Heightmap;
 
 import java.util.Set;
 
-/** Generates real vanilla mature trees only in pre-checked, empty volumes. */
+/** Generates real vanilla mature trees only in pre-checked, non-destructive volumes. */
 final class DeveloperTreeGenerator {
     private static final int MIN_RADIUS = 8;
     private static final int MAX_RADIUS = 20;
@@ -62,7 +62,11 @@ final class DeveloperTreeGenerator {
         for (int dx = -CLEARANCE_RADIUS; dx <= CLEARANCE_RADIUS; dx++) {
             for (int dz = -CLEARANCE_RADIUS; dz <= CLEARANCE_RADIUS; dz++) {
                 for (int dy = 0; dy <= CLEARANCE_HEIGHT; dy++) {
-                    if (!world.getBlockState(saplingPos.add(dx, dy, dz)).isAir()) {
+                    BlockState state = world.getBlockState(saplingPos.add(dx, dy, dz));
+                    if (!DeveloperTreeSitePolicy.allowsClearanceBlock(
+                            state.isAir(),
+                            state.isReplaceable(),
+                            state.getFluidState().isEmpty())) {
                         return false;
                     }
                 }

@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.developer;
 
+import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
@@ -10,6 +11,8 @@ import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.MinecraftServer;
@@ -106,6 +109,8 @@ public final class DeveloperSetupManager {
         private boolean originalAiDisabled;
         private BlockPos createdChestPos;
         private boolean chestSupplied;
+        private BlockPos createdFurnacePos;
+        private BlockPos createdModifierPos;
         private int generatedTrees;
         private DeveloperSetupStage reportedStage;
         private boolean terminalStatusSent;
@@ -115,7 +120,13 @@ public final class DeveloperSetupManager {
             this.request = request;
             this.world = player.getServerWorld();
             this.requestedOrigin = player.getBlockPos().offset(player.getHorizontalFacing(), 4).toImmutable();
-            this.workflow = new DeveloperSetupWorkflow(request.setupType(), request.generateMatureTrees(), STAGE_TIMEOUT_TICKS);
+            this.workflow = new DeveloperSetupWorkflow(
+                    request.setupType(),
+                    request.needsInfrastructure(),
+                    request.needsInventoryPopulation(),
+                    request.generateMatureTrees(),
+                    STAGE_TIMEOUT_TICKS
+            );
         }
 
         private void tick(MinecraftServer server) {
@@ -129,6 +140,8 @@ public final class DeveloperSetupManager {
                 case WAIT_FOR_PROFESSION -> waitForProfession();
                 case PLACE_V2_BLOCKS -> placeV2Blocks();
                 case WAIT_FOR_PAIRING -> waitForPairing();
+                case PLACE_LUMBERJACK_INFRASTRUCTURE -> placeLumberjackInfrastructure();
+                case POPULATE_LUMBERJACK_INVENTORY -> populateLumberjackInventory();
                 case GENERATE_TREES -> generateTrees();
                 default -> DeveloperSetupWorkflow.Observation.none();
             };
@@ -175,7 +188,7 @@ public final class DeveloperSetupManager {
                 villager.setAiDisabled(true);
                 workflow.markSubjectRestrained();
             }
-            return new DeveloperSetupWorkflow.Observation(true, false, false, false, false);
+            return new DeveloperSetupWorkflow.Observation(true, false, false, false, false, false, false);
         }
 
         private DeveloperSetupWorkflow.Observation waitForProfession() {
@@ -189,7 +202,7 @@ public final class DeveloperSetupManager {
                 }
             }
             boolean ready = lumberjack != null && lumberjack.isAlive() && tablePos.equals(lumberjack.getPairedCraftingTablePos());
-            return new DeveloperSetupWorkflow.Observation(false, ready, false, false, false);
+            return new DeveloperSetupWorkflow.Observation(false, ready, false, false, false, false, false);
         }
 
         private DeveloperSetupWorkflow.Observation placeV2Blocks() {
@@ -205,7 +218,7 @@ public final class DeveloperSetupManager {
                 LumberjackGuardCraftingGoal.tryPlaceAndBindChestForRecovery(world, lumberjack, null);
             }
             createdChestPos = lumberjack.getPairedChestPos();
-            return new DeveloperSetupWorkflow.Observation(false, false, createdChestPos != null, false, false);
+            return new DeveloperSetupWorkflow.Observation(false, false, createdChestPos != null, false, false, false, false);
         }
 
         private DeveloperSetupWorkflow.Observation waitForPairing() {
@@ -214,17 +227,75 @@ public final class DeveloperSetupManager {
                     && createdChestPos != null
                     && createdChestPos.equals(lumberjack.getPairedChestPos())
                     && world.getBlockState(createdChestPos).isOf(Blocks.CHEST);
-            return new DeveloperSetupWorkflow.Observation(false, false, false, paired, false);
+            return new DeveloperSetupWorkflow.Observation(false, false, false, paired, false, false, false);
+        }
+
+        private DeveloperSetupWorkflow.Observation placeLumberjackInfrastructure() {
+            if (!isPairingIntact()) {
+                workflow.fail("Lumberjack pairing was lost before optional infrastructure placement.");
+                return DeveloperSetupWorkflow.Observation.none();
+            }
+            if (createdFurnacePos == null) {
+                InfrastructureSite site = findFurnaceSite(world, tablePos, createdChestPos);
+                if (site == null) {
+                    workflow.fail("No safe furnace and Guard Stand Modifier site was found in the Lumberjack's paired zone.");
+                    return DeveloperSetupWorkflow.Observation.none();
+                }
+                if (!world.setBlockState(site.furnacePos(), Blocks.FURNACE.getDefaultState(), Block.NOTIFY_ALL)) {
+                    workflow.fail("Could not place the Lumberjack test furnace.");
+                    return DeveloperSetupWorkflow.Observation.none();
+                }
+                if (!world.setBlockState(site.modifierPos(), GuardVillagers.GUARD_STAND_MODIFIER.getDefaultState(), Block.NOTIFY_ALL)) {
+                    world.removeBlock(site.furnacePos(), false);
+                    workflow.fail("Could not place the Guard Stand Modifier beside the Lumberjack test furnace.");
+                    return DeveloperSetupWorkflow.Observation.none();
+                }
+                createdFurnacePos = site.furnacePos();
+                createdModifierPos = site.modifierPos();
+            }
+            boolean ready = world.getBlockState(createdFurnacePos).isOf(Blocks.FURNACE)
+                    && world.getBlockState(createdModifierPos).isOf(GuardVillagers.GUARD_STAND_MODIFIER);
+            return new DeveloperSetupWorkflow.Observation(false, false, false, false, ready, false, false);
+        }
+
+        private DeveloperSetupWorkflow.Observation populateLumberjackInventory() {
+            if (!isPairingIntact()) {
+                workflow.fail("Lumberjack pairing was lost before chest inventory setup.");
+                return DeveloperSetupWorkflow.Observation.none();
+            }
+            Inventory chestInventory = LumberjackGuardCraftingGoal.resolveChestInventoryForGuard(world, lumberjack);
+            if (chestInventory == null) {
+                workflow.fail("Could not access the paired Lumberjack chest for inventory setup.");
+                return DeveloperSetupWorkflow.Observation.none();
+            }
+            Map<LumberjackInventoryPreset.Item, Integer> plan = LumberjackInventoryPreset.createPlan(
+                    request.inventoryPreset(),
+                    request.createFurnaceSetup(),
+                    request.createPenSetup()
+            );
+            for (Map.Entry<LumberjackInventoryPreset.Item, Integer> entry : plan.entrySet()) {
+                ItemStack remainder = insertIntoInventory(
+                        chestInventory,
+                        new ItemStack(resolvePresetItem(entry.getKey()), entry.getValue())
+                );
+                if (!remainder.isEmpty()) {
+                    workflow.fail("The paired Lumberjack chest did not have enough room for the selected inventory preset.");
+                    return DeveloperSetupWorkflow.Observation.none();
+                }
+            }
+            chestInventory.markDirty();
+            return new DeveloperSetupWorkflow.Observation(false, false, false, false, false, true, false);
         }
 
         private DeveloperSetupWorkflow.Observation generateTrees() {
             if (generatedTrees >= request.treeCount()) {
-                return new DeveloperSetupWorkflow.Observation(false, false, false, false, true);
+                return new DeveloperSetupWorkflow.Observation(false, false, false, false, false, false, true);
             }
             DeveloperTreeGenerator.Result result = DeveloperTreeGenerator.generateNext(world, setupOrigin, attemptedTreeSites);
             if (result == DeveloperTreeGenerator.Result.GENERATED) {
                 generatedTrees++;
-                return new DeveloperSetupWorkflow.Observation(false, false, false, false, generatedTrees >= request.treeCount());
+                return new DeveloperSetupWorkflow.Observation(
+                        false, false, false, false, false, false, generatedTrees >= request.treeCount());
             }
             workflow.fail("Generated " + generatedTrees + " of " + request.treeCount() + " trees; no additional safe sites were found.");
             return DeveloperSetupWorkflow.Observation.none();
@@ -243,6 +314,8 @@ public final class DeveloperSetupManager {
                 case WAIT_FOR_PROFESSION -> sendStatus(player, "Crafting table placed; waiting for Lumberjack conversion...", 35, false, false);
                 case PLACE_V2_BLOCKS -> sendStatus(player, "Lumberjack confirmed; creating V2 chest...", 60, false, false);
                 case WAIT_FOR_PAIRING -> sendStatus(player, "Chest placed; verifying Lumberjack pairing...", 75, false, false);
+                case PLACE_LUMBERJACK_INFRASTRUCTURE -> sendStatus(player, "Pairing confirmed; placing Lumberjack test infrastructure...", 80, false, false);
+                case POPULATE_LUMBERJACK_INVENTORY -> sendStatus(player, "Loading the paired chest with the selected test inventory...", 85, false, false);
                 case GENERATE_TREES -> sendStatus(player, "Generating safe mature trees...", 85, false, false);
                 default -> {
                 }
@@ -286,6 +359,7 @@ public final class DeveloperSetupManager {
                 workflow.markSubjectReleased();
             }
             if (workflow.stage() == DeveloperSetupStage.FAILED) {
+                rollbackUnclaimedInfrastructure();
                 rollbackUnclaimedTable();
                 if (createdChestPos != null
                         && (lumberjack == null || !createdChestPos.equals(lumberjack.getPairedChestPos()))
@@ -303,6 +377,107 @@ public final class DeveloperSetupManager {
                 tablePos = null;
             }
         }
+
+        private boolean isPairingIntact() {
+            return lumberjack != null
+                    && lumberjack.isAlive()
+                    && createdChestPos != null
+                    && createdChestPos.equals(lumberjack.getPairedChestPos())
+                    && world.getBlockState(createdChestPos).isOf(Blocks.CHEST);
+        }
+
+        private void rollbackUnclaimedInfrastructure() {
+            boolean claimed = lumberjack != null
+                    && createdFurnacePos != null
+                    && createdFurnacePos.equals(lumberjack.getPairedFurnaceModifierPos());
+            if (claimed) {
+                return;
+            }
+            if (createdModifierPos != null
+                    && world.getBlockState(createdModifierPos).isOf(GuardVillagers.GUARD_STAND_MODIFIER)) {
+                world.removeBlock(createdModifierPos, false);
+            }
+            if (createdFurnacePos != null && world.getBlockState(createdFurnacePos).isOf(Blocks.FURNACE)) {
+                world.removeBlock(createdFurnacePos, false);
+            }
+        }
+    }
+
+    private static InfrastructureSite findFurnaceSite(ServerWorld world, BlockPos tablePos, BlockPos chestPos) {
+        for (int radius = 2; radius <= 3; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                        continue;
+                    }
+                    BlockPos furnacePos = tablePos.add(dx, 0, dz);
+                    BlockPos modifierPos = furnacePos.up();
+                    BlockPos floorPos = furnacePos.down();
+                    if (!furnacePos.isWithinDistance(tablePos, 4.0D)
+                            || !furnacePos.isWithinDistance(chestPos, 4.0D)
+                            || !world.getWorldBorder().contains(furnacePos)
+                            || !world.getWorldBorder().contains(modifierPos)
+                            || !world.getBlockState(furnacePos).isAir()
+                            || !world.getBlockState(modifierPos).isAir()
+                            || !world.getBlockState(floorPos).isSolidBlock(world, floorPos)
+                            || !hasOpenHorizontalNeighbors(world, furnacePos, tablePos, chestPos)) {
+                        continue;
+                    }
+                    return new InfrastructureSite(furnacePos.toImmutable(), modifierPos.toImmutable());
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasOpenHorizontalNeighbors(
+            ServerWorld world,
+            BlockPos furnacePos,
+            BlockPos tablePos,
+            BlockPos chestPos
+    ) {
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos adjacent = furnacePos.offset(direction);
+            if (!adjacent.equals(tablePos)
+                    && !adjacent.equals(chestPos)
+                    && !world.getBlockState(adjacent).isAir()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Item resolvePresetItem(LumberjackInventoryPreset.Item item) {
+        return switch (item) {
+            case OAK_LOG -> Items.OAK_LOG;
+            case OAK_PLANKS -> Items.OAK_PLANKS;
+            case STICK -> Items.STICK;
+            case OAK_FENCE -> Items.OAK_FENCE;
+            case OAK_FENCE_GATE -> Items.OAK_FENCE_GATE;
+        };
+    }
+
+    private static ItemStack insertIntoInventory(Inventory inventory, ItemStack stack) {
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
+            ItemStack existing = inventory.getStack(slot);
+            if (existing.isEmpty()) {
+                int transfer = Math.min(remaining.getCount(), remaining.getMaxCount());
+                inventory.setStack(slot, remaining.copyWithCount(transfer));
+                remaining.decrement(transfer);
+            } else if (ItemStack.areItemsAndComponentsEqual(existing, remaining)) {
+                int transfer = Math.min(existing.getMaxCount() - existing.getCount(), remaining.getCount());
+                if (transfer > 0) {
+                    existing.increment(transfer);
+                    inventory.setStack(slot, existing);
+                    remaining.decrement(transfer);
+                }
+            }
+        }
+        return remaining;
+    }
+
+    private record InfrastructureSite(BlockPos furnacePos, BlockPos modifierPos) {
     }
 
     private static VillagerEntity spawnVillager(ServerWorld world, BlockPos pos) {

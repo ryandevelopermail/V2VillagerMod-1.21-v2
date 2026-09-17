@@ -13,6 +13,9 @@ class DeveloperSetupRequestTest {
                 true,
                 true,
                 true,
+                true,
+                LumberjackInventoryPreset.GENERAL_MIXED_TEST,
+                true,
                 4
         );
 
@@ -26,6 +29,9 @@ class DeveloperSetupRequestTest {
                 DeveloperProfession.LUMBERJACK,
                 false,
                 true,
+                false,
+                false,
+                LumberjackInventoryPreset.EMPTY_NATURAL,
                 false,
                 4
         );
@@ -41,6 +47,9 @@ class DeveloperSetupRequestTest {
                 false,
                 true,
                 false,
+                false,
+                LumberjackInventoryPreset.EMPTY_NATURAL,
+                false,
                 4
         );
 
@@ -54,10 +63,30 @@ class DeveloperSetupRequestTest {
                 DeveloperProfession.LUMBERJACK,
                 false,
                 true,
+                false,
+                false,
+                LumberjackInventoryPreset.EMPTY_NATURAL,
                 true,
                 DeveloperSetupRequest.MAX_TREE_COUNT + 1
         );
 
         assertTrue(request.validationError().orElseThrow().contains("Tree count"));
+    }
+
+    @Test
+    void rejectsInventoryPresetWithoutV2Chest() {
+        DeveloperSetupRequest request = new DeveloperSetupRequest(
+                DeveloperSetupType.V1_PROFESSION,
+                DeveloperProfession.LUMBERJACK,
+                false,
+                true,
+                false,
+                false,
+                LumberjackInventoryPreset.PEN_TEST,
+                false,
+                DeveloperSetupRequest.DEFAULT_TREE_COUNT
+        );
+
+        assertTrue(request.validationError().orElseThrow().contains("V2 paired chest"));
     }
 }

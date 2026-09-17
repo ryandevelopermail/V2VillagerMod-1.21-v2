@@ -6,6 +6,8 @@ package dev.sterner.guardvillagers.common.developer;
  */
 public final class DeveloperSetupWorkflow {
     private final DeveloperSetupType setupType;
+    private final boolean placeInfrastructure;
+    private final boolean populateInventory;
     private final boolean generateTrees;
     private final int stageTimeoutTicks;
     private DeveloperSetupStage stage = DeveloperSetupStage.PREPARE;
@@ -13,8 +15,16 @@ public final class DeveloperSetupWorkflow {
     private boolean subjectRestrained;
     private String failureMessage = "";
 
-    public DeveloperSetupWorkflow(DeveloperSetupType setupType, boolean generateTrees, int stageTimeoutTicks) {
+    public DeveloperSetupWorkflow(
+            DeveloperSetupType setupType,
+            boolean placeInfrastructure,
+            boolean populateInventory,
+            boolean generateTrees,
+            int stageTimeoutTicks
+    ) {
         this.setupType = setupType;
+        this.placeInfrastructure = placeInfrastructure;
+        this.populateInventory = populateInventory;
         this.generateTrees = generateTrees;
         this.stageTimeoutTicks = Math.max(1, stageTimeoutTicks);
     }
@@ -62,6 +72,16 @@ public final class DeveloperSetupWorkflow {
                     transition(afterBaseSetup());
                 }
             }
+            case PLACE_LUMBERJACK_INFRASTRUCTURE -> {
+                if (observation.infrastructureReady()) {
+                    transition(afterInfrastructure());
+                }
+            }
+            case POPULATE_LUMBERJACK_INVENTORY -> {
+                if (observation.inventoryReady()) {
+                    transition(afterInventory());
+                }
+            }
             case GENERATE_TREES -> {
                 if (observation.treesReady()) {
                     transition(DeveloperSetupStage.COMPLETE);
@@ -101,6 +121,20 @@ public final class DeveloperSetupWorkflow {
     }
 
     private DeveloperSetupStage afterBaseSetup() {
+        if (placeInfrastructure) {
+            return DeveloperSetupStage.PLACE_LUMBERJACK_INFRASTRUCTURE;
+        }
+        return afterInfrastructure();
+    }
+
+    private DeveloperSetupStage afterInfrastructure() {
+        if (populateInventory) {
+            return DeveloperSetupStage.POPULATE_LUMBERJACK_INVENTORY;
+        }
+        return afterInventory();
+    }
+
+    private DeveloperSetupStage afterInventory() {
         return generateTrees ? DeveloperSetupStage.GENERATE_TREES : DeveloperSetupStage.COMPLETE;
     }
 
@@ -114,10 +148,12 @@ public final class DeveloperSetupWorkflow {
             boolean professionReady,
             boolean v2BlocksPlaced,
             boolean pairingReady,
+            boolean infrastructureReady,
+            boolean inventoryReady,
             boolean treesReady
     ) {
         public static Observation none() {
-            return new Observation(false, false, false, false, false);
+            return new Observation(false, false, false, false, false, false, false);
         }
     }
 }
