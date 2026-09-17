@@ -297,7 +297,13 @@ public final class DeveloperSetupManager {
                 return new DeveloperSetupWorkflow.Observation(
                         false, false, false, false, false, false, generatedTrees >= request.treeCount());
             }
-            workflow.fail("Generated " + generatedTrees + " of " + request.treeCount() + " trees; no additional safe sites were found.");
+            String reason = switch (result) {
+                case NO_USABLE_CANDIDATE -> "no additional usable dirt-like candidate positions were found.";
+                case PREFLIGHT_REJECTED -> "remaining candidate sites were rejected by solid trunk or canopy obstructions.";
+                case VANILLA_GROWTH_FAILED -> "vanilla oak growth failed at all remaining valid candidate sites.";
+                case GENERATED -> throw new IllegalStateException("Generated tree handled before failure reporting");
+            };
+            workflow.fail("Generated " + generatedTrees + " of " + request.treeCount() + " mature trees; " + reason);
             return DeveloperSetupWorkflow.Observation.none();
         }
 
