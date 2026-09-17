@@ -14,7 +14,6 @@ import net.minecraft.text.Text;
 final class WorldSetupTab implements DeveloperPanelTab {
     private DeveloperSetupType setupType = DeveloperSetupType.PLAIN_VILLAGER;
     private DeveloperProfession profession = DeveloperProfession.LUMBERJACK;
-    private boolean createPairedChest = true;
     private boolean generateTrees;
     private int left;
     private int top;
@@ -56,11 +55,11 @@ final class WorldSetupTab implements DeveloperPanelTab {
             profession = profession.next();
             button.setMessage(professionText());
         }).dimensions(controlX, top + 25, controlWidth, 20).build());
+        professionButton.active = DeveloperProfession.values().length > 1;
 
-        chestButton = screen.addPanelWidget(ButtonWidget.builder(chestText(), button -> {
-            createPairedChest = !createPairedChest;
-            button.setMessage(chestText());
+        chestButton = screen.addPanelWidget(ButtonWidget.builder(Text.literal("Not used"), button -> {
         }).dimensions(controlX, top + 50, controlWidth, 20).build());
+        chestButton.active = false;
 
         craftingTableButton = screen.addPanelWidget(ButtonWidget.builder(Text.literal("Crafting Table: Required"), button -> {
         }).dimensions(controlX, top + 75, controlWidth, 20).build());
@@ -121,7 +120,7 @@ final class WorldSetupTab implements DeveloperPanelTab {
             }
         }
         boolean createTable = setupType != DeveloperSetupType.PLAIN_VILLAGER;
-        boolean includeChest = setupType == DeveloperSetupType.V2_PROFESSION && createPairedChest;
+        boolean includeChest = setupType == DeveloperSetupType.V2_PROFESSION;
         DeveloperSetupRequest request = new DeveloperSetupRequest(
                 setupType,
                 profession,
@@ -146,8 +145,8 @@ final class WorldSetupTab implements DeveloperPanelTab {
     private void refreshModeControls() {
         boolean v2 = setupType == DeveloperSetupType.V2_PROFESSION;
         boolean professionSetup = setupType != DeveloperSetupType.PLAIN_VILLAGER;
-        chestButton.active = v2;
-        chestButton.setMessage(v2 ? chestText() : Text.literal("Not used"));
+        chestButton.active = false;
+        chestButton.setMessage(Text.literal(v2 ? "Paired Chest: Required" : "Not used"));
         craftingTableButton.setMessage(Text.literal(professionSetup ? "Crafting Table: Required" : "Not used"));
     }
 
@@ -157,10 +156,6 @@ final class WorldSetupTab implements DeveloperPanelTab {
 
     private Text professionText() {
         return Text.literal(profession.displayName());
-    }
-
-    private Text chestText() {
-        return Text.literal(createPairedChest ? "Create: Yes" : "Create: No");
     }
 
     private Text treeText() {
