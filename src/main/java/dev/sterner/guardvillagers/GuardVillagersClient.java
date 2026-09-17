@@ -5,7 +5,11 @@ import dev.sterner.guardvillagers.client.model.GuardSteveModel;
 import dev.sterner.guardvillagers.client.model.GuardVillagerModel;
 import dev.sterner.guardvillagers.client.renderer.GuardRenderer;
 import dev.sterner.guardvillagers.client.screen.GuardVillagerScreen;
+import dev.sterner.guardvillagers.client.screen.developer.DeveloperPanelScreen;
+import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
+import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityModelLayerRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityRendererRegistry;
 import net.minecraft.client.gui.screen.ingame.HandledScreens;
@@ -24,6 +28,14 @@ public class GuardVillagersClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        ClientPlayNetworking.registerGlobalReceiver(OpenDeveloperPanelPacket.ID, (payload, context) ->
+                context.client().execute(() -> context.client().setScreen(new DeveloperPanelScreen())));
+        ClientPlayNetworking.registerGlobalReceiver(DeveloperSetupStatusPacket.ID, (payload, context) ->
+                context.client().execute(() -> {
+                    if (context.client().currentScreen instanceof DeveloperPanelScreen screen) {
+                        screen.onSetupStatus(payload.message(), payload.progressPercent(), payload.finished(), payload.success());
+                    }
+                }));
         HandledScreens.register(GUARD_SCREEN_HANDLER, GuardVillagerScreen::new);
         EntityModelLayerRegistry.registerModelLayer(GUARD, GuardVillagerModel::createBodyLayer);
         EntityModelLayerRegistry.registerModelLayer(GUARD_STEVE, GuardSteveModel::createMesh);
