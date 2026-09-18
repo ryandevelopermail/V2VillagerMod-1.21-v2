@@ -11,7 +11,7 @@ final class DeveloperV1BatchProgress {
         COMPLETE
     }
 
-    private final List<DeveloperProfession> tasks;
+    private final List<Task> tasks;
     private int currentIndex;
     private int successful;
     private int failed;
@@ -25,7 +25,14 @@ final class DeveloperV1BatchProgress {
                 expanded.add(selection.profession());
             }
         }
-        this.tasks = List.copyOf(expanded);
+        List<Task> plannedTasks = new ArrayList<>(expanded.size());
+        for (int index = 0; index < expanded.size(); index++) {
+            plannedTasks.add(new Task(
+                    index,
+                    expanded.get(index),
+                    DeveloperV1PlacementGrid.offsetFor(index, expanded.size())));
+        }
+        this.tasks = List.copyOf(plannedTasks);
         this.stage = tasks.isEmpty() ? Stage.COMPLETE : Stage.PREPARE_CURRENT;
     }
 
@@ -34,6 +41,10 @@ final class DeveloperV1BatchProgress {
     }
 
     DeveloperProfession currentProfession() {
+        return currentTask().profession();
+    }
+
+    Task currentTask() {
         if (stage == Stage.COMPLETE) {
             throw new IllegalStateException("The V1 batch is complete.");
         }
@@ -94,5 +105,12 @@ final class DeveloperV1BatchProgress {
 
     boolean isComplete() {
         return stage == Stage.COMPLETE;
+    }
+
+    List<Task> tasks() {
+        return tasks;
+    }
+
+    record Task(int index, DeveloperProfession profession, DeveloperV1PlacementGrid.Offset gridSlot) {
     }
 }

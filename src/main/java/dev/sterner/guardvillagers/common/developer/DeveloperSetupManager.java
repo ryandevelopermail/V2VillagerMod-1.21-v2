@@ -111,7 +111,7 @@ public final class DeveloperSetupManager {
         private final DeveloperSetupWorkflow workflow;
         private final DeveloperV1BatchProgress v1Batch;
         private final Set<BlockPos> attemptedTreeSites = new HashSet<>();
-        private final Set<BlockPos> v1JobSites = new HashSet<>();
+        private final DeveloperV1JobSiteAssignments<BlockPos> v1JobSites = new DeveloperV1JobSiteAssignments<>();
         private BlockPos setupOrigin;
         private BlockPos tablePos;
         private VillagerEntity villager;
@@ -195,7 +195,14 @@ public final class DeveloperSetupManager {
         }
 
         private void prepareCurrentV1(MinecraftServer server) {
-            DeveloperProfession requestedProfession = v1Batch.currentProfession();
+            String completedSiteError = validateCompletedV1JobSites();
+            if (completedSiteError != null) {
+                v1FatalFailure = completedSiteError;
+                return;
+            }
+
+            DeveloperV1BatchProgress.Task currentTask = v1Batch.currentTask();
+            DeveloperProfession requestedProfession = currentTask.profession();
             expectedV1Profession = resolveV1Profession(requestedProfession);
             expectedV1JobBlock = resolveV1JobBlock(requestedProfession).orElse(null);
             if (expectedV1Profession == null || expectedV1JobBlock == null) {
@@ -203,12 +210,20 @@ public final class DeveloperSetupManager {
                 return;
             }
 
-            BlockPos gridAnchor = v1GridAnchor(requestedOrigin, v1Batch.currentNumber() - 1, v1Batch.total());
-            currentV1JobPos = findV1JobSite(world, gridAnchor, v1JobSites);
-            if (currentV1JobPos == null) {
+            BlockPos gridAnchor = requestedOrigin.add(
+                    currentTask.gridSlot().x(),
+                    0,
+                    currentTask.gridSlot().z());
+            BlockPos candidateJobPos = findV1JobSite(world, gridAnchor, v1JobSites.reservedPositions());
+            if (candidateJobPos == null) {
                 failCurrentV1(server, "No safe job-site location was found for " + requestedProfession.displayName() + ".");
                 return;
             }
+            if (!v1JobSites.begin(currentTask, candidateJobPos)) {
+                v1FatalFailure = "V1 placement ownership collision for task " + (currentTask.index() + 1) + ".";
+                return;
+            }
+            currentV1JobPos = candidateJobPos;
             if (!world.setBlockState(currentV1JobPos, stableV1JobBlockState(expectedV1JobBlock), Block.NOTIFY_ALL)) {
                 failCurrentV1(server, "Could not place the " + requestedProfession.displayName() + " job site.");
                 return;
@@ -233,7 +248,6 @@ public final class DeveloperSetupManager {
                 villager.setAiDisabled(false);
             }
             currentV1Ticks = 0;
-            v1JobSites.add(currentV1JobPos.toImmutable());
             v1Batch.markPrepared();
             sendV1Progress(server, "Waiting for " + requestedProfession.displayName() + " profession acquisition");
         }
@@ -280,6 +294,7 @@ public final class DeveloperSetupManager {
         }
 
         private void completeCurrentV1(MinecraftServer server) {
+            v1JobSites.completeCurrent(villager.getUuid());
             releaseCurrentV1Villager();
             villager = null;
             currentV1JobPos = null;
@@ -294,6 +309,7 @@ public final class DeveloperSetupManager {
             lastV1Failure = message;
             releaseCurrentV1Villager();
             rollbackCurrentV1JobSite();
+            v1JobSites.rollbackCurrent();
             villager = null;
             currentV1JobPos = null;
             currentV1SpawnPos = null;
@@ -312,14 +328,39 @@ public final class DeveloperSetupManager {
         }
 
         private void rollbackCurrentV1JobSite() {
-            if (currentV1JobPos == null || expectedV1JobBlock == null) {
+            if (currentV1JobPos == null
+                    || expectedV1JobBlock == null
+                    || !v1JobSites.isCurrent(currentV1JobPos)) {
                 return;
             }
             if (world.getBlockState(currentV1JobPos).isOf(expectedV1JobBlock)
                     && !isJobSiteClaimedByAnyVillager(world, currentV1JobPos)) {
                 world.removeBlock(currentV1JobPos, false);
-                v1JobSites.remove(currentV1JobPos);
             }
+        }
+
+        private String validateCompletedV1JobSites() {
+            for (DeveloperV1JobSiteAssignments.Assignment<BlockPos> assignment : v1JobSites.completedAssignments()) {
+                DeveloperProfession profession = assignment.task().profession();
+                VillagerProfession vanillaProfession = resolveV1Profession(profession);
+                Block expectedBlock = resolveV1JobBlock(profession).orElse(null);
+                if (vanillaProfession == null
+                        || expectedBlock == null
+                        || !world.getBlockState(assignment.position()).isOf(expectedBlock)) {
+                    return "Completed V1 job site for task " + (assignment.task().index() + 1)
+                            + " (" + profession.displayName() + ") no longer contains its expected workstation.";
+                }
+                if (!(world.getEntity(assignment.villagerId()) instanceof VillagerEntity owner)
+                        || !owner.isAlive()
+                        || owner.getVillagerData().getProfession() != vanillaProfession
+                        || !owner.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(globalPos -> globalPos.pos().equals(assignment.position()))
+                        .orElse(false)) {
+                    return "Completed V1 pairing for task " + (assignment.task().index() + 1)
+                            + " (" + profession.displayName() + ") was lost before the batch advanced.";
+                }
+            }
+            return null;
         }
 
         private void sendV1Progress(MinecraftServer server, String detail) {
@@ -346,6 +387,8 @@ public final class DeveloperSetupManager {
             }
             if (v1FatalFailure != null) {
                 sendStatus(player, v1FatalFailure, 0, true, false);
+            } else if (v1JobSites.completedCount() != v1Batch.successful()) {
+                sendStatus(player, "V1 batch ownership verification failed.", 100, true, false);
             } else if (v1Batch.failed() == 0) {
                 sendStatus(player, "Created " + v1Batch.successful() + " V1 villagers.", 100, true, true);
             } else {
@@ -556,6 +599,7 @@ public final class DeveloperSetupManager {
                 v1FatalFailure = message;
                 releaseCurrentV1Villager();
                 rollbackCurrentV1JobSite();
+                v1JobSites.rollbackCurrent();
             } else {
                 workflow.fail(message);
             }
@@ -665,11 +709,6 @@ public final class DeveloperSetupManager {
             return state.with(Properties.BLOCK_FACE, BlockFace.FLOOR);
         }
         return state;
-    }
-
-    private static BlockPos v1GridAnchor(BlockPos origin, int index, int total) {
-        DeveloperV1PlacementGrid.Offset offset = DeveloperV1PlacementGrid.offsetFor(index, total);
-        return origin.add(offset.x(), 0, offset.z());
     }
 
     private static BlockPos findV1JobSite(ServerWorld world, BlockPos anchor, Set<BlockPos> existingSites) {
