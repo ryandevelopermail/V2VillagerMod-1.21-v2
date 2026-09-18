@@ -45,6 +45,7 @@ public final class DeveloperSetupManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(DeveloperSetupManager.class);
     public static final int REQUIRED_PERMISSION_LEVEL = 2;
     private static final int STAGE_TIMEOUT_TICKS = 20 * 20;
+    static final int V1_INITIAL_RESTRAINT_TICKS = 20;
     private static final int V1_PAIR_TIMEOUT_TICKS = 20 * 45;
     private static final int V1_MAX_PENDING = DeveloperV1PlacementGrid.MAX_CONCURRENT;
     private static final int V1_ISOLATION_RADIUS = 1;
@@ -296,7 +297,7 @@ public final class DeveloperSetupManager {
             Iterator<Map.Entry<Integer, PendingV1Pair>> iterator = pendingV1Pairs.entrySet().iterator();
             while (iterator.hasNext() && v1FatalFailure == null) {
                 PendingV1Pair pair = iterator.next().getValue();
-                pair.elapsedTicks++;
+                pair.progress.advanceTick();
                 if (!(world.getEntity(pair.villagerId) instanceof VillagerEntity pendingVillager)
                         || !pendingVillager.isAlive()) {
                     failInvalidPendingV1Pair(pair,
@@ -306,7 +307,9 @@ public final class DeveloperSetupManager {
                     continue;
                 }
 
-                restrainPendingV1Villager(pair, pendingVillager);
+                if (pair.progress.shouldRestrain()) {
+                    restrainPendingV1Villager(pair, pendingVillager);
+                }
                 if (!areV1IsolationBarriersIntact(pair.isolationBlocks)) {
                     failInvalidPendingV1Pair(pair,
                             pair.task.profession().displayName() + " isolation barrier was removed before pairing.");
@@ -326,7 +329,8 @@ public final class DeveloperSetupManager {
                 BlockPos claimedJobSite = pendingVillager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                         .map(globalPos -> globalPos.pos())
                         .orElse(null);
-                if (acquired == pair.expectedProfession && pair.jobPos.equals(claimedJobSite)) {
+                boolean exactPair = acquired == pair.expectedProfession && pair.jobPos.equals(claimedJobSite);
+                if (pair.progress.completeIfExactPair(exactPair)) {
                     if (!v1JobSites.complete(pair.task.index(), pair.villagerId, claimedJobSite)) {
                         v1FatalFailure = "V1 completed-pair ownership verification failed for task "
                                 + (pair.task.index() + 1) + ".";
@@ -353,7 +357,7 @@ public final class DeveloperSetupManager {
                     changed = true;
                     continue;
                 }
-                if (pair.elapsedTicks >= V1_PAIR_TIMEOUT_TICKS) {
+                if (pair.progress.timeOutIfExpired()) {
                     if (preserveTimedOutV1Pair(pair, "Timed out waiting for "
                             + pair.task.profession().displayName() + " profession acquisition; pair preserved for inspection.")) {
                         iterator.remove();
@@ -818,7 +822,7 @@ public final class DeveloperSetupManager {
             private final BlockPos spawnPos;
             private final Set<BlockPos> isolationBlocks;
             private final boolean originalAiDisabled;
-            private int elapsedTicks;
+            private final DeveloperV1PendingPairProgress progress;
 
             private PendingV1Pair(
                     DeveloperV1BatchProgress.Task task,
@@ -838,6 +842,9 @@ public final class DeveloperSetupManager {
                 this.spawnPos = spawnPos;
                 this.isolationBlocks = isolationBlocks;
                 this.originalAiDisabled = originalAiDisabled;
+                this.progress = new DeveloperV1PendingPairProgress(
+                        V1_INITIAL_RESTRAINT_TICKS,
+                        V1_PAIR_TIMEOUT_TICKS);
             }
         }
     }
