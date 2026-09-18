@@ -8,48 +8,58 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** Tracks the one in-progress site separately from immutable completed V1 task assignments. */
+/** Tracks multiple pending sites separately from immutable completed V1 task assignments. */
 final class DeveloperV1JobSiteAssignments<P> {
+    private final Map<Integer, Assignment<P>> pendingByTask = new LinkedHashMap<>();
     private final Map<Integer, Assignment<P>> completedByTask = new LinkedHashMap<>();
-    private Assignment<P> current;
 
-    boolean begin(DeveloperV1BatchProgress.Task task, P position) {
-        if (current != null
+    boolean reserve(DeveloperV1BatchProgress.Task task, P position) {
+        if (task == null
+                || position == null
+                || pendingByTask.containsKey(task.index())
                 || completedByTask.containsKey(task.index())
-                || completedByTask.values().stream().anyMatch(assignment -> assignment.position().equals(position))) {
+                || reservedPositions().contains(position)) {
             return false;
         }
-        current = new Assignment<>(task, position, null);
+        pendingByTask.put(task.index(), new Assignment<>(task, position, null));
         return true;
     }
 
-    void completeCurrent(UUID villagerId) {
-        if (current == null || villagerId == null) {
-            throw new IllegalStateException("Cannot complete a V1 site without an in-progress assignment and villager.");
+    boolean attachVillager(int taskIndex, UUID villagerId) {
+        Assignment<P> pending = pendingByTask.get(taskIndex);
+        if (pending == null || villagerId == null || pending.villagerId() != null || ownsVillager(villagerId)) {
+            return false;
         }
-        Assignment<P> completed = new Assignment<>(current.task(), current.position(), villagerId);
-        if (completedByTask.putIfAbsent(completed.task().index(), completed) != null) {
-            throw new IllegalStateException("V1 task " + completed.task().index() + " already owns a completed site.");
-        }
-        current = null;
+        pendingByTask.put(taskIndex, new Assignment<>(pending.task(), pending.position(), villagerId));
+        return true;
     }
 
-    void rollbackCurrent() {
-        current = null;
+    boolean complete(int taskIndex, UUID villagerId, P claimedPosition) {
+        Assignment<P> pending = pendingByTask.get(taskIndex);
+        if (pending == null
+                || pending.villagerId() == null
+                || !pending.villagerId().equals(villagerId)
+                || !pending.position().equals(claimedPosition)) {
+            return false;
+        }
+        pendingByTask.remove(taskIndex);
+        completedByTask.put(taskIndex, pending);
+        return true;
     }
 
-    boolean isCurrent(P position) {
-        return current != null && current.position().equals(position);
+    boolean rollback(int taskIndex) {
+        return pendingByTask.remove(taskIndex) != null;
+    }
+
+    boolean isPending(int taskIndex, P position) {
+        Assignment<P> pending = pendingByTask.get(taskIndex);
+        return pending != null && pending.position().equals(position);
     }
 
     Set<P> reservedPositions() {
         Set<P> positions = new HashSet<>();
-        for (Assignment<P> assignment : completedByTask.values()) {
-            positions.add(assignment.position());
-        }
-        if (current != null) {
-            positions.add(current.position());
-        }
+        pendingByTask.values().forEach(assignment -> positions.add(assignment.position()));
+        completedByTask.values().forEach(assignment -> positions.add(assignment.position()));
         return Set.copyOf(positions);
     }
 
@@ -57,8 +67,17 @@ final class DeveloperV1JobSiteAssignments<P> {
         return java.util.Collections.unmodifiableList(new ArrayList<>(completedByTask.values()));
     }
 
+    int pendingCount() {
+        return pendingByTask.size();
+    }
+
     int completedCount() {
         return completedByTask.size();
+    }
+
+    private boolean ownsVillager(UUID villagerId) {
+        return pendingByTask.values().stream().anyMatch(assignment -> villagerId.equals(assignment.villagerId()))
+                || completedByTask.values().stream().anyMatch(assignment -> villagerId.equals(assignment.villagerId()));
     }
 
     record Assignment<P>(

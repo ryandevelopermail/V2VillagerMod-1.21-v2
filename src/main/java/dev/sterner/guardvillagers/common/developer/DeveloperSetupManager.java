@@ -36,6 +36,7 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -44,6 +45,8 @@ public final class DeveloperSetupManager {
     private static final Logger LOGGER = LoggerFactory.getLogger(DeveloperSetupManager.class);
     public static final int REQUIRED_PERMISSION_LEVEL = 2;
     private static final int STAGE_TIMEOUT_TICKS = 20 * 20;
+    private static final int V1_PAIR_TIMEOUT_TICKS = 20 * 30;
+    private static final int V1_MAX_PENDING = DeveloperV1PlacementGrid.CONCURRENT_LANES;
     private static final int CONVERSION_DELAY_TICKS = 10;
     private static final Map<UUID, SetupSession> SESSIONS = new HashMap<>();
 
@@ -112,6 +115,7 @@ public final class DeveloperSetupManager {
         private final DeveloperV1BatchProgress v1Batch;
         private final Set<BlockPos> attemptedTreeSites = new HashSet<>();
         private final DeveloperV1JobSiteAssignments<BlockPos> v1JobSites = new DeveloperV1JobSiteAssignments<>();
+        private final Map<Integer, PendingV1Pair> pendingV1Pairs = new LinkedHashMap<>();
         private BlockPos setupOrigin;
         private BlockPos tablePos;
         private VillagerEntity villager;
@@ -124,11 +128,6 @@ public final class DeveloperSetupManager {
         private int generatedTrees;
         private DeveloperSetupStage reportedStage;
         private boolean terminalStatusSent;
-        private VillagerProfession expectedV1Profession;
-        private Block expectedV1JobBlock;
-        private BlockPos currentV1JobPos;
-        private BlockPos currentV1SpawnPos;
-        private int currentV1Ticks;
         private String lastV1Failure;
         private String v1FatalFailure;
 
@@ -184,158 +183,217 @@ public final class DeveloperSetupManager {
                 sendV1TerminalStatus(server);
                 return;
             }
-            if (v1Batch.stage() == DeveloperV1BatchProgress.Stage.PREPARE_CURRENT) {
-                prepareCurrentV1(server);
+
+            String completedSiteError = validateCompletedV1JobSites();
+            if (completedSiteError != null) {
+                v1FatalFailure = completedSiteError;
             } else {
-                waitForCurrentV1Profession(server);
+                boolean changed = fillV1PendingWindow();
+                if (v1FatalFailure == null) {
+                    changed |= tickPendingV1Pairs();
+                }
+                if (v1FatalFailure == null) {
+                    changed |= fillV1PendingWindow();
+                }
+                if (v1FatalFailure == null
+                        && (v1Batch.pending() != pendingV1Pairs.size()
+                        || v1Batch.pending() != v1JobSites.pendingCount())) {
+                    v1FatalFailure = "V1 pending-pair ownership verification failed.";
+                } else if (changed && v1FatalFailure == null && !v1Batch.isComplete()) {
+                    sendV1Progress(server);
+                }
             }
+
             if (v1FatalFailure != null || v1Batch.isComplete()) {
                 sendV1TerminalStatus(server);
             }
         }
 
-        private void prepareCurrentV1(MinecraftServer server) {
-            String completedSiteError = validateCompletedV1JobSites();
-            if (completedSiteError != null) {
-                v1FatalFailure = completedSiteError;
-                return;
+        private boolean fillV1PendingWindow() {
+            boolean changed = false;
+            while (v1FatalFailure == null && v1Batch.canStart(V1_MAX_PENDING)) {
+                prepareV1Pair(v1Batch.startNext());
+                changed = true;
             }
+            return changed;
+        }
 
-            DeveloperV1BatchProgress.Task currentTask = v1Batch.currentTask();
-            DeveloperProfession requestedProfession = currentTask.profession();
-            expectedV1Profession = resolveV1Profession(requestedProfession);
-            expectedV1JobBlock = resolveV1JobBlock(requestedProfession).orElse(null);
-            if (expectedV1Profession == null || expectedV1JobBlock == null) {
-                failCurrentV1(server, "No supported job-site mapping exists for " + requestedProfession.displayName() + ".");
+        private void prepareV1Pair(DeveloperV1BatchProgress.Task task) {
+            DeveloperProfession requestedProfession = task.profession();
+            VillagerProfession expectedProfession = resolveV1Profession(requestedProfession);
+            Block expectedJobBlock = resolveV1JobBlock(requestedProfession).orElse(null);
+            if (expectedProfession == null || expectedJobBlock == null) {
+                failV1TaskBeforeSpawn(task,
+                        "No supported job-site mapping exists for " + requestedProfession.displayName() + ".");
                 return;
             }
 
             BlockPos gridAnchor = requestedOrigin.add(
-                    currentTask.gridSlot().x(),
+                    task.gridSlot().x(),
                     0,
-                    currentTask.gridSlot().z());
+                    task.gridSlot().z());
             BlockPos candidateJobPos = findV1JobSite(world, gridAnchor, v1JobSites.reservedPositions());
             if (candidateJobPos == null) {
-                failCurrentV1(server, "No safe job-site location was found for " + requestedProfession.displayName() + ".");
+                failV1TaskBeforeSpawn(task,
+                        "No safe job-site location was found for " + requestedProfession.displayName() + ".");
                 return;
             }
-            if (!v1JobSites.begin(currentTask, candidateJobPos)) {
-                v1FatalFailure = "V1 placement ownership collision for task " + (currentTask.index() + 1) + ".";
+            if (!v1JobSites.reserve(task, candidateJobPos)) {
+                v1FatalFailure = "V1 placement ownership collision for task " + (task.index() + 1) + ".";
                 return;
             }
-            currentV1JobPos = candidateJobPos;
-            if (!world.setBlockState(currentV1JobPos, stableV1JobBlockState(expectedV1JobBlock), Block.NOTIFY_ALL)) {
-                failCurrentV1(server, "Could not place the " + requestedProfession.displayName() + " job site.");
+            if (!world.setBlockState(candidateJobPos, stableV1JobBlockState(expectedJobBlock), Block.NOTIFY_ALL)) {
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                v1JobSites.rollback(task.index());
+                failV1TaskBeforeSpawn(task, "Could not place the " + requestedProfession.displayName() + " job site.");
                 return;
             }
 
-            currentV1SpawnPos = findSpawnBesideTable(world, currentV1JobPos);
-            if (currentV1SpawnPos == null) {
-                rollbackCurrentV1JobSite();
-                failCurrentV1(server, "No safe villager spawn position was found beside the "
+            BlockPos spawnPos = findSpawnBesideTable(world, candidateJobPos);
+            if (spawnPos == null) {
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                v1JobSites.rollback(task.index());
+                failV1TaskBeforeSpawn(task, "No safe villager spawn position was found beside the "
                         + requestedProfession.displayName() + " job site.");
                 return;
             }
-            villager = spawnVillager(world, currentV1SpawnPos);
-            if (villager == null) {
-                rollbackCurrentV1JobSite();
-                failCurrentV1(server, "Could not spawn the " + requestedProfession.displayName() + " villager.");
+            VillagerEntity pendingVillager = spawnVillager(world, spawnPos);
+            if (pendingVillager == null) {
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                v1JobSites.rollback(task.index());
+                failV1TaskBeforeSpawn(task, "Could not spawn the " + requestedProfession.displayName() + " villager.");
                 return;
             }
-            villager.setPersistent();
-            originalAiDisabled = villager.isAiDisabled();
-            if (originalAiDisabled) {
-                villager.setAiDisabled(false);
+            pendingVillager.setPersistent();
+            boolean pendingOriginalAiDisabled = pendingVillager.isAiDisabled();
+            if (pendingOriginalAiDisabled) {
+                pendingVillager.setAiDisabled(false);
             }
-            currentV1Ticks = 0;
-            v1Batch.markPrepared();
-            sendV1Progress(server, "Waiting for " + requestedProfession.displayName() + " profession acquisition");
-        }
-
-        private void waitForCurrentV1Profession(MinecraftServer server) {
-            if (villager == null || !villager.isAlive()) {
-                failCurrentV1(server, v1Batch.currentProfession().displayName() + " villager was removed before pairing.");
+            if (!v1JobSites.attachVillager(task.index(), pendingVillager.getUuid())) {
+                pendingVillager.setAiDisabled(pendingOriginalAiDisabled);
+                pendingVillager.discard();
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                v1JobSites.rollback(task.index());
+                v1FatalFailure = "V1 villager ownership collision for task " + (task.index() + 1) + ".";
                 return;
             }
-            currentV1Ticks++;
-            restrainCurrentV1Villager();
+            pendingV1Pairs.put(task.index(), new PendingV1Pair(
+                    task,
+                    pendingVillager.getUuid(),
+                    expectedProfession,
+                    expectedJobBlock,
+                    candidateJobPos,
+                    spawnPos,
+                    pendingOriginalAiDisabled));
+        }
 
-            VillagerProfession acquired = villager.getVillagerData().getProfession();
-            BlockPos claimedJobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                    .map(globalPos -> globalPos.pos())
-                    .orElse(null);
-            if (acquired == expectedV1Profession && currentV1JobPos.equals(claimedJobSite)) {
-                completeCurrentV1(server);
-                return;
+        private boolean tickPendingV1Pairs() {
+            boolean changed = false;
+            Iterator<Map.Entry<Integer, PendingV1Pair>> iterator = pendingV1Pairs.entrySet().iterator();
+            while (iterator.hasNext() && v1FatalFailure == null) {
+                PendingV1Pair pair = iterator.next().getValue();
+                pair.elapsedTicks++;
+                if (!(world.getEntity(pair.villagerId) instanceof VillagerEntity pendingVillager)
+                        || !pendingVillager.isAlive()) {
+                    failPendingV1Pair(pair,
+                            pair.task.profession().displayName() + " villager was removed before pairing.");
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
+
+                restrainPendingV1Villager(pair, pendingVillager);
+                if (!world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock)) {
+                    failPendingV1Pair(pair,
+                            pair.task.profession().displayName() + " workstation was removed before pairing.");
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
+
+                VillagerProfession acquired = pendingVillager.getVillagerData().getProfession();
+                BlockPos claimedJobSite = pendingVillager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(globalPos -> globalPos.pos())
+                        .orElse(null);
+                if (acquired == pair.expectedProfession && pair.jobPos.equals(claimedJobSite)) {
+                    if (!v1JobSites.complete(pair.task.index(), pair.villagerId, claimedJobSite)) {
+                        v1FatalFailure = "V1 completed-pair ownership verification failed for task "
+                                + (pair.task.index() + 1) + ".";
+                        break;
+                    }
+                    releasePendingV1Villager(pair, pendingVillager);
+                    v1Batch.finish(pair.task.index(), true);
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
+                if (claimedJobSite != null && !pair.jobPos.equals(claimedJobSite)) {
+                    failPendingV1Pair(pair, pair.task.profession().displayName()
+                            + " villager claimed another workstation at " + claimedJobSite.toShortString() + ".");
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
+                if (acquired != VillagerProfession.NONE && acquired != pair.expectedProfession) {
+                    failPendingV1Pair(pair, pair.task.profession().displayName()
+                            + " villager claimed a different profession (" + acquired + ").");
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
+                if (pair.elapsedTicks >= V1_PAIR_TIMEOUT_TICKS) {
+                    failPendingV1Pair(pair, "Timed out waiting for " + pair.task.profession().displayName()
+                            + " profession acquisition.");
+                    iterator.remove();
+                    changed = true;
+                }
             }
-            if (acquired != VillagerProfession.NONE && acquired != expectedV1Profession) {
-                failCurrentV1(server, v1Batch.currentProfession().displayName()
-                        + " villager claimed a different profession (" + acquired + ").");
-                return;
-            }
-            if (currentV1Ticks >= STAGE_TIMEOUT_TICKS) {
-                failCurrentV1(server, "Timed out waiting for " + v1Batch.currentProfession().displayName()
-                        + " profession acquisition.");
+            return changed;
+        }
+
+        private void restrainPendingV1Villager(PendingV1Pair pair, VillagerEntity pendingVillager) {
+            pendingVillager.setVelocity(Vec3d.ZERO);
+            if (pendingVillager.squaredDistanceTo(Vec3d.ofCenter(pair.spawnPos)) > 9.0D) {
+                pendingVillager.refreshPositionAndAngles(
+                        pair.spawnPos.getX() + 0.5D,
+                        pair.spawnPos.getY(),
+                        pair.spawnPos.getZ() + 0.5D,
+                        pendingVillager.getYaw(),
+                        pendingVillager.getPitch());
+                pendingVillager.getNavigation().stop();
             }
         }
 
-        private void restrainCurrentV1Villager() {
-            villager.setVelocity(Vec3d.ZERO);
-            if (currentV1SpawnPos != null
-                    && villager.squaredDistanceTo(Vec3d.ofCenter(currentV1SpawnPos)) > 9.0D) {
-                villager.refreshPositionAndAngles(
-                        currentV1SpawnPos.getX() + 0.5D,
-                        currentV1SpawnPos.getY(),
-                        currentV1SpawnPos.getZ() + 0.5D,
-                        villager.getYaw(),
-                        villager.getPitch());
-                villager.getNavigation().stop();
-            }
-        }
-
-        private void completeCurrentV1(MinecraftServer server) {
-            v1JobSites.completeCurrent(villager.getUuid());
-            releaseCurrentV1Villager();
-            villager = null;
-            currentV1JobPos = null;
-            currentV1SpawnPos = null;
-            expectedV1Profession = null;
-            expectedV1JobBlock = null;
-            v1Batch.finishCurrent(true);
-            sendV1Progress(server, "Created V1 villagers");
-        }
-
-        private void failCurrentV1(MinecraftServer server, String message) {
+        private void failV1TaskBeforeSpawn(DeveloperV1BatchProgress.Task task, String message) {
             lastV1Failure = message;
-            releaseCurrentV1Villager();
-            rollbackCurrentV1JobSite();
-            v1JobSites.rollbackCurrent();
-            villager = null;
-            currentV1JobPos = null;
-            currentV1SpawnPos = null;
-            expectedV1Profession = null;
-            expectedV1JobBlock = null;
-            v1Batch.finishCurrent(false);
-            sendV1Progress(server, message + " Continuing batch");
+            v1Batch.finish(task.index(), false);
         }
 
-        private void releaseCurrentV1Villager() {
-            if (villager != null && villager.isAlive()) {
-                villager.setAiDisabled(false);
-                villager.getNavigation().stop();
+        private void failPendingV1Pair(PendingV1Pair pair, String message) {
+            lastV1Failure = message;
+            VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
+                    ? found
+                    : null;
+            releasePendingV1Villager(pair, pendingVillager);
+            rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
+            v1JobSites.rollback(pair.task.index());
+            v1Batch.finish(pair.task.index(), false);
+        }
+
+        private void releasePendingV1Villager(PendingV1Pair pair, VillagerEntity pendingVillager) {
+            if (pendingVillager != null && pendingVillager.isAlive()) {
+                pendingVillager.setAiDisabled(pair.originalAiDisabled);
+                pendingVillager.getNavigation().stop();
             }
-            v1Batch.markSubjectReleased();
         }
 
-        private void rollbackCurrentV1JobSite() {
-            if (currentV1JobPos == null
-                    || expectedV1JobBlock == null
-                    || !v1JobSites.isCurrent(currentV1JobPos)) {
+        private void rollbackPendingV1JobSite(int taskIndex, BlockPos jobPos, Block expectedJobBlock) {
+            if (!v1JobSites.isPending(taskIndex, jobPos)) {
                 return;
             }
-            if (world.getBlockState(currentV1JobPos).isOf(expectedV1JobBlock)
-                    && !isJobSiteClaimedByAnyVillager(world, currentV1JobPos)) {
-                world.removeBlock(currentV1JobPos, false);
+            if (world.getBlockState(jobPos).isOf(expectedJobBlock)
+                    && !isJobSiteClaimedByAnyVillager(world, jobPos)) {
+                world.removeBlock(jobPos, false);
             }
         }
 
@@ -363,14 +421,15 @@ public final class DeveloperSetupManager {
             return null;
         }
 
-        private void sendV1Progress(MinecraftServer server, String detail) {
+        private void sendV1Progress(MinecraftServer server) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerId);
             if (player == null) {
                 return;
             }
             int progress = 5 + (int) Math.floor(90.0D * v1Batch.processed() / Math.max(1, v1Batch.total()));
             sendStatus(player,
-                    "Creating V1 villagers: " + v1Batch.processed() + " / " + v1Batch.total() + ". " + detail + ".",
+                    "Creating V1 villagers: " + v1Batch.successful() + " / " + v1Batch.total()
+                            + " complete, " + v1Batch.pending() + " pending, " + v1Batch.failed() + " failed.",
                     progress,
                     false,
                     false);
@@ -597,9 +656,7 @@ public final class DeveloperSetupManager {
         private void fail(String message) {
             if (v1Batch != null) {
                 v1FatalFailure = message;
-                releaseCurrentV1Villager();
-                rollbackCurrentV1JobSite();
-                v1JobSites.rollbackCurrent();
+                cleanupPendingV1Pairs();
             } else {
                 workflow.fail(message);
             }
@@ -619,9 +676,8 @@ public final class DeveloperSetupManager {
 
         private void cleanup() {
             if (v1Batch != null) {
-                releaseCurrentV1Villager();
                 if (v1FatalFailure != null) {
-                    rollbackCurrentV1JobSite();
+                    cleanupPendingV1Pairs();
                 }
                 return;
             }
@@ -639,6 +695,18 @@ public final class DeveloperSetupManager {
                     world.removeBlock(createdChestPos, false);
                 }
             }
+        }
+
+        private void cleanupPendingV1Pairs() {
+            for (PendingV1Pair pair : pendingV1Pairs.values()) {
+                VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
+                        ? found
+                        : null;
+                releasePendingV1Villager(pair, pendingVillager);
+                rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
+                v1JobSites.rollback(pair.task.index());
+            }
+            pendingV1Pairs.clear();
         }
 
         private void rollbackUnclaimedTable() {
@@ -671,6 +739,35 @@ public final class DeveloperSetupManager {
             }
             if (createdFurnacePos != null && world.getBlockState(createdFurnacePos).isOf(Blocks.FURNACE)) {
                 world.removeBlock(createdFurnacePos, false);
+            }
+        }
+
+        private static final class PendingV1Pair {
+            private final DeveloperV1BatchProgress.Task task;
+            private final UUID villagerId;
+            private final VillagerProfession expectedProfession;
+            private final Block expectedJobBlock;
+            private final BlockPos jobPos;
+            private final BlockPos spawnPos;
+            private final boolean originalAiDisabled;
+            private int elapsedTicks;
+
+            private PendingV1Pair(
+                    DeveloperV1BatchProgress.Task task,
+                    UUID villagerId,
+                    VillagerProfession expectedProfession,
+                    Block expectedJobBlock,
+                    BlockPos jobPos,
+                    BlockPos spawnPos,
+                    boolean originalAiDisabled
+            ) {
+                this.task = task;
+                this.villagerId = villagerId;
+                this.expectedProfession = expectedProfession;
+                this.expectedJobBlock = expectedJobBlock;
+                this.jobPos = jobPos;
+                this.spawnPos = spawnPos;
+                this.originalAiDisabled = originalAiDisabled;
             }
         }
     }
@@ -746,7 +843,7 @@ public final class DeveloperSetupManager {
     private static boolean isJobSiteClaimedByAnyVillager(ServerWorld world, BlockPos jobPos) {
         return !world.getEntitiesByClass(
                 VillagerEntity.class,
-                new Box(jobPos).expand(32.0D),
+                new Box(jobPos).expand(DeveloperV1PlacementGrid.VANILLA_JOB_SITE_SEARCH_RADIUS),
                 candidate -> candidate.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
                         .map(globalPos -> globalPos.pos().equals(jobPos))
                         .orElse(false)

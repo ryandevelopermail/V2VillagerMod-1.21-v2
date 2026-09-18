@@ -1,22 +1,17 @@
 package dev.sterner.guardvillagers.common.developer;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
-/** Pure sequential batch state used by the server executor and focused tests. */
+/** Pure rolling-window batch state used by the concurrent V1 server executor and focused tests. */
 final class DeveloperV1BatchProgress {
-    enum Stage {
-        PREPARE_CURRENT,
-        WAIT_FOR_PROFESSION,
-        COMPLETE
-    }
-
     private final List<Task> tasks;
-    private int currentIndex;
+    private final Set<Integer> unstartedTaskIndexes = new LinkedHashSet<>();
+    private final Set<Integer> pendingTaskIndexes = new LinkedHashSet<>();
     private int successful;
     private int failed;
-    private Stage stage;
-    private boolean subjectRestrained;
 
     DeveloperV1BatchProgress(List<DeveloperProfessionSelection> selections) {
         List<DeveloperProfession> expanded = new ArrayList<>();
@@ -30,29 +25,40 @@ final class DeveloperV1BatchProgress {
             plannedTasks.add(new Task(
                     index,
                     expanded.get(index),
-                    DeveloperV1PlacementGrid.offsetFor(index, expanded.size())));
+                    DeveloperV1PlacementGrid.offsetFor(index, expanded.size()),
+                    DeveloperV1PlacementGrid.laneFor(index)));
+            unstartedTaskIndexes.add(index);
         }
         this.tasks = List.copyOf(plannedTasks);
-        this.stage = tasks.isEmpty() ? Stage.COMPLETE : Stage.PREPARE_CURRENT;
     }
 
-    Stage stage() {
-        return stage;
-    }
-
-    DeveloperProfession currentProfession() {
-        return currentTask().profession();
-    }
-
-    Task currentTask() {
-        if (stage == Stage.COMPLETE) {
-            throw new IllegalStateException("The V1 batch is complete.");
+    boolean canStart(int maxPending) {
+        if (maxPending < 1) {
+            throw new IllegalArgumentException("V1 pending capacity must be positive.");
         }
-        return tasks.get(currentIndex);
+        return pendingTaskIndexes.size() < maxPending && nextAvailableTaskIndex() >= 0;
     }
 
-    int currentNumber() {
-        return Math.min(currentIndex + 1, tasks.size());
+    Task startNext() {
+        int taskIndex = nextAvailableTaskIndex();
+        if (taskIndex < 0) {
+            throw new IllegalStateException("No V1 task can start until a pending lane is released.");
+        }
+        unstartedTaskIndexes.remove(taskIndex);
+        Task task = tasks.get(taskIndex);
+        pendingTaskIndexes.add(task.index());
+        return task;
+    }
+
+    void finish(int taskIndex, boolean success) {
+        if (!pendingTaskIndexes.remove(taskIndex)) {
+            throw new IllegalStateException("V1 task " + taskIndex + " is not pending.");
+        }
+        if (success) {
+            successful++;
+        } else {
+            failed++;
+        }
     }
 
     int total() {
@@ -63,6 +69,10 @@ final class DeveloperV1BatchProgress {
         return successful + failed;
     }
 
+    int pending() {
+        return pendingTaskIndexes.size();
+    }
+
     int successful() {
         return successful;
     }
@@ -71,46 +81,32 @@ final class DeveloperV1BatchProgress {
         return failed;
     }
 
-    void markPrepared() {
-        if (stage != Stage.PREPARE_CURRENT) {
-            throw new IllegalStateException("Cannot wait for a profession from stage " + stage);
-        }
-        stage = Stage.WAIT_FOR_PROFESSION;
-        subjectRestrained = true;
-    }
-
-    boolean releaseRequired() {
-        return subjectRestrained;
-    }
-
-    void markSubjectReleased() {
-        subjectRestrained = false;
-    }
-
-    void finishCurrent(boolean success) {
-        if (stage == Stage.COMPLETE) {
-            throw new IllegalStateException("The V1 batch is already complete.");
-        }
-        if (subjectRestrained) {
-            throw new IllegalStateException("The current V1 villager must be released before advancing the batch.");
-        }
-        if (success) {
-            successful++;
-        } else {
-            failed++;
-        }
-        currentIndex++;
-        stage = currentIndex >= tasks.size() ? Stage.COMPLETE : Stage.PREPARE_CURRENT;
-    }
-
     boolean isComplete() {
-        return stage == Stage.COMPLETE;
+        return processed() == tasks.size();
     }
 
     List<Task> tasks() {
         return tasks;
     }
 
-    record Task(int index, DeveloperProfession profession, DeveloperV1PlacementGrid.Offset gridSlot) {
+    private int nextAvailableTaskIndex() {
+        for (int taskIndex : unstartedTaskIndexes) {
+            int lane = tasks.get(taskIndex).lane();
+            boolean laneOccupied = pendingTaskIndexes.stream()
+                    .map(tasks::get)
+                    .anyMatch(task -> task.lane() == lane);
+            if (!laneOccupied) {
+                return taskIndex;
+            }
+        }
+        return -1;
+    }
+
+    record Task(
+            int index,
+            DeveloperProfession profession,
+            DeveloperV1PlacementGrid.Offset gridSlot,
+            int lane
+    ) {
     }
 }
