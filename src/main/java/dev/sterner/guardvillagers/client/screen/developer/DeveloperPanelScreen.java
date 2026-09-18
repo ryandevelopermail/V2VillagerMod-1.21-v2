@@ -8,12 +8,13 @@ import net.minecraft.text.Text;
 
 public final class DeveloperPanelScreen extends Screen {
     private static final int MAX_PANEL_WIDTH = 430;
-    private static final int PANEL_HEIGHT = 230;
+    private static final int MAX_PANEL_HEIGHT = 330;
     private final WorldSetupTab worldSetupTab = new WorldSetupTab();
     private DeveloperPanelTab activeTab = worldSetupTab;
     private int panelLeft;
     private int panelTop;
     private int panelWidth;
+    private int panelHeight;
 
     public DeveloperPanelScreen() {
         super(Text.translatable("screen.guardvillagers.developer_panel"));
@@ -22,9 +23,10 @@ public final class DeveloperPanelScreen extends Screen {
     @Override
     protected void init() {
         panelWidth = Math.min(MAX_PANEL_WIDTH, width - 16);
+        panelHeight = Math.min(MAX_PANEL_HEIGHT, height - 16);
         panelLeft = (width - panelWidth) / 2;
-        panelTop = Math.max(12, (height - PANEL_HEIGHT) / 2);
-        activeTab.init(this, panelLeft + 12, panelTop + 42, panelWidth - 24, PANEL_HEIGHT - 54);
+        panelTop = Math.max(8, (height - panelHeight) / 2);
+        activeTab.init(this, panelLeft + 12, panelTop + 42, panelWidth - 24, panelHeight - 54);
     }
 
     public <T extends ClickableWidget> T addPanelWidget(T widget) {
@@ -42,7 +44,7 @@ public final class DeveloperPanelScreen extends Screen {
     @Override
     public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {
         super.renderBackground(context, mouseX, mouseY, delta);
-        context.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + PANEL_HEIGHT, 0xD0101010);
+        context.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + panelHeight, 0xD0101010);
         context.fill(panelLeft, panelTop, panelLeft + panelWidth, panelTop + 34, 0xE0252525);
         context.drawCenteredTextWithShadow(textRenderer, title, width / 2, panelTop + 10, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, activeTab.title(), panelLeft + 14, panelTop + 27, 0xA0A0A0);
@@ -57,5 +59,11 @@ public final class DeveloperPanelScreen extends Screen {
     @Override
     public boolean shouldPause() {
         return false;
+    }
+
+    @Override
+    public boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        return activeTab.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)
+                || super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
     }
 }

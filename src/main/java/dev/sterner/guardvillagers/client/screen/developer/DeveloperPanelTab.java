@@ -9,4 +9,8 @@ interface DeveloperPanelTab {
     void init(DeveloperPanelScreen screen, int left, int top, int width, int height);
 
     void render(DrawContext context, int mouseX, int mouseY, float delta);
+
+    default boolean mouseScrolled(double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        return false;
+    }
 }

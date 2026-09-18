@@ -1,19 +1,18 @@
 package dev.sterner.guardvillagers.common.network;
 
 import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.developer.DeveloperProfession;
 import dev.sterner.guardvillagers.common.developer.DeveloperSetupRequest;
-import dev.sterner.guardvillagers.common.developer.DeveloperSetupType;
-import dev.sterner.guardvillagers.common.developer.LumberjackInventoryPreset;
 import net.minecraft.network.RegistryByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 public record DeveloperSetupRequestPacket(
         int setupType,
-        int profession,
+        List<DeveloperSetupRequestWireData.ProfessionEntry> professions,
         boolean createPairedChest,
         boolean createCraftingTable,
         boolean createFurnaceSetup,
@@ -22,11 +21,16 @@ public record DeveloperSetupRequestPacket(
         boolean generateMatureTrees,
         int treeCount
 ) implements CustomPayload {
+    private static final int MAX_WIRE_PROFESSION_ENTRIES = 64;
     public static final Id<DeveloperSetupRequestPacket> ID = new Id<>(GuardVillagers.id("developer_setup_request"));
     public static final PacketCodec<RegistryByteBuf, DeveloperSetupRequestPacket> PACKET_CODEC = PacketCodec.ofStatic(
             (buffer, packet) -> {
                 buffer.writeVarInt(packet.setupType);
-                buffer.writeVarInt(packet.profession);
+                buffer.writeVarInt(packet.professions.size());
+                for (DeveloperSetupRequestWireData.ProfessionEntry profession : packet.professions) {
+                    buffer.writeVarInt(profession.professionId());
+                    buffer.writeVarInt(profession.quantity());
+                }
                 buffer.writeBoolean(packet.createPairedChest);
                 buffer.writeBoolean(packet.createCraftingTable);
                 buffer.writeBoolean(packet.createFurnaceSetup);
@@ -37,7 +41,7 @@ public record DeveloperSetupRequestPacket(
             },
             buffer -> new DeveloperSetupRequestPacket(
                     buffer.readVarInt(),
-                    buffer.readVarInt(),
+                    readProfessionEntries(buffer),
                     buffer.readBoolean(),
                     buffer.readBoolean(),
                     buffer.readBoolean(),
@@ -49,37 +53,47 @@ public record DeveloperSetupRequestPacket(
     );
 
     public DeveloperSetupRequestPacket(DeveloperSetupRequest request) {
+        this(DeveloperSetupRequestWireData.fromRequest(request));
+    }
+
+    private DeveloperSetupRequestPacket(DeveloperSetupRequestWireData wireData) {
         this(
-                request.setupType().networkId(),
-                request.profession().networkId(),
-                request.createPairedChest(),
-                request.createCraftingTable(),
-                request.createFurnaceSetup(),
-                request.createShepherdSupply(),
-                request.inventoryPreset().networkId(),
-                request.generateMatureTrees(),
-                request.treeCount()
+                wireData.setupType(),
+                wireData.professions(),
+                wireData.createPairedChest(),
+                wireData.createCraftingTable(),
+                wireData.createFurnaceSetup(),
+                wireData.createShepherdSupply(),
+                wireData.inventoryPreset(),
+                wireData.generateMatureTrees(),
+                wireData.treeCount()
         );
     }
 
     public Optional<DeveloperSetupRequest> decodeRequest() {
-        Optional<DeveloperSetupType> decodedType = DeveloperSetupType.fromNetworkId(setupType);
-        Optional<DeveloperProfession> decodedProfession = DeveloperProfession.fromNetworkId(profession);
-        Optional<LumberjackInventoryPreset> decodedPreset = LumberjackInventoryPreset.fromNetworkId(inventoryPreset);
-        if (decodedType.isEmpty() || decodedProfession.isEmpty() || decodedPreset.isEmpty()) {
-            return Optional.empty();
-        }
-        return Optional.of(new DeveloperSetupRequest(
-                decodedType.get(),
-                decodedProfession.get(),
+        return new DeveloperSetupRequestWireData(
+                setupType,
+                professions,
                 createPairedChest,
                 createCraftingTable,
                 createFurnaceSetup,
                 createShepherdSupply,
-                decodedPreset.get(),
+                inventoryPreset,
                 generateMatureTrees,
                 treeCount
-        ));
+        ).decodeRequest();
+    }
+
+    private static List<DeveloperSetupRequestWireData.ProfessionEntry> readProfessionEntries(RegistryByteBuf buffer) {
+        int count = buffer.readVarInt();
+        if (count < 0 || count > MAX_WIRE_PROFESSION_ENTRIES) {
+            throw new IllegalArgumentException("Invalid developer profession entry count: " + count);
+        }
+        List<DeveloperSetupRequestWireData.ProfessionEntry> entries = new ArrayList<>(count);
+        for (int index = 0; index < count; index++) {
+            entries.add(new DeveloperSetupRequestWireData.ProfessionEntry(buffer.readVarInt(), buffer.readVarInt()));
+        }
+        return List.copyOf(entries);
     }
 
     @Override
