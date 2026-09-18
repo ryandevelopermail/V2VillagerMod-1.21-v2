@@ -1,4 +1,8 @@
 {
+  "screen.guardvillagers.developer_panel": "V2 Villagers Developer Panel",
+  "screen.guardvillagers.developer_panel.world_setup": "World Setup",
+  "screen.guardvillagers.developer_panel.tree_count": "Tree count",
+  "screen.guardvillagers.developer_panel.create": "Create Setup",
   "entity.guardvillagers.guard": "Guard",
   "item.guardvillagers.guard_spawn_egg": "Guard Spawn Egg",
   "entity.guardvillagers.axe_guard": "Axe Guard",

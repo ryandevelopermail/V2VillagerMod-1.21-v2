@@ -78,6 +78,28 @@ public final class UnemployedLumberjackConversionHook {
         }
     }
 
+    /**
+     * Runs the same conversion used by normal crafting-table discovery for one explicitly selected
+     * developer-panel subject. Population balancing is intentionally omitted because permission to
+     * create the test setup has already been checked by the developer executor.
+     */
+    public static Optional<LumberjackGuardEntity> tryConvertForDeveloperSetup(
+            ServerWorld world,
+            VillagerEntity villager,
+            BlockPos tablePos
+    ) {
+        if (villager == null || villager.getWorld() != world || !isEligibleUnemployed(villager)) {
+            return Optional.empty();
+        }
+        if (tablePos == null
+                || !villager.getBlockPos().isWithinDistance(tablePos, CRAFTING_TABLE_SEARCH_RANGE)
+                || !world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)
+                || ConvertedWorkerJobSiteReservationManager.isReservedForAnyConvertedWorker(world, tablePos)) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(convert(world, villager, tablePos));
+    }
+
     private static boolean isEligibleUnemployed(VillagerEntity villager) {
         if (!villager.isAlive() || villager.isRemoved() || villager.isBaby()) {
             return false;
@@ -207,10 +229,10 @@ public final class UnemployedLumberjackConversionHook {
         return null;
     }
 
-    private static void convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
+    private static LumberjackGuardEntity convert(ServerWorld world, VillagerEntity villager, BlockPos tablePos) {
         LumberjackGuardEntity guard = GuardVillagers.LUMBERJACK_GUARD_VILLAGER.create(world);
         if (guard == null) {
-            return;
+            return null;
         }
 
         GuardConversionHelper.initializeConvertedGuard(world, villager, guard, tablePos);
@@ -230,6 +252,7 @@ public final class UnemployedLumberjackConversionHook {
         JobBlockPairingHelper.playPairingAnimation(world, tablePos, villager, tablePos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
+        return guard;
     }
 
     private static void clearAllEquipment(LumberjackGuardEntity guard) {

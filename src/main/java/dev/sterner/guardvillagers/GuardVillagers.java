@@ -6,10 +6,15 @@ import dev.sterner.guardvillagers.common.entity.GuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.developer.DeveloperCommands;
+import dev.sterner.guardvillagers.common.developer.DeveloperSetupManager;
 import dev.sterner.guardvillagers.common.handler.JobBlockPlacementHandler;
 import dev.sterner.guardvillagers.common.network.GuardData;
 import dev.sterner.guardvillagers.common.network.GuardFollowPacket;
 import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
+import dev.sterner.guardvillagers.common.network.DeveloperSetupRequestPacket;
+import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
+import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -166,6 +171,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(LUMBERJACK_GUARD_VILLAGER, GuardEntity.createAttributes());
         ProfessionDefinitions.registerAll();
+        DeveloperCommands.register();
 
         if (FabricLoader.getInstance().isModLoaded("morevillagers")) {
             MoreVillagersBehaviorBridge.register();
@@ -188,12 +194,17 @@ public class GuardVillagers implements ModInitializer {
 
         PayloadTypeRegistry.playC2S().register(GuardFollowPacket.ID, GuardFollowPacket.PACKET_CODEC);
         PayloadTypeRegistry.playC2S().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playC2S().register(DeveloperSetupRequestPacket.ID, DeveloperSetupRequestPacket.PACKET_CODEC);
 
         PayloadTypeRegistry.playS2C().register(GuardFollowPacket.ID, GuardFollowPacket.PACKET_CODEC);
         PayloadTypeRegistry.playS2C().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playS2C().register(OpenDeveloperPanelPacket.ID, OpenDeveloperPanelPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playS2C().register(DeveloperSetupStatusPacket.ID, DeveloperSetupStatusPacket.PACKET_CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
+        ServerPlayNetworking.registerGlobalReceiver(DeveloperSetupRequestPacket.ID, (payload, context) ->
+                DeveloperSetupManager.requestSetup(context.player(), payload.decodeRequest().orElse(null)));
 
         ItemGroupEvents.modifyEntriesEvent(ItemGroups.FUNCTIONAL).register(entries -> {
             entries.add(GUARD_SPAWN_EGG);
@@ -287,8 +298,10 @@ public class GuardVillagers implements ModInitializer {
             }
             LOGGER.info("[recipe-demand-index] invalidated {} world cache entries after datapack reload (success={})", invalidatedWorlds, success);
         });
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> DeveloperSetupManager.cancelAll());
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
+            DeveloperSetupManager.tick(server);
             for (ServerWorld world : server.getWorlds()) {
                 for (PlayerEntity player : world.getPlayers()) {
                     VillageGuardStandManager.handlePlayerNearby(world, player);
