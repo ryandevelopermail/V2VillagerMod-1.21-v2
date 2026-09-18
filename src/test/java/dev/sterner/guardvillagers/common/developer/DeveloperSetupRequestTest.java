@@ -82,7 +82,7 @@ class DeveloperSetupRequestTest {
                 true,
                 false,
                 false,
-                LumberjackInventoryPreset.PEN_TEST,
+                LumberjackInventoryPreset.SHEPHERD_SUPPLY_TEST,
                 false,
                 DeveloperSetupRequest.DEFAULT_TREE_COUNT
         );

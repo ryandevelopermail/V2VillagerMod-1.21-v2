@@ -9,6 +9,7 @@ import static dev.sterner.guardvillagers.common.developer.LumberjackInventoryPre
 import static dev.sterner.guardvillagers.common.developer.LumberjackInventoryPreset.Item.OAK_LOG;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LumberjackInventoryPresetTest {
@@ -23,11 +24,16 @@ class LumberjackInventoryPresetTest {
     }
 
     @Test
-    void penPresetMeetsCurrentFenceAndGateThresholds() {
-        Map<LumberjackInventoryPreset.Item, Integer> contents = LumberjackInventoryPreset.PEN_TEST.contents();
-        assertEquals(20, contents.get(OAK_FENCE));
+    void shepherdSupplyPresetMatchesCurrentDistributionBatchMaterials() {
+        Map<LumberjackInventoryPreset.Item, Integer> contents = LumberjackInventoryPreset.SHEPHERD_SUPPLY_TEST.contents();
+        assertEquals("Shepherd Supply Test", LumberjackInventoryPreset.SHEPHERD_SUPPLY_TEST.displayName());
+        assertSame(
+                LumberjackInventoryPreset.SHEPHERD_SUPPLY_TEST,
+                LumberjackInventoryPreset.fromNetworkId(2).orElseThrow());
+        assertEquals(8, contents.get(OAK_FENCE));
         assertEquals(1, contents.get(OAK_FENCE_GATE));
         assertFalse(contents.containsKey(OAK_LOG));
+        assertTrue(contents.get(OAK_FENCE) < 20, "Supply batch must not trigger the Lumberjack pen builder.");
     }
 
     @Test
@@ -38,7 +44,7 @@ class LumberjackInventoryPresetTest {
                 true
         );
         assertEquals(16, plan.get(OAK_LOG));
-        assertEquals(20, plan.get(OAK_FENCE));
+        assertEquals(8, plan.get(OAK_FENCE));
         assertEquals(1, plan.get(OAK_FENCE_GATE));
     }
 }

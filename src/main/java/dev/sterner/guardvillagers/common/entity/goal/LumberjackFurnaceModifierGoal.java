@@ -177,7 +177,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
             return;
         }
 
-        int logsAvailable = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
+        int logsAvailable = countCharcoalEligibleLogs(chestInventory);
         int logsToMove = logsAvailable / 2;
         if (logsToMove <= 0) {
             return;
@@ -207,7 +207,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         }
 
         int space = fuel.isEmpty() ? 64 : (fuel.getMaxCount() - fuel.getCount());
-        int requested = Math.min(amount, space);
+        int requested = Math.min(Math.min(amount, space), countCharcoalEligibleLogs(chestInventory));
         if (requested <= 0) {
             return;
         }
@@ -330,6 +330,46 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         int total = 0;
         for (ItemStack stack : stacks) {
             if (!stack.isEmpty() && stack.isIn(ItemTags.LOGS)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int countCharcoalEligibleLogs(Inventory chestInventory) {
+        int availableLogs = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
+        int availablePlanks = countMatching(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.PLANKS));
+        int availableSticks = countMatching(chestInventory, stack -> stack.isOf(Items.STICK))
+                + countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isOf(Items.STICK));
+        boolean axeAvailable = this.guard.getMainHandStack().isIn(ItemTags.AXES)
+                || countMatching(chestInventory, stack -> stack.isIn(ItemTags.AXES)) > 0
+                || countMatching(this.guard.getGatheredStackBuffer(), stack -> stack.isIn(ItemTags.AXES)) > 0;
+        return LumberjackAxeBootstrapPolicy.charcoalEligibleLogs(
+                availableLogs,
+                axeAvailable,
+                availablePlanks,
+                availableSticks);
+    }
+
+    private int countMatching(Inventory inventory, java.util.function.Predicate<ItemStack> predicate) {
+        if (inventory == null) {
+            return 0;
+        }
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && predicate.test(stack)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private int countMatching(List<ItemStack> stacks, java.util.function.Predicate<ItemStack> predicate) {
+        int total = 0;
+        for (ItemStack stack : stacks) {
+            if (!stack.isEmpty() && predicate.test(stack)) {
                 total += stack.getCount();
             }
         }
@@ -502,7 +542,7 @@ public class LumberjackFurnaceModifierGoal extends Goal {
         ItemStack fuel = furnace.getStack(1);
         ItemStack output = furnace.getStack(2);
 
-        int logsInStorage = countLogs(chestInventory) + countLogs(this.guard.getGatheredStackBuffer());
+        int logsInStorage = countCharcoalEligibleLogs(chestInventory);
         int logsInInput = input.isIn(ItemTags.LOGS) ? input.getCount() : 0;
         return evaluateServiceStateCore(logsInStorage, logsInInput, input, fuel, output, hasReturnSpace(chestInventory, output));
     }

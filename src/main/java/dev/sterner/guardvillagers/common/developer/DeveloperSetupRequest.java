@@ -8,7 +8,7 @@ public record DeveloperSetupRequest(
         boolean createPairedChest,
         boolean createCraftingTable,
         boolean createFurnaceSetup,
-        boolean createPenSetup,
+        boolean createShepherdSupply,
         LumberjackInventoryPreset inventoryPreset,
         boolean generateMatureTrees,
         int treeCount
@@ -39,7 +39,7 @@ public record DeveloperSetupRequest(
             return Optional.of("Lumberjack V2 setup requires a paired chest.");
         }
         if (setupType != DeveloperSetupType.V2_PROFESSION
-                && (createFurnaceSetup || createPenSetup || inventoryPreset != LumberjackInventoryPreset.EMPTY_NATURAL)) {
+                && (createFurnaceSetup || createShepherdSupply || inventoryPreset != LumberjackInventoryPreset.EMPTY_NATURAL)) {
             return Optional.of("Lumberjack infrastructure and inventory presets require a V2 paired chest.");
         }
         if (generateMatureTrees && (treeCount < 1 || treeCount > MAX_TREE_COUNT)) {
@@ -54,7 +54,7 @@ public record DeveloperSetupRequest(
 
     public boolean needsInventoryPopulation() {
         return createFurnaceSetup
-                || createPenSetup
+                || createShepherdSupply
                 || inventoryPreset != LumberjackInventoryPreset.EMPTY_NATURAL;
     }
 }

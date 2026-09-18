@@ -17,7 +17,7 @@ public record DeveloperSetupRequestPacket(
         boolean createPairedChest,
         boolean createCraftingTable,
         boolean createFurnaceSetup,
-        boolean createPenSetup,
+        boolean createShepherdSupply,
         int inventoryPreset,
         boolean generateMatureTrees,
         int treeCount
@@ -30,7 +30,7 @@ public record DeveloperSetupRequestPacket(
                 buffer.writeBoolean(packet.createPairedChest);
                 buffer.writeBoolean(packet.createCraftingTable);
                 buffer.writeBoolean(packet.createFurnaceSetup);
-                buffer.writeBoolean(packet.createPenSetup);
+                buffer.writeBoolean(packet.createShepherdSupply);
                 buffer.writeVarInt(packet.inventoryPreset);
                 buffer.writeBoolean(packet.generateMatureTrees);
                 buffer.writeVarInt(packet.treeCount);
@@ -55,7 +55,7 @@ public record DeveloperSetupRequestPacket(
                 request.createPairedChest(),
                 request.createCraftingTable(),
                 request.createFurnaceSetup(),
-                request.createPenSetup(),
+                request.createShepherdSupply(),
                 request.inventoryPreset().networkId(),
                 request.generateMatureTrees(),
                 request.treeCount()
@@ -75,7 +75,7 @@ public record DeveloperSetupRequestPacket(
                 createPairedChest,
                 createCraftingTable,
                 createFurnaceSetup,
-                createPenSetup,
+                createShepherdSupply,
                 decodedPreset.get(),
                 generateMatureTrees,
                 treeCount

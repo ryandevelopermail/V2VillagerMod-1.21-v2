@@ -271,7 +271,7 @@ public final class DeveloperSetupManager {
             Map<LumberjackInventoryPreset.Item, Integer> plan = LumberjackInventoryPreset.createPlan(
                     request.inventoryPreset(),
                     request.createFurnaceSetup(),
-                    request.createPenSetup()
+                    request.createShepherdSupply()
             );
             for (Map.Entry<LumberjackInventoryPreset.Item, Integer> entry : plan.entrySet()) {
                 ItemStack remainder = insertIntoInventory(

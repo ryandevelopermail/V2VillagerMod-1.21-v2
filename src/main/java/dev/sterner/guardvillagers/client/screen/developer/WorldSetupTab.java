@@ -18,7 +18,7 @@ final class WorldSetupTab implements DeveloperPanelTab {
     private LumberjackInventoryPreset inventoryPreset = LumberjackInventoryPreset.EMPTY_NATURAL;
     private boolean generateTrees;
     private boolean createFurnaceSetup;
-    private boolean createPenSetup;
+    private boolean createShepherdSupply;
     private int left;
     private int top;
     private int width;
@@ -29,7 +29,7 @@ final class WorldSetupTab implements DeveloperPanelTab {
     private ButtonWidget craftingTableButton;
     private ButtonWidget treeButton;
     private ButtonWidget furnaceButton;
-    private ButtonWidget penButton;
+    private ButtonWidget shepherdSupplyButton;
     private ButtonWidget inventoryPresetButton;
     private ButtonWidget createButton;
     private TextFieldWidget treeCountField;
@@ -97,9 +97,9 @@ final class WorldSetupTab implements DeveloperPanelTab {
             button.setMessage(furnaceText());
         }).dimensions(rightControlX, top + 25, controlWidth, 20).build());
 
-        penButton = screen.addPanelWidget(ButtonWidget.builder(penText(), button -> {
-            createPenSetup = !createPenSetup;
-            button.setMessage(penText());
+        shepherdSupplyButton = screen.addPanelWidget(ButtonWidget.builder(shepherdSupplyText(), button -> {
+            createShepherdSupply = !createShepherdSupply;
+            button.setMessage(shepherdSupplyText());
         }).dimensions(rightControlX, top + 50, controlWidth, 20).build());
 
         inventoryPresetButton = screen.addPanelWidget(ButtonWidget.builder(inventoryPresetText(), button -> {
@@ -123,7 +123,7 @@ final class WorldSetupTab implements DeveloperPanelTab {
         int rightColumnX = left + (width - 14) / 2 + 14;
         context.drawTextWithShadow(textRenderer, Text.literal("Mature Trees"), rightColumnX, top + 6, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, Text.literal("Furnace"), rightColumnX, top + 31, 0xFFFFFF);
-        context.drawTextWithShadow(textRenderer, Text.literal("Pen Setup"), rightColumnX, top + 56, 0xFFFFFF);
+        context.drawTextWithShadow(textRenderer, Text.literal("Fence Supply"), rightColumnX, top + 56, 0xFFFFFF);
         context.drawTextWithShadow(textRenderer, Text.literal("Inventory"), rightColumnX, top + 81, 0xFFFFFF);
         String progressText = progress > 0 && progress < 100 ? " [" + progress + "%]" : "";
         context.drawTextWrapped(textRenderer, Text.literal(status + progressText), left, top + 140, width, statusColor);
@@ -157,7 +157,7 @@ final class WorldSetupTab implements DeveloperPanelTab {
                 includeChest,
                 createTable,
                 createFurnaceSetup,
-                createPenSetup,
+                createShepherdSupply,
                 inventoryPreset,
                 generateTrees,
                 treeCount
@@ -190,13 +190,13 @@ final class WorldSetupTab implements DeveloperPanelTab {
         treeCountField.setEditable(professionSetup && generateTrees);
         if (!v2) {
             createFurnaceSetup = false;
-            createPenSetup = false;
+            createShepherdSupply = false;
             inventoryPreset = LumberjackInventoryPreset.EMPTY_NATURAL;
         }
         furnaceButton.active = v2;
         furnaceButton.setMessage(furnaceText());
-        penButton.active = v2;
-        penButton.setMessage(penText());
+        shepherdSupplyButton.active = v2;
+        shepherdSupplyButton.setMessage(shepherdSupplyText());
         inventoryPresetButton.active = v2;
         inventoryPresetButton.setMessage(inventoryPresetText());
     }
@@ -217,8 +217,8 @@ final class WorldSetupTab implements DeveloperPanelTab {
         return Text.literal(createFurnaceSetup ? "Create: Yes" : "Create: No");
     }
 
-    private Text penText() {
-        return Text.literal(createPenSetup ? "Load: Yes" : "Load: No");
+    private Text shepherdSupplyText() {
+        return Text.literal(createShepherdSupply ? "Load: Yes" : "Load: No");
     }
 
     private Text inventoryPresetText() {

@@ -9,12 +9,13 @@ import java.util.Optional;
 public enum LumberjackInventoryPreset {
     EMPTY_NATURAL(0, "Empty / Natural"),
     CHARCOAL_TEST(1, "Charcoal Test", entry(Item.OAK_LOG, 16)),
-    PEN_TEST(2, "Pen Test", entry(Item.OAK_FENCE, 20), entry(Item.OAK_FENCE_GATE, 1)),
+    // One Lumberjack distribution batch; stays below the local 20-fence pen-builder trigger.
+    SHEPHERD_SUPPLY_TEST(2, "Shepherd Supply Test", entry(Item.OAK_FENCE, 8), entry(Item.OAK_FENCE_GATE, 1)),
     GENERAL_MIXED_TEST(3, "General / Mixed Test",
             entry(Item.OAK_LOG, 16),
             entry(Item.OAK_PLANKS, 16),
             entry(Item.STICK, 8),
-            entry(Item.OAK_FENCE, 20),
+            entry(Item.OAK_FENCE, 8),
             entry(Item.OAK_FENCE_GATE, 1));
 
     private final int networkId;
@@ -61,7 +62,7 @@ public enum LumberjackInventoryPreset {
     public static Map<Item, Integer> createPlan(
             LumberjackInventoryPreset preset,
             boolean includeCharcoalMaterials,
-            boolean includePenMaterials
+            boolean includeShepherdSupplyMaterials
     ) {
         EnumMap<Item, Integer> plan = new EnumMap<>(Item.class);
         if (preset != null) {
@@ -70,8 +71,8 @@ public enum LumberjackInventoryPreset {
         if (includeCharcoalMaterials) {
             mergeMaximum(plan, Item.OAK_LOG, 16);
         }
-        if (includePenMaterials) {
-            mergeMaximum(plan, Item.OAK_FENCE, 20);
+        if (includeShepherdSupplyMaterials) {
+            mergeMaximum(plan, Item.OAK_FENCE, 8);
             mergeMaximum(plan, Item.OAK_FENCE_GATE, 1);
         }
         return Collections.unmodifiableMap(plan);
