@@ -4,12 +4,16 @@ import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.LumberjackGuardCraftingGoal;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.UnemployedLumberjackConversionHook;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.enums.BlockFace;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
@@ -18,8 +22,12 @@ import net.minecraft.item.Items;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.village.VillagerProfession;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.ServerWorldAccess;
 import org.slf4j.Logger;
@@ -101,7 +109,9 @@ public final class DeveloperSetupManager {
         private final ServerWorld world;
         private final BlockPos requestedOrigin;
         private final DeveloperSetupWorkflow workflow;
+        private final DeveloperV1BatchProgress v1Batch;
         private final Set<BlockPos> attemptedTreeSites = new HashSet<>();
+        private final Set<BlockPos> v1JobSites = new HashSet<>();
         private BlockPos setupOrigin;
         private BlockPos tablePos;
         private VillagerEntity villager;
@@ -114,22 +124,39 @@ public final class DeveloperSetupManager {
         private int generatedTrees;
         private DeveloperSetupStage reportedStage;
         private boolean terminalStatusSent;
+        private VillagerProfession expectedV1Profession;
+        private Block expectedV1JobBlock;
+        private BlockPos currentV1JobPos;
+        private BlockPos currentV1SpawnPos;
+        private int currentV1Ticks;
+        private String lastV1Failure;
+        private String v1FatalFailure;
 
         private SetupSession(ServerPlayerEntity player, DeveloperSetupRequest request) {
             this.playerId = player.getUuid();
             this.request = request;
             this.world = player.getServerWorld();
             this.requestedOrigin = player.getBlockPos().offset(player.getHorizontalFacing(), 4).toImmutable();
-            this.workflow = new DeveloperSetupWorkflow(
-                    request.setupType(),
-                    request.needsInfrastructure(),
-                    request.needsInventoryPopulation(),
-                    request.generateMatureTrees(),
-                    STAGE_TIMEOUT_TICKS
-            );
+            if (request.setupType() == DeveloperSetupType.V1_PROFESSION) {
+                this.v1Batch = new DeveloperV1BatchProgress(request.professionSelections());
+                this.workflow = null;
+            } else {
+                this.v1Batch = null;
+                this.workflow = new DeveloperSetupWorkflow(
+                        request.setupType(),
+                        request.needsInfrastructure(),
+                        request.needsInventoryPopulation(),
+                        request.generateMatureTrees(),
+                        STAGE_TIMEOUT_TICKS
+                );
+            }
         }
 
         private void tick(MinecraftServer server) {
+            if (v1Batch != null) {
+                tickV1Batch(server);
+                return;
+            }
             if (workflow.stage().isTerminal()) {
                 sendTerminalStatus(server);
                 return;
@@ -149,6 +176,185 @@ public final class DeveloperSetupManager {
             reportStage(server);
             if (workflow.stage().isTerminal()) {
                 sendTerminalStatus(server);
+            }
+        }
+
+        private void tickV1Batch(MinecraftServer server) {
+            if (v1FatalFailure != null || v1Batch.isComplete()) {
+                sendV1TerminalStatus(server);
+                return;
+            }
+            if (v1Batch.stage() == DeveloperV1BatchProgress.Stage.PREPARE_CURRENT) {
+                prepareCurrentV1(server);
+            } else {
+                waitForCurrentV1Profession(server);
+            }
+            if (v1FatalFailure != null || v1Batch.isComplete()) {
+                sendV1TerminalStatus(server);
+            }
+        }
+
+        private void prepareCurrentV1(MinecraftServer server) {
+            DeveloperProfession requestedProfession = v1Batch.currentProfession();
+            expectedV1Profession = resolveV1Profession(requestedProfession);
+            expectedV1JobBlock = resolveV1JobBlock(requestedProfession).orElse(null);
+            if (expectedV1Profession == null || expectedV1JobBlock == null) {
+                failCurrentV1(server, "No supported job-site mapping exists for " + requestedProfession.displayName() + ".");
+                return;
+            }
+
+            BlockPos gridAnchor = v1GridAnchor(requestedOrigin, v1Batch.currentNumber() - 1, v1Batch.total());
+            currentV1JobPos = findV1JobSite(world, gridAnchor, v1JobSites);
+            if (currentV1JobPos == null) {
+                failCurrentV1(server, "No safe job-site location was found for " + requestedProfession.displayName() + ".");
+                return;
+            }
+            if (!world.setBlockState(currentV1JobPos, stableV1JobBlockState(expectedV1JobBlock), Block.NOTIFY_ALL)) {
+                failCurrentV1(server, "Could not place the " + requestedProfession.displayName() + " job site.");
+                return;
+            }
+
+            currentV1SpawnPos = findSpawnBesideTable(world, currentV1JobPos);
+            if (currentV1SpawnPos == null) {
+                rollbackCurrentV1JobSite();
+                failCurrentV1(server, "No safe villager spawn position was found beside the "
+                        + requestedProfession.displayName() + " job site.");
+                return;
+            }
+            villager = spawnVillager(world, currentV1SpawnPos);
+            if (villager == null) {
+                rollbackCurrentV1JobSite();
+                failCurrentV1(server, "Could not spawn the " + requestedProfession.displayName() + " villager.");
+                return;
+            }
+            villager.setPersistent();
+            originalAiDisabled = villager.isAiDisabled();
+            if (originalAiDisabled) {
+                villager.setAiDisabled(false);
+            }
+            currentV1Ticks = 0;
+            v1JobSites.add(currentV1JobPos.toImmutable());
+            v1Batch.markPrepared();
+            sendV1Progress(server, "Waiting for " + requestedProfession.displayName() + " profession acquisition");
+        }
+
+        private void waitForCurrentV1Profession(MinecraftServer server) {
+            if (villager == null || !villager.isAlive()) {
+                failCurrentV1(server, v1Batch.currentProfession().displayName() + " villager was removed before pairing.");
+                return;
+            }
+            currentV1Ticks++;
+            restrainCurrentV1Villager();
+
+            VillagerProfession acquired = villager.getVillagerData().getProfession();
+            BlockPos claimedJobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                    .map(globalPos -> globalPos.pos())
+                    .orElse(null);
+            if (acquired == expectedV1Profession && currentV1JobPos.equals(claimedJobSite)) {
+                completeCurrentV1(server);
+                return;
+            }
+            if (acquired != VillagerProfession.NONE && acquired != expectedV1Profession) {
+                failCurrentV1(server, v1Batch.currentProfession().displayName()
+                        + " villager claimed a different profession (" + acquired + ").");
+                return;
+            }
+            if (currentV1Ticks >= STAGE_TIMEOUT_TICKS) {
+                failCurrentV1(server, "Timed out waiting for " + v1Batch.currentProfession().displayName()
+                        + " profession acquisition.");
+            }
+        }
+
+        private void restrainCurrentV1Villager() {
+            villager.setVelocity(Vec3d.ZERO);
+            if (currentV1SpawnPos != null
+                    && villager.squaredDistanceTo(Vec3d.ofCenter(currentV1SpawnPos)) > 9.0D) {
+                villager.refreshPositionAndAngles(
+                        currentV1SpawnPos.getX() + 0.5D,
+                        currentV1SpawnPos.getY(),
+                        currentV1SpawnPos.getZ() + 0.5D,
+                        villager.getYaw(),
+                        villager.getPitch());
+                villager.getNavigation().stop();
+            }
+        }
+
+        private void completeCurrentV1(MinecraftServer server) {
+            releaseCurrentV1Villager();
+            villager = null;
+            currentV1JobPos = null;
+            currentV1SpawnPos = null;
+            expectedV1Profession = null;
+            expectedV1JobBlock = null;
+            v1Batch.finishCurrent(true);
+            sendV1Progress(server, "Created V1 villagers");
+        }
+
+        private void failCurrentV1(MinecraftServer server, String message) {
+            lastV1Failure = message;
+            releaseCurrentV1Villager();
+            rollbackCurrentV1JobSite();
+            villager = null;
+            currentV1JobPos = null;
+            currentV1SpawnPos = null;
+            expectedV1Profession = null;
+            expectedV1JobBlock = null;
+            v1Batch.finishCurrent(false);
+            sendV1Progress(server, message + " Continuing batch");
+        }
+
+        private void releaseCurrentV1Villager() {
+            if (villager != null && villager.isAlive()) {
+                villager.setAiDisabled(false);
+                villager.getNavigation().stop();
+            }
+            v1Batch.markSubjectReleased();
+        }
+
+        private void rollbackCurrentV1JobSite() {
+            if (currentV1JobPos == null || expectedV1JobBlock == null) {
+                return;
+            }
+            if (world.getBlockState(currentV1JobPos).isOf(expectedV1JobBlock)
+                    && !isJobSiteClaimedByAnyVillager(world, currentV1JobPos)) {
+                world.removeBlock(currentV1JobPos, false);
+                v1JobSites.remove(currentV1JobPos);
+            }
+        }
+
+        private void sendV1Progress(MinecraftServer server, String detail) {
+            ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerId);
+            if (player == null) {
+                return;
+            }
+            int progress = 5 + (int) Math.floor(90.0D * v1Batch.processed() / Math.max(1, v1Batch.total()));
+            sendStatus(player,
+                    "Creating V1 villagers: " + v1Batch.processed() + " / " + v1Batch.total() + ". " + detail + ".",
+                    progress,
+                    false,
+                    false);
+        }
+
+        private void sendV1TerminalStatus(MinecraftServer server) {
+            if (terminalStatusSent) {
+                return;
+            }
+            terminalStatusSent = true;
+            ServerPlayerEntity player = server.getPlayerManager().getPlayer(playerId);
+            if (player == null) {
+                return;
+            }
+            if (v1FatalFailure != null) {
+                sendStatus(player, v1FatalFailure, 0, true, false);
+            } else if (v1Batch.failed() == 0) {
+                sendStatus(player, "Created " + v1Batch.successful() + " V1 villagers.", 100, true, true);
+            } else {
+                sendStatus(player,
+                        "Created " + v1Batch.successful() + " of " + v1Batch.total()
+                                + " V1 villagers; " + v1Batch.failed() + " failed. Last failure: " + lastV1Failure,
+                        100,
+                        true,
+                        false);
             }
         }
 
@@ -346,19 +552,35 @@ public final class DeveloperSetupManager {
         }
 
         private void fail(String message) {
-            workflow.fail(message);
+            if (v1Batch != null) {
+                v1FatalFailure = message;
+                releaseCurrentV1Villager();
+                rollbackCurrentV1JobSite();
+            } else {
+                workflow.fail(message);
+            }
         }
 
         private void cancel() {
-            workflow.fail("Setup cancelled because the server is stopping.");
+            fail("Setup cancelled because the server is stopping.");
             cleanup();
         }
 
         private boolean isFinished() {
+            if (v1Batch != null) {
+                return (v1FatalFailure != null || v1Batch.isComplete()) && terminalStatusSent;
+            }
             return workflow.stage().isTerminal() && terminalStatusSent;
         }
 
         private void cleanup() {
+            if (v1Batch != null) {
+                releaseCurrentV1Villager();
+                if (v1FatalFailure != null) {
+                    rollbackCurrentV1JobSite();
+                }
+                return;
+            }
             if (workflow.subjectRestrained() && villager != null && villager.isAlive()) {
                 villager.setAiDisabled(originalAiDisabled);
                 villager.getNavigation().stop();
@@ -407,6 +629,89 @@ public final class DeveloperSetupManager {
                 world.removeBlock(createdFurnacePos, false);
             }
         }
+    }
+
+    static java.util.Optional<Block> resolveV1JobBlock(DeveloperProfession profession) {
+        VillagerProfession vanillaProfession = resolveV1Profession(profession);
+        if (vanillaProfession == null) {
+            return java.util.Optional.empty();
+        }
+        return ProfessionDefinitions.get(vanillaProfession)
+                .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst());
+    }
+
+    static VillagerProfession resolveV1Profession(DeveloperProfession profession) {
+        return switch (profession) {
+            case FARMER -> VillagerProfession.FARMER;
+            case FISHERMAN -> VillagerProfession.FISHERMAN;
+            case FLETCHER -> VillagerProfession.FLETCHER;
+            case SHEPHERD -> VillagerProfession.SHEPHERD;
+            case LIBRARIAN -> VillagerProfession.LIBRARIAN;
+            case CARTOGRAPHER -> VillagerProfession.CARTOGRAPHER;
+            case CLERIC -> VillagerProfession.CLERIC;
+            case ARMORER -> VillagerProfession.ARMORER;
+            case WEAPONSMITH -> VillagerProfession.WEAPONSMITH;
+            case TOOLSMITH -> VillagerProfession.TOOLSMITH;
+            case BUTCHER -> VillagerProfession.BUTCHER;
+            case LEATHERWORKER -> VillagerProfession.LEATHERWORKER;
+            case MASON -> VillagerProfession.MASON;
+            case LUMBERJACK -> null;
+        };
+    }
+
+    private static BlockState stableV1JobBlockState(Block block) {
+        BlockState state = block.getDefaultState();
+        if (block == Blocks.GRINDSTONE) {
+            return state.with(Properties.BLOCK_FACE, BlockFace.FLOOR);
+        }
+        return state;
+    }
+
+    private static BlockPos v1GridAnchor(BlockPos origin, int index, int total) {
+        DeveloperV1PlacementGrid.Offset offset = DeveloperV1PlacementGrid.offsetFor(index, total);
+        return origin.add(offset.x(), 0, offset.z());
+    }
+
+    private static BlockPos findV1JobSite(ServerWorld world, BlockPos anchor, Set<BlockPos> existingSites) {
+        for (int radius = 0; radius <= 2; radius++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (radius > 0 && Math.max(Math.abs(dx), Math.abs(dz)) != radius) {
+                        continue;
+                    }
+                    int x = anchor.getX() + dx;
+                    int z = anchor.getZ() + dz;
+                    int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
+                    BlockPos candidate = new BlockPos(x, y, z);
+                    if (!isSafeOpenPosition(world, candidate) || isTooCloseToV1JobSite(candidate, existingSites)) {
+                        continue;
+                    }
+                    return candidate.toImmutable();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isTooCloseToV1JobSite(BlockPos candidate, Set<BlockPos> existingSites) {
+        for (BlockPos existing : existingSites) {
+            int dx = candidate.getX() - existing.getX();
+            int dz = candidate.getZ() - existing.getZ();
+            if (dx * dx + dz * dz < 25) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isJobSiteClaimedByAnyVillager(ServerWorld world, BlockPos jobPos) {
+        return !world.getEntitiesByClass(
+                VillagerEntity.class,
+                new Box(jobPos).expand(32.0D),
+                candidate -> candidate.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
+                        .map(globalPos -> globalPos.pos().equals(jobPos))
+                        .orElse(false)
+        ).isEmpty();
     }
 
     private static InfrastructureSite findFurnaceSite(ServerWorld world, BlockPos tablePos, BlockPos chestPos) {
