@@ -36,8 +36,9 @@ class DeveloperV1BatchProgressTest {
         assertEquals(DeveloperProfession.v1Professions().size(), progress.total());
         assertEquals(DeveloperV1PlacementGrid.MAX_CONCURRENT, progress.pending());
         assertEquals(progress.pending(), assignments.pendingCount());
-        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.x()) <= 12));
-        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.z()) <= 12));
+        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.x()) <= 6));
+        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.z()) <= 6));
+        assertEquals(4, progress.tasks().get(1).gridSlot().x() - progress.tasks().get(0).gridSlot().x());
         for (DeveloperV1PlacementGrid.Offset first : plannedPositions) {
             for (DeveloperV1PlacementGrid.Offset second : plannedPositions) {
                 if (first.equals(second)) {
@@ -45,7 +46,7 @@ class DeveloperV1BatchProgressTest {
                 }
                 int dx = first.x() - second.x();
                 int dz = first.z() - second.z();
-                assertTrue(dx * dx + dz * dz >= 8 * 8);
+                assertTrue(dx * dx + dz * dz >= 4 * 4);
             }
         }
     }
@@ -79,7 +80,7 @@ class DeveloperV1BatchProgressTest {
         }
 
         DeveloperV1BatchProgress.Task timedOut = firstWindow.get(1);
-        assertTrue(assignments.rollback(timedOut.index()));
+        assertTrue(assignments.markUnresolved(timedOut.index()));
         progress.finish(timedOut.index(), false);
         assertTrue(progress.canStart(3));
 
@@ -105,8 +106,8 @@ class DeveloperV1BatchProgressTest {
 
         assertEquals(64, progress.total());
         assertEquals(64, progress.tasks().stream().map(DeveloperV1BatchProgress.Task::gridSlot).distinct().count());
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 12));
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 60));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 6));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 30));
 
         while (!progress.isComplete()) {
             while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
@@ -132,6 +133,45 @@ class DeveloperV1BatchProgressTest {
         assertFalse(assignments.reserve(progress.tasks().get(0), completed.gridSlot()));
         assertEquals(1, assignments.completedCount());
         assertEquals(2, assignments.pendingCount());
+    }
+
+    @Test
+    void timedOutPairPreservesBothVillagerAndWorkstationForInspection() {
+        DeveloperV1BatchProgress progress = progress(2);
+        DeveloperV1JobSiteAssignments<DeveloperV1PlacementGrid.Offset> assignments = startAll(progress);
+        DeveloperV1BatchProgress.Task timedOut = progress.tasks().get(1);
+
+        assertTrue(assignments.markUnresolved(timedOut.index()));
+        progress.finish(timedOut.index(), false);
+
+        DeveloperV1JobSiteAssignments.Assignment<DeveloperV1PlacementGrid.Offset> unresolved =
+                assignments.unresolvedAssignments().iterator().next();
+        assertEquals(timedOut.gridSlot(), unresolved.position());
+        assertEquals(villagerId(timedOut.index()), unresolved.villagerId());
+        assertTrue(assignments.reservedPositions().contains(timedOut.gridSlot()));
+        assertFalse(assignments.rollback(timedOut.index()));
+        assertEquals(1, assignments.unresolvedCount());
+    }
+
+    @Test
+    void anotherTasksTimeoutCannotDeleteCompletedOrPendingWorkstations() {
+        DeveloperV1BatchProgress progress = progress(3);
+        DeveloperV1JobSiteAssignments<DeveloperV1PlacementGrid.Offset> assignments = startAll(progress);
+        DeveloperV1BatchProgress.Task completed = progress.tasks().get(0);
+        DeveloperV1BatchProgress.Task timedOut = progress.tasks().get(1);
+        DeveloperV1BatchProgress.Task stillPending = progress.tasks().get(2);
+
+        complete(progress, assignments, completed.index());
+        assertTrue(assignments.markUnresolved(timedOut.index()));
+        progress.finish(timedOut.index(), false);
+
+        assertFalse(assignments.rollback(completed.index()));
+        assertTrue(assignments.reservedPositions().contains(completed.gridSlot()));
+        assertTrue(assignments.reservedPositions().contains(timedOut.gridSlot()));
+        assertTrue(assignments.reservedPositions().contains(stillPending.gridSlot()));
+        assertEquals(1, assignments.completedCount());
+        assertEquals(1, assignments.unresolvedCount());
+        assertEquals(1, assignments.pendingCount());
     }
 
     @Test

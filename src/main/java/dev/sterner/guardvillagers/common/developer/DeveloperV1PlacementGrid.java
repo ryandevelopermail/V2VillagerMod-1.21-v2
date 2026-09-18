@@ -5,7 +5,7 @@ final class DeveloperV1PlacementGrid {
     static final int MAX_CONCURRENT = 4;
     static final int VANILLA_JOB_SITE_SEARCH_RADIUS = 48;
     private static final int MAX_COLUMNS = 4;
-    private static final int SPACING = 8;
+    private static final int SPACING = 4;
 
     private DeveloperV1PlacementGrid() {
     }
