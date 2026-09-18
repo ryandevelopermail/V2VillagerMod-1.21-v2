@@ -1,15 +1,14 @@
 package dev.sterner.guardvillagers.common.developer;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 /** Pure rolling-window batch state used by the concurrent V1 server executor and focused tests. */
 final class DeveloperV1BatchProgress {
     private final List<Task> tasks;
-    private final Set<Integer> unstartedTaskIndexes = new LinkedHashSet<>();
-    private final Set<Integer> pendingTaskIndexes = new LinkedHashSet<>();
+    private final boolean[] pendingTasks;
+    private int nextTaskIndex;
+    private int pending;
     private int successful;
     private int failed;
 
@@ -25,35 +24,35 @@ final class DeveloperV1BatchProgress {
             plannedTasks.add(new Task(
                     index,
                     expanded.get(index),
-                    DeveloperV1PlacementGrid.offsetFor(index, expanded.size()),
-                    DeveloperV1PlacementGrid.laneFor(index)));
-            unstartedTaskIndexes.add(index);
+                    DeveloperV1PlacementGrid.offsetFor(index, expanded.size())));
         }
         this.tasks = List.copyOf(plannedTasks);
+        this.pendingTasks = new boolean[tasks.size()];
     }
 
     boolean canStart(int maxPending) {
         if (maxPending < 1) {
             throw new IllegalArgumentException("V1 pending capacity must be positive.");
         }
-        return pendingTaskIndexes.size() < maxPending && nextAvailableTaskIndex() >= 0;
+        return pending < maxPending && nextTaskIndex < tasks.size();
     }
 
     Task startNext() {
-        int taskIndex = nextAvailableTaskIndex();
-        if (taskIndex < 0) {
-            throw new IllegalStateException("No V1 task can start until a pending lane is released.");
+        if (nextTaskIndex >= tasks.size()) {
+            throw new IllegalStateException("Every V1 task has already started.");
         }
-        unstartedTaskIndexes.remove(taskIndex);
-        Task task = tasks.get(taskIndex);
-        pendingTaskIndexes.add(task.index());
+        Task task = tasks.get(nextTaskIndex++);
+        pendingTasks[task.index()] = true;
+        pending++;
         return task;
     }
 
     void finish(int taskIndex, boolean success) {
-        if (!pendingTaskIndexes.remove(taskIndex)) {
+        if (taskIndex < 0 || taskIndex >= pendingTasks.length || !pendingTasks[taskIndex]) {
             throw new IllegalStateException("V1 task " + taskIndex + " is not pending.");
         }
+        pendingTasks[taskIndex] = false;
+        pending--;
         if (success) {
             successful++;
         } else {
@@ -70,7 +69,7 @@ final class DeveloperV1BatchProgress {
     }
 
     int pending() {
-        return pendingTaskIndexes.size();
+        return pending;
     }
 
     int successful() {
@@ -89,24 +88,6 @@ final class DeveloperV1BatchProgress {
         return tasks;
     }
 
-    private int nextAvailableTaskIndex() {
-        for (int taskIndex : unstartedTaskIndexes) {
-            int lane = tasks.get(taskIndex).lane();
-            boolean laneOccupied = pendingTaskIndexes.stream()
-                    .map(tasks::get)
-                    .anyMatch(task -> task.lane() == lane);
-            if (!laneOccupied) {
-                return taskIndex;
-            }
-        }
-        return -1;
-    }
-
-    record Task(
-            int index,
-            DeveloperProfession profession,
-            DeveloperV1PlacementGrid.Offset gridSlot,
-            int lane
-    ) {
+    record Task(int index, DeveloperProfession profession, DeveloperV1PlacementGrid.Offset gridSlot) {
     }
 }

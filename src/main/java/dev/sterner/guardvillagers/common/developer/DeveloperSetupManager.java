@@ -46,7 +46,8 @@ public final class DeveloperSetupManager {
     public static final int REQUIRED_PERMISSION_LEVEL = 2;
     private static final int STAGE_TIMEOUT_TICKS = 20 * 20;
     private static final int V1_PAIR_TIMEOUT_TICKS = 20 * 30;
-    private static final int V1_MAX_PENDING = DeveloperV1PlacementGrid.CONCURRENT_LANES;
+    private static final int V1_MAX_PENDING = DeveloperV1PlacementGrid.MAX_CONCURRENT;
+    private static final int V1_ISOLATION_RADIUS = 2;
     private static final int CONVERSION_DELAY_TICKS = 10;
     private static final Map<UUID, SetupSession> SESSIONS = new HashMap<>();
 
@@ -249,7 +250,7 @@ public final class DeveloperSetupManager {
                 return;
             }
 
-            BlockPos spawnPos = findSpawnBesideTable(world, candidateJobPos);
+            BlockPos spawnPos = findV1SpawnInsideIsolation(world, candidateJobPos);
             if (spawnPos == null) {
                 rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1JobSites.rollback(task.index());
@@ -257,8 +258,17 @@ public final class DeveloperSetupManager {
                         + requestedProfession.displayName() + " job site.");
                 return;
             }
+            Set<BlockPos> isolationBlocks = placeV1IsolationBarriers(candidateJobPos);
+            if (isolationBlocks == null) {
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                v1JobSites.rollback(task.index());
+                failV1TaskBeforeSpawn(task, "Could not isolate the " + requestedProfession.displayName()
+                        + " villager from other pending workstations.");
+                return;
+            }
             VillagerEntity pendingVillager = spawnVillager(world, spawnPos);
             if (pendingVillager == null) {
+                removeV1IsolationBarriers(isolationBlocks);
                 rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1JobSites.rollback(task.index());
                 failV1TaskBeforeSpawn(task, "Could not spawn the " + requestedProfession.displayName() + " villager.");
@@ -272,6 +282,7 @@ public final class DeveloperSetupManager {
             if (!v1JobSites.attachVillager(task.index(), pendingVillager.getUuid())) {
                 pendingVillager.setAiDisabled(pendingOriginalAiDisabled);
                 pendingVillager.discard();
+                removeV1IsolationBarriers(isolationBlocks);
                 rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1JobSites.rollback(task.index());
                 v1FatalFailure = "V1 villager ownership collision for task " + (task.index() + 1) + ".";
@@ -284,6 +295,7 @@ public final class DeveloperSetupManager {
                     expectedJobBlock,
                     candidateJobPos,
                     spawnPos,
+                    isolationBlocks,
                     pendingOriginalAiDisabled));
         }
 
@@ -303,6 +315,13 @@ public final class DeveloperSetupManager {
                 }
 
                 restrainPendingV1Villager(pair, pendingVillager);
+                if (!areV1IsolationBarriersIntact(pair.isolationBlocks)) {
+                    failPendingV1Pair(pair,
+                            pair.task.profession().displayName() + " isolation barrier was removed before pairing.");
+                    iterator.remove();
+                    changed = true;
+                    continue;
+                }
                 if (!world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock)) {
                     failPendingV1Pair(pair,
                             pair.task.profession().displayName() + " workstation was removed before pairing.");
@@ -321,6 +340,7 @@ public final class DeveloperSetupManager {
                                 + (pair.task.index() + 1) + ".";
                         break;
                     }
+                    removeV1IsolationBarriers(pair.isolationBlocks);
                     releasePendingV1Villager(pair, pendingVillager);
                     v1Batch.finish(pair.task.index(), true);
                     iterator.remove();
@@ -374,6 +394,7 @@ public final class DeveloperSetupManager {
             VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
                     ? found
                     : null;
+            removeV1IsolationBarriers(pair.isolationBlocks);
             releasePendingV1Villager(pair, pendingVillager);
             rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
             v1JobSites.rollback(pair.task.index());
@@ -394,6 +415,48 @@ public final class DeveloperSetupManager {
             if (world.getBlockState(jobPos).isOf(expectedJobBlock)
                     && !isJobSiteClaimedByAnyVillager(world, jobPos)) {
                 world.removeBlock(jobPos, false);
+            }
+        }
+
+        private Set<BlockPos> placeV1IsolationBarriers(BlockPos jobPos) {
+            Set<BlockPos> barrierPositions = new HashSet<>();
+            for (int dx = -V1_ISOLATION_RADIUS; dx <= V1_ISOLATION_RADIUS; dx++) {
+                for (int dz = -V1_ISOLATION_RADIUS; dz <= V1_ISOLATION_RADIUS; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != V1_ISOLATION_RADIUS) {
+                        continue;
+                    }
+                    BlockPos base = jobPos.add(dx, 0, dz);
+                    if (!world.getWorldBorder().contains(base)
+                            || !world.getWorldBorder().contains(base.up())
+                            || !world.getBlockState(base).isAir()
+                            || !world.getBlockState(base.up()).isAir()
+                            || !world.getBlockState(base.down()).isSolidBlock(world, base.down())) {
+                        return null;
+                    }
+                    barrierPositions.add(base.toImmutable());
+                    barrierPositions.add(base.up().toImmutable());
+                }
+            }
+            Set<BlockPos> placed = new HashSet<>();
+            for (BlockPos barrierPos : barrierPositions) {
+                if (!world.setBlockState(barrierPos, Blocks.BARRIER.getDefaultState(), Block.NOTIFY_ALL)) {
+                    removeV1IsolationBarriers(placed);
+                    return null;
+                }
+                placed.add(barrierPos);
+            }
+            return Set.copyOf(placed);
+        }
+
+        private boolean areV1IsolationBarriersIntact(Set<BlockPos> barrierPositions) {
+            return barrierPositions.stream().allMatch(pos -> world.getBlockState(pos).isOf(Blocks.BARRIER));
+        }
+
+        private void removeV1IsolationBarriers(Set<BlockPos> barrierPositions) {
+            for (BlockPos barrierPos : barrierPositions) {
+                if (world.getBlockState(barrierPos).isOf(Blocks.BARRIER)) {
+                    world.removeBlock(barrierPos, false);
+                }
             }
         }
 
@@ -703,6 +766,7 @@ public final class DeveloperSetupManager {
                         ? found
                         : null;
                 releasePendingV1Villager(pair, pendingVillager);
+                removeV1IsolationBarriers(pair.isolationBlocks);
                 rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
                 v1JobSites.rollback(pair.task.index());
             }
@@ -749,6 +813,7 @@ public final class DeveloperSetupManager {
             private final Block expectedJobBlock;
             private final BlockPos jobPos;
             private final BlockPos spawnPos;
+            private final Set<BlockPos> isolationBlocks;
             private final boolean originalAiDisabled;
             private int elapsedTicks;
 
@@ -759,6 +824,7 @@ public final class DeveloperSetupManager {
                     Block expectedJobBlock,
                     BlockPos jobPos,
                     BlockPos spawnPos,
+                    Set<BlockPos> isolationBlocks,
                     boolean originalAiDisabled
             ) {
                 this.task = task;
@@ -767,6 +833,7 @@ public final class DeveloperSetupManager {
                 this.expectedJobBlock = expectedJobBlock;
                 this.jobPos = jobPos;
                 this.spawnPos = spawnPos;
+                this.isolationBlocks = isolationBlocks;
                 this.originalAiDisabled = originalAiDisabled;
             }
         }
@@ -819,7 +886,9 @@ public final class DeveloperSetupManager {
                     int z = anchor.getZ() + dz;
                     int y = world.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
                     BlockPos candidate = new BlockPos(x, y, z);
-                    if (!isSafeOpenPosition(world, candidate) || isTooCloseToV1JobSite(candidate, existingSites)) {
+                    if (!isSafeOpenPosition(world, candidate)
+                            || !canPlaceV1IsolationBarriers(world, candidate)
+                            || isTooCloseToV1JobSite(candidate, existingSites)) {
                         continue;
                     }
                     return candidate.toImmutable();
@@ -833,11 +902,30 @@ public final class DeveloperSetupManager {
         for (BlockPos existing : existingSites) {
             int dx = candidate.getX() - existing.getX();
             int dz = candidate.getZ() - existing.getZ();
-            if (dx * dx + dz * dz < 25) {
+            if (Math.max(Math.abs(dx), Math.abs(dz)) < V1_ISOLATION_RADIUS * 2 + 1) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean canPlaceV1IsolationBarriers(ServerWorld world, BlockPos jobPos) {
+        for (int dx = -V1_ISOLATION_RADIUS; dx <= V1_ISOLATION_RADIUS; dx++) {
+            for (int dz = -V1_ISOLATION_RADIUS; dz <= V1_ISOLATION_RADIUS; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) != V1_ISOLATION_RADIUS) {
+                    continue;
+                }
+                BlockPos base = jobPos.add(dx, 0, dz);
+                if (!world.getWorldBorder().contains(base)
+                        || !world.getWorldBorder().contains(base.up())
+                        || !world.getBlockState(base).isAir()
+                        || !world.getBlockState(base.up()).isAir()
+                        || !world.getBlockState(base.down()).isSolidBlock(world, base.down())) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean isJobSiteClaimedByAnyVillager(ServerWorld world, BlockPos jobPos) {
@@ -961,6 +1049,16 @@ public final class DeveloperSetupManager {
         for (Direction direction : Direction.Type.HORIZONTAL) {
             BlockPos candidate = tablePos.offset(direction, 2);
             if (isSafeOpenPosition(world, candidate) && candidate.isWithinDistance(tablePos, 3.0D)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private static BlockPos findV1SpawnInsideIsolation(ServerWorld world, BlockPos jobPos) {
+        for (Direction direction : Direction.Type.HORIZONTAL) {
+            BlockPos candidate = jobPos.offset(direction);
+            if (isSafeOpenPosition(world, candidate)) {
                 return candidate;
             }
         }

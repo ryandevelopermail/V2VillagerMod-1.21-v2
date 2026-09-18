@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeveloperV1BatchProgressTest {
     @Test
-    void allSupportedProfessionsCanBePlannedPendingTogetherWithIsolatedSites() {
+    void allSupportedProfessionsArePreplannedWithCompactUniqueSites() {
         List<DeveloperProfessionSelection> selections = DeveloperProfession.v1Professions().stream()
                 .map(profession -> new DeveloperProfessionSelection(profession, 1))
                 .toList();
@@ -26,7 +26,7 @@ class DeveloperV1BatchProgressTest {
             assertTrue(plannedPositions.add(task.gridSlot()));
         }
 
-        while (progress.canStart(progress.total())) {
+        while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
             DeveloperV1BatchProgress.Task task = progress.startNext();
             assertTrue(assignments.reserve(task, task.gridSlot()));
             assertTrue(assignments.attachVillager(task.index(), villagerId(task.index())));
@@ -34,17 +34,18 @@ class DeveloperV1BatchProgressTest {
 
         assertEquals(13, progress.total());
         assertEquals(DeveloperProfession.v1Professions().size(), progress.total());
-        assertEquals(DeveloperV1PlacementGrid.CONCURRENT_LANES, progress.pending());
+        assertEquals(DeveloperV1PlacementGrid.MAX_CONCURRENT, progress.pending());
         assertEquals(progress.pending(), assignments.pendingCount());
-        for (DeveloperV1PlacementGrid.Offset first : assignments.reservedPositions()) {
-            for (DeveloperV1PlacementGrid.Offset second : assignments.reservedPositions()) {
+        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.x()) <= 12));
+        assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.z()) <= 12));
+        for (DeveloperV1PlacementGrid.Offset first : plannedPositions) {
+            for (DeveloperV1PlacementGrid.Offset second : plannedPositions) {
                 if (first.equals(second)) {
                     continue;
                 }
                 int dx = first.x() - second.x();
                 int dz = first.z() - second.z();
-                assertTrue(dx * dx + dz * dz >= 64 * 64,
-                        "Concurrent sites must be farther apart than vanilla's 48-block POI scan.");
+                assertTrue(dx * dx + dz * dz >= 8 * 8);
             }
         }
     }
@@ -94,7 +95,7 @@ class DeveloperV1BatchProgressTest {
     }
 
     @Test
-    void rollingLaneSchedulerKeepsMaximumBatchCompactAndIsolated() {
+    void rollingSchedulerKeepsMaximumBatchCompact() {
         DeveloperV1BatchProgress progress = new DeveloperV1BatchProgress(List.of(
                 new DeveloperProfessionSelection(DeveloperProfession.FARMER, 16),
                 new DeveloperProfessionSelection(DeveloperProfession.FLETCHER, 16),
@@ -104,14 +105,14 @@ class DeveloperV1BatchProgressTest {
 
         assertEquals(64, progress.total());
         assertEquals(64, progress.tasks().stream().map(DeveloperV1BatchProgress.Task::gridSlot).distinct().count());
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 96));
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 45));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 12));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 60));
 
         while (!progress.isComplete()) {
-            while (progress.canStart(DeveloperV1PlacementGrid.CONCURRENT_LANES)) {
+            while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
                 active.add(progress.startNext());
             }
-            assertEquals(active.size(), active.stream().map(DeveloperV1BatchProgress.Task::lane).distinct().count());
+            assertTrue(active.size() <= DeveloperV1PlacementGrid.MAX_CONCURRENT);
             DeveloperV1BatchProgress.Task finished = active.remove(active.size() - 1);
             progress.finish(finished.index(), true);
         }
