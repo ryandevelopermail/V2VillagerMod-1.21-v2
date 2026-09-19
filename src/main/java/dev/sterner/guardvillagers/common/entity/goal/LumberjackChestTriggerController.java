@@ -45,8 +45,8 @@ public final class LumberjackChestTriggerController {
     private static final long RULE_COOLDOWN_TICKS = 40L;
     private static final long V2_AFTER_CHEST_DELAY_TICKS = 40L;
     private static final double VILLAGE_EXPANSION_SCAN_RADIUS = 300.0D;
-    private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 400L;
-    private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 120L;
+    private static final long VILLAGE_EXPANSION_SCAN_INTERVAL_TICKS = 100L;
+    private static final long VILLAGE_EXPANSION_SCAN_JITTER_TICKS = 20L;
     private static final double MIDPOINT_PAIRING_REFRESH_RADIUS = 32.0D;
     private static final long MIDPOINT_RETRY_MAX_DELAY_TICKS = 20L * 60L * 8L;
     private static final int MIDPOINT_RETRY_MAX_ATTEMPTS = 5;
@@ -182,19 +182,15 @@ public final class LumberjackChestTriggerController {
             }
         }
 
-        // Catch-up V2 pass: place crafting tables for CHEST_PAIRED villagers that already have
-        // a chest from a prior session but are still missing a crafting table (e.g. because
-        // the lumberjack ran out of wood during the paired pass). Only runs when no V1 chest
-        // backlog remains, preserving the original fallback behaviour.
-        if (!hasUnresolvedV1ChestDemand(world, guard)) {
-            while (actions < IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS) {
-                if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
-                    break;
-                }
-                guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
-                placedAny = true;
-                actions++;
+        // Catch-up V2 pass: a separate V1 candidate must not block a CHEST_PAIRED villager
+        // whose table materials and placement are ready.
+        while (actions < IMMEDIATE_UPGRADE_PASS_MAX_ACTIONS) {
+            if (!tryPlaceCraftingTableForEligibleV2Villager(context, true)) {
+                break;
             }
+            guard.recordTriggerAction(world.getTime(), "immediate_place_crafting_table_for_v2");
+            placedAny = true;
+            actions++;
         }
 
         return placedAny;
@@ -446,26 +442,9 @@ public final class LumberjackChestTriggerController {
         //
         // Profession priority: Toolsmith > Farmer > Mason > Cartographer > Weaponsmith >
         // Armorer > Cleric > Librarian > Fletcher > Butcher > Leatherworker > Shepherd > Fisherman.
-        for (VillagerEntity villager : collectNearbyVillagersForV2Placement(world, guard)) {
-            if (!isEligibleV1Villager(world, villager)) {
-                continue;
-            }
-            BlockPos jobPos = resolveVillagerJobSite(world, villager);
-            if (jobPos == null) {
-                continue;
-            }
-
-            // Check if this villager needs a chest.
-            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
-                    && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
-                return UpgradeDemand.v1Chest();
-            }
-
-            // Chest present — check if they need a crafting table.
-            if (isEligibleV2VillagerMissingCraftingTableQuery(world, villager)
-                    && findPlacementNearJobAndPairedChest(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
-                return UpgradeDemand.v2CraftingTable();
-            }
+        PromotionCandidate promotionCandidate = resolveNextPromotionCandidate(world, guard);
+        if (promotionCandidate != null) {
+            return promotionCandidate.demand();
         }
 
         // Cluster 5A: once all V1/V2 demands are satisfied, produce fences + gates for pen building.
@@ -478,6 +457,34 @@ public final class LumberjackChestTriggerController {
             }
         }
 
+        return null;
+    }
+
+    public static PromotionCandidate resolveNextPromotionCandidate(ServerWorld world, LumberjackGuardEntity guard) {
+        if (guard.getPairedChestPos() == null) {
+            return null;
+        }
+        for (VillagerEntity villager : collectNearbyVillagersForV2Placement(world, guard)) {
+            if (!isEligibleV1Villager(world, villager)) {
+                continue;
+            }
+            BlockPos jobPos = resolveVillagerJobSite(world, villager);
+            if (jobPos == null) {
+                continue;
+            }
+
+            // Check if this villager needs a chest.
+            if (JobBlockPairingHelper.findNearbyChest(world, jobPos, jobPos).isEmpty()
+                    && findPlacementNearJob(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
+                return new PromotionCandidate(villager.getUuid(), jobPos.toImmutable(), UpgradeDemand.v1Chest());
+            }
+
+            // Chest present — check if they need a crafting table.
+            if (isEligibleV2VillagerMissingCraftingTableQuery(world, villager)
+                    && findPlacementNearJobAndPairedChest(world, jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE) != null) {
+                return new PromotionCandidate(villager.getUuid(), jobPos.toImmutable(), UpgradeDemand.v2CraftingTable());
+            }
+        }
         return null;
     }
 
@@ -749,15 +756,19 @@ public final class LumberjackChestTriggerController {
     }
 
     private static void runVillageExpansionScan(ServerWorld world, LumberjackGuardEntity guard) {
-        runImmediateVillageUpgradePass(world, guard);
+        LumberjackGuardCraftingGoal.servicePromotionBacklog(world, guard, 4);
     }
 
     private static boolean tryPlaceChestForEligibleV1Villager(TriggerContext context) {
         if (context.guard().getPairedChestPos() == null) {
+            LOGGER.debug("Skip V1 chest placement: lumberjack {} has no paired supply chest",
+                    context.guard().getUuid());
             return false;
         }
 
         if (countByItem(context, Items.CHEST) <= 0 && countByItem(context, Items.TRAPPED_CHEST) <= 0) {
+            LOGGER.debug("Skip V1 chest placement: lumberjack {} has no chest item on hand",
+                    context.guard().getUuid());
             return false;
         }
 
@@ -772,6 +783,8 @@ public final class LumberjackChestTriggerController {
 
             BlockPos placePos = findPlacementNearJob(context.world(), jobPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
             if (placePos == null) {
+                LOGGER.debug("Skip V1 chest placement: villager={} jobPos={} has no valid placement within range",
+                        villager.getUuid(), jobPos.toShortString());
                 continue;
             }
 
@@ -792,6 +805,8 @@ public final class LumberjackChestTriggerController {
                 }
                 addToInventoryOrBuffer(context, new ItemStack(Items.TRAPPED_CHEST));
             }
+            LOGGER.debug("Skip V1 chest placement: villager={} jobPos={} placement failed",
+                    villager.getUuid(), jobPos.toShortString());
         }
 
         return false;
@@ -836,12 +851,6 @@ public final class LumberjackChestTriggerController {
     }
 
     private static boolean tryPlaceCraftingTableForEligibleV2Villager(TriggerContext context, boolean skipDelay) {
-        V2BlockReason v2BlockReason = resolveV2BlockReason(context.world(), context.guard());
-        if (v2BlockReason != null) {
-            LOGGER.debug("Skip V2 crafting table placement: {}", v2BlockReason.debugReason());
-            return false;
-        }
-
         Inventory pairedChestInventory = resolveChestInventory(context.world(), context.guard());
         Inventory contextInventory = context.chestInventory() == pairedChestInventory ? null : context.chestInventory();
         List<ItemStack> contextBuffer = context.guard().getGatheredStackBuffer();
@@ -1977,6 +1986,9 @@ public final class LumberjackChestTriggerController {
         public static UpgradeDemand v3FenceGate() {
             return new UpgradeDemand(Items.OAK_FENCE_GATE, 1, 2, 4);
         }
+    }
+
+    public record PromotionCandidate(UUID villagerId, BlockPos jobPos, UpgradeDemand demand) {
     }
 
     private record TriggerRule(String id, int priority, Predicate<TriggerContext> predicate, Predicate<TriggerContext> action) {

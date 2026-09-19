@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.UUID;
 
 import net.minecraft.util.math.Vec3d;
 import org.mockito.InOrder;
@@ -35,6 +36,66 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LumberjackGuardCraftingGoalTest {
+
+    @Test
+    void storedLogsCanSatisfyChestPromotionExactly() {
+        LumberjackGuardCraftingGoal.PromotionMaterialPlan plan = LumberjackGuardCraftingGoal.planPromotionMaterials(
+                2, 0, 0, 8, 0);
+
+        assertTrue(plan.canCraft());
+        assertEquals(2, plan.logsToConvert());
+    }
+
+    @Test
+    void gatheredLogCanSatisfyCraftingTablePromotion() {
+        LumberjackGuardCraftingGoal.PromotionMaterialPlan plan = LumberjackGuardCraftingGoal.planPromotionMaterials(
+                1, 0, 0, 4, 0);
+
+        assertTrue(plan.canCraft());
+        assertEquals(1, plan.logsToConvert());
+    }
+
+    @Test
+    void existingPlanksAvoidUnnecessaryLogConversion() {
+        LumberjackGuardCraftingGoal.PromotionMaterialPlan plan = LumberjackGuardCraftingGoal.planPromotionMaterials(
+                5, 8, 0, 8, 0);
+
+        assertTrue(plan.canCraft());
+        assertEquals(0, plan.logsToConvert());
+    }
+
+    @Test
+    void insufficientMaterialsDoNotStartPartialPromotionCraft() {
+        LumberjackGuardCraftingGoal.PromotionMaterialPlan plan = LumberjackGuardCraftingGoal.planPromotionMaterials(
+                1, 0, 0, 8, 0);
+
+        assertFalse(plan.canCraft());
+        assertEquals(2, plan.logsToConvert());
+    }
+
+    @Test
+    void twoLumberjacksCannotOwnTheSamePromotionRecipientAtOnce() {
+        UUID villager = UUID.randomUUID();
+        UUID firstGuard = UUID.randomUUID();
+        UUID secondGuard = UUID.randomUUID();
+
+        assertTrue(LumberjackGuardCraftingGoal.tryClaimPromotionRecipient(villager, firstGuard, 100L));
+        assertFalse(LumberjackGuardCraftingGoal.tryClaimPromotionRecipient(villager, secondGuard, 101L));
+        LumberjackGuardCraftingGoal.releasePromotionRecipient(villager, firstGuard);
+        assertTrue(LumberjackGuardCraftingGoal.tryClaimPromotionRecipient(villager, secondGuard, 102L));
+        LumberjackGuardCraftingGoal.releasePromotionRecipient(villager, secondGuard);
+    }
+
+    @Test
+    void expiredPromotionClaimCanBeRecoveredByAnotherLumberjack() {
+        UUID villager = UUID.randomUUID();
+        UUID firstGuard = UUID.randomUUID();
+        UUID secondGuard = UUID.randomUUID();
+
+        assertTrue(LumberjackGuardCraftingGoal.tryClaimPromotionRecipient(villager, firstGuard, 200L));
+        assertTrue(LumberjackGuardCraftingGoal.tryClaimPromotionRecipient(villager, secondGuard, 441L));
+        LumberjackGuardCraftingGoal.releasePromotionRecipient(villager, secondGuard);
+    }
 
     @Test
     void craftBootstrapChestAndAttemptPlacementIfNeeded_noChestAndEnoughPlanks_craftsChestAndAttemptsPlacement() {

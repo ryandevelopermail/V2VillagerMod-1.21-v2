@@ -33,6 +33,7 @@ class GuardVillagersConfigRangeValidationTest {
         GuardVillagersConfig.foresterBonemealScanRadius = 1;
         GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession = 0;
         GuardVillagersConfig.farmerBonemealScanRadius = 999;
+        GuardVillagersConfig.farmerFarmlandWorkRadius = 999;
 
         GuardVillagersConfig.validateClampedRanges();
 
@@ -61,5 +62,6 @@ class GuardVillagersConfigRangeValidationTest {
         assertEquals(GuardVillagersConfig.MIN_FORESTER_BONEMEAL_SCAN_RADIUS, GuardVillagersConfig.foresterBonemealScanRadius);
         assertEquals(GuardVillagersConfig.MIN_BONEMEAL_APPLICATIONS_PER_SESSION, GuardVillagersConfig.farmerBonemealMaxApplicationsPerSession);
         assertEquals(GuardVillagersConfig.MAX_FARMER_BONEMEAL_SCAN_RADIUS, GuardVillagersConfig.farmerBonemealScanRadius);
+        assertEquals(GuardVillagersConfig.MAX_FARMER_FARMLAND_WORK_RADIUS, GuardVillagersConfig.farmerFarmlandWorkRadius);
     }
 }

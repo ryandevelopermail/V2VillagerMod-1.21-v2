@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.compat.morevillagers;
 
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEnderian;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEngineer;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersFlorist;
@@ -51,21 +52,25 @@ public final class MoreVillagersBehaviorBridge {
         // Register all MoreVillagers job blocks as natural village POI anchors so the
         // Quartermaster bootstrap chest scan accepts chests placed near MV workstations.
         // Blocks.AIR is the sentinel returned by Registries.BLOCK.get() when an ID is missing.
-        String[] mvJobBlockIds = {
-            "woodworking_table",   // Forester / Woodworker
-            "oceanography_table",  // Oceanographer
-            "decayed_workbench",   // Netherian
-            "purpur_altar",        // Enderian
-            "blueprint_table",     // Engineer
-            "gardening_table",     // Florist
-            "hunting_post",        // Hunter
-            "mining_bench"         // Miner
+        String[][] mvProfessionJobBlockIds = {
+            {"woodworker", "woodworking_table"},
+            {"oceanographer", "oceanography_table"},
+            {"netherian", "decayed_workbench"},
+            {"enderian", "purpur_altar"},
+            {"engineer", "blueprint_table"},
+            {"florist", "gardening_table"},
+            {"hunter", "hunting_post"},
+            {"miner", "mining_bench"}
         };
-        for (String blockName : mvJobBlockIds) {
+        for (String[] mapping : mvProfessionJobBlockIds) {
+            String professionName = mapping[0];
+            String blockName = mapping[1];
             net.minecraft.util.Identifier blockId = net.minecraft.util.Identifier.of(MV_NAMESPACE, blockName);
             net.minecraft.block.Block block = net.minecraft.registry.Registries.BLOCK.get(blockId);
             if (block != net.minecraft.block.Blocks.AIR) {
                 QuartermasterGoal.registerNaturalVillageJobSiteBlock(block);
+                ProfessionDefinitions.registerExternalJobBlock(
+                        net.minecraft.util.Identifier.of(MV_NAMESPACE, professionName), block);
                 LOGGER.info("[morevillagers-compat] Registered QM bootstrap job site block '{}'.", blockId);
             } else {
                 LOGGER.warn("[morevillagers-compat] QM bootstrap: block '{}' not found in registry (skipped).", blockId);

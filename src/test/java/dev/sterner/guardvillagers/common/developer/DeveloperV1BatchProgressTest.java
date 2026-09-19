@@ -106,8 +106,8 @@ class DeveloperV1BatchProgressTest {
 
         assertEquals(64, progress.total());
         assertEquals(64, progress.tasks().stream().map(DeveloperV1BatchProgress.Task::gridSlot).distinct().count());
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 6));
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 30));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 14));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 14));
 
         while (!progress.isComplete()) {
             while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
