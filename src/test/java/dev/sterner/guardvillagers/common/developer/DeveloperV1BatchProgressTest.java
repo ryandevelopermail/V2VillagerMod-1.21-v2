@@ -15,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DeveloperV1BatchProgressTest {
     @Test
     void allSupportedProfessionsArePreplannedWithCompactUniqueSites() {
-        List<DeveloperProfessionSelection> selections = DeveloperProfession.v1Professions().stream()
+        List<DeveloperProfessionSelection> selections = DeveloperProfession.vanillaV1Professions().stream()
                 .map(profession -> new DeveloperProfessionSelection(profession, 1))
                 .toList();
         DeveloperV1BatchProgress progress = new DeveloperV1BatchProgress(selections);
@@ -33,7 +33,7 @@ class DeveloperV1BatchProgressTest {
         }
 
         assertEquals(13, progress.total());
-        assertEquals(DeveloperProfession.v1Professions().size(), progress.total());
+        assertEquals(DeveloperProfession.vanillaV1Professions().size(), progress.total());
         assertEquals(DeveloperV1PlacementGrid.MAX_CONCURRENT, progress.pending());
         assertEquals(progress.pending(), assignments.pendingCount());
         assertTrue(plannedPositions.stream().allMatch(position -> Math.abs(position.x()) <= 6));
@@ -106,8 +106,8 @@ class DeveloperV1BatchProgressTest {
 
         assertEquals(64, progress.total());
         assertEquals(64, progress.tasks().stream().map(DeveloperV1BatchProgress.Task::gridSlot).distinct().count());
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 6));
-        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 30));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().x()) <= 14));
+        assertTrue(progress.tasks().stream().allMatch(task -> Math.abs(task.gridSlot().z()) <= 14));
 
         while (!progress.isComplete()) {
             while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {

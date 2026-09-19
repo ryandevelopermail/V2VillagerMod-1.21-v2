@@ -1,12 +1,15 @@
 package dev.sterner.guardvillagers.common.developer;
 
+import dev.sterner.guardvillagers.compat.morevillagers.MoreVillagersBehaviorBridge;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeveloperProfessionCatalogTest {
     private static final Map<String, String> VANILLA_JOB_SITES = Map.ofEntries(
@@ -24,14 +27,59 @@ class DeveloperProfessionCatalogTest {
             Map.entry("minecraft:leatherworker", "minecraft:cauldron"),
             Map.entry("minecraft:mason", "minecraft:stonecutter"));
 
-    @Test
-    void everySelectableV1ProfessionHasTheExpectedVanillaJobSiteMapping() {
-        Set<String> selectableIds = DeveloperProfession.v1Professions().stream()
-                .map(profession -> profession.vanillaProfessionId().orElseThrow())
-                .collect(java.util.stream.Collectors.toSet());
+    private static final Map<String, String> MORE_VILLAGERS_JOB_SITES = Map.ofEntries(
+            Map.entry("morevillagers:oceanographer", "morevillagers:oceanography_table"),
+            Map.entry("morevillagers:netherian", "morevillagers:decayed_workbench"),
+            Map.entry("morevillagers:woodworker", "morevillagers:woodworking_table"),
+            Map.entry("morevillagers:enderian", "morevillagers:purpur_altar"),
+            Map.entry("morevillagers:engineer", "morevillagers:blueprint_table"),
+            Map.entry("morevillagers:florist", "morevillagers:gardening_table"),
+            Map.entry("morevillagers:hunter", "morevillagers:hunting_post"),
+            Map.entry("morevillagers:miner", "morevillagers:mining_bench"));
 
-        assertEquals(VANILLA_JOB_SITES.keySet(), selectableIds);
-        assertEquals(13, VANILLA_JOB_SITES.values().stream().distinct().count());
-        assertFalse(DeveloperProfession.LUMBERJACK.supportsVanillaV1());
+    @Test
+    void everySelectableVanillaProfessionKeepsItsExpectedJobSiteMapping() {
+        assertEquals(VANILLA_JOB_SITES, mappings(DeveloperProfession.vanillaV1Professions()));
+        assertEquals(13, DeveloperProfession.vanillaV1Professions().size());
+        assertFalse(DeveloperProfession.LUMBERJACK.supportsV1());
+    }
+
+    @Test
+    void allEightMoreVillagersProfessionsAppearOnlyWhenModIsAvailable() {
+        assertEquals(Set.copyOf(DeveloperProfession.vanillaV1Professions()),
+                Set.copyOf(DeveloperProfession.v1Professions(false)));
+        assertTrue(DeveloperProfession.v1Professions(false).stream()
+                .noneMatch(DeveloperProfession::requiresMoreVillagers));
+
+        assertEquals(8, DeveloperProfession.moreVillagersV1Professions().size());
+        assertTrue(DeveloperProfession.v1Professions(true)
+                .containsAll(DeveloperProfession.moreVillagersV1Professions()));
+        assertEquals(21, DeveloperProfession.v1Professions(true).size());
+    }
+
+    @Test
+    void moreVillagersMappingsMatchTheExistingCompatibilityBridge() {
+        Map<String, String> bridgeMappings = MoreVillagersBehaviorBridge.supportedProfessionJobBlocks()
+                .entrySet().stream()
+                .collect(Collectors.toUnmodifiableMap(
+                        entry -> "morevillagers:" + entry.getKey(),
+                        entry -> "morevillagers:" + entry.getValue()));
+        assertEquals(MORE_VILLAGERS_JOB_SITES, bridgeMappings);
+        assertEquals(bridgeMappings, mappings(DeveloperProfession.moreVillagersV1Professions()));
+    }
+
+    @Test
+    void foresterUsesWoodworkerInternalIds() {
+        assertTrue(DeveloperProfession.WOODWORKER.displayName().startsWith("Forester / Woodworker"));
+        assertEquals("morevillagers:woodworker",
+                DeveloperProfession.WOODWORKER.professionId().orElseThrow());
+        assertEquals("morevillagers:woodworking_table",
+                DeveloperProfession.WOODWORKER.jobBlockId().orElseThrow());
+    }
+
+    private static Map<String, String> mappings(java.util.List<DeveloperProfession> professions) {
+        return professions.stream().collect(Collectors.toUnmodifiableMap(
+                profession -> profession.professionId().orElseThrow(),
+                profession -> profession.jobBlockId().orElseThrow()));
     }
 }

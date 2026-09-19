@@ -15,12 +15,18 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import java.util.function.BooleanSupplier;
 
 public class LumberjackGuardCraftingGoal extends Goal {
+    private static final Logger LOGGER = LoggerFactory.getLogger(LumberjackGuardCraftingGoal.class);
     // Per-day cap for axe/tool-upgrade outputs (does not apply to V1 chest / V2 table promotion).
     private static final int DAILY_CRAFT_LIMIT = 4;
     // Higher per-day cap specifically for V1 chest and V2 crafting table promotion outputs.
@@ -28,6 +34,8 @@ public class LumberjackGuardCraftingGoal extends Goal {
     // would stretch promotion over many real-world MC days.
     private static final int DAILY_PROMOTION_CRAFT_LIMIT = 16;
     private static final int BOOTSTRAP_CHEST_PLANK_REQUIREMENT = 8;
+    private static final long PROMOTION_CLAIM_TTL_TICKS = 240L;
+    private static final Map<UUID, PromotionServiceClaim> PROMOTION_CLAIMS_BY_VILLAGER = new HashMap<>();
 
     private final LumberjackGuardEntity guard;
     private long lastCraftDay = -1L;
@@ -399,6 +407,161 @@ public class LumberjackGuardCraftingGoal extends Goal {
                                                                     Inventory chestInventory,
                                                                     LumberjackChestTriggerController.UpgradeDemand demand) {
         return craftSingleUpgradeDemandOutputIfPossible(guard.getGatheredStackBuffer(), chestInventory, demand);
+    }
+
+    /**
+     * Services only V1/V2 promotion demand without changing the Lumberjack's chop workflow.
+     * The caller supplies a small craft budget and invokes this on a coarse cadence.
+     */
+    public static PromotionServiceResult servicePromotionBacklog(ServerWorld world,
+                                                                  LumberjackGuardEntity guard,
+                                                                  int maxCrafts) {
+        if (!guard.isAlive() || guard.getPairedChestPos() == null) {
+            return new PromotionServiceResult(false, 0, 0);
+        }
+
+        Inventory chestInventory = resolveChestInventoryForGuard(world, guard);
+        boolean placedExistingOutput = LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, guard);
+        int crafted = 0;
+        int placedAfterCraft = 0;
+        int craftBudget = Math.max(1, maxCrafts);
+
+        while (crafted < craftBudget) {
+            LumberjackChestTriggerController.PromotionCandidate candidate =
+                    LumberjackChestTriggerController.resolveNextPromotionCandidate(world, guard);
+            if (candidate == null || !isPromotionDemand(candidate.demand())) {
+                break;
+            }
+            LumberjackChestTriggerController.UpgradeDemand demand = candidate.demand();
+            if (!tryClaimPromotionRecipient(candidate.villagerId(), guard.getUuid(), world.getTime())) {
+                LOGGER.debug("Lumberjack {} promotion candidate {} is owned by another service pass",
+                        guard.getUuidAsString(), candidate.villagerId());
+                break;
+            }
+
+            int outputOnHand = countByItemStatic(chestInventory, demand.outputItem())
+                    + countByItemStatic(guard.getGatheredStackBuffer(), demand.outputItem());
+            if (outputOnHand >= demand.outputCount()) {
+                LOGGER.debug("Lumberjack {} promotion blocked with output already on hand: item={} count={}",
+                        guard.getUuidAsString(), demand.outputItem(), outputOnHand);
+                break;
+            }
+
+            int convertedLogs = ensureUpgradeDemandCraftingSupplies(
+                    guard.getGatheredStackBuffer(), chestInventory, demand);
+            if (!craftSingleUpgradeDemandOutputIfPossible(guard, chestInventory, demand)) {
+                releasePromotionRecipient(candidate.villagerId(), guard.getUuid());
+                LOGGER.debug("Lumberjack {} promotion waiting for materials: item={} planksCost={} sticksCost={}",
+                        guard.getUuidAsString(), demand.outputItem(), demand.planksCost(), demand.stickCost());
+                break;
+            }
+            crafted++;
+            if (chestInventory != null) {
+                chestInventory.markDirty();
+            }
+            boolean placed = LumberjackChestTriggerController.runImmediateVillageUpgradePass(world, guard);
+            if (placed) {
+                placedAfterCraft++;
+                releasePromotionRecipient(candidate.villagerId(), guard.getUuid());
+            } else {
+                LOGGER.debug("Lumberjack {} crafted promotion output but no candidate accepted placement: item={} convertedLogs={}",
+                        guard.getUuidAsString(), demand.outputItem(), convertedLogs);
+                break;
+            }
+        }
+
+        return new PromotionServiceResult(placedExistingOutput, crafted, placedAfterCraft);
+    }
+
+    static synchronized boolean tryClaimPromotionRecipient(UUID villagerId, UUID guardId, long now) {
+        PromotionServiceClaim current = PROMOTION_CLAIMS_BY_VILLAGER.get(villagerId);
+        if (current != null && current.expiresAtTick() > now && !current.guardId().equals(guardId)) {
+            return false;
+        }
+        PROMOTION_CLAIMS_BY_VILLAGER.put(
+                villagerId,
+                new PromotionServiceClaim(guardId, now + PROMOTION_CLAIM_TTL_TICKS));
+        return true;
+    }
+
+    static synchronized void releasePromotionRecipient(UUID villagerId, UUID guardId) {
+        PromotionServiceClaim current = PROMOTION_CLAIMS_BY_VILLAGER.get(villagerId);
+        if (current != null && current.guardId().equals(guardId)) {
+            PROMOTION_CLAIMS_BY_VILLAGER.remove(villagerId);
+        }
+    }
+
+    static int ensureUpgradeDemandCraftingSupplies(List<ItemStack> gatheredStackBuffer,
+                                                   Inventory chestInventory,
+                                                   LumberjackChestTriggerController.UpgradeDemand demand) {
+        if (demand == null) {
+            return 0;
+        }
+        int availablePlanks = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.PLANKS))
+                + countMatchingStatic(gatheredStackBuffer, stack -> stack.isIn(ItemTags.PLANKS));
+        int availableLogs = countMatchingStatic(chestInventory, stack -> stack.isIn(ItemTags.LOGS))
+                + countMatchingStatic(gatheredStackBuffer, stack -> stack.isIn(ItemTags.LOGS));
+        int availableSticks = countByItemStatic(chestInventory, Items.STICK)
+                + countByItemStatic(gatheredStackBuffer, Items.STICK);
+        PromotionMaterialPlan materialPlan = planPromotionMaterials(
+                availableLogs, availablePlanks, availableSticks, demand);
+        if (!materialPlan.canCraft()) {
+            return 0;
+        }
+        int logsNeeded = materialPlan.logsToConvert();
+        if (logsNeeded <= 0) {
+            return 0;
+        }
+        if (!consumeMatchingStatic(chestInventory, gatheredStackBuffer,
+                stack -> stack.isIn(ItemTags.LOGS), logsNeeded)) {
+            return 0;
+        }
+        addToBufferStatic(gatheredStackBuffer, new ItemStack(Items.OAK_PLANKS, logsNeeded * 4));
+        if (chestInventory != null) {
+            chestInventory.markDirty();
+        }
+        return logsNeeded;
+    }
+
+    static PromotionMaterialPlan planPromotionMaterials(int availableLogs,
+                                                        int availablePlanks,
+                                                        int availableSticks,
+                                                        LumberjackChestTriggerController.UpgradeDemand demand) {
+        if (demand == null) {
+            return new PromotionMaterialPlan(false, 0);
+        }
+        return planPromotionMaterials(
+                availableLogs, availablePlanks, availableSticks, demand.planksCost(), demand.stickCost());
+    }
+
+    static PromotionMaterialPlan planPromotionMaterials(int availableLogs,
+                                                        int availablePlanks,
+                                                        int availableSticks,
+                                                        int planksCost,
+                                                        int sticksCost) {
+        if (availableSticks < sticksCost) {
+            return new PromotionMaterialPlan(false, 0);
+        }
+        int plankDeficit = Math.max(0, planksCost - availablePlanks);
+        int logsToConvert = (plankDeficit + 3) / 4;
+        return new PromotionMaterialPlan(availableLogs >= logsToConvert, logsToConvert);
+    }
+
+    static boolean isPromotionDemand(LumberjackChestTriggerController.UpgradeDemand demand) {
+        return LumberjackChestTriggerController.UpgradeDemand.v1Chest().equals(demand)
+                || LumberjackChestTriggerController.UpgradeDemand.v2CraftingTable().equals(demand);
+    }
+
+    public record PromotionServiceResult(boolean placedExistingOutput, int crafted, int placedAfterCraft) {
+        public boolean acted() {
+            return placedExistingOutput || crafted > 0 || placedAfterCraft > 0;
+        }
+    }
+
+    record PromotionMaterialPlan(boolean canCraft, int logsToConvert) {
+    }
+
+    private record PromotionServiceClaim(UUID guardId, long expiresAtTick) {
     }
 
     static boolean craftSingleUpgradeDemandOutputIfPossible(List<ItemStack> gatheredStackBuffer,

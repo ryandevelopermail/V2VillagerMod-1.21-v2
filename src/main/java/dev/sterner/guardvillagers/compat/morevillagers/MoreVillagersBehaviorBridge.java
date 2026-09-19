@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.compat.morevillagers;
 
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
+import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEnderian;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersEngineer;
 import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersFlorist;
@@ -13,6 +14,10 @@ import dev.sterner.guardvillagers.compat.morevillagers.behavior.MoreVillagersWoo
 import net.minecraft.util.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Registers GuardVillagers profession behaviors for MoreVillagers professions.
@@ -28,6 +33,15 @@ import org.slf4j.LoggerFactory;
 public final class MoreVillagersBehaviorBridge {
     private static final Logger LOGGER = LoggerFactory.getLogger(MoreVillagersBehaviorBridge.class);
     private static final String MV_NAMESPACE = "morevillagers";
+    private static final Map<String, String> PROFESSION_JOB_BLOCKS = Map.ofEntries(
+            Map.entry("woodworker", "woodworking_table"),
+            Map.entry("oceanographer", "oceanography_table"),
+            Map.entry("netherian", "decayed_workbench"),
+            Map.entry("enderian", "purpur_altar"),
+            Map.entry("engineer", "blueprint_table"),
+            Map.entry("florist", "gardening_table"),
+            Map.entry("hunter", "hunting_post"),
+            Map.entry("miner", "mining_bench"));
 
     private MoreVillagersBehaviorBridge() {
     }
@@ -51,26 +65,30 @@ public final class MoreVillagersBehaviorBridge {
         // Register all MoreVillagers job blocks as natural village POI anchors so the
         // Quartermaster bootstrap chest scan accepts chests placed near MV workstations.
         // Blocks.AIR is the sentinel returned by Registries.BLOCK.get() when an ID is missing.
-        String[] mvJobBlockIds = {
-            "woodworking_table",   // Forester / Woodworker
-            "oceanography_table",  // Oceanographer
-            "decayed_workbench",   // Netherian
-            "purpur_altar",        // Enderian
-            "blueprint_table",     // Engineer
-            "gardening_table",     // Florist
-            "hunting_post",        // Hunter
-            "mining_bench"         // Miner
-        };
-        for (String blockName : mvJobBlockIds) {
+        for (Map.Entry<String, String> mapping : PROFESSION_JOB_BLOCKS.entrySet()) {
+            String professionName = mapping.getKey();
+            String blockName = mapping.getValue();
             net.minecraft.util.Identifier blockId = net.minecraft.util.Identifier.of(MV_NAMESPACE, blockName);
             net.minecraft.block.Block block = net.minecraft.registry.Registries.BLOCK.get(blockId);
             if (block != net.minecraft.block.Blocks.AIR) {
                 QuartermasterGoal.registerNaturalVillageJobSiteBlock(block);
+                ProfessionDefinitions.registerExternalJobBlock(
+                        net.minecraft.util.Identifier.of(MV_NAMESPACE, professionName), block);
                 LOGGER.info("[morevillagers-compat] Registered QM bootstrap job site block '{}'.", blockId);
             } else {
                 LOGGER.warn("[morevillagers-compat] QM bootstrap: block '{}' not found in registry (skipped).", blockId);
             }
         }
+    }
+
+    public static Map<String, String> supportedProfessionJobBlocks() {
+        return PROFESSION_JOB_BLOCKS;
+    }
+
+    public static Set<String> supportedJobBlockIds() {
+        return PROFESSION_JOB_BLOCKS.values().stream()
+                .map(blockName -> MV_NAMESPACE + ":" + blockName)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static void registerProfession(String name, java.util.function.Supplier<dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior> factory) {

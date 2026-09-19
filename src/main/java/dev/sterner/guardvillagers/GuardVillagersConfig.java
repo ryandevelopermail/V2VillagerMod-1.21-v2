@@ -48,6 +48,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_FORESTER_BONEMEAL_SCAN_RADIUS = 96;
     public static final int MIN_FARMER_BONEMEAL_SCAN_RADIUS = 4;
     public static final int MAX_FARMER_BONEMEAL_SCAN_RADIUS = 96;
+    public static final int MIN_FARMER_FARMLAND_WORK_RADIUS = 8;
+    public static final int MAX_FARMER_FARMLAND_WORK_RADIUS = 64;
     public static final int MIN_BONEMEAL_APPLICATIONS_PER_SESSION = 1;
     public static final int MAX_BONEMEAL_APPLICATIONS_PER_SESSION = 128;
 
@@ -159,6 +161,8 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static int farmerWheatSeedReserveCap = 64;
     @Entry(min=0)
     public static int farmerWheatSeedBootstrapFloor = 0;
+    @Entry(min=8, max=64)
+    public static int farmerFarmlandWorkRadius = 32;
     @Entry
     public static boolean foresterBonemealEnabled = true;
     @Entry(min=1)
@@ -387,6 +391,10 @@ public class GuardVillagersConfig extends MidnightConfig {
         farmerAdaptiveThrottleDeferTicks = clamp(farmerAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         farmerAdaptiveThrottleJitterTicks = clamp(farmerAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
         farmerAdaptiveSummaryLogIntervalSessions = clamp(farmerAdaptiveSummaryLogIntervalSessions, MIN_PROFESSION_SUMMARY_LOG_INTERVAL, MAX_PROFESSION_SUMMARY_LOG_INTERVAL);
+        farmerFarmlandWorkRadius = clamp(
+                farmerFarmlandWorkRadius,
+                MIN_FARMER_FARMLAND_WORK_RADIUS,
+                MAX_FARMER_FARMLAND_WORK_RADIUS);
         weaponsmithAdaptiveThrottleLoadThreshold = clamp(weaponsmithAdaptiveThrottleLoadThreshold, MIN_PROFESSION_THROTTLE_THRESHOLD, MAX_PROFESSION_THROTTLE_THRESHOLD);
         weaponsmithAdaptiveThrottleDeferTicks = clamp(weaponsmithAdaptiveThrottleDeferTicks, MIN_PROFESSION_THROTTLE_DEFER_TICKS, MAX_PROFESSION_THROTTLE_DEFER_TICKS);
         weaponsmithAdaptiveThrottleJitterTicks = clamp(weaponsmithAdaptiveThrottleJitterTicks, MIN_PROFESSION_THROTTLE_JITTER_TICKS, MAX_PROFESSION_THROTTLE_JITTER_TICKS);
