@@ -98,6 +98,19 @@ public final class ProfessionDefinitions {
                 && EXTERNAL_JOB_BLOCKS_BY_PROFESSION.getOrDefault(professionId, Set.of()).contains(blockState.getBlock());
     }
 
+    /** Shared job-block knowledge for safety scans that are not tied to one villager profession. */
+    public static boolean isKnownJobBlock(BlockState blockState) {
+        if (blockState.isOf(Blocks.CRAFTING_TABLE)) {
+            return true;
+        }
+        Block block = blockState.getBlock();
+        if (DEFINITIONS.stream().anyMatch(definition -> definition.expectedJobBlocks().contains(block))) {
+            return true;
+        }
+        return EXTERNAL_JOB_BLOCKS_BY_PROFESSION.values().stream()
+                .anyMatch(jobBlocks -> jobBlocks.contains(block));
+    }
+
     /** Registers a soft-dependency profession/job-block pair for the shared V1→V2 path. */
     public static void registerExternalJobBlock(net.minecraft.util.Identifier professionId, Block jobBlock) {
         EXTERNAL_JOB_BLOCKS_BY_PROFESSION

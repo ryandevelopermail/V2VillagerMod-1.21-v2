@@ -15,6 +15,10 @@ import net.minecraft.util.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
 /**
  * Registers GuardVillagers profession behaviors for MoreVillagers professions.
  * <p>
@@ -29,6 +33,15 @@ import org.slf4j.LoggerFactory;
 public final class MoreVillagersBehaviorBridge {
     private static final Logger LOGGER = LoggerFactory.getLogger(MoreVillagersBehaviorBridge.class);
     private static final String MV_NAMESPACE = "morevillagers";
+    private static final Map<String, String> PROFESSION_JOB_BLOCKS = Map.ofEntries(
+            Map.entry("woodworker", "woodworking_table"),
+            Map.entry("oceanographer", "oceanography_table"),
+            Map.entry("netherian", "decayed_workbench"),
+            Map.entry("enderian", "purpur_altar"),
+            Map.entry("engineer", "blueprint_table"),
+            Map.entry("florist", "gardening_table"),
+            Map.entry("hunter", "hunting_post"),
+            Map.entry("miner", "mining_bench"));
 
     private MoreVillagersBehaviorBridge() {
     }
@@ -52,19 +65,9 @@ public final class MoreVillagersBehaviorBridge {
         // Register all MoreVillagers job blocks as natural village POI anchors so the
         // Quartermaster bootstrap chest scan accepts chests placed near MV workstations.
         // Blocks.AIR is the sentinel returned by Registries.BLOCK.get() when an ID is missing.
-        String[][] mvProfessionJobBlockIds = {
-            {"woodworker", "woodworking_table"},
-            {"oceanographer", "oceanography_table"},
-            {"netherian", "decayed_workbench"},
-            {"enderian", "purpur_altar"},
-            {"engineer", "blueprint_table"},
-            {"florist", "gardening_table"},
-            {"hunter", "hunting_post"},
-            {"miner", "mining_bench"}
-        };
-        for (String[] mapping : mvProfessionJobBlockIds) {
-            String professionName = mapping[0];
-            String blockName = mapping[1];
+        for (Map.Entry<String, String> mapping : PROFESSION_JOB_BLOCKS.entrySet()) {
+            String professionName = mapping.getKey();
+            String blockName = mapping.getValue();
             net.minecraft.util.Identifier blockId = net.minecraft.util.Identifier.of(MV_NAMESPACE, blockName);
             net.minecraft.block.Block block = net.minecraft.registry.Registries.BLOCK.get(blockId);
             if (block != net.minecraft.block.Blocks.AIR) {
@@ -76,6 +79,16 @@ public final class MoreVillagersBehaviorBridge {
                 LOGGER.warn("[morevillagers-compat] QM bootstrap: block '{}' not found in registry (skipped).", blockId);
             }
         }
+    }
+
+    public static Map<String, String> supportedProfessionJobBlocks() {
+        return PROFESSION_JOB_BLOCKS;
+    }
+
+    public static Set<String> supportedJobBlockIds() {
+        return PROFESSION_JOB_BLOCKS.values().stream()
+                .map(blockName -> MV_NAMESPACE + ":" + blockName)
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     private static void registerProfession(String name, java.util.function.Supplier<dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior> factory) {

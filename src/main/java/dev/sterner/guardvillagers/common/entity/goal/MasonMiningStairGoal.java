@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 
 public class MasonMiningStairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
@@ -58,6 +59,8 @@ public class MasonMiningStairGoal extends Goal {
     private static final int BOOTSTRAP_STAGING_RADIUS_MAX = 10;
     private static final int BOOTSTRAP_STAGING_MAX_ATTEMPTS = 48;
     private static final int WATER_BLACKLIST_MIN_RADIUS = 20;
+    static final int JOB_BLOCK_EXCLUSION_RADIUS = 5;
+    private static final int JOB_BLOCK_REVALIDATION_TICKS = 20;
     private final MasonGuardEntity guard;
     private Direction miningDirection;
     private BlockPos origin;
@@ -96,6 +99,8 @@ public class MasonMiningStairGoal extends Goal {
     private int adaptiveForcedRecoveryWindow;
     private int adaptiveSessionCount;
     private int bootstrapRetryCount;
+    private BlockPos exclusionValidatedTarget;
+    private long exclusionValidatedAtTick = Long.MIN_VALUE;
     private final List<ShaftBlacklistEntry> waterBailoutBlacklist = new ArrayList<>();
     private Stage stage = Stage.IDLE;
 
@@ -184,15 +189,22 @@ public class MasonMiningStairGoal extends Goal {
             this.rejoinDeepTarget = null;
         }
 
-        if (stepIndex == 0 && isBootstrapObstructedAtOrigin(world, origin, miningDirection)) {
+        BlockPos prospectiveStepTarget = computeStepTarget(origin, miningDirection, stepIndex);
+        boolean violatesJobBlockExclusion = isWithinJobBlockExclusionZone(world, origin)
+                || isWithinJobBlockExclusionZone(world, prospectiveStepTarget);
+        boolean bootstrapObstructed = stepIndex == 0
+                && isBootstrapObstructedAtOrigin(world, origin, miningDirection);
+        if (violatesJobBlockExclusion || bootstrapObstructed) {
             BlockPos stagingOrigin = findBootstrapStagingOrigin(world, origin, miningDirection);
             if (stagingOrigin == null) {
                 bootstrapRetryCount = 0;
-                LOGGER.warn("Mason guard {} mining bootstrap failed after {} staging attempts (origin={}, direction={}); deferring to normal workflow",
+                LOGGER.warn("Mason guard {} mining bootstrap failed after {} staging attempts (origin={}, direction={}, jobBlockExclusion={}); deferring to normal workflow",
                         guard.getUuidAsString(),
                         BOOTSTRAP_STAGING_MAX_ATTEMPTS,
                         origin == null ? "none" : origin.toShortString(),
-                        miningDirection);
+                        miningDirection,
+                        violatesJobBlockExclusion);
+                guard.clearMiningProgress();
                 return false;
             }
 
@@ -240,6 +252,8 @@ public class MasonMiningStairGoal extends Goal {
         this.placedSupportCount = 0;
         this.blockedByProtectedJobBlock = false;
         this.protectedBlockSkipPositions.clear();
+        this.exclusionValidatedTarget = null;
+        this.exclusionValidatedAtTick = Long.MIN_VALUE;
         return true;
     }
 
@@ -372,6 +386,11 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
+        if (!isExcavationTargetAllowed(world, rejoinStepTarget)) {
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
         if (!clearCurrentHeadBlock(world)) {
             beginReturn(ReturnReason.CANNOT_ADVANCE);
             return;
@@ -430,6 +449,11 @@ public class MasonMiningStairGoal extends Goal {
             activateMiningStage(world);
         }
 
+        if (!isExcavationTargetAllowed(world, currentStepTarget)) {
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
         if (shouldAbortForWaterHazard(world, currentStepTarget)) {
             return;
         }
@@ -484,7 +508,9 @@ public class MasonMiningStairGoal extends Goal {
                 return;
             }
             BlockPos nextStepTarget = computeStepTarget(stepIndex);
-            if (!repairStairTransitionIfNeeded(world, reachedStepPos, nextStepTarget) || !ensureStepClear(world, nextStepTarget)) {
+            if (!isExcavationTargetAllowed(world, nextStepTarget)
+                    || !repairStairTransitionIfNeeded(world, reachedStepPos, nextStepTarget)
+                    || !ensureStepClear(world, nextStepTarget)) {
                 beginReturn(ReturnReason.CANNOT_ADVANCE);
                 return;
             }
@@ -691,6 +717,16 @@ public class MasonMiningStairGoal extends Goal {
         if (state.getFluidState().isIn(FluidTags.WATER) || state.getFluidState().isIn(FluidTags.LAVA)) {
             return false;
         }
+        if ((stage == Stage.MINING || stage == Stage.REJOIN_LAST_STEP)
+                && isWithinJobBlockExclusionZone(world, pos)) {
+            blockedByProtectedJobBlock = true;
+            protectedBlockSkipPositions.add(pos.toImmutable());
+            LOGGER.info("Mason guard {} job-block-exclusion-skip pos={} radius={}",
+                    guard.getUuidAsString(),
+                    pos.toShortString(),
+                    JOB_BLOCK_EXCLUSION_RADIUS);
+            return false;
+        }
         if (isProtectedJobBlock(pos, state)) {
             blockedByProtectedJobBlock = true;
             protectedBlockSkipPositions.add(pos.toImmutable());
@@ -725,9 +761,96 @@ public class MasonMiningStairGoal extends Goal {
             return true;
         }
 
-        return Registries.VILLAGER_PROFESSION.stream()
-                .filter(ProfessionDefinitions::hasDefinition)
-                .anyMatch(profession -> ProfessionDefinitions.isExpectedJobBlock(profession, state));
+        return ProfessionDefinitions.isKnownJobBlock(state);
+    }
+
+    static boolean isWithinJobBlockExclusion(BlockPos excavationPos, BlockPos jobBlockPos) {
+        if (excavationPos == null || jobBlockPos == null) {
+            return false;
+        }
+        // The five-block boundary is protected inclusively.
+        return excavationPos.getSquaredDistance(jobBlockPos)
+                <= JOB_BLOCK_EXCLUSION_RADIUS * JOB_BLOCK_EXCLUSION_RADIUS;
+    }
+
+    static boolean isExcavationBlockedByJobBlock(
+            BlockPos excavationPos,
+            BlockPos blockPos,
+            boolean knownJobBlock
+    ) {
+        return knownJobBlock
+                && isWithinJobBlockExclusion(excavationPos, blockPos);
+    }
+
+    private boolean isWithinJobBlockExclusionZone(ServerWorld world, BlockPos excavationPos) {
+        if (excavationPos == null) {
+            return true;
+        }
+
+        int radius = JOB_BLOCK_EXCLUSION_RADIUS;
+        BlockPos pairedJobPos = guard.getPairedJobPos();
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    BlockPos scanPos = excavationPos.add(dx, dy, dz);
+                    if (!isWithinJobBlockExclusion(excavationPos, scanPos) || !world.isChunkLoaded(scanPos)) {
+                        continue;
+                    }
+                    BlockState scanState = world.getBlockState(scanPos);
+                    if (scanState.isAir()) {
+                        continue;
+                    }
+                    if ((pairedJobPos != null && pairedJobPos.equals(scanPos))
+                            || isExcavationBlockedByJobBlock(
+                            excavationPos, scanPos, ProfessionDefinitions.isKnownJobBlock(scanState))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isExcavationTargetAllowed(ServerWorld world, BlockPos target) {
+        long worldTime = world.getTime();
+        if (target != null
+                && target.equals(exclusionValidatedTarget)
+                && worldTime - exclusionValidatedAtTick < JOB_BLOCK_REVALIDATION_TICKS) {
+            return true;
+        }
+
+        exclusionValidatedTarget = target == null ? null : target.toImmutable();
+        exclusionValidatedAtTick = worldTime;
+        if (!isWithinJobBlockExclusionZone(world, target)) {
+            return true;
+        }
+
+        blockedByProtectedJobBlock = true;
+        LOGGER.info("Mason guard {} mining route rejected by job-block exclusion: target={} radius={}",
+                guard.getUuidAsString(),
+                target == null ? "none" : target.toShortString(),
+                JOB_BLOCK_EXCLUSION_RADIUS);
+        return false;
+    }
+
+    static BlockPos selectFirstAllowedMiningOrigin(
+            List<BlockPos> candidates,
+            Predicate<BlockPos> isAllowed,
+            int maxAttempts
+    ) {
+        if (candidates == null || isAllowed == null || maxAttempts <= 0) {
+            return null;
+        }
+        int attempts = 0;
+        for (BlockPos candidate : candidates) {
+            if (attempts++ >= maxAttempts) {
+                break;
+            }
+            if (candidate != null && isAllowed.test(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void collectNearbyDrops(ServerWorld world, BlockPos pos) {
@@ -810,18 +933,14 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         List<BlockPos> candidates = buildBootstrapCandidateOffsets(blockedOrigin);
-        bootstrapRetryCount = 0;
-        for (BlockPos candidate : candidates) {
-            if (bootstrapRetryCount >= BOOTSTRAP_STAGING_MAX_ATTEMPTS) {
-                break;
-            }
-            bootstrapRetryCount++;
-            if (!isCandidateValidStagingOrigin(world, candidate, direction)) {
-                continue;
-            }
-            return candidate;
-        }
-        return null;
+        BlockPos selected = selectFirstAllowedMiningOrigin(
+                candidates,
+                candidate -> isCandidateValidStagingOrigin(world, candidate, direction),
+                BOOTSTRAP_STAGING_MAX_ATTEMPTS);
+        bootstrapRetryCount = selected == null
+                ? Math.min(candidates.size(), BOOTSTRAP_STAGING_MAX_ATTEMPTS)
+                : candidates.indexOf(selected) + 1;
+        return selected;
     }
 
     private List<BlockPos> buildBootstrapCandidateOffsets(BlockPos blockedOrigin) {
@@ -843,6 +962,11 @@ public class MasonMiningStairGoal extends Goal {
         if (!world.isChunkLoaded(candidateOrigin)) {
             return false;
         }
+        BlockPos firstStep = computeStepTarget(candidateOrigin, direction, 0);
+        if (isWithinJobBlockExclusionZone(world, candidateOrigin)
+                || isWithinJobBlockExclusionZone(world, firstStep)) {
+            return false;
+        }
         if (!hasSafeSupport(world, candidateOrigin)) {
             return false;
         }
@@ -854,7 +978,6 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
 
-        BlockPos firstStep = computeStepTarget(candidateOrigin, direction, 0);
         Path preflight = guard.getNavigation().findPathTo(firstStep, 0);
         return preflight != null;
     }
@@ -1286,6 +1409,8 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryAttemptedForStep = false;
         this.blockedByProtectedJobBlock = false;
         this.protectedBlockSkipPositions.clear();
+        this.exclusionValidatedTarget = null;
+        this.exclusionValidatedAtTick = Long.MIN_VALUE;
     }
 
     private boolean clearGravitySensitiveColumns(ServerWorld world, BlockPos footTarget) {
@@ -1378,6 +1503,9 @@ public class MasonMiningStairGoal extends Goal {
 
         for (BlockPos candidate : candidates) {
             if (Math.abs(candidate.getY() - baseTarget.getY()) > 1) {
+                continue;
+            }
+            if (isWithinJobBlockExclusionZone(world, candidate)) {
                 continue;
             }
             if (!hasSafeSupport(world, candidate)) {

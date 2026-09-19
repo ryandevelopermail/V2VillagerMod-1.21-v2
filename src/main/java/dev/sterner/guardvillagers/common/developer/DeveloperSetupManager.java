@@ -19,10 +19,12 @@ import net.minecraft.inventory.Inventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
+import net.minecraft.registry.Registries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
@@ -850,12 +852,19 @@ public final class DeveloperSetupManager {
     }
 
     static java.util.Optional<Block> resolveV1JobBlock(DeveloperProfession profession) {
-        VillagerProfession vanillaProfession = resolveV1Profession(profession);
-        if (vanillaProfession == null) {
+        if (profession.supportsVanillaV1()) {
+            VillagerProfession vanillaProfession = resolveV1Profession(profession);
+            if (vanillaProfession == null) {
+                return java.util.Optional.empty();
+            }
+            return ProfessionDefinitions.get(vanillaProfession)
+                    .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst());
+        }
+        Identifier blockId = profession.jobBlockId().map(Identifier::tryParse).orElse(null);
+        if (blockId == null || !Registries.BLOCK.containsId(blockId)) {
             return java.util.Optional.empty();
         }
-        return ProfessionDefinitions.get(vanillaProfession)
-                .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst());
+        return java.util.Optional.of(Registries.BLOCK.get(blockId));
     }
 
     static VillagerProfession resolveV1Profession(DeveloperProfession profession) {
@@ -873,8 +882,18 @@ public final class DeveloperSetupManager {
             case BUTCHER -> VillagerProfession.BUTCHER;
             case LEATHERWORKER -> VillagerProfession.LEATHERWORKER;
             case MASON -> VillagerProfession.MASON;
+            case OCEANOGRAPHER, NETHERIAN, WOODWORKER, ENDERIAN, ENGINEER, FLORIST, HUNTER, MINER ->
+                    resolveRegisteredV1Profession(profession);
             case LUMBERJACK -> null;
         };
+    }
+
+    private static VillagerProfession resolveRegisteredV1Profession(DeveloperProfession profession) {
+        Identifier professionId = profession.professionId().map(Identifier::tryParse).orElse(null);
+        if (professionId == null || !Registries.VILLAGER_PROFESSION.containsId(professionId)) {
+            return null;
+        }
+        return Registries.VILLAGER_PROFESSION.get(professionId);
     }
 
     private static BlockState stableV1JobBlockState(Block block) {

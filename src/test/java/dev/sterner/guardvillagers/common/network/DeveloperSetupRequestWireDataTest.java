@@ -46,4 +46,25 @@ class DeveloperSetupRequestWireDataTest {
 
         assertTrue(data.decodeRequest().isEmpty());
     }
+
+    @Test
+    void moreVillagersEntriesRoundTripThroughExistingNetworkIds() {
+        DeveloperSetupRequest request = new DeveloperSetupRequest(
+                DeveloperSetupType.V1_PROFESSION,
+                List.of(
+                        new DeveloperProfessionSelection(DeveloperProfession.FARMER, 1),
+                        new DeveloperProfessionSelection(DeveloperProfession.OCEANOGRAPHER, 2),
+                        new DeveloperProfessionSelection(DeveloperProfession.WOODWORKER, 1)),
+                false, true, false, false,
+                LumberjackInventoryPreset.EMPTY_NATURAL,
+                false,
+                DeveloperSetupRequest.DEFAULT_TREE_COUNT);
+
+        DeveloperSetupRequest decoded = DeveloperSetupRequestWireData.fromRequest(request)
+                .decodeRequest()
+                .orElseThrow();
+
+        assertEquals(request, decoded);
+        assertEquals(4, decoded.totalV1Villagers());
+    }
 }
