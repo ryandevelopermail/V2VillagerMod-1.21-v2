@@ -13,6 +13,8 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.village.VillagerProfession;
 
 import java.util.List;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -47,6 +49,7 @@ public final class ProfessionDefinitions {
 
     private static final Map<VillagerProfession, ProfessionDefinition> DEFINITIONS_BY_PROFESSION = DEFINITIONS.stream()
             .collect(Collectors.toUnmodifiableMap(ProfessionDefinition::profession, definition -> definition));
+    private static final Map<net.minecraft.util.Identifier, Set<Block>> EXTERNAL_JOB_BLOCKS_BY_PROFESSION = new HashMap<>();
 
     private static boolean registered;
 
@@ -84,9 +87,35 @@ public final class ProfessionDefinitions {
             return blockState.isOf(Blocks.CRAFTING_TABLE);
         }
 
-        return get(profession)
+        boolean vanillaMatch = get(profession)
                 .map(definition -> definition.expectedJobBlocks().contains(blockState.getBlock()))
                 .orElse(false);
+        if (vanillaMatch) {
+            return true;
+        }
+        net.minecraft.util.Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
+        return professionId != null
+                && EXTERNAL_JOB_BLOCKS_BY_PROFESSION.getOrDefault(professionId, Set.of()).contains(blockState.getBlock());
+    }
+
+    /** Shared job-block knowledge for safety scans that are not tied to one villager profession. */
+    public static boolean isKnownJobBlock(BlockState blockState) {
+        if (blockState.isOf(Blocks.CRAFTING_TABLE)) {
+            return true;
+        }
+        Block block = blockState.getBlock();
+        if (DEFINITIONS.stream().anyMatch(definition -> definition.expectedJobBlocks().contains(block))) {
+            return true;
+        }
+        return EXTERNAL_JOB_BLOCKS_BY_PROFESSION.values().stream()
+                .anyMatch(jobBlocks -> jobBlocks.contains(block));
+    }
+
+    /** Registers a soft-dependency profession/job-block pair for the shared V1→V2 path. */
+    public static void registerExternalJobBlock(net.minecraft.util.Identifier professionId, Block jobBlock) {
+        EXTERNAL_JOB_BLOCKS_BY_PROFESSION
+                .computeIfAbsent(professionId, ignored -> new HashSet<>())
+                .add(jobBlock);
     }
 
     public static Optional<Block> resolveJobBlock(VillagerProfession profession, BlockState currentJobState) {
@@ -94,8 +123,15 @@ public final class ProfessionDefinitions {
             return Optional.of(currentJobState.getBlock());
         }
 
-        return get(profession)
+        Optional<Block> vanilla = get(profession)
                 .flatMap(definition -> definition.expectedJobBlocks().stream().findFirst());
+        if (vanilla.isPresent()) {
+            return vanilla;
+        }
+        net.minecraft.util.Identifier professionId = Registries.VILLAGER_PROFESSION.getId(profession);
+        return professionId == null
+                ? Optional.empty()
+                : EXTERNAL_JOB_BLOCKS_BY_PROFESSION.getOrDefault(professionId, Set.of()).stream().findFirst();
     }
 
     public static void runConversionHooks(ServerWorld world) {

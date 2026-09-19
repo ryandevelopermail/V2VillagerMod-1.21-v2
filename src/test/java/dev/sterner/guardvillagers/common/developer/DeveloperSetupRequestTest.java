@@ -32,7 +32,7 @@ class DeveloperSetupRequestTest {
 
     @Test
     void selectAllProducesOneValidEntryPerSupportedV1Profession() {
-        List<DeveloperProfessionSelection> selections = DeveloperProfession.v1Professions().stream()
+        List<DeveloperProfessionSelection> selections = DeveloperProfession.vanillaV1Professions().stream()
                 .map(profession -> selection(profession, DeveloperSetupRequest.DEFAULT_PROFESSION_QUANTITY))
                 .toList();
         DeveloperSetupRequest request = validV1(selections);
@@ -40,6 +40,30 @@ class DeveloperSetupRequestTest {
         assertEquals(13, selections.size());
         assertEquals(13, request.totalV1Villagers());
         assertTrue(request.validationError().isEmpty());
+    }
+
+    @Test
+    void selectAllIncludesMoreVillagersProfessionsWhenAvailable() {
+        List<DeveloperProfessionSelection> selections = DeveloperProfession.v1Professions(true).stream()
+                .map(profession -> selection(profession, DeveloperSetupRequest.DEFAULT_PROFESSION_QUANTITY))
+                .toList();
+        DeveloperSetupRequest request = validV1(selections);
+
+        assertEquals(21, selections.size());
+        assertEquals(21, request.totalV1Villagers());
+        assertTrue(request.validationError(true).isEmpty());
+    }
+
+    @Test
+    void mixedVanillaAndMoreVillagersBatchRequiresCompatibilityMod() {
+        DeveloperSetupRequest request = validV1(List.of(
+                selection(DeveloperProfession.FARMER, 2),
+                selection(DeveloperProfession.OCEANOGRAPHER, 1),
+                selection(DeveloperProfession.WOODWORKER, 3)));
+
+        assertEquals(6, request.totalV1Villagers());
+        assertTrue(request.validationError(true).isEmpty());
+        assertTrue(request.validationError(false).orElseThrow().contains("unsupported"));
     }
 
     @Test

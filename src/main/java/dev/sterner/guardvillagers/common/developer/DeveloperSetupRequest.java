@@ -31,6 +31,14 @@ public record DeveloperSetupRequest(
     }
 
     public Optional<String> validationError() {
+        return validationError(DeveloperProfession.v1Professions());
+    }
+
+    Optional<String> validationError(boolean moreVillagersLoaded) {
+        return validationError(DeveloperProfession.v1Professions(moreVillagersLoaded));
+    }
+
+    private Optional<String> validationError(List<DeveloperProfession> availableV1Professions) {
         if (setupType == null) {
             return Optional.of("Unknown setup type.");
         }
@@ -42,7 +50,7 @@ public record DeveloperSetupRequest(
         }
         Optional<String> modeError = switch (setupType) {
             case PLAIN_VILLAGER -> validatePlainMode();
-            case V1_PROFESSION -> validateV1Mode();
+            case V1_PROFESSION -> validateV1Mode(availableV1Professions);
             case V2_PROFESSION -> validateV2Mode();
         };
         if (modeError.isPresent()) {
@@ -64,11 +72,11 @@ public record DeveloperSetupRequest(
         return Optional.empty();
     }
 
-    private Optional<String> validateV1Mode() {
+    private Optional<String> validateV1Mode(List<DeveloperProfession> availableV1Professions) {
         if (professionSelections.isEmpty()) {
             return Optional.of("Select at least one V1 profession.");
         }
-        if (professionSelections.size() > DeveloperProfession.v1Professions().size()) {
+        if (professionSelections.size() > availableV1Professions.size()) {
             return Optional.of("Too many V1 profession entries.");
         }
         if (createPairedChest) {
@@ -84,7 +92,9 @@ public record DeveloperSetupRequest(
         Set<DeveloperProfession> seen = EnumSet.noneOf(DeveloperProfession.class);
         int total = 0;
         for (DeveloperProfessionSelection selection : professionSelections) {
-            if (selection == null || selection.profession() == null || !selection.profession().supportsVanillaV1()) {
+            if (selection == null
+                    || selection.profession() == null
+                    || !availableV1Professions.contains(selection.profession())) {
                 return Optional.of("Unknown or unsupported V1 profession.");
             }
             if (!seen.add(selection.profession())) {
@@ -129,7 +139,7 @@ public record DeveloperSetupRequest(
             return 0;
         }
         return professionSelections.stream()
-                .filter(selection -> selection != null && selection.profession() != null && selection.profession().supportsVanillaV1())
+                .filter(selection -> selection != null && selection.profession() != null && selection.profession().supportsV1())
                 .mapToInt(DeveloperProfessionSelection::quantity)
                 .sum();
     }
