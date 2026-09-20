@@ -301,10 +301,23 @@ public final class DeveloperSetupManager {
             }
             if (!v1JobSites.attachVillager(task.index(), pendingVillager.getUuid())) {
                 pendingVillager.setAiDisabled(pendingOriginalAiDisabled);
-                pendingVillager.discard();
                 removeV1IsolationBarriers(isolation.barrierPositions());
-                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
-                v1JobSites.rollback(task.index());
+                DeveloperV1JobSiteAssignments.AssignmentState failureState =
+                        v1JobSites.state(task.index());
+                if (failureState != null && failureState.rollbackEligible()) {
+                    pendingVillager.discard();
+                    rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
+                    v1JobSites.rollback(task.index());
+                } else {
+                    pendingVillager.getNavigation().stop();
+                    LOGGER.debug("V1 failed attachment preserved spawned villager task={} profession={} assignmentState={} workstationPosition={} villagerUuid={} reason=destructive_cleanup_not_allowed workstationPreserved={} villagerPreserved=true",
+                            task.index() + 1,
+                            task.profession().displayName(),
+                            failureState == null ? "missing" : failureState,
+                            candidateJobPos.toShortString(),
+                            pendingVillager.getUuid(),
+                            world.getBlockState(candidateJobPos).isOf(expectedJobBlock));
+                }
                 v1FatalFailure = "V1 villager ownership collision for task " + (task.index() + 1) + ".";
                 return;
             }
@@ -344,17 +357,21 @@ public final class DeveloperSetupManager {
                 }
                 if (!areV1IsolationBarriersIntact(pair.isolationBlocks)) {
                     failInvalidPendingV1Pair(pair,
-                            pair.task.profession().displayName() + " isolation barrier was removed before pairing.");
+                            "isolation_lost: temporary isolation barrier was removed before pairing.");
                     iterator.remove();
                     changed = true;
                     continue;
                 }
                 if (!world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock)) {
-                    failInvalidPendingV1Pair(pair,
-                            pair.task.profession().displayName() + " workstation was removed before pairing.");
-                    iterator.remove();
-                    changed = true;
-                    continue;
+                    if (restoreAttachedV1Workstation(pair, pendingVillager)) {
+                        changed = true;
+                    } else {
+                        failInvalidPendingV1Pair(pair,
+                                "workstation_missing: owned workstation could not be safely restored.");
+                        iterator.remove();
+                        changed = true;
+                        continue;
+                    }
                 }
 
                 VillagerProfession acquired = pendingVillager.getVillagerData().getProfession();
@@ -479,58 +496,70 @@ public final class DeveloperSetupManager {
             }
         }
 
+        private boolean restoreAttachedV1Workstation(PendingV1Pair pair, VillagerEntity pendingVillager) {
+            DeveloperV1JobSiteAssignments.AssignmentState state = v1JobSites.state(pair.task.index());
+            BlockState currentState = world.getBlockState(pair.jobPos);
+            boolean taskOwnsPosition = v1JobSites.isPending(pair.task.index(), pair.jobPos);
+            if (!DeveloperV1JobSiteAssignments.canRestoreAttachedWorkstation(
+                    state,
+                    taskOwnsPosition,
+                    isV1ReplaceableSpace(currentState))) {
+                logPreservedV1Pair(
+                        pair,
+                        pendingVillager,
+                        "workstation_restore_rejected",
+                        false,
+                        false);
+                return false;
+            }
+            boolean restored = world.setBlockState(
+                    pair.jobPos,
+                    stableV1JobBlockState(pair.expectedJobBlock),
+                    Block.NOTIFY_ALL);
+            logPreservedV1Pair(
+                    pair,
+                    pendingVillager,
+                    restored ? "workstation_restored" : "workstation_restore_failed",
+                    restored,
+                    restored);
+            return restored;
+        }
+
         private void failV1TaskBeforeSpawn(DeveloperV1BatchProgress.Task task, String message) {
             lastV1Failure = message;
             v1Batch.finish(task.index(), false);
         }
 
-        private void failInvalidPendingV1Pair(PendingV1Pair pair, String message) {
-            lastV1Failure = message;
+        private boolean failInvalidPendingV1Pair(PendingV1Pair pair, String reason) {
             VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
                     ? found
                     : null;
             removeV1IsolationBarriers(pair.isolationBlocks);
-            if (!v1JobSites.isPending(pair.task.index(), pair.jobPos)) {
-                releasePendingV1Villager(pair, pendingVillager);
-                logV1WorkstationLifecycle(
-                        pair.task,
-                        pair.jobPos,
-                        "failure_cleanup_skipped",
-                        "assignment_not_pending");
-                return;
+            boolean preserved = v1JobSites.markUnresolved(pair.task.index());
+            releasePendingV1Villager(pair, pendingVillager);
+            logPreservedV1Pair(
+                    pair,
+                    pendingVillager,
+                    reason,
+                    world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock),
+                    false);
+            if (!preserved) {
+                v1FatalFailure = "V1 attached pair could not transition to preserved unresolved state for task "
+                        + (pair.task.index() + 1) + "; physical pair was left untouched.";
+                return false;
             }
-            if (pendingVillager != null && pendingVillager.isAlive()) {
-                pendingVillager.discard();
-            }
-            rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
-            v1JobSites.rollback(pair.task.index());
+            lastV1Failure = reason;
             v1Batch.finish(pair.task.index(), false);
+            return true;
         }
 
         private boolean preserveTimedOutV1Pair(PendingV1Pair pair, String message) {
-            if (!v1JobSites.markUnresolved(pair.task.index())) {
-                v1FatalFailure = "V1 unresolved-pair ownership verification failed for task "
-                        + (pair.task.index() + 1) + ".";
-                return false;
-            }
-            logV1WorkstationLifecycle(
-                    pair.task,
-                    pair.jobPos,
-                    "assignment_marked_unresolved",
-                    pair.villagerId.toString());
-            lastV1Failure = message;
             LOGGER.debug("V1 pending pair preserved at timeout task={} expectedProfession={} expectedJobPos={} attempts={} timeoutPreserved=true",
                     pair.task.index() + 1,
                     pair.expectedProfession,
                     pair.jobPos.toShortString(),
                     pair.mismatchRecovery.recoveryAttempts());
-            VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
-                    ? found
-                    : null;
-            removeV1IsolationBarriers(pair.isolationBlocks);
-            releasePendingV1Villager(pair, pendingVillager);
-            v1Batch.finish(pair.task.index(), false);
-            return true;
+            return failInvalidPendingV1Pair(pair, "timeout: " + message);
         }
 
         private void releasePendingV1Villager(PendingV1Pair pair, VillagerEntity pendingVillager) {
@@ -593,6 +622,27 @@ public final class DeveloperSetupManager {
                     jobPos.toShortString(),
                     state == null ? "missing" : state,
                     detail);
+        }
+
+        private void logPreservedV1Pair(
+                PendingV1Pair pair,
+                VillagerEntity pendingVillager,
+                String reason,
+                boolean workstationPreserved,
+                boolean workstationRestored
+        ) {
+            DeveloperV1JobSiteAssignments.AssignmentState state = v1JobSites.state(pair.task.index());
+            boolean villagerPreserved = pendingVillager != null && pendingVillager.isAlive();
+            LOGGER.debug("V1 attached pair preserved task={} profession={} assignmentState={} workstationPosition={} villagerUuid={} reason={} workstationPreserved={} workstationRestored={} villagerPreserved={}",
+                    pair.task.index() + 1,
+                    pair.task.profession().displayName(),
+                    state == null ? "missing" : state,
+                    pair.jobPos.toShortString(),
+                    pair.villagerId,
+                    reason,
+                    workstationPreserved,
+                    workstationRestored,
+                    villagerPreserved);
         }
 
         private Set<Long> occupiedV1IsolationColumns() {
@@ -982,18 +1032,20 @@ public final class DeveloperSetupManager {
                 if (genuinelyPending) {
                     boolean preserved = v1JobSites.markUnresolved(pair.task.index());
                     releasePendingV1Villager(pair, pendingVillager);
-                    logV1WorkstationLifecycle(
-                            pair.task,
-                            pair.jobPos,
-                            preserved ? "session_cleanup_marked_unresolved" : "session_cleanup_preserved",
-                            preserved ? "fatal_session_cleanup" : "state_transition_rejected");
+                    logPreservedV1Pair(
+                            pair,
+                            pendingVillager,
+                            preserved ? "fatal_session_cleanup" : "fatal_session_cleanup_state_transition_rejected",
+                            world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock),
+                            false);
                 } else {
                     releasePendingV1Villager(pair, pendingVillager);
-                    logV1WorkstationLifecycle(
-                            pair.task,
-                            pair.jobPos,
-                            "session_cleanup_preserved",
-                            "assignment_not_pending");
+                    logPreservedV1Pair(
+                            pair,
+                            pendingVillager,
+                            "fatal_session_cleanup_assignment_not_pending",
+                            world.getBlockState(pair.jobPos).isOf(pair.expectedJobBlock),
+                            false);
                 }
             }
             pendingV1Pairs.clear();

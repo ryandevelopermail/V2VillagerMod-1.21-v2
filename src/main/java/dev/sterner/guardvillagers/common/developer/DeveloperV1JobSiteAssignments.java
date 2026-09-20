@@ -89,7 +89,12 @@ final class DeveloperV1JobSiteAssignments<P> {
     }
 
     boolean rollback(int taskIndex) {
-        return pendingByTask.remove(taskIndex) != null;
+        Assignment<P> pending = pendingByTask.get(taskIndex);
+        if (pending == null || !pending.state().rollbackEligible()) {
+            return false;
+        }
+        pendingByTask.remove(taskIndex);
+        return true;
     }
 
     boolean isPending(int taskIndex, P position) {
@@ -121,6 +126,9 @@ final class DeveloperV1JobSiteAssignments<P> {
         }
         if (pending.exactPairRecorded()) {
             return RollbackDecision.EXACT_PAIR_RECORDED;
+        }
+        if (pending.state() == AssignmentState.VILLAGER_ATTACHED) {
+            return RollbackDecision.ATTACHED_PAIR_PRESERVED;
         }
         if (!pending.state().workstationPlaced()) {
             return RollbackDecision.WORKSTATION_NOT_PLACED;
@@ -155,9 +163,20 @@ final class DeveloperV1JobSiteAssignments<P> {
     ) {
         return state != null
                 && state.rollbackEligible()
+                && state.workstationPlaced()
                 && !exactPairRecorded
                 && failingTaskOwnsPosition
                 && !positionReservedByAnotherTask;
+    }
+
+    static boolean canRestoreAttachedWorkstation(
+            AssignmentState state,
+            boolean taskOwnsPosition,
+            boolean currentBlockReplaceable
+    ) {
+        return state == AssignmentState.VILLAGER_ATTACHED
+                && taskOwnsPosition
+                && currentBlockReplaceable;
     }
 
     Set<P> reservedPositions() {
@@ -203,9 +222,9 @@ final class DeveloperV1JobSiteAssignments<P> {
     }
 
     enum AssignmentState {
-        RESERVED(false, false),
+        RESERVED(false, true),
         WORKSTATION_PLACED(true, true),
-        VILLAGER_ATTACHED(true, true),
+        VILLAGER_ATTACHED(true, false),
         COMPLETED(true, false),
         UNRESOLVED(true, false);
 
@@ -231,6 +250,7 @@ final class DeveloperV1JobSiteAssignments<P> {
         ASSIGNMENT_MISSING,
         TASK_POSITION_MISMATCH,
         WORKSTATION_NOT_PLACED,
+        ATTACHED_PAIR_PRESERVED,
         EXACT_PAIR_RECORDED,
         COMPLETED,
         UNRESOLVED,

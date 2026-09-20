@@ -191,9 +191,13 @@ class DeveloperV1BatchProgressTest {
     @Test
     void failedPendingSiteCanBeReusedWithoutReleasingCompletedSites() {
         DeveloperV1BatchProgress progress = progress(2);
-        DeveloperV1JobSiteAssignments<DeveloperV1PlacementGrid.Offset> assignments = startAll(progress);
-        DeveloperV1BatchProgress.Task completed = progress.tasks().get(0);
-        DeveloperV1BatchProgress.Task failed = progress.tasks().get(1);
+        DeveloperV1JobSiteAssignments<DeveloperV1PlacementGrid.Offset> assignments =
+                new DeveloperV1JobSiteAssignments<>();
+        DeveloperV1BatchProgress.Task completed = progress.startNext();
+        reserve(assignments, completed);
+        DeveloperV1BatchProgress.Task failed = progress.startNext();
+        assertTrue(assignments.reserve(failed, failed.gridSlot()));
+        assertTrue(assignments.markWorkstationPlaced(failed.index(), failed.gridSlot()));
 
         complete(progress, assignments, completed.index());
         assertTrue(assignments.rollback(failed.index()));
