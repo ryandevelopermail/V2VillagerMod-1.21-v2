@@ -50,6 +50,7 @@ public class GuardVillagersConfig extends MidnightConfig {
     public static final int MAX_FARMER_BONEMEAL_SCAN_RADIUS = 96;
     public static final int MIN_FARMER_FARMLAND_WORK_RADIUS = 8;
     public static final int MAX_FARMER_FARMLAND_WORK_RADIUS = 64;
+    public static final int DEFAULT_FARMER_FARMLAND_WORK_RADIUS = 64;
     public static final int MIN_BONEMEAL_APPLICATIONS_PER_SESSION = 1;
     public static final int MAX_BONEMEAL_APPLICATIONS_PER_SESSION = 128;
 
@@ -162,7 +163,7 @@ public class GuardVillagersConfig extends MidnightConfig {
     @Entry(min=0)
     public static int farmerWheatSeedBootstrapFloor = 0;
     @Entry(min=8, max=64)
-    public static int farmerFarmlandWorkRadius = 32;
+    public static int farmerFarmlandWorkRadius = DEFAULT_FARMER_FARMLAND_WORK_RADIUS;
     @Entry
     public static boolean foresterBonemealEnabled = true;
     @Entry(min=1)
