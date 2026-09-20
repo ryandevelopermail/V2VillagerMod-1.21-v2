@@ -35,6 +35,7 @@ import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public class FarmerHarvestGoal extends Goal {
@@ -164,6 +165,8 @@ public class FarmerHarvestGoal extends Goal {
     private long lastTerritoryInvalidationTick = 0L;
     private int tinyTerritoryMatureDetectionStreak = 0;
     private long nextForcedTerritoryRescanTick = 0L;
+    private boolean chestWakePending;
+    private boolean startFollowingChestWake;
 
     public FarmerHarvestGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         this.villager = villager;
@@ -171,16 +174,44 @@ public class FarmerHarvestGoal extends Goal {
         setControls(EnumSet.of(Control.MOVE));
     }
 
-    public void setTargets(BlockPos jobPos, BlockPos chestPos) {
-        this.jobPos = jobPos.toImmutable();
-        this.chestPos = chestPos.toImmutable();
+    public boolean setTargets(BlockPos jobPos, BlockPos chestPos) {
+        BlockPos newJobPos = jobPos.toImmutable();
+        BlockPos newChestPos = chestPos.toImmutable();
+        if (Objects.equals(this.jobPos, newJobPos) && Objects.equals(this.chestPos, newChestPos)) {
+            LOGGER.debug("Farmer {} identical pairing refresh ignored jobPos={} chestPos={} stage={}",
+                    villagerDebugName(), newJobPos.toShortString(), newChestPos.toShortString(), stage);
+            return false;
+        }
+
+        BlockPos previousJobPos = this.jobPos;
+        BlockPos previousChestPos = this.chestPos;
+        Stage previousStage = this.stage;
+        boolean replacingExistingPair = previousJobPos != null || previousChestPos != null;
+
+        this.jobPos = newJobPos;
+        this.chestPos = newChestPos;
         this.enabled = true;
-        this.stage = Stage.IDLE;
+        // A rebind may happen while GoalSelector still owns this goal. DONE makes
+        // shouldContinue() fail so the selector calls stop() before the immediate
+        // check below can start a clean run against the new pair.
+        this.stage = Stage.DONE;
         this.harvestTargets.clear();
+        this.hoeTargets.clear();
+        this.plantTargets.clear();
+        this.currentTarget = null;
         this.currentHoeTarget = null;
         this.hoeTargetRetryAfterTick.clear();
         this.gatherSeedTargets.clear();
         this.currentGatherTarget = null;
+        this.bannerPos = null;
+        this.gatePos = null;
+        this.gateWalkTarget = null;
+        this.exitWalkTarget = null;
+        this.feedTargetCount = 0;
+        this.penInsideDirection = null;
+        this.exitDelayTicks = 0;
+        this.lastHarvestDay = -1L;
+        this.dailyHarvestRun = false;
         this.wheatSeedForagingRequested = false;
         this.prioritizeWheatSeedsForPlanting = false;
         this.gatherNoTargetPasses = 0;
@@ -188,6 +219,7 @@ public class FarmerHarvestGoal extends Goal {
         this.gatherLowYieldBreakPasses = 0;
         this.nextSeedForageRetryTick = 0L;
         this.seedForageRetryCount = 0;
+        this.pendingSeedGatherEndReason = null;
         this.hasUnseededFarmlandObligation = false;
         this.obligationLoggedThisCycle = false;
         this.nextIncrementalSeedPickupTick = 0L;
@@ -202,6 +234,17 @@ public class FarmerHarvestGoal extends Goal {
         this.nextForcedTerritoryRescanTick = 0L;
         this.cachedCoverage = null;
         this.coverageCacheTime = -1L;
+        this.chestWakePending = false;
+        this.startFollowingChestWake = false;
+        this.workCheckSchedule.requestImmediate();
+
+        LOGGER.debug("Farmer {} target rebind oldJobPos={} oldChestPos={} newJobPos={} newChestPos={} previousStage={} activeRun={}",
+                villagerDebugName(),
+                previousJobPos == null ? "none" : previousJobPos.toShortString(),
+                previousChestPos == null ? "none" : previousChestPos.toShortString(),
+                newJobPos.toShortString(), newChestPos.toShortString(), previousStage,
+                replacingExistingPair && isContinuableStage(previousStage));
+        return true;
     }
 
     public void setCraftingGoal(FarmerCraftingGoal craftingGoal) {
@@ -212,10 +255,16 @@ public class FarmerHarvestGoal extends Goal {
         workCheckSchedule.requestImmediate();
         cachedCoverage = null;
         coverageCacheTime = -1L;
+        chestWakePending = true;
+        LOGGER.debug("Farmer {} chest mutation wake requested stage={} jobPos={} chestPos={}",
+                villagerDebugName(), stage, jobPos.toShortString(), chestPos.toShortString());
     }
 
     public void requestCheckNoSoonerThan(long targetTick) {
         workCheckSchedule.requestNoSoonerThan(targetTick);
+        chestWakePending = true;
+        LOGGER.debug("Farmer {} chest mutation wake coalesced stage={} targetTick={}",
+                villagerDebugName(), stage, targetTick);
     }
 
     @Override
@@ -326,7 +375,7 @@ public class FarmerHarvestGoal extends Goal {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
                 }
-                return true;
+                return authorizeStart();
             } else {
                 // No seeds in inventory or chest — but we still have unseeded farmland.
                 // Allow the goal to START so it can route into GATHER_WHEAT_SEEDS via
@@ -347,7 +396,7 @@ public class FarmerHarvestGoal extends Goal {
                     lastHarvestDay = day;
                     dailyHarvestRun = true;
                 }
-                return true;
+                return authorizeStart();
             }
         }
 
@@ -369,14 +418,14 @@ public class FarmerHarvestGoal extends Goal {
             }
             dailyHarvestRun = true;
             workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
-            return true;
+            return authorizeStart();
         }
 
         int matureCount = preflight.matureCropCount;
         boolean canRunForHoeing = preflight.canHoeGround;
         if (matureCount >= 1 || canRunForHoeing) {
             workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
-            return true;
+            return authorizeStart();
         }
         if (preflight.shouldRun()) {
             // shouldRun() fires when there is a plausible reason (no crops found, may need seeding/hoeing).
@@ -393,7 +442,7 @@ public class FarmerHarvestGoal extends Goal {
                     : CHECK_INTERVAL_TICKS));
             if (!nothingActionable) {
                 logBootstrapReason(preflight.reason);
-                return true;
+                return authorizeStart();
             }
             return false;
         }
@@ -416,13 +465,18 @@ public class FarmerHarvestGoal extends Goal {
 
     @Override
     public boolean shouldContinue() {
-        return enabled && villager.isAlive() && stage != Stage.DONE;
+        return shouldContinueForState(enabled, villager.isAlive(), stage);
     }
 
     @Override
     public void start() {
+        if (startFollowingChestWake) {
+            LOGGER.debug("Farmer {} goal start following chest mutation wake jobPos={} chestPos={}",
+                    villager.getUuidAsString(), jobPos.toShortString(), chestPos.toShortString());
+            startFollowingChestWake = false;
+        }
         villager.setCanPickUpLoot(true);
-        setStage(Stage.GO_TO_JOB);
+        beginRunLifecycle();
         populateHarvestTargets();
         moveTo(jobPos);
     }
@@ -832,6 +886,32 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
+    private boolean authorizeStart() {
+        startFollowingChestWake = chestWakePending;
+        chestWakePending = false;
+        return true;
+    }
+
+    static boolean isContinuableStage(Stage stage) {
+        return stage != Stage.IDLE && stage != Stage.DONE;
+    }
+
+    static boolean shouldContinueForState(boolean enabled, boolean villagerAlive, Stage stage) {
+        return enabled && villagerAlive && isContinuableStage(stage);
+    }
+
+    static Stage startedStage() {
+        return Stage.GO_TO_JOB;
+    }
+
+    void beginRunLifecycle() {
+        setStage(startedStage());
+    }
+
+    private String villagerDebugName() {
+        return villager == null ? "unbound" : villager.getUuidAsString();
+    }
+
     private void populateHarvestTargets() {
         if (!(villager.getWorld() instanceof ServerWorld serverWorld)) {
             return;
@@ -1153,7 +1233,7 @@ public class FarmerHarvestGoal extends Goal {
         if (previousStage == Stage.GATHER_WHEAT_SEEDS && newStage == Stage.DONE && villager.getWorld() instanceof ServerWorld world) {
             clearSeedForageRetryCooldown(world, "gather stage completed with DONE");
         }
-        LOGGER.debug("Farmer {} entering harvest stage {}", villager.getUuidAsString(), newStage);
+        LOGGER.debug("Farmer {} entering harvest stage {}", villagerDebugName(), newStage);
     }
 
     private boolean routePostDepositFlow(ServerWorld world, boolean afterHoeing) {
@@ -1296,7 +1376,7 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
-    private enum Stage {
+    enum Stage {
         IDLE,
         GO_TO_JOB,
         HARVEST,
