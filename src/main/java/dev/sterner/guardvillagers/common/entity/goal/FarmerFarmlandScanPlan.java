@@ -71,6 +71,35 @@ final class FarmerFarmlandScanPlan {
         return List.copyOf(offsets);
     }
 
+    static List<Offset> priorityRingOffsets(
+            int innerExclusiveRadius,
+            int outerInclusiveRadius,
+            int minYOffset,
+            int maxYOffset
+    ) {
+        int safeInnerRadius = Math.max(0, innerExclusiveRadius);
+        int safeOuterRadius = Math.max(safeInnerRadius, outerInclusiveRadius);
+        List<Offset> offsets = new ArrayList<>();
+        for (int y = minYOffset; y <= maxYOffset; y++) {
+            for (int z = -safeOuterRadius; z <= safeOuterRadius; z++) {
+                for (int x = -safeOuterRadius; x <= safeOuterRadius; x++) {
+                    Offset offset = new Offset(x, y, z);
+                    if (isInsideHorizontalRadius(offset, safeOuterRadius)
+                            && !isInsideHorizontalRadius(offset, safeInnerRadius)) {
+                        offsets.add(offset);
+                    }
+                }
+            }
+        }
+        offsets.sort(Comparator
+                .comparingInt((Offset offset) -> offset.x() * offset.x() + offset.z() * offset.z())
+                .thenComparingInt(offset -> Math.abs(offset.y()))
+                .thenComparingInt(Offset::y)
+                .thenComparingInt(Offset::x)
+                .thenComparingInt(Offset::z));
+        return List.copyOf(offsets);
+    }
+
     static boolean completeAfterSlice(boolean previouslyComplete, Slice slice) {
         return previouslyComplete || slice.wrapped();
     }

@@ -71,7 +71,7 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
     private static final int BOOTSTRAP_SCAN_BLOCK_BUDGET = 1200;
     private static final int BOOTSTRAP_SCAN_INTERVAL_TICKS = 40;
-    private static final int LOCAL_PRIORITY_SCAN_RADIUS = 16;
+    private static final int LOCAL_PRIORITY_PRIMARY_RADIUS = 32;
     private static final int BOOTSTRAP_INVALIDATION_CHECK_INTERVAL_TICKS = 200;
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
@@ -2367,40 +2367,53 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private int runLocalPriorityTerritoryScan(ServerWorld world) {
-        int radius = localPriorityDiscoveryRadius(getFarmlandWorkRadius());
-        int actionableCells = 0;
-        boolean cacheChanged = false;
-        List<FarmerFarmlandScanPlan.Offset> offsets = FarmerFarmlandScanPlan.priorityOffsets(
-                radius,
+        int configuredRadius = getFarmlandWorkRadius();
+        int primaryRadius = localPriorityDiscoveryRadius(configuredRadius);
+        List<FarmerFarmlandScanPlan.Offset> primaryOffsets = FarmerFarmlandScanPlan.priorityOffsets(
+                primaryRadius,
                 BOOTSTRAP_SCAN_MIN_Y_OFFSET,
                 BOOTSTRAP_SCAN_MAX_Y_OFFSET);
-        Set<BlockPos> localWaterSources = collectLocalPriorityWaterSources(world, radius);
-        for (FarmerFarmlandScanPlan.Offset offset : offsets) {
-            BlockPos pos = jobPos.add(offset.x(), offset.y(), offset.z());
-            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND)
-                    && (world.getBlockState(pos.up()).isAir()
-                    || world.getBlockState(pos.up()).getBlock() instanceof CropBlock);
-            boolean hoeTarget = isHoeTarget(world, pos);
-            boolean hydrated = hoeTarget && hasNearbyWater(localWaterSources, pos);
-            boolean hydratedHoeTarget = hoeTarget && hydrated;
-            if (isLocalPriorityTerritoryCell(plantableFarmland, hoeTarget, hydrated)) {
-                cacheChanged |= eligibleTerritory.add(pos.toImmutable());
-                if (hydratedHoeTarget) {
-                    actionableCells++;
-                }
-            } else if (!isEligibleTerritoryCell(world, pos)) {
-                cacheChanged |= eligibleTerritory.remove(pos);
-            }
+        Set<BlockPos> localWaterSources = new HashSet<>();
+        int examinedCells = collectLocalPriorityWaterSources(
+                world,
+                localWaterSources,
+                -1,
+                primaryRadius + WATER_HYDRATION_RADIUS);
+        LocalPriorityScanPass primaryPass = scanLocalPriorityOffsets(world, primaryOffsets, localWaterSources);
+
+        boolean fallbackRan = shouldRunLocalPriorityFallback(configuredRadius, primaryPass.actionableCells());
+        int finalRadius = localPriorityFinalRadius(configuredRadius, primaryPass.actionableCells());
+        int actionableCells = primaryPass.actionableCells();
+        boolean cacheChanged = primaryPass.cacheChanged();
+        examinedCells += primaryOffsets.size();
+        if (fallbackRan) {
+            examinedCells += collectLocalPriorityWaterSources(
+                    world,
+                    localWaterSources,
+                    primaryRadius + WATER_HYDRATION_RADIUS,
+                    finalRadius + WATER_HYDRATION_RADIUS);
+            List<FarmerFarmlandScanPlan.Offset> fallbackOffsets = FarmerFarmlandScanPlan.priorityRingOffsets(
+                    primaryRadius,
+                    finalRadius,
+                    BOOTSTRAP_SCAN_MIN_Y_OFFSET,
+                    BOOTSTRAP_SCAN_MAX_Y_OFFSET);
+            LocalPriorityScanPass fallbackPass = scanLocalPriorityOffsets(world, fallbackOffsets, localWaterSources);
+            examinedCells += fallbackOffsets.size();
+            actionableCells += fallbackPass.actionableCells();
+            cacheChanged |= fallbackPass.cacheChanged();
         }
-        adaptiveScanVolumeWindow += localPriorityScanCellBudget(radius, offsets.size());
+
+        adaptiveScanVolumeWindow += examinedCells;
         if (shouldInvalidateCoverageCache(cacheChanged)) {
             cachedCoverage = null;
             coverageCacheTime = -1L;
         }
-        LOGGER.debug("Farmer {} local priority territory scan radius={} cells={} actionable={} cacheChanged={} backgroundCursor={} sweepComplete={}",
+        LOGGER.debug("Farmer {} local priority territory scan primaryRadius={} fallbackRan={} finalRadius={} examinedCells={} actionableTargets={} cacheChanged={} backgroundCursor={} sweepComplete={}",
                 villager.getUuidAsString(),
-                radius,
-                offsets.size(),
+                primaryRadius,
+                fallbackRan,
+                finalRadius,
+                examinedCells,
                 actionableCells,
                 cacheChanged,
                 bootstrapScanCursor,
@@ -2408,23 +2421,64 @@ public class FarmerHarvestGoal extends Goal {
         return actionableCells;
     }
 
-    private Set<BlockPos> collectLocalPriorityWaterSources(ServerWorld world, int localRadius) {
-        int waterSearchRadius = localRadius + WATER_HYDRATION_RADIUS;
+    private LocalPriorityScanPass scanLocalPriorityOffsets(
+            ServerWorld world,
+            List<FarmerFarmlandScanPlan.Offset> offsets,
+            Set<BlockPos> localWaterSources
+    ) {
+        int actionableCells = 0;
+        boolean cacheChanged = false;
+        for (FarmerFarmlandScanPlan.Offset offset : offsets) {
+            BlockPos pos = jobPos.add(offset.x(), offset.y(), offset.z());
+            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND)
+                    && (world.getBlockState(pos.up()).isAir()
+                    || world.getBlockState(pos.up()).getBlock() instanceof CropBlock);
+            boolean hoeTarget = isHoeTarget(world, pos);
+            boolean hydrated = hoeTarget && hasNearbyWater(localWaterSources, pos);
+            boolean actionableHydratedHoeTarget = shouldQueueHoeTarget(
+                    true,
+                    hoeTarget,
+                    hydrated,
+                    hoeTargetRetryAfterTick.getOrDefault(pos, 0L) <= world.getTime());
+            if (isLocalPriorityTerritoryCell(plantableFarmland, hoeTarget, hydrated)) {
+                cacheChanged |= eligibleTerritory.add(pos.toImmutable());
+                if (actionableHydratedHoeTarget) {
+                    actionableCells++;
+                }
+            } else if (!isEligibleTerritoryCell(world, pos)) {
+                cacheChanged |= eligibleTerritory.remove(pos);
+            }
+        }
+        return new LocalPriorityScanPass(actionableCells, cacheChanged);
+    }
+
+    private int collectLocalPriorityWaterSources(
+            ServerWorld world,
+            Set<BlockPos> waterSources,
+            int innerExclusiveRadius,
+            int outerRadius
+    ) {
         BlockPos start = jobPos.add(
-                -waterSearchRadius,
+                -outerRadius,
                 BOOTSTRAP_SCAN_MIN_Y_OFFSET + VANILLA_WATER_MIN_Y_OFFSET,
-                -waterSearchRadius);
+                -outerRadius);
         BlockPos end = jobPos.add(
-                waterSearchRadius,
+                outerRadius,
                 BOOTSTRAP_SCAN_MAX_Y_OFFSET + VANILLA_WATER_MAX_Y_OFFSET,
-                waterSearchRadius);
-        Set<BlockPos> waterSources = new HashSet<>();
+                outerRadius);
+        int examinedCells = 0;
         for (BlockPos pos : BlockPos.iterate(start, end)) {
+            int dx = Math.abs(pos.getX() - jobPos.getX());
+            int dz = Math.abs(pos.getZ() - jobPos.getZ());
+            if (Math.max(dx, dz) <= innerExclusiveRadius) {
+                continue;
+            }
+            examinedCells++;
             if (world.getFluidState(pos).isIn(FluidTags.WATER)) {
                 waterSources.add(pos.toImmutable());
             }
         }
-        return waterSources;
+        return examinedCells;
     }
 
     private boolean hasNearbyWater(Set<BlockPos> waterSources, BlockPos farmlandCandidate) {
@@ -2458,28 +2512,69 @@ public class FarmerHarvestGoal extends Goal {
                 safeRadius,
                 BOOTSTRAP_SCAN_MIN_Y_OFFSET,
                 BOOTSTRAP_SCAN_MAX_Y_OFFSET).size();
-        return localPriorityScanCellBudget(safeRadius, priorityCells);
+        return priorityCells + localPriorityWaterScanCellBudget(-1, safeRadius + WATER_HYDRATION_RADIUS);
     }
 
     static int localPriorityDiscoveryRadius(int configuredWorkRadius) {
-        return Math.min(LOCAL_PRIORITY_SCAN_RADIUS, Math.max(0, configuredWorkRadius));
+        return Math.min(LOCAL_PRIORITY_PRIMARY_RADIUS, clampedFarmlandWorkRadius(configuredWorkRadius));
     }
 
-    private static int localPriorityScanCellBudget(int radius, int priorityCells) {
-        int safeRadius = Math.max(0, radius);
-        int waterSearchRadius = safeRadius + WATER_HYDRATION_RADIUS;
-        int waterDiameter = waterSearchRadius * 2 + 1;
+    static boolean shouldRunLocalPriorityFallback(int configuredWorkRadius, int primaryActionableTargets) {
+        return clampedFarmlandWorkRadius(configuredWorkRadius) > localPriorityDiscoveryRadius(configuredWorkRadius)
+                && primaryActionableTargets == 0;
+    }
+
+    static int localPriorityFinalRadius(int configuredWorkRadius, int primaryActionableTargets) {
+        int configuredRadius = clampedFarmlandWorkRadius(configuredWorkRadius);
+        return shouldRunLocalPriorityFallback(configuredRadius, primaryActionableTargets)
+                ? configuredRadius
+                : localPriorityDiscoveryRadius(configuredRadius);
+    }
+
+    static int localPriorityScanCellBudget(int configuredWorkRadius, int primaryActionableTargets) {
+        int primaryRadius = localPriorityDiscoveryRadius(configuredWorkRadius);
+        int examinedCells = localPriorityScanCellBudget(primaryRadius);
+        if (!shouldRunLocalPriorityFallback(configuredWorkRadius, primaryActionableTargets)) {
+            return examinedCells;
+        }
+        int finalRadius = localPriorityFinalRadius(configuredWorkRadius, primaryActionableTargets);
+        examinedCells += FarmerFarmlandScanPlan.priorityRingOffsets(
+                primaryRadius,
+                finalRadius,
+                BOOTSTRAP_SCAN_MIN_Y_OFFSET,
+                BOOTSTRAP_SCAN_MAX_Y_OFFSET).size();
+        examinedCells += localPriorityWaterScanCellBudget(
+                primaryRadius + WATER_HYDRATION_RADIUS,
+                finalRadius + WATER_HYDRATION_RADIUS);
+        return examinedCells;
+    }
+
+    private static int localPriorityWaterScanCellBudget(int innerExclusiveRadius, int outerRadius) {
+        int safeOuterRadius = Math.max(0, outerRadius);
+        int outerDiameter = safeOuterRadius * 2 + 1;
         int waterLayers = (BOOTSTRAP_SCAN_MAX_Y_OFFSET + VANILLA_WATER_MAX_Y_OFFSET)
                 - (BOOTSTRAP_SCAN_MIN_Y_OFFSET + VANILLA_WATER_MIN_Y_OFFSET)
                 + 1;
-        return priorityCells + waterDiameter * waterDiameter * waterLayers;
+        int outerCells = outerDiameter * outerDiameter * waterLayers;
+        if (innerExclusiveRadius < 0) {
+            return outerCells;
+        }
+        int safeInnerRadius = Math.min(safeOuterRadius, innerExclusiveRadius);
+        int innerDiameter = safeInnerRadius * 2 + 1;
+        return outerCells - innerDiameter * innerDiameter * waterLayers;
+    }
+
+    private static int clampedFarmlandWorkRadius(int configuredWorkRadius) {
+        return Math.max(
+                GuardVillagersConfig.MIN_FARMER_FARMLAND_WORK_RADIUS,
+                Math.min(GuardVillagersConfig.MAX_FARMER_FARMLAND_WORK_RADIUS, configuredWorkRadius));
     }
 
     private int getFarmlandWorkRadius() {
-        return Math.max(
-                GuardVillagersConfig.MIN_FARMER_FARMLAND_WORK_RADIUS,
-                Math.min(GuardVillagersConfig.MAX_FARMER_FARMLAND_WORK_RADIUS,
-                        GuardVillagersConfig.farmerFarmlandWorkRadius));
+        return clampedFarmlandWorkRadius(GuardVillagersConfig.farmerFarmlandWorkRadius);
+    }
+
+    private record LocalPriorityScanPass(int actionableCells, boolean cacheChanged) {
     }
 
     private int getEligibleTerritoryCount(ServerWorld world) {
