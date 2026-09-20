@@ -380,29 +380,90 @@ public final class DeveloperSetupManager {
                     changed = true;
                     continue;
                 }
-                if (claimedJobSite != null && !pair.jobPos.equals(claimedJobSite)) {
-                    failInvalidPendingV1Pair(pair, pair.task.profession().displayName()
-                            + " villager claimed another workstation at " + claimedJobSite.toShortString() + ".");
-                    iterator.remove();
+                boolean wrongJobSite = claimedJobSite != null && !pair.jobPos.equals(claimedJobSite);
+                boolean wrongProfession = acquired != VillagerProfession.NONE && acquired != pair.expectedProfession;
+                DeveloperV1PendingMismatchRecovery.Action mismatchAction =
+                        pair.mismatchRecovery.observe(wrongJobSite, wrongProfession);
+                if (mismatchAction == DeveloperV1PendingMismatchRecovery.Action.RECOVER) {
+                    recoverPendingV1Mismatch(
+                            pair,
+                            pendingVillager,
+                            acquired,
+                            claimedJobSite,
+                            wrongProfession);
                     changed = true;
-                    continue;
-                }
-                if (acquired != VillagerProfession.NONE && acquired != pair.expectedProfession) {
-                    failInvalidPendingV1Pair(pair, pair.task.profession().displayName()
-                            + " villager claimed a different profession (" + acquired + ").");
-                    iterator.remove();
-                    changed = true;
-                    continue;
+                } else if (mismatchAction == DeveloperV1PendingMismatchRecovery.Action.WAIT_FOR_TIMEOUT
+                        && !pair.mismatchLimitLogged) {
+                    pair.mismatchLimitLogged = true;
+                    LOGGER.debug("V1 pending mismatch recovery exhausted task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} wrongPoiCleared=false retried=false action=wait_for_preserved_timeout",
+                            pair.task.index() + 1,
+                            pair.expectedProfession,
+                            pair.jobPos.toShortString(),
+                            acquired,
+                            claimedJobSite == null ? "none" : claimedJobSite.toShortString(),
+                            pair.mismatchRecovery.recoveryAttempts());
                 }
                 if (pair.progress.timeOutIfExpired()) {
                     if (preserveTimedOutV1Pair(pair, "Timed out waiting for "
-                            + pair.task.profession().displayName() + " profession acquisition; pair preserved for inspection.")) {
+                            + pair.task.profession().displayName() + " profession acquisition after "
+                            + pair.mismatchRecovery.recoveryAttempts()
+                            + " mismatch recoveries; pair preserved for inspection.")) {
                         iterator.remove();
                         changed = true;
                     }
                 }
             }
             return changed;
+        }
+
+        private void recoverPendingV1Mismatch(
+                PendingV1Pair pair,
+                VillagerEntity pendingVillager,
+                VillagerProfession currentProfession,
+                BlockPos claimedJobSite,
+                boolean wrongProfession
+        ) {
+            boolean hadJobSite = pendingVillager.getBrain().hasMemoryModule(MemoryModuleType.JOB_SITE);
+            boolean hadPotentialJobSite = pendingVillager.getBrain()
+                    .hasMemoryModule(MemoryModuleType.POTENTIAL_JOB_SITE);
+            if (hadJobSite) {
+                pendingVillager.releaseTicketFor(MemoryModuleType.JOB_SITE);
+                pendingVillager.getBrain().forget(MemoryModuleType.JOB_SITE);
+            }
+            if (hadPotentialJobSite) {
+                pendingVillager.releaseTicketFor(MemoryModuleType.POTENTIAL_JOB_SITE);
+                pendingVillager.getBrain().forget(MemoryModuleType.POTENTIAL_JOB_SITE);
+            }
+
+            boolean professionReset = DeveloperV1PendingMismatchRecovery.canResetTemporaryProfession(
+                    wrongProfession,
+                    pendingVillager.getVillagerData().getLevel(),
+                    pendingVillager.getExperience());
+            if (professionReset) {
+                pendingVillager.setVillagerData(
+                        pendingVillager.getVillagerData().withProfession(VillagerProfession.NONE));
+            }
+            pendingVillager.setVelocity(Vec3d.ZERO);
+            pendingVillager.getNavigation().stop();
+            if (pendingVillager.squaredDistanceTo(Vec3d.ofCenter(pair.spawnPos)) > 9.0D) {
+                pendingVillager.refreshPositionAndAngles(
+                        pair.spawnPos.getX() + 0.5D,
+                        pair.spawnPos.getY(),
+                        pair.spawnPos.getZ() + 0.5D,
+                        pendingVillager.getYaw(),
+                        pendingVillager.getPitch());
+            }
+
+            LOGGER.debug("V1 pending mismatch recovered task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} wrongPoiCleared={} potentialPoiCleared={} professionReset={} retried=true",
+                    pair.task.index() + 1,
+                    pair.expectedProfession,
+                    pair.jobPos.toShortString(),
+                    currentProfession,
+                    claimedJobSite == null ? "none" : claimedJobSite.toShortString(),
+                    pair.mismatchRecovery.recoveryAttempts(),
+                    hadJobSite,
+                    hadPotentialJobSite,
+                    professionReset);
         }
 
         private void restrainPendingV1Villager(PendingV1Pair pair, VillagerEntity pendingVillager) {
@@ -458,6 +519,11 @@ public final class DeveloperSetupManager {
                     "assignment_marked_unresolved",
                     pair.villagerId.toString());
             lastV1Failure = message;
+            LOGGER.debug("V1 pending pair preserved at timeout task={} expectedProfession={} expectedJobPos={} attempts={} timeoutPreserved=true",
+                    pair.task.index() + 1,
+                    pair.expectedProfession,
+                    pair.jobPos.toShortString(),
+                    pair.mismatchRecovery.recoveryAttempts());
             VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
                     ? found
                     : null;
@@ -976,6 +1042,8 @@ public final class DeveloperSetupManager {
             private final Set<BlockPos> isolationBlocks;
             private final boolean originalAiDisabled;
             private final DeveloperV1PendingPairProgress progress;
+            private final DeveloperV1PendingMismatchRecovery mismatchRecovery;
+            private boolean mismatchLimitLogged;
 
             private PendingV1Pair(
                     DeveloperV1BatchProgress.Task task,
@@ -998,6 +1066,7 @@ public final class DeveloperSetupManager {
                 this.progress = new DeveloperV1PendingPairProgress(
                         V1_INITIAL_RESTRAINT_TICKS,
                         V1_PAIR_TIMEOUT_TICKS);
+                this.mismatchRecovery = new DeveloperV1PendingMismatchRecovery();
             }
         }
     }

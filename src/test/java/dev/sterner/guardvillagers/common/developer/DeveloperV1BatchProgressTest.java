@@ -219,6 +219,31 @@ class DeveloperV1BatchProgressTest {
         assertEquals(6, mixed.tasks().stream().map(DeveloperV1BatchProgress.Task::gridSlot).distinct().count());
     }
 
+    @Test
+    void twentyOneTaskMixedBatchAccountsForEveryRequestedTask() {
+        DeveloperV1BatchProgress progress = new DeveloperV1BatchProgress(List.of(
+                new DeveloperProfessionSelection(DeveloperProfession.FARMER, 4),
+                new DeveloperProfessionSelection(DeveloperProfession.FLETCHER, 4),
+                new DeveloperProfessionSelection(DeveloperProfession.SHEPHERD, 4),
+                new DeveloperProfessionSelection(DeveloperProfession.LIBRARIAN, 4),
+                new DeveloperProfessionSelection(DeveloperProfession.CLERIC, 5)));
+        List<DeveloperV1BatchProgress.Task> active = new ArrayList<>();
+
+        while (!progress.isComplete()) {
+            while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
+                active.add(progress.startNext());
+            }
+            assertTrue(active.size() <= DeveloperV1PlacementGrid.MAX_CONCURRENT);
+            DeveloperV1BatchProgress.Task finished = active.removeFirst();
+            progress.finish(finished.index(), finished.index() % 7 != 0);
+        }
+
+        assertEquals(21, progress.total());
+        assertEquals(21, progress.processed());
+        assertEquals(progress.total(), progress.successful() + progress.failed());
+        assertEquals(0, progress.pending());
+    }
+
     private static DeveloperV1BatchProgress progress(int quantity) {
         return new DeveloperV1BatchProgress(List.of(
                 new DeveloperProfessionSelection(DeveloperProfession.FARMER, quantity)));
