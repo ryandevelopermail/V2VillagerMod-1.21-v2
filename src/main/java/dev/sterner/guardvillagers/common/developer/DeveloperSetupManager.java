@@ -265,27 +265,24 @@ public final class DeveloperSetupManager {
                 return;
             }
             logV1WorkstationLifecycle(task, candidateJobPos, "assignment_reserved", "none");
-            if (!world.setBlockState(candidateJobPos, stableV1JobBlockState(expectedJobBlock), Block.NOTIFY_ALL)) {
+            V1IsolationPlan isolation = placeV1IsolationBarriers(
+                    sitePlan.isolation(), expectedJobBlock, task);
+            if (isolation == null) {
                 rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1JobSites.rollback(task.index());
-                failV1TaskBeforeSpawn(task, "Could not place the " + requestedProfession.displayName() + " job site.");
+                failV1TaskBeforeSpawn(task, "Could not preflight and build the "
+                        + requestedProfession.displayName() + " isolation footprint.");
                 return;
             }
             if (!v1JobSites.markWorkstationPlaced(task.index(), candidateJobPos)) {
+                removeV1IsolationBarriers(isolation.barrierPositions());
+                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1FatalFailure = "V1 workstation lifecycle verification failed for task "
                         + (task.index() + 1) + ".";
                 return;
             }
             logV1WorkstationLifecycle(task, candidateJobPos, "workstation_placed", "none");
 
-            V1IsolationPlan isolation = placeV1IsolationBarriers(sitePlan.isolation());
-            if (isolation == null) {
-                rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
-                v1JobSites.rollback(task.index());
-                failV1TaskBeforeSpawn(task, "Could not isolate the " + requestedProfession.displayName()
-                        + " villager from other pending workstations.");
-                return;
-            }
             VillagerEntity pendingVillager = spawnVillager(world, isolation.spawnPos());
             if (pendingVillager == null) {
                 removeV1IsolationBarriers(isolation.barrierPositions());
@@ -334,6 +331,9 @@ public final class DeveloperSetupManager {
                     candidateJobPos,
                     isolation.spawnPos(),
                     isolation.barrierPositions(),
+                    isolation.naturalLowerWallPositions(),
+                    isolation.interiorPositions(),
+                    isolation.canonicalY(),
                     pendingOriginalAiDisabled));
         }
 
@@ -352,10 +352,9 @@ public final class DeveloperSetupManager {
                     continue;
                 }
 
-                if (pair.progress.shouldRestrain()) {
-                    restrainPendingV1Villager(pair, pendingVillager);
-                }
-                if (!areV1IsolationBarriersIntact(pair.isolationBlocks)) {
+                restrainPendingV1Villager(pair, pendingVillager, pair.progress.shouldRestrain());
+                if (!areV1IsolationBarriersIntact(
+                        pair.isolationBlocks, pair.naturalLowerWallPositions)) {
                     failInvalidPendingV1Pair(pair,
                             "isolation_lost: temporary isolation barrier was removed before pairing.");
                     iterator.remove();
@@ -412,13 +411,15 @@ public final class DeveloperSetupManager {
                 } else if (mismatchAction == DeveloperV1PendingMismatchRecovery.Action.WAIT_FOR_TIMEOUT
                         && !pair.mismatchLimitLogged) {
                     pair.mismatchLimitLogged = true;
-                    LOGGER.debug("V1 pending mismatch recovery exhausted task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} wrongPoiCleared=false retried=false action=wait_for_preserved_timeout",
+                    LOGGER.debug("V1 pending mismatch recovery exhausted task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} canonicalY={} spawnPosition={} wrongPoiCleared=false retried=false action=wait_for_preserved_timeout",
                             pair.task.index() + 1,
                             pair.expectedProfession,
                             pair.jobPos.toShortString(),
                             acquired,
                             claimedJobSite == null ? "none" : claimedJobSite.toShortString(),
-                            pair.mismatchRecovery.recoveryAttempts());
+                            pair.mismatchRecovery.recoveryAttempts(),
+                            pair.canonicalIsolationY,
+                            pair.spawnPos.toShortString());
                 }
                 if (pair.progress.timeOutIfExpired()) {
                     if (preserveTimedOutV1Pair(pair, "Timed out waiting for "
@@ -462,37 +463,69 @@ public final class DeveloperSetupManager {
             }
             pendingVillager.setVelocity(Vec3d.ZERO);
             pendingVillager.getNavigation().stop();
-            if (pendingVillager.squaredDistanceTo(Vec3d.ofCenter(pair.spawnPos)) > 9.0D) {
-                pendingVillager.refreshPositionAndAngles(
-                        pair.spawnPos.getX() + 0.5D,
-                        pair.spawnPos.getY(),
-                        pair.spawnPos.getZ() + 0.5D,
-                        pendingVillager.getYaw(),
-                        pendingVillager.getPitch());
-            }
+            restrainPendingV1Villager(pair, pendingVillager, true);
 
-            LOGGER.debug("V1 pending mismatch recovered task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} wrongPoiCleared={} potentialPoiCleared={} professionReset={} retried=true",
+            LOGGER.debug("V1 pending mismatch recovered task={} expectedProfession={} expectedJobPos={} currentProfession={} claimedJobSite={} attempts={} canonicalY={} spawnPosition={} wrongPoiCleared={} potentialPoiCleared={} professionReset={} retried=true",
                     pair.task.index() + 1,
                     pair.expectedProfession,
                     pair.jobPos.toShortString(),
                     currentProfession,
                     claimedJobSite == null ? "none" : claimedJobSite.toShortString(),
                     pair.mismatchRecovery.recoveryAttempts(),
+                    pair.canonicalIsolationY,
+                    pair.spawnPos.toShortString(),
                     hadJobSite,
                     hadPotentialJobSite,
                     professionReset);
         }
 
-        private void restrainPendingV1Villager(PendingV1Pair pair, VillagerEntity pendingVillager) {
+        private void restrainPendingV1Villager(
+                PendingV1Pair pair,
+                VillagerEntity pendingVillager,
+                boolean initialRestraint
+        ) {
+            BlockPos feetPos = pendingVillager.getBlockPos();
+            BlockPos touchedBarrier = pair.isolationBlocks.contains(feetPos)
+                    ? feetPos
+                    : pair.isolationBlocks.contains(feetPos.down()) ? feetPos.down() : null;
+            boolean correctionRequired = DeveloperV1IsolationSafety.needsInteriorCorrection(
+                    feetPos,
+                    feetPos.down(),
+                    pair.interiorPositions,
+                    pair.isolationBlocks);
+            if (!correctionRequired) {
+                if (initialRestraint) {
+                    pendingVillager.setVelocity(Vec3d.ZERO);
+                }
+                return;
+            }
+
             pendingVillager.setVelocity(Vec3d.ZERO);
-            if (pendingVillager.squaredDistanceTo(Vec3d.ofCenter(pair.spawnPos)) > 9.0D) {
-                pendingVillager.refreshPositionAndAngles(
-                        pair.spawnPos.getX() + 0.5D,
-                        pair.spawnPos.getY(),
-                        pair.spawnPos.getZ() + 0.5D,
-                        pendingVillager.getYaw(),
-                        pendingVillager.getPitch());
-                pendingVillager.getNavigation().stop();
+            pendingVillager.getNavigation().stop();
+            pendingVillager.refreshPositionAndAngles(
+                    pair.spawnPos.getX() + 0.5D,
+                    pair.spawnPos.getY(),
+                    pair.spawnPos.getZ() + 0.5D,
+                    pendingVillager.getYaw(),
+                    pendingVillager.getPitch());
+            if (touchedBarrier != null) {
+                LOGGER.debug("V1 pending barrier-standing correction task={} profession={} villagerUuid={} barrierPosition={} canonicalY={} spawnPosition={} workstationPosition={}",
+                        pair.task.index() + 1,
+                        pair.task.profession().displayName(),
+                        pair.villagerId,
+                        touchedBarrier.toShortString(),
+                        pair.canonicalIsolationY,
+                        pair.spawnPos.toShortString(),
+                        pair.jobPos.toShortString());
+            } else {
+                LOGGER.debug("V1 pending escape correction task={} profession={} villagerUuid={} from={} to={} canonicalY={} workstationPosition={}",
+                        pair.task.index() + 1,
+                        pair.task.profession().displayName(),
+                        pair.villagerId,
+                        feetPos.toShortString(),
+                        pair.spawnPos.toShortString(),
+                        pair.canonicalIsolationY,
+                        pair.jobPos.toShortString());
             }
         }
 
@@ -554,11 +587,13 @@ public final class DeveloperSetupManager {
         }
 
         private boolean preserveTimedOutV1Pair(PendingV1Pair pair, String message) {
-            LOGGER.debug("V1 pending pair preserved at timeout task={} expectedProfession={} expectedJobPos={} attempts={} timeoutPreserved=true",
+            LOGGER.debug("V1 pending pair preserved at timeout task={} expectedProfession={} expectedJobPos={} attempts={} canonicalY={} spawnPosition={} timeoutPreserved=true",
                     pair.task.index() + 1,
                     pair.expectedProfession,
                     pair.jobPos.toShortString(),
-                    pair.mismatchRecovery.recoveryAttempts());
+                    pair.mismatchRecovery.recoveryAttempts(),
+                    pair.canonicalIsolationY,
+                    pair.spawnPos.toShortString());
             return failInvalidPendingV1Pair(pair, "timeout: " + message);
         }
 
@@ -660,52 +695,128 @@ public final class DeveloperSetupManager {
             return Set.copyOf(occupied);
         }
 
-        private V1IsolationPlan placeV1IsolationBarriers(V1IsolationPlan isolation) {
+        private V1IsolationPlan placeV1IsolationBarriers(
+                V1IsolationPlan isolation,
+                Block expectedJobBlock,
+                DeveloperV1BatchProgress.Task task
+        ) {
             Set<BlockPos> protectedPositions = protectedV1TaskPositions();
             if (!DeveloperV1IsolationSafety.avoidsProtectedPositions(
                     isolation.barrierPositions(),
                     isolation.clearPositions(),
+                    isolation.fillPositions(),
                     protectedPositions)) {
                 LOGGER.debug("V1 isolation placement rejected because temporary positions overlap a reserved task position");
                 return null;
             }
+            if (!preflightV1IsolationMutation(isolation)) {
+                LOGGER.debug("V1 isolation preflight rejected task={} profession={} canonicalY={} spawnPosition={} workstationPosition={} footprintColumns={} terrainCellsCleared={} terrainCellsFilled={}",
+                        task.index() + 1,
+                        task.profession().displayName(),
+                        isolation.canonicalY(),
+                        isolation.spawnPos().toShortString(),
+                        isolation.jobPos().toShortString(),
+                        isolation.footprintColumns().size(),
+                        isolation.clearPositions().size(),
+                        isolation.fillPositions().size());
+                return null;
+            }
+
+            Map<BlockPos, BlockState> originalStates = new LinkedHashMap<>();
+            isolation.fillPositions().forEach(pos -> originalStates.put(pos, world.getBlockState(pos)));
+            isolation.clearPositions().forEach(pos -> originalStates.put(pos, world.getBlockState(pos)));
+            originalStates.put(isolation.jobPos(), world.getBlockState(isolation.jobPos()));
+            isolation.barrierPositions().forEach(pos -> originalStates.put(pos, world.getBlockState(pos)));
+
+            boolean applied = true;
+            for (BlockPos fillPos : isolation.fillPositions()) {
+                applied &= world.setBlockState(fillPos, Blocks.DIRT.getDefaultState(), Block.NOTIFY_ALL);
+            }
             for (BlockPos clearPos : isolation.clearPositions()) {
-                BlockState state = world.getBlockState(clearPos);
-                if (state.isAir()) {
-                    continue;
+                if (!world.getBlockState(clearPos).isAir()) {
+                    applied &= world.setBlockState(clearPos, Blocks.AIR.getDefaultState(), Block.NOTIFY_ALL);
                 }
-                if (!isV1ReplaceableSpace(state)) {
-                    return null;
-                }
-                world.removeBlock(clearPos, false);
             }
-            Set<BlockPos> placed = new HashSet<>();
+            applied &= world.setBlockState(
+                    isolation.jobPos(), stableV1JobBlockState(expectedJobBlock), Block.NOTIFY_ALL);
             for (BlockPos barrierPos : isolation.barrierPositions()) {
-                if (!isV1ReplaceableSpace(world.getBlockState(barrierPos))) {
-                    removeV1IsolationBarriers(placed);
-                    return null;
-                }
-                if (!world.setBlockState(barrierPos, Blocks.BARRIER.getDefaultState(), Block.NOTIFY_ALL)) {
-                    removeV1IsolationBarriers(placed);
-                    return null;
-                }
-                placed.add(barrierPos);
+                applied &= world.setBlockState(
+                        barrierPos, Blocks.BARRIER.getDefaultState(), Block.NOTIFY_ALL);
             }
-            return new V1IsolationPlan(
-                    isolation.spawnPos(),
-                    Set.copyOf(placed),
-                    Set.of(),
-                    isolation.terrainAdjustmentCost());
+            if (!applied) {
+                originalStates.forEach((pos, state) -> world.setBlockState(pos, state, Block.NOTIFY_ALL));
+                LOGGER.debug("V1 isolation mutation rolled back task={} profession={} canonicalY={} spawnPosition={} workstationPosition={}",
+                        task.index() + 1,
+                        task.profession().displayName(),
+                        isolation.canonicalY(),
+                        isolation.spawnPos().toShortString(),
+                        isolation.jobPos().toShortString());
+                return null;
+            }
+
+            LOGGER.debug("V1 isolation placed task={} profession={} canonicalY={} spawnPosition={} workstationPosition={} normalizedFootprint={} terrainCellsCleared={} terrainCellsFilled={} barriers={}",
+                    task.index() + 1,
+                    task.profession().displayName(),
+                    isolation.canonicalY(),
+                    isolation.spawnPos().toShortString(),
+                    isolation.jobPos().toShortString(),
+                    isolation.footprintColumns(),
+                    isolation.clearPositions().size(),
+                    isolation.fillPositions().size(),
+                    isolation.barrierPositions().size());
+            return isolation;
         }
 
-        private boolean areV1IsolationBarriersIntact(Set<BlockPos> barrierPositions) {
-            return barrierPositions.stream().allMatch(pos -> world.getBlockState(pos).isOf(Blocks.BARRIER));
+        private boolean preflightV1IsolationMutation(V1IsolationPlan isolation) {
+            if (!world.getWorldBorder().contains(isolation.jobPos())
+                    || !isV1ReplaceableSpace(world.getBlockState(isolation.jobPos()))) {
+                return false;
+            }
+            for (BlockPos clearPos : isolation.clearPositions()) {
+                if (!world.getWorldBorder().contains(clearPos)
+                        || !isV1ReplaceableSpace(world.getBlockState(clearPos))) {
+                    return false;
+                }
+            }
+            for (BlockPos fillPos : isolation.fillPositions()) {
+                BlockState state = world.getBlockState(fillPos);
+                if (!world.getWorldBorder().contains(fillPos)
+                        || !isV1ReplaceableSpace(state)
+                        || !isStableV1Support(world, fillPos.down())) {
+                    return false;
+                }
+            }
+            for (BlockPos barrierPos : isolation.barrierPositions()) {
+                if (!world.getWorldBorder().contains(barrierPos)
+                        || !isV1ReplaceableSpace(world.getBlockState(barrierPos))) {
+                    return false;
+                }
+            }
+            for (BlockPos naturalWall : isolation.naturalLowerWallPositions()) {
+                if (!isStableV1Support(world, naturalWall)) {
+                    return false;
+                }
+            }
+            boolean spawnSupported = isStableV1Support(world, isolation.spawnPos().down())
+                    || isolation.fillPositions().contains(isolation.spawnPos().down());
+            boolean jobSupported = isStableV1Support(world, isolation.jobPos().down())
+                    || isolation.fillPositions().contains(isolation.jobPos().down());
+            return spawnSupported && jobSupported;
+        }
+
+        private boolean areV1IsolationBarriersIntact(
+                Set<BlockPos> barrierPositions,
+                Set<BlockPos> naturalLowerWallPositions
+        ) {
+            return barrierPositions.stream().allMatch(pos -> world.getBlockState(pos).isOf(Blocks.BARRIER))
+                    && naturalLowerWallPositions.stream().allMatch(pos -> isStableV1Support(world, pos));
         }
 
         private void removeV1IsolationBarriers(Set<BlockPos> barrierPositions) {
             Set<BlockPos> protectedPositions = protectedV1TaskPositions();
             for (BlockPos barrierPos : barrierPositions) {
-                if (!DeveloperV1IsolationSafety.canRemoveTemporaryPosition(barrierPos, protectedPositions)) {
+                if (!DeveloperV1IsolationSafety.canRemoveOwnedTemporaryPosition(
+                        barrierPos, barrierPositions, protectedPositions)) {
                     LOGGER.debug("V1 isolation cleanup skipped protected task position {}", barrierPos.toShortString());
                     continue;
                 }
@@ -1092,6 +1203,9 @@ public final class DeveloperSetupManager {
             private final BlockPos jobPos;
             private final BlockPos spawnPos;
             private final Set<BlockPos> isolationBlocks;
+            private final Set<BlockPos> naturalLowerWallPositions;
+            private final Set<BlockPos> interiorPositions;
+            private final int canonicalIsolationY;
             private final boolean originalAiDisabled;
             private final DeveloperV1PendingPairProgress progress;
             private final DeveloperV1PendingMismatchRecovery mismatchRecovery;
@@ -1105,6 +1219,9 @@ public final class DeveloperSetupManager {
                     BlockPos jobPos,
                     BlockPos spawnPos,
                     Set<BlockPos> isolationBlocks,
+                    Set<BlockPos> naturalLowerWallPositions,
+                    Set<BlockPos> interiorPositions,
+                    int canonicalIsolationY,
                     boolean originalAiDisabled
             ) {
                 this.task = task;
@@ -1114,6 +1231,9 @@ public final class DeveloperSetupManager {
                 this.jobPos = jobPos;
                 this.spawnPos = spawnPos;
                 this.isolationBlocks = isolationBlocks;
+                this.naturalLowerWallPositions = naturalLowerWallPositions;
+                this.interiorPositions = interiorPositions;
+                this.canonicalIsolationY = canonicalIsolationY;
                 this.originalAiDisabled = originalAiDisabled;
                 this.progress = new DeveloperV1PendingPairProgress(
                         V1_INITIAL_RESTRAINT_TICKS,
@@ -1205,7 +1325,7 @@ public final class DeveloperSetupManager {
                         return java.util.Optional.empty();
                     }
                     return java.util.Optional.of(new DeveloperV1TerrainPlanner.Candidate<>(
-                            new DeveloperV1TerrainPlanner.Site(x, candidate.getY(), z),
+                            new DeveloperV1TerrainPlanner.Site(x, isolation.jobPos().getY(), z),
                             isolation.terrainAdjustmentCost(),
                             isolation));
                 });
@@ -1219,66 +1339,151 @@ public final class DeveloperSetupManager {
 
     private static V1IsolationPlan findV1IsolationPlan(
             ServerWorld world,
-            BlockPos jobPos,
+            BlockPos jobSurface,
             Set<Long> occupiedColumns
     ) {
         for (Direction direction : Direction.Type.HORIZONTAL) {
-            BlockPos horizontalSpawn = jobPos.offset(direction);
-            BlockPos spawnPos = v1SurfacePosition(
+            BlockPos horizontalSpawn = jobSurface.offset(direction);
+            BlockPos spawnSurface = v1SurfacePosition(
                     world, horizontalSpawn.getX(), horizontalSpawn.getZ());
-            if (Math.abs(spawnPos.getY() - jobPos.getY()) > 1
-                    || occupiedColumns.contains(v1ColumnKey(spawnPos))
-                    || !isSafeV1PlacementPosition(world, spawnPos)) {
+            if (Math.abs(spawnSurface.getY() - jobSurface.getY()) > 1
+                    || occupiedColumns.contains(v1ColumnKey(spawnSurface))
+                    || !isSafeV1PlacementPosition(world, spawnSurface)) {
                 continue;
             }
-            Set<BlockPos> barrierPositions = new HashSet<>();
-            Set<BlockPos> clearPositions = new HashSet<>();
-            clearPositions.add(spawnPos.toImmutable());
-            clearPositions.add(spawnPos.up().toImmutable());
-            boolean valid = true;
-            for (int dx = -V1_ISOLATION_RADIUS; dx <= V1_ISOLATION_RADIUS && valid; dx++) {
-                for (int dz = -V1_ISOLATION_RADIUS; dz <= V1_ISOLATION_RADIUS; dz++) {
-                    if (Math.max(Math.abs(dx), Math.abs(dz)) != V1_ISOLATION_RADIUS) {
-                        continue;
-                    }
-                    int wallX = spawnPos.getX() + dx;
-                    int wallZ = spawnPos.getZ() + dz;
-                    if (wallX == jobPos.getX() && wallZ == jobPos.getZ()) {
-                        BlockPos aboveJobSite = jobPos.up();
-                        if (!world.getWorldBorder().contains(aboveJobSite)
-                                || !isV1ReplaceableSpace(world.getBlockState(aboveJobSite))) {
-                            valid = false;
-                            break;
-                        }
-                        barrierPositions.add(aboveJobSite.toImmutable());
-                        continue;
-                    }
-                    BlockPos wallBase = v1SurfacePosition(world, wallX, wallZ);
-                    if (Math.abs(wallBase.getY() - spawnPos.getY()) > 1
-                            || occupiedColumns.contains(v1ColumnKey(wallBase))
-                            || !isSafeV1PlacementPosition(world, wallBase)) {
-                        valid = false;
-                        break;
-                    }
-                    barrierPositions.add(wallBase.toImmutable());
-                    barrierPositions.add(wallBase.up().toImmutable());
-                }
+
+            DeveloperV1IsolationSafety.Cell jobCell = toIsolationCell(jobSurface);
+            DeveloperV1IsolationSafety.Cell spawnCell = toIsolationCell(spawnSurface);
+            Map<DeveloperV1IsolationSafety.Column, Integer> perimeterSurfaceY = new HashMap<>();
+            for (DeveloperV1IsolationSafety.Column column :
+                    DeveloperV1IsolationSafety.perimeterColumns(
+                            spawnCell.column(), V1_ISOLATION_RADIUS)) {
+                perimeterSurfaceY.put(
+                        column,
+                        v1SurfacePosition(world, column.x(), column.z()).getY());
             }
-            if (valid) {
-                Set<BlockPos> adjustedPositions = new HashSet<>(barrierPositions);
-                adjustedPositions.add(jobPos);
-                adjustedPositions.addAll(clearPositions);
-                int terrainAdjustmentCost = (int) adjustedPositions.stream()
-                        .filter(pos -> !world.getBlockState(pos).isAir())
-                        .count();
-                return new V1IsolationPlan(
-                        spawnPos.toImmutable(),
-                        Set.copyOf(barrierPositions),
-                        Set.copyOf(clearPositions),
-                        terrainAdjustmentCost);
+
+            DeveloperV1IsolationSafety.Geometry geometry =
+                    DeveloperV1IsolationSafety.planCanonicalFootprint(
+                                    jobCell,
+                                    spawnCell,
+                                    V1_ISOLATION_RADIUS,
+                                    perimeterSurfaceY,
+                                    Set.of())
+                            .orElse(null);
+            if (geometry == null
+                    || geometry.footprintColumns().stream()
+                    .anyMatch(column -> occupiedColumns.contains(v1ColumnKey(column.x(), column.z())))) {
+                continue;
             }
+
+            Set<BlockPos> barrierPositions = toBlockPositions(geometry.barrierPositions());
+            Set<BlockPos> naturalLowerWalls = toBlockPositions(geometry.naturalLowerWallPositions());
+            Set<BlockPos> clearPositions = toBlockPositions(geometry.clearPositions());
+            Set<BlockPos> fillPositions = toBlockPositions(geometry.fillPositions());
+            Set<BlockPos> interiorPositions = toBlockPositions(geometry.interiorPositions());
+            BlockPos normalizedJobPos = toBlockPos(geometry.jobPos());
+            BlockPos normalizedSpawnPos = toBlockPos(geometry.spawnPos());
+            if (!isSafeV1IsolationPlan(
+                    world,
+                    normalizedJobPos,
+                    normalizedSpawnPos,
+                    barrierPositions,
+                    naturalLowerWalls,
+                    clearPositions,
+                    fillPositions)) {
+                continue;
+            }
+
+            Set<BlockPos> adjustedPositions = new HashSet<>(barrierPositions);
+            adjustedPositions.add(normalizedJobPos);
+            adjustedPositions.addAll(clearPositions);
+            int terrainAdjustmentCost = fillPositions.size() + (int) adjustedPositions.stream()
+                    .filter(pos -> !world.getBlockState(pos).isAir())
+                    .count();
+            Set<Long> footprintColumns = geometry.footprintColumns().stream()
+                    .map(column -> v1ColumnKey(column.x(), column.z()))
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            return new V1IsolationPlan(
+                    normalizedJobPos,
+                    normalizedSpawnPos,
+                    barrierPositions,
+                    naturalLowerWalls,
+                    clearPositions,
+                    fillPositions,
+                    interiorPositions,
+                    footprintColumns,
+                    geometry.canonicalY(),
+                    terrainAdjustmentCost);
         }
         return null;
+    }
+
+    private static boolean isSafeV1IsolationPlan(
+            ServerWorld world,
+            BlockPos jobPos,
+            BlockPos spawnPos,
+            Set<BlockPos> barriers,
+            Set<BlockPos> naturalLowerWalls,
+            Set<BlockPos> clearPositions,
+            Set<BlockPos> fillPositions
+    ) {
+        if (!world.getWorldBorder().contains(jobPos)
+                || !isV1ReplaceableSpace(world.getBlockState(jobPos))) {
+            return false;
+        }
+        for (BlockPos pos : barriers) {
+            if (!world.getWorldBorder().contains(pos)
+                    || !isV1ReplaceableSpace(world.getBlockState(pos))) {
+                return false;
+            }
+        }
+        for (BlockPos pos : clearPositions) {
+            if (!world.getWorldBorder().contains(pos)
+                    || !isV1ReplaceableSpace(world.getBlockState(pos))) {
+                return false;
+            }
+        }
+        for (BlockPos pos : naturalLowerWalls) {
+            if (!world.getWorldBorder().contains(pos) || !isStableV1Support(world, pos)) {
+                return false;
+            }
+        }
+        for (BlockPos pos : fillPositions) {
+            if (!world.getWorldBorder().contains(pos)
+                    || !isV1ReplaceableSpace(world.getBlockState(pos))
+                    || !isStableV1Support(world, pos.down())) {
+                return false;
+            }
+        }
+        boolean spawnSupported = fillPositions.contains(spawnPos.down())
+                || isStableV1Support(world, spawnPos.down());
+        boolean jobSupported = fillPositions.contains(jobPos.down())
+                || isStableV1Support(world, jobPos.down());
+        return spawnSupported && jobSupported;
+    }
+
+    private static boolean isStableV1Support(ServerWorld world, BlockPos pos) {
+        BlockState state = world.getBlockState(pos);
+        return state.isSolidBlock(world, pos)
+                && !state.isIn(BlockTags.LOGS)
+                && !state.isIn(BlockTags.LEAVES);
+    }
+
+    private static DeveloperV1IsolationSafety.Cell toIsolationCell(BlockPos pos) {
+        return new DeveloperV1IsolationSafety.Cell(pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    private static BlockPos toBlockPos(DeveloperV1IsolationSafety.Cell cell) {
+        return new BlockPos(cell.x(), cell.y(), cell.z());
+    }
+
+    private static Set<BlockPos> toBlockPositions(
+            Set<DeveloperV1IsolationSafety.Cell> cells
+    ) {
+        return cells.stream()
+                .map(DeveloperSetupManager::toBlockPos)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     private static BlockPos v1SurfacePosition(ServerWorld world, int x, int z) {
@@ -1438,9 +1643,15 @@ public final class DeveloperSetupManager {
     }
 
     private record V1IsolationPlan(
+            BlockPos jobPos,
             BlockPos spawnPos,
             Set<BlockPos> barrierPositions,
+            Set<BlockPos> naturalLowerWallPositions,
             Set<BlockPos> clearPositions,
+            Set<BlockPos> fillPositions,
+            Set<BlockPos> interiorPositions,
+            Set<Long> footprintColumns,
+            int canonicalY,
             int terrainAdjustmentCost
     ) {
     }

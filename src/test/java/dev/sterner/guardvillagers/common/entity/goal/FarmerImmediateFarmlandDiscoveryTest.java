@@ -16,7 +16,7 @@ class FarmerImmediateFarmlandDiscoveryTest {
 
         schedule.requestImmediate();
         List<FarmerFarmlandScanPlan.Offset> localOffsets =
-                FarmerFarmlandScanPlan.priorityOffsets(8, -1, 1);
+                FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1);
         FarmerFarmlandScanPlan.Offset nearbyDirt = new FarmerFarmlandScanPlan.Offset(2, 0, 1);
 
         assertFalse(schedule.shouldWait(1L));
@@ -25,6 +25,25 @@ class FarmerImmediateFarmlandDiscoveryTest {
         assertTrue(localOffsets.contains(nearbyDirt));
         assertTrue(FarmerHarvestGoal.isLocalPriorityTerritoryCell(false, true, true));
         assertTrue(FarmerHarvestGoal.canPrepareFarmland(true, true));
+    }
+
+    @Test
+    void immediatePriorityScanFindsHydratedDirtFifteenBlocksFromJob() {
+        List<FarmerFarmlandScanPlan.Offset> offsets =
+                FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1);
+
+        assertTrue(offsets.contains(new FarmerFarmlandScanPlan.Offset(15, 0, 0)));
+        assertEquals(16, FarmerHarvestGoal.localPriorityDiscoveryRadius(32));
+        assertTrue(FarmerHarvestGoal.isLocalPriorityTerritoryCell(false, true, true));
+    }
+
+    @Test
+    void dirtOutsideSixteenBlocksIsNotInImmediatePriorityScan() {
+        List<FarmerFarmlandScanPlan.Offset> offsets =
+                FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1);
+
+        assertFalse(offsets.contains(new FarmerFarmlandScanPlan.Offset(17, 0, 0)));
+        assertFalse(offsets.contains(new FarmerFarmlandScanPlan.Offset(16, 0, 5)));
     }
 
     @Test
@@ -72,12 +91,12 @@ class FarmerImmediateFarmlandDiscoveryTest {
 
     @Test
     void localPriorityScanIsBoundedAndDoesNotScanConfiguredRadius() {
-        int localCells = FarmerFarmlandScanPlan.priorityOffsets(8, -1, 1).size();
-        int localCellBudget = FarmerHarvestGoal.localPriorityScanCellBudget(8);
+        int localCells = FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1).size();
+        int localCellBudget = FarmerHarvestGoal.localPriorityScanCellBudget(16);
         int fullConfiguredCells = FarmerFarmlandScanPlan.totalCells(32, -1, 1);
 
         assertTrue(localCells > 0);
-        assertTrue(localCells < 900);
+        assertTrue(localCells < 2500);
         assertTrue(localCellBudget < fullConfiguredCells);
         assertTrue(localCells < fullConfiguredCells);
     }
@@ -85,12 +104,63 @@ class FarmerImmediateFarmlandDiscoveryTest {
     @Test
     void localPriorityScanVisitsClosestHorizontalCellsFirst() {
         List<FarmerFarmlandScanPlan.Offset> offsets =
-                FarmerFarmlandScanPlan.priorityOffsets(8, -1, 1);
+                FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1);
         int nearIndex = offsets.indexOf(new FarmerFarmlandScanPlan.Offset(1, 0, 0));
         int farIndex = offsets.indexOf(new FarmerFarmlandScanPlan.Offset(7, 0, 0));
 
         assertTrue(nearIndex >= 0);
         assertTrue(farIndex > nearIndex);
+    }
+
+    @Test
+    void discoveryRadiusDoesNotIncreaseSessionHoeTargetCap() {
+        List<net.minecraft.util.math.BlockPos> candidates = new java.util.ArrayList<>();
+        for (int x = 0; x < 64; x++) {
+            candidates.add(new net.minecraft.util.math.BlockPos(x, 64, 0));
+        }
+
+        List<net.minecraft.util.math.BlockPos> selected = FarmerHarvestGoal.selectCompactHoeTargets(
+                candidates, List.of(), new net.minecraft.util.math.BlockPos(0, 64, 0), 32, 2);
+
+        assertEquals(32, selected.size());
+    }
+
+    @Test
+    void nearestCompactCandidatesWinOverFarScatteredCandidates() {
+        net.minecraft.util.math.BlockPos origin = new net.minecraft.util.math.BlockPos(0, 64, 0);
+        List<net.minecraft.util.math.BlockPos> candidates = List.of(
+                new net.minecraft.util.math.BlockPos(4, 64, 0),
+                new net.minecraft.util.math.BlockPos(5, 64, 0),
+                new net.minecraft.util.math.BlockPos(6, 64, 0),
+                new net.minecraft.util.math.BlockPos(12, 64, 8),
+                new net.minecraft.util.math.BlockPos(15, 64, -4));
+
+        List<net.minecraft.util.math.BlockPos> selected = FarmerHarvestGoal.selectCompactHoeTargets(
+                candidates, List.of(), origin, 5, 2);
+
+        assertEquals(List.of(
+                new net.minecraft.util.math.BlockPos(4, 64, 0),
+                new net.minecraft.util.math.BlockPos(5, 64, 0),
+                new net.minecraft.util.math.BlockPos(6, 64, 0)), selected);
+    }
+
+    @Test
+    void existingFarmlandReducesNewExpansionBudget() {
+        net.minecraft.util.math.BlockPos origin = new net.minecraft.util.math.BlockPos(0, 64, 0);
+        List<net.minecraft.util.math.BlockPos> existing = List.of(
+                new net.minecraft.util.math.BlockPos(4, 64, 0),
+                new net.minecraft.util.math.BlockPos(4, 64, 1),
+                new net.minecraft.util.math.BlockPos(4, 64, 2));
+        List<net.minecraft.util.math.BlockPos> candidates = List.of(
+                new net.minecraft.util.math.BlockPos(5, 64, 0),
+                new net.minecraft.util.math.BlockPos(6, 64, 0),
+                new net.minecraft.util.math.BlockPos(7, 64, 0));
+
+        List<net.minecraft.util.math.BlockPos> selected = FarmerHarvestGoal.selectCompactHoeTargets(
+                candidates, existing, origin, 4, 2);
+
+        assertEquals(1, selected.size());
+        assertEquals(new net.minecraft.util.math.BlockPos(5, 64, 0), selected.getFirst());
     }
 
     @Test
@@ -109,7 +179,7 @@ class FarmerImmediateFarmlandDiscoveryTest {
     @Test
     void backgroundCursorContinuesAfterIndependentLocalPlan() {
         FarmerFarmlandScanPlan.Slice first = FarmerFarmlandScanPlan.nextSlice(0, 1200, 32, -1, 1);
-        FarmerFarmlandScanPlan.priorityOffsets(8, -1, 1);
+        FarmerFarmlandScanPlan.priorityOffsets(16, -1, 1);
         FarmerFarmlandScanPlan.Slice second =
                 FarmerFarmlandScanPlan.nextSlice(first.nextCursor(), 1200, 32, -1, 1);
 

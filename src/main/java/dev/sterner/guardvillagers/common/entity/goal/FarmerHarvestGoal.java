@@ -71,7 +71,7 @@ public class FarmerHarvestGoal extends Goal {
     private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
     private static final int BOOTSTRAP_SCAN_BLOCK_BUDGET = 1200;
     private static final int BOOTSTRAP_SCAN_INTERVAL_TICKS = 40;
-    private static final int LOCAL_PRIORITY_SCAN_RADIUS = 8;
+    private static final int LOCAL_PRIORITY_SCAN_RADIUS = 16;
     private static final int BOOTSTRAP_INVALIDATION_CHECK_INTERVAL_TICKS = 200;
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
@@ -83,6 +83,7 @@ public class FarmerHarvestGoal extends Goal {
      *  The territory cache builds incrementally — a high value causes indefinite stand-still on new farms. */
     private static final int MIN_VIABLE_TERRITORY_PLOTS = 2;
     private static final int MAX_HOE_TARGETS_PER_SESSION = 32;
+    private static final int COMPACT_HOE_CLUSTER_STEP = 2;
     private static final int HOE_TARGET_RETRY_TICKS = 200;
     private static final int SEED_TARGET_RESERVE_MARGIN_MIN = 2;
     private static final int SEED_TARGET_RESERVE_MARGIN_DIVISOR = 5;
@@ -1547,9 +1548,13 @@ public class FarmerHarvestGoal extends Goal {
         ensureEligibleTerritoryCache(world, false);
 
         List<BlockPos> hoeableTargets = new ArrayList<>();
+        List<BlockPos> existingFarmland = new ArrayList<>();
         long now = world.getTime();
         hoeTargetRetryAfterTick.entrySet().removeIf(entry -> !isHoeTarget(world, entry.getKey()));
         for (BlockPos pos : eligibleTerritory) {
+            if (world.getBlockState(pos).isOf(Blocks.FARMLAND)) {
+                existingFarmland.add(pos.toImmutable());
+            }
             if (!shouldQueueHoeTarget(
                     true,
                     isHoeTarget(world, pos),
@@ -1560,10 +1565,81 @@ public class FarmerHarvestGoal extends Goal {
             hoeableTargets.add(pos.toImmutable());
         }
 
-        hoeableTargets.sort(Comparator.comparingDouble(this::distanceToVillagerSquared));
-        hoeableTargets.stream()
-                .limit(MAX_HOE_TARGETS_PER_SESSION)
-                .forEach(hoeTargets::addLast);
+        hoeTargets.addAll(selectCompactHoeTargets(
+                hoeableTargets,
+                existingFarmland,
+                jobPos,
+                MAX_HOE_TARGETS_PER_SESSION,
+                COMPACT_HOE_CLUSTER_STEP));
+    }
+
+    static List<BlockPos> selectCompactHoeTargets(
+            List<BlockPos> candidates,
+            List<BlockPos> existingFarmland,
+            BlockPos origin,
+            int sessionCap,
+            int clusterStep
+    ) {
+        int remainingBudget = Math.max(0, sessionCap - Math.min(sessionCap, existingFarmland.size()));
+        if (remainingBudget == 0 || candidates.isEmpty()) {
+            return List.of();
+        }
+
+        int safeStep = Math.max(1, clusterStep);
+        Comparator<BlockPos> originOrder = Comparator
+                .comparingLong((BlockPos pos) -> squaredHorizontalDistance(pos, origin))
+                .thenComparingInt(BlockPos::getY)
+                .thenComparingInt(BlockPos::getX)
+                .thenComparingInt(BlockPos::getZ);
+        List<BlockPos> remaining = candidates.stream().distinct().sorted(originOrder).toList();
+        List<BlockPos> mutableRemaining = new ArrayList<>(remaining);
+        List<BlockPos> selected = new ArrayList<>(remainingBudget);
+
+        BlockPos anchor;
+        if (existingFarmland.isEmpty()) {
+            anchor = mutableRemaining.removeFirst();
+            selected.add(anchor);
+        } else {
+            anchor = existingFarmland.stream()
+                    .distinct()
+                    .sorted(originOrder)
+                    .filter(existing -> mutableRemaining.stream()
+                            .anyMatch(candidate -> isCompactNeighbor(existing, candidate, safeStep)))
+                    .findFirst()
+                    .orElse(null);
+            if (anchor == null) {
+                return List.of();
+            }
+        }
+
+        while (selected.size() < remainingBudget) {
+            BlockPos next = mutableRemaining.stream()
+                    .filter(candidate -> isCompactNeighbor(anchor, candidate, safeStep)
+                            || selected.stream().anyMatch(selectedPos ->
+                            isCompactNeighbor(selectedPos, candidate, safeStep)))
+                    .min(Comparator
+                            .comparingLong((BlockPos pos) -> squaredHorizontalDistance(pos, anchor))
+                            .thenComparing(originOrder))
+                    .orElse(null);
+            if (next == null) {
+                break;
+            }
+            selected.add(next);
+            mutableRemaining.remove(next);
+        }
+        return List.copyOf(selected);
+    }
+
+    private static boolean isCompactNeighbor(BlockPos first, BlockPos second, int step) {
+        return Math.abs(first.getX() - second.getX()) <= step
+                && Math.abs(first.getZ() - second.getZ()) <= step
+                && Math.abs(first.getY() - second.getY()) <= 1;
+    }
+
+    private static long squaredHorizontalDistance(BlockPos first, BlockPos second) {
+        long dx = (long) first.getX() - second.getX();
+        long dz = (long) first.getZ() - second.getZ();
+        return dx * dx + dz * dz;
     }
 
     private void populatePlantTargets(ServerWorld world) {
@@ -2291,7 +2367,7 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private int runLocalPriorityTerritoryScan(ServerWorld world) {
-        int radius = Math.min(LOCAL_PRIORITY_SCAN_RADIUS, getFarmlandWorkRadius());
+        int radius = localPriorityDiscoveryRadius(getFarmlandWorkRadius());
         int actionableCells = 0;
         boolean cacheChanged = false;
         List<FarmerFarmlandScanPlan.Offset> offsets = FarmerFarmlandScanPlan.priorityOffsets(
@@ -2383,6 +2459,10 @@ public class FarmerHarvestGoal extends Goal {
                 BOOTSTRAP_SCAN_MIN_Y_OFFSET,
                 BOOTSTRAP_SCAN_MAX_Y_OFFSET).size();
         return localPriorityScanCellBudget(safeRadius, priorityCells);
+    }
+
+    static int localPriorityDiscoveryRadius(int configuredWorkRadius) {
+        return Math.min(LOCAL_PRIORITY_SCAN_RADIUS, Math.max(0, configuredWorkRadius));
     }
 
     private static int localPriorityScanCellBudget(int radius, int priorityCells) {
