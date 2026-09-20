@@ -67,7 +67,8 @@ public final class ProfessionalStorageScreenHandlerFactory implements NamedScree
                         storageType,
                         workers,
                         delegate.getDisplayName().getString(),
-                        preserveCustomTitle)
+                        preserveCustomTitle,
+                        ProfessionalStorageProfileProviders.createRows(serverWorld, storage, resolutions))
                 .<NamedScreenHandlerFactory>map(snapshot ->
                         new ProfessionalStorageScreenHandlerFactory(delegate, snapshot))
                 .orElse(delegate);

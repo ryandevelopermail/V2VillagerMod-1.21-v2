@@ -16,6 +16,7 @@ import dev.sterner.guardvillagers.common.network.DeveloperSetupRequestPacket;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
 import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
 import dev.sterner.guardvillagers.common.network.ProfessionalStorageSnapshotPacket;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageProfileProviders;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -172,6 +173,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(LUMBERJACK_GUARD_VILLAGER, GuardEntity.createAttributes());
         ProfessionDefinitions.registerAll();
+        ProfessionalStorageProfileProviders.registerDefaults();
         DeveloperCommands.register();
 
         if (FabricLoader.getInstance().isModLoaded("morevillagers")) {

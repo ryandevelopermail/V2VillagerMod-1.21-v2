@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -112,6 +113,47 @@ class ProfessionalStorageSnapshotFactoryTest {
         assertEquals(leftSnapshot, rightSnapshot);
         assertEquals(left, leftSnapshot.canonicalPos());
         assertFalse(leftSnapshot.customTitlePreserved());
+    }
+
+    @Test
+    void optionalProfessionRowsReplaceGenericRowsWithoutChangingTitleLogic() {
+        List<ProfessionalStorageRow> farmerRows = List.of(
+                new ProfessionalStorageRow("Status", "Idle", ProfessionalStorageRow.Tone.PAIRED),
+                new ProfessionalStorageRow("Hoe available", "Yes", ProfessionalStorageRow.Tone.PAIRED));
+
+        ProfessionalStorageSnapshot snapshot = ProfessionalStorageSnapshotFactory.create(
+                44,
+                STORAGE,
+                ProfessionalStorageSnapshot.StorageType.NORMAL_CHEST,
+                List.of(worker("minecraft:farmer")),
+                "Chest",
+                false,
+                Optional.of(farmerRows)).orElseThrow();
+
+        assertEquals(farmerRows, snapshot.rows());
+        assertEquals("Farmer Storage", snapshot.title());
+    }
+
+    @Test
+    void oversizedProfessionRowsFallBackToGenericProfile() {
+        List<ProfessionalStorageRow> oversized = java.util.stream.IntStream.range(0, 7)
+                .mapToObj(index -> new ProfessionalStorageRow(
+                        "Metric " + index,
+                        "0",
+                        ProfessionalStorageRow.Tone.NORMAL))
+                .toList();
+
+        ProfessionalStorageSnapshot snapshot = ProfessionalStorageSnapshotFactory.create(
+                45,
+                STORAGE,
+                ProfessionalStorageSnapshot.StorageType.NORMAL_CHEST,
+                List.of(worker("minecraft:farmer")),
+                "Chest",
+                false,
+                Optional.of(oversized)).orElseThrow();
+
+        assertEquals(List.of("Profession", "Status"),
+                snapshot.rows().stream().map(ProfessionalStorageRow::label).toList());
     }
 
     private static ProfessionalStorageSnapshot snapshot(ProfessionalStorageSnapshotFactory.WorkerView... workers) {

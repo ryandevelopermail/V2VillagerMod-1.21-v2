@@ -19,6 +19,25 @@ public final class ProfessionalStorageSnapshotFactory {
             String originalTitle,
             boolean preserveCustomTitle
     ) {
+        return create(
+                syncId,
+                storage,
+                storageType,
+                workers,
+                originalTitle,
+                preserveCustomTitle,
+                Optional.empty());
+    }
+
+    public static Optional<ProfessionalStorageSnapshot> create(
+            int syncId,
+            StorageIdentity storage,
+            ProfessionalStorageSnapshot.StorageType storageType,
+            List<WorkerView> workers,
+            String originalTitle,
+            boolean preserveCustomTitle,
+            Optional<List<ProfessionalStorageRow>> profileRows
+    ) {
         if (workers.isEmpty()) {
             return Optional.empty();
         }
@@ -38,6 +57,28 @@ public final class ProfessionalStorageSnapshotFactory {
         String generatedTitle = titleFor(firstRole, workers.size(), roles.size());
         String title = preserveCustomTitle ? originalTitle : generatedTitle;
 
+        List<ProfessionalStorageRow> rows = profileRows
+                .filter(candidate -> !candidate.isEmpty()
+                        && candidate.size() <= ProfessionalStorageSnapshot.MAX_ROWS)
+                .map(List::copyOf)
+                .orElseGet(() -> createGenericRows(workers, profession));
+
+        return Optional.of(new ProfessionalStorageSnapshot(
+                syncId,
+                storage.dimension().getValue().toString(),
+                storage.canonicalPos(),
+                storageType,
+                roleState,
+                workers.size(),
+                title,
+                preserveCustomTitle,
+                rows));
+    }
+
+    private static List<ProfessionalStorageRow> createGenericRows(
+            List<WorkerView> workers,
+            String profession
+    ) {
         var rows = new java.util.ArrayList<ProfessionalStorageRow>();
         rows.add(new ProfessionalStorageRow("Profession", profession, ProfessionalStorageRow.Tone.NORMAL));
         if (workers.size() > 1) {
@@ -61,16 +102,7 @@ public final class ProfessionalStorageSnapshotFactory {
             rows.add(new ProfessionalStorageRow("Status", "Paired", ProfessionalStorageRow.Tone.PAIRED));
         }
 
-        return Optional.of(new ProfessionalStorageSnapshot(
-                syncId,
-                storage.dimension().getValue().toString(),
-                storage.canonicalPos(),
-                storageType,
-                roleState,
-                workers.size(),
-                title,
-                preserveCustomTitle,
-                rows));
+        return List.copyOf(rows);
     }
 
     static String titleFor(ProfessionalRoleId role, int workerCount, int distinctRoleCount) {
