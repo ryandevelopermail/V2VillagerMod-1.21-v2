@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.util;
 
 import com.google.common.collect.Sets;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.villager.ButcherBannerTracker;
 import dev.sterner.guardvillagers.common.villager.SpecialModifier;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehaviorRegistry;
@@ -305,18 +306,19 @@ public final class JobBlockPairingHelper {
 
     public static void refreshVillagerPairings(ServerWorld world, VillagerEntity villager) {
         if (!isEmployedVillager(villager)) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
 
         Optional<GlobalPos> jobSite = villager.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE);
         if (jobSite.isEmpty()) {
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
 
         GlobalPos globalPos = jobSite.get();
         if (!Objects.equals(globalPos.dimension(), world.getRegistryKey())) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
 
@@ -338,7 +340,7 @@ public final class JobBlockPairingHelper {
                     VillagerProfessionBehaviorRegistry.notifyChestPaired(world, villager, jobPos, chestPos);
                 },
                 () -> {
-                    invalidateVillagerChestPairing(world, villager.getUuid());
+                    removeConfirmedVillagerChestPairing(world, villager.getUuid());
                     // No chest present — give behaviors a chance to run in chestless (v1) mode
                     VillagerProfessionBehaviorRegistry.notifyJobSiteReady(world, villager, jobPos);
                 });
@@ -714,19 +716,19 @@ public final class JobBlockPairingHelper {
 
     public static void cacheVillagerChestPairing(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!villager.isAlive() || villager.isRemoved()) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
         if (!isEmployedVillager(villager)) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
         if (!jobPos.isWithinDistance(chestPos, JOB_BLOCK_PAIRING_RANGE)) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
         if (!isPairingBlock(world.getBlockState(chestPos))) {
-            invalidateVillagerChestPairing(world, villager.getUuid());
+            removeConfirmedVillagerChestPairing(world, villager.getUuid());
             return;
         }
         WorldKey worldKey = WorldKey.of(world);
@@ -737,9 +739,11 @@ public final class JobBlockPairingHelper {
                         villager.getVillagerData().getProfession(),
                         jobPos.toImmutable(),
                         chestPos.toImmutable()));
+        ProfessionalStorageRegistry.recordNativeVillagerPairing(world, villager, jobPos, chestPos);
     }
 
-    public static void invalidateVillagerChestPairing(ServerWorld world, UUID villagerUuid) {
+    /** Evicts only transient AI lookup state; safe for entity/chunk unload. */
+    public static void evictVillagerChestPairingCache(ServerWorld world, UUID villagerUuid) {
         WorldKey worldKey = WorldKey.of(world);
         Map<UUID, CachedVillagerChestPairing> byVillager = CACHED_VILLAGER_CHESTS.get(worldKey);
         if (byVillager == null) {
@@ -749,6 +753,12 @@ public final class JobBlockPairingHelper {
         if (byVillager.isEmpty()) {
             CACHED_VILLAGER_CHESTS.remove(worldKey);
         }
+    }
+
+    /** Removes both runtime cache and persistence after confirmed pairing invalidation. */
+    public static void removeConfirmedVillagerChestPairing(ServerWorld world, UUID villagerUuid) {
+        evictVillagerChestPairingCache(world, villagerUuid);
+        ProfessionalStorageRegistry.removePersistentPairing(world, villagerUuid);
     }
 
     public static List<CachedVillagerChestPairing> getCachedVillagerChestPairings(ServerWorld world) {
@@ -766,6 +776,9 @@ public final class JobBlockPairingHelper {
             Entity entity = world.getEntity(entry.getKey());
             if (!(entity instanceof VillagerEntity villager) || !villager.isAlive() || villager.isRemoved()) {
                 iterator.remove();
+                if (entity != null) {
+                    ProfessionalStorageRegistry.removePersistentPairing(world, entry.getKey());
+                }
                 continue;
             }
 
@@ -774,6 +787,7 @@ public final class JobBlockPairingHelper {
                     || !Objects.equals(jobSite.get().dimension(), world.getRegistryKey())
                     || !jobSite.get().pos().equals(pairing.jobPos())) {
                 iterator.remove();
+                ProfessionalStorageRegistry.removePersistentPairing(world, entry.getKey());
                 continue;
             }
 
@@ -781,6 +795,7 @@ public final class JobBlockPairingHelper {
                     || !isPairingBlock(world.getBlockState(pairing.chestPos()))
                     || !pairing.jobPos().isWithinDistance(pairing.chestPos(), JOB_BLOCK_PAIRING_RANGE)) {
                 iterator.remove();
+                ProfessionalStorageRegistry.removePersistentPairing(world, entry.getKey());
                 continue;
             }
 

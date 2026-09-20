@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
@@ -195,7 +197,25 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.FISHERMAN, "fisherman conversion");
 
-        world.spawnEntityAndPassengers(guard);
+        if (!world.spawnNewEntityAndPassengers(guard)) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "fisherman spawn failed");
+            LOGGER.warn("Fisherman {} conversion aborted: guard spawn failed", villager.getUuidAsString());
+            return;
+        }
+        BlockPos pairedStoragePos = chestPos != null
+                ? chestPos
+                : (JobBlockPairingHelper.isPairingBlock(world.getBlockState(jobPos)) ? jobPos : null);
+        if (pairedStoragePos != null) {
+            ProfessionalStorageRegistry.transferToSpecialist(
+                    world,
+                    villager.getUuid(),
+                    guard.getUuid(),
+                    ProfessionalRoleId.FISHERMAN_GUARD,
+                    pairedStoragePos,
+                    jobPos);
+        } else {
+            JobBlockPairingHelper.removeConfirmedVillagerChestPairing(world, villager.getUuid());
+        }
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Fisherman converted into guard using fishing rod ({})",

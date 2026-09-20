@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonToLibrarianDistributionGoal;
@@ -338,7 +340,18 @@ public class MasonBehavior implements VillagerProfessionBehavior {
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.MASON, "mason conversion");
 
-        world.spawnEntityAndPassengers(guard);
+        if (!world.spawnNewEntityAndPassengers(guard)) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "mason spawn failed");
+            LOGGER.warn("Mason {} conversion aborted from {}: guard spawn failed", villager.getUuidAsString(), source);
+            return;
+        }
+        ProfessionalStorageRegistry.transferToSpecialist(
+                world,
+                villager.getUuid(),
+                guard.getUuid(),
+                ProfessionalRoleId.MASON_GUARD,
+                chestPos,
+                jobPos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Mason converted into guard using tool {} from {} slot {} ({}) ({})",

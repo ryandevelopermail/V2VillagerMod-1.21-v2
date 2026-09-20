@@ -270,7 +270,7 @@ public class GuardVillagers implements ModInitializer {
         });
         ServerEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity && world instanceof ServerWorld serverWorld) {
-                JobBlockPairingHelper.invalidateVillagerChestPairing(serverWorld, villagerEntity.getUuid());
+                JobBlockPairingHelper.evictVillagerChestPairingCache(serverWorld, villagerEntity.getUuid());
             }
         });
 
