@@ -15,6 +15,7 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupRequestPacket;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
 import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
+import dev.sterner.guardvillagers.common.network.ProfessionalStorageSnapshotPacket;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -200,6 +201,7 @@ public class GuardVillagers implements ModInitializer {
         PayloadTypeRegistry.playS2C().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
         PayloadTypeRegistry.playS2C().register(OpenDeveloperPanelPacket.ID, OpenDeveloperPanelPacket.PACKET_CODEC);
         PayloadTypeRegistry.playS2C().register(DeveloperSetupStatusPacket.ID, DeveloperSetupStatusPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playS2C().register(ProfessionalStorageSnapshotPacket.ID, ProfessionalStorageSnapshotPacket.PACKET_CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
