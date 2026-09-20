@@ -29,6 +29,7 @@ class DeveloperV1BatchProgressTest {
         while (progress.canStart(DeveloperV1PlacementGrid.MAX_CONCURRENT)) {
             DeveloperV1BatchProgress.Task task = progress.startNext();
             assertTrue(assignments.reserve(task, task.gridSlot()));
+            assertTrue(assignments.markWorkstationPlaced(task.index(), task.gridSlot()));
             assertTrue(assignments.attachVillager(task.index(), villagerId(task.index())));
         }
 
@@ -239,6 +240,7 @@ class DeveloperV1BatchProgressTest {
             DeveloperV1BatchProgress.Task task
     ) {
         assertTrue(assignments.reserve(task, task.gridSlot()));
+        assertTrue(assignments.markWorkstationPlaced(task.index(), task.gridSlot()));
         assertTrue(assignments.attachVillager(task.index(), villagerId(task.index())));
     }
 

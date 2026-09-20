@@ -27,7 +27,6 @@ import net.minecraft.server.world.ServerWorld;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.VillagerProfession;
@@ -265,12 +264,19 @@ public final class DeveloperSetupManager {
                 v1FatalFailure = "V1 placement ownership collision for task " + (task.index() + 1) + ".";
                 return;
             }
+            logV1WorkstationLifecycle(task, candidateJobPos, "assignment_reserved", "none");
             if (!world.setBlockState(candidateJobPos, stableV1JobBlockState(expectedJobBlock), Block.NOTIFY_ALL)) {
                 rollbackPendingV1JobSite(task.index(), candidateJobPos, expectedJobBlock);
                 v1JobSites.rollback(task.index());
                 failV1TaskBeforeSpawn(task, "Could not place the " + requestedProfession.displayName() + " job site.");
                 return;
             }
+            if (!v1JobSites.markWorkstationPlaced(task.index(), candidateJobPos)) {
+                v1FatalFailure = "V1 workstation lifecycle verification failed for task "
+                        + (task.index() + 1) + ".";
+                return;
+            }
+            logV1WorkstationLifecycle(task, candidateJobPos, "workstation_placed", "none");
 
             V1IsolationPlan isolation = placeV1IsolationBarriers(sitePlan.isolation());
             if (isolation == null) {
@@ -302,6 +308,11 @@ public final class DeveloperSetupManager {
                 v1FatalFailure = "V1 villager ownership collision for task " + (task.index() + 1) + ".";
                 return;
             }
+            logV1WorkstationLifecycle(
+                    task,
+                    candidateJobPos,
+                    "villager_attached",
+                    pendingVillager.getUuidAsString());
             pendingV1Pairs.put(task.index(), new PendingV1Pair(
                     task,
                     pendingVillager.getUuid(),
@@ -357,6 +368,11 @@ public final class DeveloperSetupManager {
                                 + (pair.task.index() + 1) + ".";
                         break;
                     }
+                    logV1WorkstationLifecycle(
+                            pair.task,
+                            pair.jobPos,
+                            "exact_pair_completed",
+                            pair.villagerId.toString());
                     removeV1IsolationBarriers(pair.isolationBlocks);
                     releasePendingV1Villager(pair, pendingVillager);
                     v1Batch.finish(pair.task.index(), true);
@@ -413,6 +429,15 @@ public final class DeveloperSetupManager {
                     ? found
                     : null;
             removeV1IsolationBarriers(pair.isolationBlocks);
+            if (!v1JobSites.isPending(pair.task.index(), pair.jobPos)) {
+                releasePendingV1Villager(pair, pendingVillager);
+                logV1WorkstationLifecycle(
+                        pair.task,
+                        pair.jobPos,
+                        "failure_cleanup_skipped",
+                        "assignment_not_pending");
+                return;
+            }
             if (pendingVillager != null && pendingVillager.isAlive()) {
                 pendingVillager.discard();
             }
@@ -427,6 +452,11 @@ public final class DeveloperSetupManager {
                         + (pair.task.index() + 1) + ".";
                 return false;
             }
+            logV1WorkstationLifecycle(
+                    pair.task,
+                    pair.jobPos,
+                    "assignment_marked_unresolved",
+                    pair.villagerId.toString());
             lastV1Failure = message;
             VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
                     ? found
@@ -445,13 +475,58 @@ public final class DeveloperSetupManager {
         }
 
         private void rollbackPendingV1JobSite(int taskIndex, BlockPos jobPos, Block expectedJobBlock) {
-            if (!v1JobSites.isPending(taskIndex, jobPos)) {
+            DeveloperV1JobSiteAssignments.AssignmentState state = v1JobSites.state(taskIndex);
+            DeveloperV1JobSiteAssignments.RollbackDecision decision =
+                    v1JobSites.rollbackDecision(taskIndex, jobPos);
+            DeveloperV1BatchProgress.Task task = taskIndex >= 0 && taskIndex < v1Batch.tasks().size()
+                    ? v1Batch.tasks().get(taskIndex)
+                    : null;
+            LOGGER.debug("V1 workstation rollback requested task={} profession={} jobPos={} state={} decision={}",
+                    taskIndex + 1,
+                    task == null ? "unknown" : task.profession().displayName(),
+                    jobPos == null ? "none" : jobPos.toShortString(),
+                    state == null ? "missing" : state,
+                    decision);
+            if (decision != DeveloperV1JobSiteAssignments.RollbackDecision.ELIGIBLE) {
+                LOGGER.debug("V1 workstation rollback skipped task={} profession={} jobPos={} state={} reason={}",
+                        taskIndex + 1,
+                        task == null ? "unknown" : task.profession().displayName(),
+                        jobPos == null ? "none" : jobPos.toShortString(),
+                        state == null ? "missing" : state,
+                        decision);
                 return;
             }
-            if (world.getBlockState(jobPos).isOf(expectedJobBlock)
-                    && !isJobSiteClaimedByAnyVillager(world, jobPos)) {
-                world.removeBlock(jobPos, false);
+            if (!world.getBlockState(jobPos).isOf(expectedJobBlock)) {
+                LOGGER.debug("V1 workstation rollback skipped task={} profession={} jobPos={} state={} reason=block_mismatch",
+                        taskIndex + 1,
+                        task == null ? "unknown" : task.profession().displayName(),
+                        jobPos.toShortString(),
+                        state);
+                return;
             }
+            if (world.removeBlock(jobPos, false)) {
+                LOGGER.debug("V1 workstation removed task={} profession={} jobPos={} state={}",
+                        taskIndex + 1,
+                        task == null ? "unknown" : task.profession().displayName(),
+                        jobPos.toShortString(),
+                        state);
+            }
+        }
+
+        private void logV1WorkstationLifecycle(
+                DeveloperV1BatchProgress.Task task,
+                BlockPos jobPos,
+                String event,
+                String detail
+        ) {
+            DeveloperV1JobSiteAssignments.AssignmentState state = v1JobSites.state(task.index());
+            LOGGER.debug("V1 workstation lifecycle event={} task={} profession={} jobPos={} state={} detail={}",
+                    event,
+                    task.index() + 1,
+                    task.profession().displayName(),
+                    jobPos.toShortString(),
+                    state == null ? "missing" : state,
+                    detail);
         }
 
         private Set<Long> occupiedV1IsolationColumns() {
@@ -470,6 +545,14 @@ public final class DeveloperSetupManager {
         }
 
         private V1IsolationPlan placeV1IsolationBarriers(V1IsolationPlan isolation) {
+            Set<BlockPos> protectedPositions = protectedV1TaskPositions();
+            if (!DeveloperV1IsolationSafety.avoidsProtectedPositions(
+                    isolation.barrierPositions(),
+                    isolation.clearPositions(),
+                    protectedPositions)) {
+                LOGGER.debug("V1 isolation placement rejected because temporary positions overlap a reserved task position");
+                return null;
+            }
             for (BlockPos clearPos : isolation.clearPositions()) {
                 BlockState state = world.getBlockState(clearPos);
                 if (state.isAir()) {
@@ -504,11 +587,22 @@ public final class DeveloperSetupManager {
         }
 
         private void removeV1IsolationBarriers(Set<BlockPos> barrierPositions) {
+            Set<BlockPos> protectedPositions = protectedV1TaskPositions();
             for (BlockPos barrierPos : barrierPositions) {
+                if (!DeveloperV1IsolationSafety.canRemoveTemporaryPosition(barrierPos, protectedPositions)) {
+                    LOGGER.debug("V1 isolation cleanup skipped protected task position {}", barrierPos.toShortString());
+                    continue;
+                }
                 if (world.getBlockState(barrierPos).isOf(Blocks.BARRIER)) {
                     world.removeBlock(barrierPos, false);
                 }
             }
+        }
+
+        private Set<BlockPos> protectedV1TaskPositions() {
+            Set<BlockPos> protectedPositions = new HashSet<>(v1JobSites.reservedPositions());
+            pendingV1Pairs.values().forEach(pair -> protectedPositions.add(pair.spawnPos));
+            return Set.copyOf(protectedPositions);
         }
 
         private String validateCompletedV1JobSites() {
@@ -524,10 +618,7 @@ public final class DeveloperSetupManager {
                 }
                 if (!(world.getEntity(assignment.villagerId()) instanceof VillagerEntity owner)
                         || !owner.isAlive()
-                        || owner.getVillagerData().getProfession() != vanillaProfession
-                        || !owner.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                        .map(globalPos -> globalPos.pos().equals(assignment.position()))
-                        .orElse(false)) {
+                        || owner.getVillagerData().getProfession() != vanillaProfession) {
                     return "Completed V1 pairing for task " + (assignment.task().index() + 1)
                             + " (" + profession.displayName() + ") was lost before the batch advanced.";
                 }
@@ -820,12 +911,24 @@ public final class DeveloperSetupManager {
                 VillagerEntity pendingVillager = world.getEntity(pair.villagerId) instanceof VillagerEntity found
                         ? found
                         : null;
-                if (pendingVillager != null && pendingVillager.isAlive()) {
-                    pendingVillager.discard();
-                }
+                boolean genuinelyPending = v1JobSites.isPending(pair.task.index(), pair.jobPos);
                 removeV1IsolationBarriers(pair.isolationBlocks);
-                rollbackPendingV1JobSite(pair.task.index(), pair.jobPos, pair.expectedJobBlock);
-                v1JobSites.rollback(pair.task.index());
+                if (genuinelyPending) {
+                    boolean preserved = v1JobSites.markUnresolved(pair.task.index());
+                    releasePendingV1Villager(pair, pendingVillager);
+                    logV1WorkstationLifecycle(
+                            pair.task,
+                            pair.jobPos,
+                            preserved ? "session_cleanup_marked_unresolved" : "session_cleanup_preserved",
+                            preserved ? "fatal_session_cleanup" : "state_transition_rejected");
+                } else {
+                    releasePendingV1Villager(pair, pendingVillager);
+                    logV1WorkstationLifecycle(
+                            pair.task,
+                            pair.jobPos,
+                            "session_cleanup_preserved",
+                            "assignment_not_pending");
+                }
             }
             pendingV1Pairs.clear();
         }
@@ -1084,17 +1187,6 @@ public final class DeveloperSetupManager {
 
     private static long v1ColumnKey(int x, int z) {
         return new BlockPos(x, 0, z).asLong();
-    }
-
-    private static boolean isJobSiteClaimedByAnyVillager(ServerWorld world, BlockPos jobPos) {
-        return !world.getEntitiesByClass(
-                VillagerEntity.class,
-                new Box(jobPos).expand(DeveloperV1PlacementGrid.VANILLA_JOB_SITE_SEARCH_RADIUS),
-                candidate -> candidate.isAlive()
-                        && candidate.getBrain().getOptionalMemory(MemoryModuleType.JOB_SITE)
-                        .map(globalPos -> globalPos.pos().equals(jobPos))
-                        .orElse(false)
-        ).isEmpty();
     }
 
     private static InfrastructureSite findFurnaceSite(ServerWorld world, BlockPos tablePos, BlockPos chestPos) {
