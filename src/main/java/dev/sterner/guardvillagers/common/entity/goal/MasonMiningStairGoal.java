@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.entity.goal.MasonMiningRecoveryPolicy.FailureSubtype;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -32,6 +33,7 @@ import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -39,15 +41,12 @@ public class MasonMiningStairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(MasonMiningStairGoal.class);
     private static final double MOVE_SPEED = 0.7D;
     private static final double TARGET_REACH_SQUARED = 1.8D;
-    private static final int NO_PROGRESS_LIMIT_TICKS = 600;
     private static final int MINING_DURATION_MIN_TICKS = 1200;
     private static final int MINING_DURATION_MAX_TICKS = 3600;
     private static final int BATCH_MIN_STEPS = 20;
     private static final int BATCH_MAX_STEPS = 56;
     private static final int SESSION_BACKOFF_MIN_TICKS = 20 * 60 * 2;
     private static final int SESSION_BACKOFF_MAX_TICKS = 20 * 60 * 5;
-    private static final int FAILURE_BACKOFF_MIN_TICKS = 20 * 60 * 1;
-    private static final int FAILURE_BACKOFF_MAX_TICKS = 20 * 60 * 3;
     private static final int REQUIRED_STAIR_CLEARANCE = 3;
     private static final int GRAVITY_SCAN_HEIGHT = 6;
     private static final int RECOVERY_TRIGGER_TICKS = 50;
@@ -85,7 +84,18 @@ public class MasonMiningStairGoal extends Goal {
     private BlockPos recoveryMoveTarget;
     private BlockPos returnStepTarget;
     private int recoveryTicks;
-    private boolean recoveryAttemptedForStep;
+    private int localStepRetryCount;
+    private BlockPos localRetryTarget;
+    private int localRetryDelayTicks;
+    private int returnPathRetryCount;
+    private BlockPos returnPathRetryTarget;
+    private FailureSubtype failureSubtype = FailureSubtype.NONE;
+    private BlockPos failurePosition;
+    private FailureSubtype terminalFailureSubtype = FailureSubtype.NONE;
+    private BlockPos terminalFailurePosition;
+    private FailureSubtype lastTrackedFailureSubtype = FailureSubtype.NONE;
+    private BlockPos lastTrackedFailureTarget;
+    private Direction reseedMiningDirection;
     private int repairedObstructionCount;
     private int placedSupportCount;
     private ReturnReason lastFailureReason = ReturnReason.NONE;
@@ -152,7 +162,10 @@ public class MasonMiningStairGoal extends Goal {
         this.adaptiveScanVolumeWindow += Math.max(1L, this.stepIndex + 1L);
 
         Direction directionFromChest = Direction.getFacing(jobPos.getX() - chestPos.getX(), 0, jobPos.getZ() - chestPos.getZ());
-        Direction fallbackDirection = directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing();
+        Direction fallbackDirection = reseedMiningDirection != null && reseedMiningDirection.getAxis().isHorizontal()
+                ? reseedMiningDirection
+                : (directionFromChest.getAxis().isHorizontal() ? directionFromChest : guard.getHorizontalFacing());
+        reseedMiningDirection = null;
 
         Direction persistedDirection = Direction.byId(guard.getMiningDirectionId());
         BlockPos persistedOrigin = guard.getMiningOrigin();
@@ -247,7 +260,15 @@ public class MasonMiningStairGoal extends Goal {
         this.recoveryMoveTarget = null;
         this.returnStepTarget = null;
         this.recoveryTicks = 0;
-        this.recoveryAttemptedForStep = false;
+        this.localStepRetryCount = 0;
+        this.localRetryTarget = null;
+        this.localRetryDelayTicks = 0;
+        this.returnPathRetryCount = 0;
+        this.returnPathRetryTarget = null;
+        this.failureSubtype = FailureSubtype.NONE;
+        this.failurePosition = null;
+        this.terminalFailureSubtype = FailureSubtype.NONE;
+        this.terminalFailurePosition = null;
         this.repairedObstructionCount = 0;
         this.placedSupportCount = 0;
         this.blockedByProtectedJobBlock = false;
@@ -270,7 +291,8 @@ public class MasonMiningStairGoal extends Goal {
         if (!world.isChunkLoaded(chestPos) || !world.isChunkLoaded(jobPos)) {
             return false;
         }
-        if (stage == Stage.MINING && !hasUsableMiningTool()) {
+        if ((stage == Stage.MINING || stage == Stage.REJOIN_LAST_STEP) && !hasUsableMiningTool()) {
+            recordAdvanceFailure(FailureSubtype.TOOL_LOST, guard.getBlockPos());
             beginReturn(ReturnReason.TOOL_BROKE);
         }
         return stage != Stage.DONE;
@@ -341,13 +363,22 @@ public class MasonMiningStairGoal extends Goal {
 
             if (returnStepTarget != null) {
                 BlockPos guardFeet = guard.getBlockPos();
-                if (!repairStairTransitionIfNeeded(world, guardFeet, returnStepTarget) || !ensureStepClear(world, returnStepTarget)) {
-                    beginReturn(ReturnReason.CANNOT_ADVANCE);
+                beginAdvanceAttempt(returnStepTarget);
+                if (!repairStairTransitionIfNeeded(world, guardFeet, returnStepTarget)) {
+                    recordFallbackFailure(FailureSubtype.TRANSITION_REPAIR_FAILED, returnStepTarget);
+                    handleReturnPathFailure(returnStepTarget);
+                    return;
+                }
+                if (!ensureStepClear(world, returnStepTarget)) {
+                    recordFallbackFailure(FailureSubtype.STEP_CLEAR_FAILED, returnStepTarget);
+                    handleReturnPathFailure(returnStepTarget);
                     return;
                 }
 
                 guard.getNavigation().startMovingTo(returnStepTarget.getX() + 0.5D, returnStepTarget.getY(), returnStepTarget.getZ() + 0.5D, MOVE_SPEED);
                 if (guard.squaredDistanceTo(Vec3d.ofBottomCenter(returnStepTarget)) <= TARGET_REACH_SQUARED) {
+                    this.returnPathRetryCount = 0;
+                    this.returnPathRetryTarget = null;
                     if (stepIndex > 1) {
                         stepIndex--;
                         returnStepTarget = computeStepTarget(stepIndex - 1);
@@ -379,6 +410,10 @@ public class MasonMiningStairGoal extends Goal {
         if (shouldAbortForWaterHazard(world, rejoinStepTarget)) {
             return;
         }
+        if (localRetryDelayTicks > 0) {
+            localRetryDelayTicks--;
+            return;
+        }
         if (rejoinStepTarget == null) {
             activateMiningStage(world);
             this.noProgressTicks = 0;
@@ -386,19 +421,46 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
 
+        beginAdvanceAttempt(rejoinStepTarget);
         if (!isExcavationTargetAllowed(world, rejoinStepTarget)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            handleAdvanceFailure(
+                    world,
+                    rejoinStepTarget,
+                    guard.getBlockPos(),
+                    FailureSubtype.TARGET_PROTECTED,
+                    "rejoin_target");
             return;
         }
 
         if (!clearCurrentHeadBlock(world)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            handleAdvanceFailure(
+                    world,
+                    rejoinStepTarget,
+                    guard.getBlockPos(),
+                    FailureSubtype.HEAD_CLEAR_FAILED,
+                    "rejoin_head");
             return;
         }
 
         if (!ensureStepClear(world, rejoinStepTarget)) {
-            if (!repairStairTransitionIfNeeded(world, guard.getBlockPos(), rejoinStepTarget) || !ensureStepClear(world, rejoinStepTarget)) {
-                beginReturn(ReturnReason.CANNOT_ADVANCE);
+            if (!repairStairTransitionIfNeeded(world, guard.getBlockPos(), rejoinStepTarget)) {
+                recordFallbackFailure(FailureSubtype.TRANSITION_REPAIR_FAILED, rejoinStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        rejoinStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.TRANSITION_REPAIR_FAILED,
+                        "rejoin_transition");
+                return;
+            }
+            if (!ensureStepClear(world, rejoinStepTarget)) {
+                recordFallbackFailure(FailureSubtype.STEP_CLEAR_FAILED, rejoinStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        rejoinStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.STEP_CLEAR_FAILED,
+                        "rejoin_clear");
                 return;
             }
         }
@@ -415,17 +477,16 @@ public class MasonMiningStairGoal extends Goal {
         } else {
             noProgressTicks++;
             adaptivePathRetryWindow++;
-            if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
-                recoveryAttemptedForStep = true;
-                if (tryStartRecoveryMove(world, rejoinStepTarget, "rejoin")) {
-                    return;
-                }
+            if (noProgressTicks >= RECOVERY_TRIGGER_TICKS) {
+                recordAdvanceFailure(FailureSubtype.NAVIGATION_FAILED, rejoinStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        rejoinStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.NAVIGATION_FAILED,
+                        "rejoin_navigation");
+                return;
             }
-        }
-
-        if (noProgressTicks >= NO_PROGRESS_LIMIT_TICKS) {
-            beginReturn(ReturnReason.STUCK_30_SECONDS);
-            return;
         }
 
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
@@ -437,9 +498,7 @@ public class MasonMiningStairGoal extends Goal {
                 return;
             }
             this.rejoinStepTarget = null;
-            this.noProgressTicks = 0;
-            this.lastDistanceToTarget = Double.MAX_VALUE;
-            this.recoveryAttemptedForStep = false;
+            resetStepRecoveryAfterProgress();
             activateMiningStage(world);
         }
     }
@@ -448,9 +507,19 @@ public class MasonMiningStairGoal extends Goal {
         if (miningSessionStartTick < 0L || miningSessionEndTick < 0L) {
             activateMiningStage(world);
         }
+        if (localRetryDelayTicks > 0) {
+            localRetryDelayTicks--;
+            return;
+        }
 
+        beginAdvanceAttempt(currentStepTarget);
         if (!isExcavationTargetAllowed(world, currentStepTarget)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            handleAdvanceFailure(
+                    world,
+                    currentStepTarget,
+                    guard.getBlockPos(),
+                    FailureSubtype.TARGET_PROTECTED,
+                    "mining_target");
             return;
         }
 
@@ -459,7 +528,12 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (!clearCurrentHeadBlock(world)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            handleAdvanceFailure(
+                    world,
+                    currentStepTarget,
+                    guard.getBlockPos(),
+                    FailureSubtype.HEAD_CLEAR_FAILED,
+                    "mining_head");
             return;
         }
 
@@ -469,8 +543,26 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         if (!ensureStepClear(world, currentStepTarget)) {
-            beginReturn(ReturnReason.CANNOT_ADVANCE);
-            return;
+            if (!repairStairTransitionIfNeeded(world, guard.getBlockPos(), currentStepTarget)) {
+                recordFallbackFailure(FailureSubtype.TRANSITION_REPAIR_FAILED, currentStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        currentStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.TRANSITION_REPAIR_FAILED,
+                        "mining_transition");
+                return;
+            }
+            if (!ensureStepClear(world, currentStepTarget)) {
+                recordFallbackFailure(FailureSubtype.STEP_CLEAR_FAILED, currentStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        currentStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.STEP_CLEAR_FAILED,
+                        "mining_clear");
+                return;
+            }
         }
 
         if (tickRecoveryMove(world)) {
@@ -485,17 +577,16 @@ public class MasonMiningStairGoal extends Goal {
         } else {
             noProgressTicks++;
             adaptivePathRetryWindow++;
-            if (noProgressTicks >= RECOVERY_TRIGGER_TICKS && !recoveryAttemptedForStep) {
-                recoveryAttemptedForStep = true;
-                if (tryStartRecoveryMove(world, currentStepTarget, "mining")) {
-                    return;
-                }
+            if (noProgressTicks >= RECOVERY_TRIGGER_TICKS) {
+                recordAdvanceFailure(FailureSubtype.NAVIGATION_FAILED, currentStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        currentStepTarget,
+                        guard.getBlockPos(),
+                        FailureSubtype.NAVIGATION_FAILED,
+                        "mining_navigation");
+                return;
             }
-        }
-
-        if (noProgressTicks >= NO_PROGRESS_LIMIT_TICKS) {
-            beginReturn(ReturnReason.STUCK_30_SECONDS);
-            return;
         }
 
         if (distanceToTarget <= TARGET_REACH_SQUARED) {
@@ -503,22 +594,270 @@ public class MasonMiningStairGoal extends Goal {
             guard.setMiningProgress(origin, stepIndex, miningDirection.getId());
             BlockPos reachedStepPos = currentStepTarget;
             guard.setMiningPathAnchors(guard.getMiningStartPos() == null ? origin : guard.getMiningStartPos(), reachedStepPos);
-            if (stepIndex >= sessionStepTarget) {
+            resetStepRecoveryAfterProgress();
+            if (MasonMiningRecoveryPolicy.batchComplete(stepIndex, sessionStepTarget)) {
                 beginReturn(ReturnReason.BATCH_COMPLETE);
                 return;
             }
             BlockPos nextStepTarget = computeStepTarget(stepIndex);
-            if (!isExcavationTargetAllowed(world, nextStepTarget)
-                    || !repairStairTransitionIfNeeded(world, reachedStepPos, nextStepTarget)
-                    || !ensureStepClear(world, nextStepTarget)) {
-                beginReturn(ReturnReason.CANNOT_ADVANCE);
+            currentStepTarget = nextStepTarget;
+            beginAdvanceAttempt(nextStepTarget);
+            if (!isExcavationTargetAllowed(world, nextStepTarget)) {
+                handleAdvanceFailure(
+                        world,
+                        nextStepTarget,
+                        reachedStepPos,
+                        FailureSubtype.TARGET_PROTECTED,
+                        "next_target");
                 return;
             }
-            currentStepTarget = nextStepTarget;
-            noProgressTicks = 0;
-            lastDistanceToTarget = Double.MAX_VALUE;
-            recoveryAttemptedForStep = false;
+            if (!repairStairTransitionIfNeeded(world, reachedStepPos, nextStepTarget)) {
+                recordFallbackFailure(FailureSubtype.TRANSITION_REPAIR_FAILED, nextStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        nextStepTarget,
+                        reachedStepPos,
+                        FailureSubtype.TRANSITION_REPAIR_FAILED,
+                        "next_transition");
+                return;
+            }
+            if (!ensureStepClear(world, nextStepTarget)) {
+                recordFallbackFailure(FailureSubtype.STEP_CLEAR_FAILED, nextStepTarget);
+                handleAdvanceFailure(
+                        world,
+                        nextStepTarget,
+                        reachedStepPos,
+                        FailureSubtype.STEP_CLEAR_FAILED,
+                        "next_clear");
+                return;
+            }
         }
+    }
+
+    private void beginAdvanceAttempt(BlockPos target) {
+        this.failureSubtype = FailureSubtype.NONE;
+        this.failurePosition = target == null ? null : target.toImmutable();
+    }
+
+    private void recordAdvanceFailure(FailureSubtype subtype, BlockPos pos) {
+        if (subtype == null || subtype == FailureSubtype.NONE) {
+            return;
+        }
+        BlockPos immutablePos = pos == null ? null : pos.toImmutable();
+        boolean changed = subtype != this.failureSubtype
+                || !Objects.equals(immutablePos, this.failurePosition);
+        this.failureSubtype = subtype;
+        this.failurePosition = immutablePos;
+        if (changed) {
+            LOGGER.debug("Mason guard {} mining advance failure: subtype={} pos={} stage={} stepIndex={}",
+                    guard.getUuidAsString(),
+                    subtype.reasonCode(),
+                    immutablePos == null ? "none" : immutablePos.toShortString(),
+                    stage,
+                    stepIndex);
+        }
+    }
+
+    private void recordFallbackFailure(FailureSubtype fallback, BlockPos pos) {
+        if (failureSubtype == FailureSubtype.NONE) {
+            recordAdvanceFailure(fallback, pos);
+        }
+    }
+
+    private void handleAdvanceFailure(
+            ServerWorld world,
+            BlockPos target,
+            BlockPos pivot,
+            FailureSubtype fallback,
+            String context
+    ) {
+        recordFallbackFailure(fallback, target);
+        FailureSubtype concreteFailure = failureSubtype;
+        int completedRetries = target != null && target.equals(localRetryTarget)
+                ? localStepRetryCount
+                : 0;
+
+        if (concreteFailure == FailureSubtype.WATER_HAZARD) {
+            beginReturn(ReturnReason.WATER_BAILOUT);
+            return;
+        }
+        if (concreteFailure == FailureSubtype.TOOL_LOST) {
+            beginReturn(ReturnReason.TOOL_BROKE);
+            return;
+        }
+
+        boolean hardRouteExclusion = concreteFailure == FailureSubtype.JOB_BLOCK_EXCLUSION
+                || concreteFailure == FailureSubtype.TARGET_PROTECTED;
+        if (hardRouteExclusion) {
+            boolean rerouted = tryRerouteContinuation(world, pivot, context, concreteFailure);
+            MasonMiningRecoveryPolicy.Decision decision = MasonMiningRecoveryPolicy.decide(
+                    concreteFailure, completedRetries, rerouted);
+            if (decision.action() == MasonMiningRecoveryPolicy.Action.REROUTE) {
+                return;
+            }
+            reseedMiningDirection = chooseReseedDirection();
+            beginReturn(ReturnReason.CANNOT_ADVANCE);
+            return;
+        }
+
+        MasonMiningRecoveryPolicy.Decision retryDecision = MasonMiningRecoveryPolicy.decide(
+                concreteFailure, completedRetries, false);
+        if (retryDecision.action() == MasonMiningRecoveryPolicy.Action.RETRY_STEP) {
+            this.localRetryTarget = target == null ? null : target.toImmutable();
+            this.localStepRetryCount = retryDecision.nextRetryCount();
+            this.localRetryDelayTicks = MasonMiningRecoveryPolicy.LOCAL_RETRY_DELAY_TICKS;
+            this.noProgressTicks = 0;
+            this.lastDistanceToTarget = Double.MAX_VALUE;
+            boolean recoveryMoveStarted = concreteFailure == FailureSubtype.NAVIGATION_FAILED
+                    && target != null
+                    && tryStartRecoveryMove(world, target, context);
+            if (!recoveryMoveStarted) {
+                guard.getNavigation().stop();
+            }
+            LOGGER.debug("Mason guard {} mining local retry scheduled: context={} subtype={} target={} attempt={}/{} recoveryMove={}",
+                    guard.getUuidAsString(),
+                    context,
+                    concreteFailure.reasonCode(),
+                    target == null ? "none" : target.toShortString(),
+                    localStepRetryCount,
+                    MasonMiningRecoveryPolicy.MAX_LOCAL_RETRIES,
+                    recoveryMoveStarted);
+            return;
+        }
+
+        boolean rerouted = tryRerouteContinuation(world, pivot, context, concreteFailure);
+        MasonMiningRecoveryPolicy.Decision finalDecision = MasonMiningRecoveryPolicy.decide(
+                concreteFailure, completedRetries, rerouted);
+        if (finalDecision.action() == MasonMiningRecoveryPolicy.Action.REROUTE) {
+            return;
+        }
+
+        reseedMiningDirection = chooseReseedDirection();
+        beginReturn(ReturnReason.CANNOT_ADVANCE);
+    }
+
+    private boolean tryRerouteContinuation(
+            ServerWorld world,
+            BlockPos pivot,
+            String context,
+            FailureSubtype triggeringFailure
+    ) {
+        if (pivot == null || miningDirection == null || !miningDirection.getAxis().isHorizontal()) {
+            return false;
+        }
+        Direction[] candidates = new Direction[]{
+                miningDirection.rotateYClockwise(),
+                miningDirection.rotateYCounterclockwise(),
+                miningDirection.getOpposite()
+        };
+        for (Direction candidateDirection : candidates) {
+            BlockPos candidateTarget = computeStepTarget(pivot, candidateDirection, 0);
+            if (!canPotentiallyPrepareStep(world, candidateTarget)) {
+                continue;
+            }
+            this.origin = pivot.toImmutable();
+            this.miningDirection = candidateDirection;
+            this.stepIndex = 0;
+            this.currentStepTarget = candidateTarget.toImmutable();
+            this.rejoinStepTarget = null;
+            this.rejoinDeepTarget = null;
+            guard.setMiningProgress(origin, 0, miningDirection.getId());
+            guard.setMiningPathAnchors(origin, null);
+            resetStepRecoveryAfterProgress();
+            LOGGER.debug("Mason guard {} mining continuation rerouted: context={} triggeringSubtype={} pivot={} direction={} target={}",
+                    guard.getUuidAsString(),
+                    context,
+                    triggeringFailure.reasonCode(),
+                    pivot.toShortString(),
+                    candidateDirection,
+                    candidateTarget.toShortString());
+            return true;
+        }
+        return false;
+    }
+
+    private boolean canPotentiallyPrepareStep(ServerWorld world, BlockPos footTarget) {
+        if (footTarget == null
+                || isWithinJobBlockExclusionZone(world, footTarget)
+                || containsWaterAtStep(world, footTarget)) {
+            return false;
+        }
+        BlockPos supportPos = footTarget.down();
+        if (!hasSafeSupport(world, footTarget)) {
+            BlockState support = world.getBlockState(supportPos);
+            if ((!support.isAir() && !support.isReplaceable())
+                    || !support.getFluidState().isEmpty()
+                    || findSupportPlacementChoice() == null) {
+                return false;
+            }
+        }
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            BlockPos pos = footTarget.up(i);
+            BlockState state = world.getBlockState(pos);
+            if (state.isAir() || state.getCollisionShape(world, pos).isEmpty()) {
+                continue;
+            }
+            if (isProtectedJobBlock(pos, state) || !canMine(world, pos, state)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean containsWaterAtStep(ServerWorld world, BlockPos footTarget) {
+        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
+            if (isWaterAt(world, footTarget.up(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Direction chooseReseedDirection() {
+        Direction current = miningDirection != null && miningDirection.getAxis().isHorizontal()
+                ? miningDirection
+                : guard.getHorizontalFacing();
+        return current.rotateYClockwise();
+    }
+
+    private void resetStepRecoveryAfterProgress() {
+        this.localStepRetryCount = 0;
+        this.localRetryTarget = null;
+        this.localRetryDelayTicks = 0;
+        this.noProgressTicks = 0;
+        this.lastDistanceToTarget = Double.MAX_VALUE;
+        this.failureSubtype = FailureSubtype.NONE;
+        this.failurePosition = null;
+    }
+
+    private void handleReturnPathFailure(BlockPos target) {
+        recordFallbackFailure(FailureSubtype.RETURN_PATH_FAILED, target);
+        if (target == null || !target.equals(returnPathRetryTarget)) {
+            returnPathRetryTarget = target == null ? null : target.toImmutable();
+            returnPathRetryCount = 0;
+        }
+        MasonMiningRecoveryPolicy.ReturnPathAction action =
+                MasonMiningRecoveryPolicy.returnPathAction(returnPathRetryCount);
+        if (action == MasonMiningRecoveryPolicy.ReturnPathAction.RETRY_STAIR) {
+            returnPathRetryCount++;
+            guard.getNavigation().stop();
+            LOGGER.debug("Mason guard {} return stair retry: subtype={} target={} attempt={}/{}",
+                    guard.getUuidAsString(),
+                    failureSubtype.reasonCode(),
+                    target == null ? "none" : target.toShortString(),
+                    returnPathRetryCount,
+                    MasonMiningRecoveryPolicy.MAX_LOCAL_RETRIES);
+            return;
+        }
+        LOGGER.debug("Mason guard {} return stair fallback to chest: subtype={} target={} retries={}",
+                guard.getUuidAsString(),
+                failureSubtype.reasonCode(),
+                target == null ? "none" : target.toShortString(),
+                returnPathRetryCount);
+        returnStepTarget = null;
+        stepIndex = 0;
+        returnPathRetryCount = 0;
+        returnPathRetryTarget = null;
     }
 
     private boolean repairStairTransitionIfNeeded(ServerWorld world, BlockPos fromStep, BlockPos toStep) {
@@ -658,15 +997,18 @@ public class MasonMiningStairGoal extends Goal {
         if ((!supportState.isAir() && !supportState.isReplaceable())
                 || !supportState.getFluidState().isEmpty()
                 || !world.getOtherEntities(null, new Box(supportPos), entity -> entity.isAlive()).isEmpty()) {
+            recordAdvanceFailure(FailureSubtype.SUPPORT_FAILED, supportPos);
             return false;
         }
 
         SupportPlacementChoice placementChoice = findSupportPlacementChoice();
         if (placementChoice == null) {
+            recordAdvanceFailure(FailureSubtype.SUPPORT_FAILED, supportPos);
             return false;
         }
 
         if (!world.setBlockState(supportPos, placementChoice.block.getDefaultState())) {
+            recordAdvanceFailure(FailureSubtype.SUPPORT_FAILED, supportPos);
             return false;
         }
 
@@ -715,12 +1057,14 @@ public class MasonMiningStairGoal extends Goal {
             return true;
         }
         if (state.getFluidState().isIn(FluidTags.WATER) || state.getFluidState().isIn(FluidTags.LAVA)) {
+            recordAdvanceFailure(FailureSubtype.WATER_HAZARD, pos);
             return false;
         }
         if ((stage == Stage.MINING || stage == Stage.REJOIN_LAST_STEP)
                 && isWithinJobBlockExclusionZone(world, pos)) {
             blockedByProtectedJobBlock = true;
             protectedBlockSkipPositions.add(pos.toImmutable());
+            recordAdvanceFailure(FailureSubtype.JOB_BLOCK_EXCLUSION, pos);
             LOGGER.info("Mason guard {} job-block-exclusion-skip pos={} radius={}",
                     guard.getUuidAsString(),
                     pos.toShortString(),
@@ -730,6 +1074,7 @@ public class MasonMiningStairGoal extends Goal {
         if (isProtectedJobBlock(pos, state)) {
             blockedByProtectedJobBlock = true;
             protectedBlockSkipPositions.add(pos.toImmutable());
+            recordAdvanceFailure(FailureSubtype.TARGET_PROTECTED, pos);
             LOGGER.info("Mason guard {} protected-block-skip blockId={} pos={}",
                     guard.getUuidAsString(),
                     Registries.BLOCK.getId(state.getBlock()),
@@ -737,6 +1082,7 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
         if (!canMine(world, pos, state)) {
+            recordAdvanceFailure(FailureSubtype.UNMINEABLE_BLOCK, pos);
             return false;
         }
 
@@ -747,9 +1093,11 @@ public class MasonMiningStairGoal extends Goal {
                     state.getBlock().getName().getString());
         }
 
-        if (world.breakBlock(pos, true, guard)) {
-            minedBlockCount++;
+        if (!world.breakBlock(pos, true, guard)) {
+            recordAdvanceFailure(FailureSubtype.BLOCK_BREAK_FAILED, pos);
+            return false;
         }
+        minedBlockCount++;
         collectNearbyDrops(world, pos);
         return true;
     }
@@ -826,6 +1174,7 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         blockedByProtectedJobBlock = true;
+        recordAdvanceFailure(FailureSubtype.JOB_BLOCK_EXCLUSION, target);
         LOGGER.info("Mason guard {} mining route rejected by job-block exclusion: target={} radius={}",
                 guard.getUuidAsString(),
                 target == null ? "none" : target.toShortString(),
@@ -895,7 +1244,7 @@ public class MasonMiningStairGoal extends Goal {
         return origin.offset(miningDirection, index + 1).down(index + 1);
     }
 
-    private BlockPos computeStepTarget(BlockPos stepOrigin, Direction direction, int index) {
+    static BlockPos computeStepTarget(BlockPos stepOrigin, Direction direction, int index) {
         return stepOrigin.offset(direction, index + 1).down(index + 1);
     }
 
@@ -1025,6 +1374,8 @@ public class MasonMiningStairGoal extends Goal {
             return;
         }
         this.returnReason = reason;
+        this.terminalFailureSubtype = failureSubtype;
+        this.terminalFailurePosition = failurePosition == null ? null : failurePosition.toImmutable();
         if (reason == ReturnReason.CANNOT_ADVANCE || reason == ReturnReason.STUCK_30_SECONDS || reason == ReturnReason.TOOL_BROKE) {
             adaptiveFailedSessionWindow++;
         }
@@ -1032,9 +1383,7 @@ public class MasonMiningStairGoal extends Goal {
         boolean protectedEarlyAbort = reason == ReturnReason.CANNOT_ADVANCE
                 && blockedByProtectedJobBlock
                 && minedBlockCount <= 0;
-        if (protectedEarlyAbort) {
-            rerouteMiningDirectionAwayFromProtectedBlocks();
-        }
+        boolean forceSafeAnchorReset = protectedEarlyAbort ? false : trackFailureReason(reason);
         long backoffTicks = protectedEarlyAbort ? 20L : computeSessionBackoffTicks(reason);
         this.nextSessionStartTick = worldTime + backoffTicks;
         guard.setNextMiningStartTick(this.nextSessionStartTick);
@@ -1042,17 +1391,18 @@ public class MasonMiningStairGoal extends Goal {
         this.cooldownThreeQuarterLogTick = worldTime + Math.max(1L, (backoffTicks * 3L) / 4L);
         this.cooldownProgressLoggedForStartTick = -1L;
 
-        boolean forceSafeAnchorReset = protectedEarlyAbort ? false : trackFailureReason(reason);
         if (reason == ReturnReason.WATER_BAILOUT) {
             recordWaterBailoutOrigin();
         } else if (reason == ReturnReason.BATCH_COMPLETE) {
             clearBlacklistOnSuccessfulDistantSession();
         }
 
-        LOGGER.info("Mason guard {} ending mining session: reason={}, reasonCode={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
+        LOGGER.info("Mason guard {} ending mining session: reason={}, reasonCode={}, failureSubtype={}, failurePos={}, minedBlocks={}, currentStepIndex={}, startPos={}, deepestPos={}, backoffTicks={}, nextEligibleStartTick={}, plannedDurationTicks={}, travelAllowanceTicks={}, miningStartTick={}, miningSessionEndTick={}",
                 guard.getUuidAsString(),
                 reason,
                 reason.reasonCode,
+                terminalFailureSubtype.reasonCode(),
+                terminalFailurePosition == null ? "none" : terminalFailurePosition.toShortString(),
                 minedBlockCount,
                 stepIndex,
                 guard.getMiningStartPos() == null ? "none" : guard.getMiningStartPos().toShortString(),
@@ -1082,57 +1432,6 @@ public class MasonMiningStairGoal extends Goal {
         }
 
         this.stage = Stage.RETURN_TO_CHEST;
-    }
-
-    private void rerouteMiningDirectionAwayFromProtectedBlocks() {
-        if (origin == null) {
-            return;
-        }
-        Direction current = miningDirection != null && miningDirection.getAxis().isHorizontal()
-                ? miningDirection
-                : guard.getHorizontalFacing();
-        Direction[] candidates = new Direction[]{
-                current.rotateYClockwise(),
-                current.rotateYCounterclockwise(),
-                current.getOpposite(),
-                current
-        };
-        for (Direction candidate : candidates) {
-            if (!candidate.getAxis().isHorizontal()) {
-                continue;
-            }
-            if (isDirectionBlockedByProtectedJobBlock(candidate)) {
-                continue;
-            }
-            miningDirection = candidate;
-            stepIndex = 0;
-            currentStepTarget = computeStepTarget(0);
-            guard.setMiningProgress(origin, 0, miningDirection.getId());
-            guard.setMiningPathAnchors(origin, null);
-            LOGGER.info("Mason guard {} rerouted initial mining direction away from protected job block: newDirection={} origin={}",
-                    guard.getUuidAsString(),
-                    miningDirection,
-                    origin.toShortString());
-            return;
-        }
-    }
-
-    private boolean isDirectionBlockedByProtectedJobBlock(Direction direction) {
-        if (origin == null || direction == null || !direction.getAxis().isHorizontal()) {
-            return false;
-        }
-        BlockPos footTarget = origin.offset(direction).down();
-        for (int i = 0; i < REQUIRED_STAIR_CLEARANCE; i++) {
-            BlockPos pos = footTarget.up(i);
-            BlockState state = guard.getWorld().getBlockState(pos);
-            if (state.isAir() || state.getCollisionShape(guard.getWorld(), pos).isEmpty()) {
-                continue;
-            }
-            if (isProtectedJobBlock(pos, state)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private void depositMinedMaterials(ServerWorld world) {
@@ -1286,12 +1585,13 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private int computeSessionBackoffTicks(ReturnReason reason) {
-        boolean isFailureReason = reason == ReturnReason.CANNOT_ADVANCE
+        if (reason == ReturnReason.CANNOT_ADVANCE
                 || reason == ReturnReason.STUCK_30_SECONDS
                 || reason == ReturnReason.TOOL_BROKE
-                || reason == ReturnReason.WATER_BAILOUT;
-        if (isFailureReason) {
-            return MathHelper.nextInt(guard.getRandom(), FAILURE_BACKOFF_MIN_TICKS, FAILURE_BACKOFF_MAX_TICKS);
+                || reason == ReturnReason.WATER_BAILOUT) {
+            return MasonMiningRecoveryPolicy.failureBackoffTicks(
+                    terminalFailureSubtype,
+                    Math.max(1, consecutiveFailureCount));
         }
         return MathHelper.nextInt(guard.getRandom(), SESSION_BACKOFF_MIN_TICKS, SESSION_BACKOFF_MAX_TICKS);
     }
@@ -1334,6 +1634,7 @@ public class MasonMiningStairGoal extends Goal {
     }
 
     private void triggerWaterBailout(String hazardZone, BlockPos waterPos) {
+        recordAdvanceFailure(FailureSubtype.WATER_HAZARD, waterPos);
         LOGGER.info("Mason guard {} mining water bailout: reasonCode=water_bailout zone={} waterPos={} origin={} stepIndex={}",
                 guard.getUuidAsString(),
                 hazardZone,
@@ -1406,11 +1707,19 @@ public class MasonMiningStairGoal extends Goal {
         this.sessionStepTarget = 0;
         this.recoveryMoveTarget = null;
         this.recoveryTicks = 0;
-        this.recoveryAttemptedForStep = false;
+        this.localStepRetryCount = 0;
+        this.localRetryTarget = null;
+        this.localRetryDelayTicks = 0;
+        this.returnPathRetryCount = 0;
+        this.returnPathRetryTarget = null;
         this.blockedByProtectedJobBlock = false;
         this.protectedBlockSkipPositions.clear();
         this.exclusionValidatedTarget = null;
         this.exclusionValidatedAtTick = Long.MIN_VALUE;
+        this.failureSubtype = FailureSubtype.NONE;
+        this.failurePosition = null;
+        this.terminalFailureSubtype = FailureSubtype.NONE;
+        this.terminalFailurePosition = null;
     }
 
     private boolean clearGravitySensitiveColumns(ServerWorld world, BlockPos footTarget) {
@@ -1538,20 +1847,28 @@ public class MasonMiningStairGoal extends Goal {
     private boolean trackFailureReason(ReturnReason reason) {
         if (!reason.resetsMiningProgress) {
             lastFailureReason = ReturnReason.NONE;
+            lastTrackedFailureSubtype = FailureSubtype.NONE;
+            lastTrackedFailureTarget = null;
             consecutiveFailureCount = 0;
             return false;
         }
 
-        if (reason == lastFailureReason) {
+        if (reason == lastFailureReason
+                && terminalFailureSubtype == lastTrackedFailureSubtype
+                && Objects.equals(terminalFailurePosition, lastTrackedFailureTarget)) {
             consecutiveFailureCount++;
         } else {
             lastFailureReason = reason;
+            lastTrackedFailureSubtype = terminalFailureSubtype;
+            lastTrackedFailureTarget = terminalFailurePosition == null ? null : terminalFailurePosition.toImmutable();
             consecutiveFailureCount = 1;
         }
 
-        LOGGER.info("Mason guard {} failure-reason tracker: reason={}, consecutiveCount={}, threshold={}",
+        LOGGER.debug("Mason guard {} failure-reason tracker: reason={} subtype={} target={} consecutiveCount={} threshold={}",
                 guard.getUuidAsString(),
                 reason,
+                terminalFailureSubtype.reasonCode(),
+                terminalFailurePosition == null ? "none" : terminalFailurePosition.toShortString(),
                 consecutiveFailureCount,
                 FAILURE_REASON_RESET_THRESHOLD);
 
@@ -1587,6 +1904,8 @@ public class MasonMiningStairGoal extends Goal {
                 consecutiveFailureCount);
 
         lastFailureReason = ReturnReason.NONE;
+        lastTrackedFailureSubtype = FailureSubtype.NONE;
+        lastTrackedFailureTarget = null;
         consecutiveFailureCount = 0;
     }
 
@@ -1604,11 +1923,12 @@ public class MasonMiningStairGoal extends Goal {
         int reservedCobblestone = countInventoryItem(Blocks.COBBLESTONE.asItem());
         int reservedDirt = countInventoryItem(Blocks.DIRT.asItem());
 
-        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, nextEligibleStartTick={}, reservedCobblestone={}, reservedDirt={}, mainHand={} ",
+        LOGGER.info("Mason guard {} mining deposit telemetry: minedBlocks={}, depositedItems={}, returnReason={}, failureSubtype={}, nextEligibleStartTick={}, reservedCobblestone={}, reservedDirt={}, mainHand={} ",
                 guard.getUuidAsString(),
                 minedBlockCount,
                 depositedItemCount,
                 returnReasonText,
+                terminalFailureSubtype.reasonCode(),
                 nextSessionStartTick,
                 reservedCobblestone,
                 reservedDirt,
