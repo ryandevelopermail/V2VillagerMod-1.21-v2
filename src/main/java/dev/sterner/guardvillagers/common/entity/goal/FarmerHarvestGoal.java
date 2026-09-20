@@ -16,6 +16,7 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.HoeItem;
+import net.minecraft.registry.tag.FluidTags;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
@@ -63,16 +64,13 @@ public class FarmerHarvestGoal extends Goal {
     /** How often to attempt incremental seed pickup when no seeds and no hoe are available. */
     private static final int SEED_INCREMENT_INTERVAL_TICKS = 200;
     private static final int WATER_HYDRATION_RADIUS = 4;
-    /**
-     * Vertical range when scanning for nearby water. Vanilla farmland hydration works within
-     * roughly ±1 block vertically, so ±3 is a comfortable margin without bloating per-block
-     * scan cost the way ±8 did (saves ~63% of scan volume per territory cell).
-     */
-    private static final int WATER_SEARCH_VERTICAL_RANGE = 3;
+    private static final int VANILLA_WATER_MIN_Y_OFFSET = 0;
+    private static final int VANILLA_WATER_MAX_Y_OFFSET = 1;
     private static final int BOOTSTRAP_SCAN_MIN_Y_OFFSET = -1;
     private static final int BOOTSTRAP_SCAN_MAX_Y_OFFSET = 1;
     private static final int BOOTSTRAP_SCAN_BLOCK_BUDGET = 1200;
     private static final int BOOTSTRAP_SCAN_INTERVAL_TICKS = 40;
+    private static final int LOCAL_PRIORITY_SCAN_RADIUS = 8;
     private static final int BOOTSTRAP_INVALIDATION_CHECK_INTERVAL_TICKS = 200;
     private static final int BOOTSTRAP_INVALIDATION_SAMPLE_SIZE = 12;
     private static final int BOOTSTRAP_INVALIDATION_PERCENT = 35;
@@ -96,8 +94,7 @@ public class FarmerHarvestGoal extends Goal {
     private BlockPos chestPos;
     private boolean enabled;
     private Stage stage = Stage.IDLE;
-    private long nextCheckTime;
-    private boolean immediateRunRequested;
+    private final FarmerWorkCheckSchedule workCheckSchedule = new FarmerWorkCheckSchedule();
     private long lastHarvestDay = -1L;
     private boolean dailyHarvestRun;
     private FarmerCraftingGoal craftingGoal;
@@ -162,6 +159,7 @@ public class FarmerHarvestGoal extends Goal {
     private final Set<BlockPos> eligibleTerritory = new HashSet<>();
     private long nextBootstrapScanTick = 0L;
     private int bootstrapScanCursor = 0;
+    private boolean territorySweepComplete;
     private int lastScannedFarmlandWorkRadius = -1;
     private long lastTerritoryInvalidationTick = 0L;
     private int tinyTerritoryMatureDetectionStreak = 0;
@@ -193,8 +191,10 @@ public class FarmerHarvestGoal extends Goal {
         this.hasUnseededFarmlandObligation = false;
         this.obligationLoggedThisCycle = false;
         this.nextIncrementalSeedPickupTick = 0L;
+        this.workCheckSchedule.reset();
         this.eligibleTerritory.clear();
         this.bootstrapScanCursor = 0;
+        this.territorySweepComplete = false;
         this.lastScannedFarmlandWorkRadius = -1;
         this.nextBootstrapScanTick = 0L;
         this.lastTerritoryInvalidationTick = 0L;
@@ -209,14 +209,13 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     public void requestImmediateWorkCheck() {
-        immediateRunRequested = true;
-        nextCheckTime = 0L;
+        workCheckSchedule.requestImmediate();
+        cachedCoverage = null;
+        coverageCacheTime = -1L;
     }
 
     public void requestCheckNoSoonerThan(long targetTick) {
-        if (nextCheckTime == 0L || nextCheckTime > targetTick) {
-            nextCheckTime = targetTick;
-        }
+        workCheckSchedule.requestNoSoonerThan(targetTick);
     }
 
     @Override
@@ -227,24 +226,30 @@ public class FarmerHarvestGoal extends Goal {
         if (!(villager.getWorld() instanceof ServerWorld world)) {
             return false;
         }
-        if (!immediateRunRequested && world.getTime() < nextCheckTime) {
+        if (workCheckSchedule.shouldWait(world.getTime())) {
             return false;
         }
-        if (immediateRunRequested) {
-            immediateRunRequested = false;
-        }
-        if (world.getTime() < adaptiveThrottleUntilTick) {
+        workCheckSchedule.consumeImmediateRequest();
+        boolean priorityTerritoryScan = workCheckSchedule.consumePriorityScanRequest();
+        if (!priorityTerritoryScan && world.getTime() < adaptiveThrottleUntilTick) {
             return false;
         }
         int matureCropSignalCount = countMatureCrops(world);
         boolean hasMatureCropSignal = matureCropSignalCount > 0;
         ensureEligibleTerritoryCache(world, false);
+        int locallyDiscoveredActionableCells = priorityTerritoryScan
+                ? runLocalPriorityTerritoryScan(world)
+                : 0;
         int eligibleTerritoryCount = getEligibleTerritoryCount(world);
         maybeRecoverStaleTerritoryCache(world, eligibleTerritoryCount, hasMatureCropSignal, matureCropSignalCount);
-        if (isBlockedByTerritoryBootstrap(matureCropSignalCount, eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS)) {
+        if (locallyDiscoveredActionableCells == 0
+                && isBlockedByTerritoryBootstrap(
+                matureCropSignalCount,
+                eligibleTerritoryCount,
+                MIN_VIABLE_TERRITORY_PLOTS)) {
             LOGGER.debug("Farmer {} blocked by territory bootstrap (eligibleTerritoryCount={} minRequired={} matureCropCount={})",
                     villager.getUuidAsString(), eligibleTerritoryCount, MIN_VIABLE_TERRITORY_PLOTS, matureCropSignalCount);
-            nextCheckTime = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
+            workCheckSchedule.scheduleAt(world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS);
             return false;
         }
         if (eligibleTerritoryCount < MIN_VIABLE_TERRITORY_PLOTS) {
@@ -255,7 +260,9 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         BootstrapPreflight preflight = evaluateBootstrapPreflight(world, false);
-        if (shouldApplyExpansionThrottle(preflight) && shouldThrottleFarmlandExpansionChecks(world)) {
+        if (!priorityTerritoryScan
+                && shouldApplyExpansionThrottle(preflight)
+                && shouldThrottleFarmlandExpansionChecks(world)) {
             LOGGER.debug("Farmer {} throttled expansion (expansionOnlyCandidate=true matureCropCount={})",
                     villager.getUuidAsString(), preflight.matureCropCount);
             return false;
@@ -276,7 +283,7 @@ public class FarmerHarvestGoal extends Goal {
                 nextIncrementalSeedPickupTick = world.getTime() + SEED_INCREMENT_INTERVAL_TICKS;
                 tryIncrementalSeedPickupFromChest(world);
             }
-            nextCheckTime = world.getTime() + SEED_INCREMENT_INTERVAL_TICKS;
+            workCheckSchedule.scheduleAt(world.getTime() + SEED_INCREMENT_INTERVAL_TICKS);
             return false;
         }
 
@@ -313,7 +320,7 @@ public class FarmerHarvestGoal extends Goal {
                     LOGGER.debug("Farmer {} obligation: {} unseeded farmland blocks, seeds available — resuming",
                             villager.getUuidAsString(), unseededCount);
                 }
-                nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
                 long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
@@ -334,7 +341,7 @@ public class FarmerHarvestGoal extends Goal {
                             villager.getUuidAsString(), unseededCount);
                 }
                 wheatSeedForagingRequested = true;
-                nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+                workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
                 long day = world.getTime() / 24000L;
                 if (day != lastHarvestDay) {
                     lastHarvestDay = day;
@@ -356,18 +363,19 @@ public class FarmerHarvestGoal extends Goal {
                     && preflight.matureCropCount == 0
                     && preflight.plantedCropCount == 0;
             if (nothingActionable) {
-                nextCheckTime = world.getTime() + IDLE_BACKOFF_INTERVAL_TICKS;
+                workCheckSchedule.scheduleAt(world.getTime()
+                        + noActionRetryDelay(territorySweepComplete));
                 return false;
             }
             dailyHarvestRun = true;
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
             return true;
         }
 
         int matureCount = preflight.matureCropCount;
         boolean canRunForHoeing = preflight.canHoeGround;
         if (matureCount >= 1 || canRunForHoeing) {
-            nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+            workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
             return true;
         }
         if (preflight.shouldRun()) {
@@ -379,14 +387,17 @@ public class FarmerHarvestGoal extends Goal {
                     && !preflight.hasSeedsForPlanting
                     && preflight.matureCropCount == 0
                     && preflight.plantedCropCount == 0;
-            nextCheckTime = world.getTime() + (nothingActionable ? IDLE_BACKOFF_INTERVAL_TICKS : CHECK_INTERVAL_TICKS);
+            workCheckSchedule.scheduleAt(world.getTime()
+                    + (nothingActionable
+                    ? noActionRetryDelay(territorySweepComplete)
+                    : CHECK_INTERVAL_TICKS));
             if (!nothingActionable) {
                 logBootstrapReason(preflight.reason);
                 return true;
             }
             return false;
         }
-        nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
+        workCheckSchedule.scheduleAt(world.getTime() + CHECK_INTERVAL_TICKS);
         return false;
     }
 
@@ -1157,7 +1168,7 @@ public class FarmerHarvestGoal extends Goal {
         // After hoeing new farmland the farmer has a concrete obligation to seed it.
         // Clear any stale forage cooldown so a prior failed seed-search doesn't block
         // gathering seeds for the freshly-prepared plots.
-        if (afterHoeing && !plantTargets.isEmpty()) {
+        if (shouldContinueSeedFlowAfterHoeing(afterHoeing, !plantTargets.isEmpty())) {
             clearSeedForageRetryCooldown(world, "fresh farmland created by hoeing");
         }
 
@@ -1209,6 +1220,10 @@ public class FarmerHarvestGoal extends Goal {
         }
 
         return false;
+    }
+
+    static boolean shouldContinueSeedFlowAfterHoeing(boolean afterHoeing, boolean hasPlantTargets) {
+        return afterHoeing && hasPlantTargets;
     }
 
     private BootstrapPreflight evaluateBootstrapPreflight(ServerWorld world, boolean afterHoeing) {
@@ -1455,13 +1470,11 @@ public class FarmerHarvestGoal extends Goal {
         long now = world.getTime();
         hoeTargetRetryAfterTick.entrySet().removeIf(entry -> !isHoeTarget(world, entry.getKey()));
         for (BlockPos pos : eligibleTerritory) {
-            if (!isHoeTarget(world, pos)) {
-                continue;
-            }
-            if (!hasNearbyWater(world, pos)) {
-                continue;
-            }
-            if (hoeTargetRetryAfterTick.getOrDefault(pos, 0L) > now) {
+            if (!shouldQueueHoeTarget(
+                    true,
+                    isHoeTarget(world, pos),
+                    hasNearbyWater(world, pos),
+                    hoeTargetRetryAfterTick.getOrDefault(pos, 0L) <= now)) {
                 continue;
             }
             hoeableTargets.add(pos.toImmutable());
@@ -1566,6 +1579,15 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         return false;
+    }
+
+    static boolean shouldQueueHoeTarget(
+            boolean eligibleTerritoryCell,
+            boolean hoeTarget,
+            boolean hydrated,
+            boolean retryReady
+    ) {
+        return eligibleTerritoryCell && hoeTarget && hydrated && retryReady;
     }
 
     private void pickUpPlantablesFromChest(ServerWorld world) {
@@ -1773,6 +1795,12 @@ public class FarmerHarvestGoal extends Goal {
         return eligibleTerritoryCount < minimumViableTerritoryPlots && matureCropCount <= 0;
     }
 
+    static int noActionRetryDelay(boolean territorySweepComplete) {
+        return territorySweepComplete
+                ? IDLE_BACKOFF_INTERVAL_TICKS
+                : BOOTSTRAP_SCAN_INTERVAL_TICKS;
+    }
+
     private boolean shouldApplyExpansionThrottle(BootstrapPreflight preflight) {
         return shouldApplyExpansionThrottle(preflight.matureCropCount, preflight.expansionOnlyCandidate);
     }
@@ -1794,7 +1822,7 @@ public class FarmerHarvestGoal extends Goal {
                 : villager.getRandom().nextInt(GuardVillagersConfig.farmerAdaptiveThrottleJitterTicks + 1);
         int deferTicks = GuardVillagersConfig.farmerAdaptiveThrottleDeferTicks + jitter;
         adaptiveThrottleUntilTick = world.getTime() + deferTicks;
-        nextCheckTime = Math.max(nextCheckTime, adaptiveThrottleUntilTick);
+        workCheckSchedule.ensureNotBefore(adaptiveThrottleUntilTick);
         adaptiveScanVolumeWindow = Math.max(0L, adaptiveScanVolumeWindow / 2L);
         adaptivePathRetryWindow = Math.max(0, adaptivePathRetryWindow / 2);
         adaptiveFailedSessionWindow = Math.max(0, adaptiveFailedSessionWindow / 2);
@@ -2031,15 +2059,22 @@ public class FarmerHarvestGoal extends Goal {
     }
 
     private boolean hasNearbyWater(ServerWorld world, BlockPos farmlandCandidate) {
-        BlockPos start = farmlandCandidate.add(-WATER_HYDRATION_RADIUS, -WATER_SEARCH_VERTICAL_RANGE, -WATER_HYDRATION_RADIUS);
-        BlockPos end = farmlandCandidate.add(WATER_HYDRATION_RADIUS, WATER_SEARCH_VERTICAL_RANGE, WATER_HYDRATION_RADIUS);
+        BlockPos start = farmlandCandidate.add(
+                -WATER_HYDRATION_RADIUS,
+                VANILLA_WATER_MIN_Y_OFFSET,
+                -WATER_HYDRATION_RADIUS);
+        BlockPos end = farmlandCandidate.add(
+                WATER_HYDRATION_RADIUS,
+                VANILLA_WATER_MAX_Y_OFFSET,
+                WATER_HYDRATION_RADIUS);
         for (BlockPos pos : BlockPos.iterate(start, end)) {
             int dx = pos.getX() - farmlandCandidate.getX();
+            int dy = pos.getY() - farmlandCandidate.getY();
             int dz = pos.getZ() - farmlandCandidate.getZ();
-            if (!isWithinHydrationRange(dx, dz, WATER_HYDRATION_RADIUS)) {
+            if (!isWithinVanillaHydrationRange(dx, dy, dz)) {
                 continue;
             }
-            if (world.getBlockState(pos).isOf(Blocks.WATER)) {
+            if (world.getFluidState(pos).isIn(FluidTags.WATER)) {
                 return true;
             }
         }
@@ -2048,6 +2083,12 @@ public class FarmerHarvestGoal extends Goal {
 
     static boolean isWithinHydrationRange(int dx, int dz, int radius) {
         return Math.max(Math.abs(dx), Math.abs(dz)) <= Math.max(0, radius);
+    }
+
+    static boolean isWithinVanillaHydrationRange(int dx, int dy, int dz) {
+        return isWithinHydrationRange(dx, dz, WATER_HYDRATION_RADIUS)
+                && dy >= VANILLA_WATER_MIN_Y_OFFSET
+                && dy <= VANILLA_WATER_MAX_Y_OFFSET;
     }
 
     private boolean isWithinHarvestRange(BlockPos pos) {
@@ -2092,6 +2133,7 @@ public class FarmerHarvestGoal extends Goal {
         if (lastScannedFarmlandWorkRadius != workRadius) {
             eligibleTerritory.clear();
             bootstrapScanCursor = 0;
+            territorySweepComplete = false;
             lastScannedFarmlandWorkRadius = workRadius;
             cachedCoverage = null;
             coverageCacheTime = -1L;
@@ -2130,6 +2172,7 @@ public class FarmerHarvestGoal extends Goal {
         if (invalidPercent >= BOOTSTRAP_INVALIDATION_PERCENT) {
             eligibleTerritory.clear();
             bootstrapScanCursor = 0;
+            territorySweepComplete = false;
             nextBootstrapScanTick = now + BOOTSTRAP_RESCAN_COOLDOWN_TICKS;
             cachedCoverage = null;
             coverageCacheTime = -1L;
@@ -2158,10 +2201,118 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         bootstrapScanCursor = slice.nextCursor();
+        territorySweepComplete = FarmerFarmlandScanPlan.completeAfterSlice(
+                territorySweepComplete,
+                slice);
         adaptiveScanVolumeWindow += slice.offsets().size();
         cachedCoverage = null;
         coverageCacheTime = -1L;
         nextBootstrapScanTick = world.getTime() + BOOTSTRAP_SCAN_INTERVAL_TICKS;
+    }
+
+    private int runLocalPriorityTerritoryScan(ServerWorld world) {
+        int radius = Math.min(LOCAL_PRIORITY_SCAN_RADIUS, getFarmlandWorkRadius());
+        int actionableCells = 0;
+        boolean cacheChanged = false;
+        List<FarmerFarmlandScanPlan.Offset> offsets = FarmerFarmlandScanPlan.priorityOffsets(
+                radius,
+                BOOTSTRAP_SCAN_MIN_Y_OFFSET,
+                BOOTSTRAP_SCAN_MAX_Y_OFFSET);
+        Set<BlockPos> localWaterSources = collectLocalPriorityWaterSources(world, radius);
+        for (FarmerFarmlandScanPlan.Offset offset : offsets) {
+            BlockPos pos = jobPos.add(offset.x(), offset.y(), offset.z());
+            boolean plantableFarmland = world.getBlockState(pos).isOf(Blocks.FARMLAND)
+                    && (world.getBlockState(pos.up()).isAir()
+                    || world.getBlockState(pos.up()).getBlock() instanceof CropBlock);
+            boolean hoeTarget = isHoeTarget(world, pos);
+            boolean hydrated = hoeTarget && hasNearbyWater(localWaterSources, pos);
+            boolean hydratedHoeTarget = hoeTarget && hydrated;
+            if (isLocalPriorityTerritoryCell(plantableFarmland, hoeTarget, hydrated)) {
+                cacheChanged |= eligibleTerritory.add(pos.toImmutable());
+                if (hydratedHoeTarget) {
+                    actionableCells++;
+                }
+            } else if (!isEligibleTerritoryCell(world, pos)) {
+                cacheChanged |= eligibleTerritory.remove(pos);
+            }
+        }
+        adaptiveScanVolumeWindow += localPriorityScanCellBudget(radius, offsets.size());
+        if (shouldInvalidateCoverageCache(cacheChanged)) {
+            cachedCoverage = null;
+            coverageCacheTime = -1L;
+        }
+        LOGGER.debug("Farmer {} local priority territory scan radius={} cells={} actionable={} cacheChanged={} backgroundCursor={} sweepComplete={}",
+                villager.getUuidAsString(),
+                radius,
+                offsets.size(),
+                actionableCells,
+                cacheChanged,
+                bootstrapScanCursor,
+                territorySweepComplete);
+        return actionableCells;
+    }
+
+    private Set<BlockPos> collectLocalPriorityWaterSources(ServerWorld world, int localRadius) {
+        int waterSearchRadius = localRadius + WATER_HYDRATION_RADIUS;
+        BlockPos start = jobPos.add(
+                -waterSearchRadius,
+                BOOTSTRAP_SCAN_MIN_Y_OFFSET + VANILLA_WATER_MIN_Y_OFFSET,
+                -waterSearchRadius);
+        BlockPos end = jobPos.add(
+                waterSearchRadius,
+                BOOTSTRAP_SCAN_MAX_Y_OFFSET + VANILLA_WATER_MAX_Y_OFFSET,
+                waterSearchRadius);
+        Set<BlockPos> waterSources = new HashSet<>();
+        for (BlockPos pos : BlockPos.iterate(start, end)) {
+            if (world.getFluidState(pos).isIn(FluidTags.WATER)) {
+                waterSources.add(pos.toImmutable());
+            }
+        }
+        return waterSources;
+    }
+
+    private boolean hasNearbyWater(Set<BlockPos> waterSources, BlockPos farmlandCandidate) {
+        for (int dy = VANILLA_WATER_MIN_Y_OFFSET; dy <= VANILLA_WATER_MAX_Y_OFFSET; dy++) {
+            for (int dz = -WATER_HYDRATION_RADIUS; dz <= WATER_HYDRATION_RADIUS; dz++) {
+                for (int dx = -WATER_HYDRATION_RADIUS; dx <= WATER_HYDRATION_RADIUS; dx++) {
+                    if (waterSources.contains(farmlandCandidate.add(dx, dy, dz))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean isLocalPriorityTerritoryCell(
+            boolean plantableFarmland,
+            boolean hoeTarget,
+            boolean hydrated
+    ) {
+        return plantableFarmland || (hoeTarget && hydrated);
+    }
+
+    static boolean shouldInvalidateCoverageCache(boolean localScanChangedTerritory) {
+        return localScanChangedTerritory;
+    }
+
+    static int localPriorityScanCellBudget(int radius) {
+        int safeRadius = Math.max(0, radius);
+        int priorityCells = FarmerFarmlandScanPlan.priorityOffsets(
+                safeRadius,
+                BOOTSTRAP_SCAN_MIN_Y_OFFSET,
+                BOOTSTRAP_SCAN_MAX_Y_OFFSET).size();
+        return localPriorityScanCellBudget(safeRadius, priorityCells);
+    }
+
+    private static int localPriorityScanCellBudget(int radius, int priorityCells) {
+        int safeRadius = Math.max(0, radius);
+        int waterSearchRadius = safeRadius + WATER_HYDRATION_RADIUS;
+        int waterDiameter = waterSearchRadius * 2 + 1;
+        int waterLayers = (BOOTSTRAP_SCAN_MAX_Y_OFFSET + VANILLA_WATER_MAX_Y_OFFSET)
+                - (BOOTSTRAP_SCAN_MIN_Y_OFFSET + VANILLA_WATER_MIN_Y_OFFSET)
+                + 1;
+        return priorityCells + waterDiameter * waterDiameter * waterLayers;
     }
 
     private int getFarmlandWorkRadius() {
