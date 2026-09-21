@@ -105,7 +105,6 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
             pendingTargetId = fisherman.recipientId();
             pendingTargetPos = fisherman.chestPos();
             pendingUniversalRoute = false;
-            pendingOverflowTransfer = false;
             CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
             CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());
             CraftingCheckLogger.report(world, "Toolsmith", "crafted tool selected for transfer: fishing_rod"
@@ -123,7 +122,6 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
         pendingTargetId = recipient.record().recipient().getUuid();
         pendingTargetPos = recipient.record().chestPos();
         pendingUniversalRoute = false;
-        pendingOverflowTransfer = false;
 
         CraftingCheckLogger.report(world, "Toolsmith", "distribution " + demandSnapshot.compactSummary());
         CraftingCheckLogger.report(world, "Toolsmith", selected.selectionReason());

@@ -21,6 +21,7 @@ import org.mockito.Mockito;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -37,6 +39,8 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
     void clearStaticState() throws Exception {
         map("QUARTERMASTER_GOALS").clear();
         map("PAIRED_CHEST_POS").clear();
+        map("LAST_QUARTERMASTER_PAIR").clear();
+        quartermasterMap("ACTIVE_QM_BY_WORLD_ANCHOR").clear();
     }
 
     @Test
@@ -60,7 +64,7 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
     }
 
     @Test
-    void librarianGainsSecondAdjacentChest_promotesToQuartermaster_then_demotesWhenRemoved() throws Exception {
+    void removingSecondChest_demotesOnceWithoutPairingLoop() throws Exception {
         LibrarianBehavior behavior = new LibrarianBehavior();
         ServerWorld world = mock(ServerWorld.class);
         VillagerEntity villager = mockLibrarian();
@@ -77,6 +81,7 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
         when(world.getBlockState(chestPos)).thenReturn(chestState(ChestType.LEFT, Direction.NORTH));
         when(world.getBlockState(secondPos)).thenReturn(chestState(ChestType.RIGHT, Direction.NORTH));
         when(world.getServer()).thenReturn(server);
+        when(world.getTime()).thenReturn(100L, 100L, 102L, 103L);
 
         invokeSyncQuartermasterState(behavior, world, villager, jobPos, chestPos, "second_chest_added");
 
@@ -88,12 +93,14 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
         try (MockedStatic<VillageAnchorState> anchorStateStatic = Mockito.mockStatic(VillageAnchorState.class)) {
             anchorStateStatic.when(() -> VillageAnchorState.get(server)).thenReturn(anchorState);
 
-            invokeSyncQuartermasterState(behavior, world, villager, jobPos, chestPos, "second_chest_removed");
+            invokeSyncQuartermasterState(behavior, world, villager, jobPos, chestPos, "second_chest_removed_transient");
+            invokeSyncQuartermasterState(behavior, world, villager, jobPos, chestPos, "second_chest_removed_stable");
+            invokeSyncQuartermasterState(behavior, world, villager, jobPos, chestPos, "second_chest_removed_repeated");
         }
 
         assertFalse(map("QUARTERMASTER_GOALS").containsKey(villager));
-        verify(goalSelector).remove(any(QuartermasterGoal.class));
-        verify(anchorState).unregister(world, chestPos);
+        verify(goalSelector, times(1)).remove(any(QuartermasterGoal.class));
+        verify(anchorState, times(1)).unregister(world, chestPos);
     }
 
     private static VillagerEntity mockLibrarian() {
@@ -102,6 +109,7 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
         when(villager.getVillagerData()).thenReturn(villagerData);
         when(villagerData.getProfession()).thenReturn(VillagerProfession.LIBRARIAN);
         when(villager.isAlive()).thenReturn(true);
+        when(villager.getUuid()).thenReturn(UUID.randomUUID());
         when(villager.getUuidAsString()).thenReturn("test-librarian");
         return villager;
     }
@@ -133,6 +141,13 @@ class LibrarianBehaviorQuartermasterLifecycleTest {
     @SuppressWarnings("unchecked")
     private static Map<Object, Object> map(String fieldName) throws Exception {
         Field field = LibrarianBehavior.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return (Map<Object, Object>) field.get(null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<Object, Object> quartermasterMap(String fieldName) throws Exception {
+        Field field = QuartermasterGoal.class.getDeclaredField(fieldName);
         field.setAccessible(true);
         return (Map<Object, Object>) field.get(null);
     }
