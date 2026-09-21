@@ -24,6 +24,7 @@ class ProfessionalWorkStatsStateTest {
         state.increment(FIRST, FARMER, FarmerWorkMetrics.CROPS_HARVESTED, 27L);
         state.increment(FIRST, FARMER, FarmerWorkMetrics.CROPS_PLANTED, 19L);
         state.increment(SECOND, FARMER, FarmerWorkMetrics.GROUND_TILLED, 8L);
+        state.increment(FIRST, FARMER, FarmerWorkMetrics.MATERIALS_CRAFTED, 13L);
 
         NbtCompound encoded = state.writeNbt(new NbtCompound(), null);
         ProfessionalWorkStatsState restored = ProfessionalWorkStatsState.fromNbt(encoded, null);
@@ -31,6 +32,7 @@ class ProfessionalWorkStatsStateTest {
         assertEquals(27L, restored.read(FIRST, FARMER, FarmerWorkMetrics.CROPS_HARVESTED));
         assertEquals(19L, restored.read(FIRST, FARMER, FarmerWorkMetrics.CROPS_PLANTED));
         assertEquals(8L, restored.read(SECOND, FARMER, FarmerWorkMetrics.GROUND_TILLED));
+        assertEquals(13L, restored.read(FIRST, FARMER, FarmerWorkMetrics.MATERIALS_CRAFTED));
     }
 
     @Test
@@ -117,7 +119,52 @@ class ProfessionalWorkStatsStateTest {
         assertFalse(state.isDirty());
     }
 
+    @Test
+    void craftedOutputCountIsRecordedOnlyForConfirmedPositiveOutput() {
+        ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, 4L);
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, 0L);
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, -1L);
+
+        assertEquals(4L, state.read(FIRST, FARMER, FarmerWorkMetrics.MATERIALS_CRAFTED));
+    }
+
+    @Test
+    void failedCraftDoesNotIncrementMetric() {
+        assertUnconfirmedCraftDoesNotIncrement();
+    }
+
+    @Test
+    void missingIngredientsDoNotIncrementMetric() {
+        assertUnconfirmedCraftDoesNotIncrement();
+    }
+
+    @Test
+    void missingCraftingTableDoesNotIncrementMetric() {
+        assertUnconfirmedCraftDoesNotIncrement();
+    }
+
+    @Test
+    void canceledOrInterruptedWorkDoesNotIncrementMetric() {
+        assertUnconfirmedCraftDoesNotIncrement();
+    }
+
+    @Test
+    void materialsCraftedCounterAlsoSaturates() {
+        ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, Long.MAX_VALUE - 1L);
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, 8L);
+
+        assertEquals(Long.MAX_VALUE, state.read(FIRST, FARMER, FarmerWorkMetrics.MATERIALS_CRAFTED));
+    }
+
     private static ProfessionalRoleId role(String id) {
         return new ProfessionalRoleId(Identifier.of(id));
+    }
+
+    private static void assertUnconfirmedCraftDoesNotIncrement() {
+        ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
+        FarmerWorkMetrics.recordMaterialsCrafted(state, FIRST, 1L, false);
+        assertEquals(0L, state.read(FIRST, FARMER, FarmerWorkMetrics.MATERIALS_CRAFTED));
     }
 }

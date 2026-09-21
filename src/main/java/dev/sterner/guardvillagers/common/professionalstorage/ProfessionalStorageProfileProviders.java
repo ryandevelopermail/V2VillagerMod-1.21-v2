@@ -25,7 +25,7 @@ public final class ProfessionalStorageProfileProviders {
         PROVIDERS.put(role, provider);
     }
 
-    public static Optional<List<ProfessionalStorageRow>> createRows(
+    public static Optional<List<ProfessionalStorageTab>> createTabs(
             ServerWorld world,
             StorageIdentity storage,
             List<ProfessionalStorageResolution> resolutions
@@ -41,8 +41,25 @@ public final class ProfessionalStorageProfileProviders {
         if (provider == null) {
             return Optional.empty();
         }
-        return provider.createRows(world, storage, List.copyOf(resolutions))
+        return provider.createTabs(world, storage, List.copyOf(resolutions))
                 .map(List::copyOf)
-                .filter(rows -> !rows.isEmpty() && rows.size() <= ProfessionalStorageSnapshot.MAX_ROWS);
+                .filter(ProfessionalStorageProfileProviders::withinBounds);
+    }
+
+    private static boolean withinBounds(List<ProfessionalStorageTab> tabs) {
+        if (tabs.isEmpty() || tabs.size() > ProfessionalStorageSnapshot.MAX_TABS) {
+            return false;
+        }
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        boolean hasRows = false;
+        for (ProfessionalStorageTab tab : tabs) {
+            if (tab.id().isBlank()
+                    || !ids.add(tab.id())
+                    || tab.rows().size() > ProfessionalStorageSnapshot.MAX_ROWS_PER_TAB) {
+                return false;
+            }
+            hasRows |= !tab.rows().isEmpty();
+        }
+        return hasRows;
     }
 }

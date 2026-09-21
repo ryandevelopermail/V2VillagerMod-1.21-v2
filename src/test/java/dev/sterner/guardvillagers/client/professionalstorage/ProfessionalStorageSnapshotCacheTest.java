@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.client.professionalstorage;
 
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRow;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageSnapshot;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageTab;
 import net.minecraft.util.math.BlockPos;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -56,8 +57,8 @@ class ProfessionalStorageSnapshotCacheTest {
                 1,
                 "Fisherman Storage",
                 false,
-                List.of(
+                List.of(new ProfessionalStorageTab("overview", "Overview", List.of(
                         new ProfessionalStorageRow("Profession", "Fisherman", ProfessionalStorageRow.Tone.NORMAL),
-                        new ProfessionalStorageRow("Status", "Paired", ProfessionalStorageRow.Tone.PAIRED)));
+                        new ProfessionalStorageRow("Status", "Paired", ProfessionalStorageRow.Tone.PAIRED)))));
     }
 }

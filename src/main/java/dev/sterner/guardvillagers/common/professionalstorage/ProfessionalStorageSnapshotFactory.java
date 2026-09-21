@@ -36,7 +36,7 @@ public final class ProfessionalStorageSnapshotFactory {
             List<WorkerView> workers,
             String originalTitle,
             boolean preserveCustomTitle,
-            Optional<List<ProfessionalStorageRow>> profileRows
+            Optional<List<ProfessionalStorageTab>> profileTabs
     ) {
         if (workers.isEmpty()) {
             return Optional.empty();
@@ -57,11 +57,13 @@ public final class ProfessionalStorageSnapshotFactory {
         String generatedTitle = titleFor(firstRole, workers.size(), roles.size());
         String title = preserveCustomTitle ? originalTitle : generatedTitle;
 
-        List<ProfessionalStorageRow> rows = profileRows
-                .filter(candidate -> !candidate.isEmpty()
-                        && candidate.size() <= ProfessionalStorageSnapshot.MAX_ROWS)
+        List<ProfessionalStorageTab> tabs = profileTabs
+                .filter(ProfessionalStorageSnapshotFactory::withinBounds)
                 .map(List::copyOf)
-                .orElseGet(() -> createGenericRows(workers, profession));
+                .orElseGet(() -> List.of(new ProfessionalStorageTab(
+                        "overview",
+                        "Overview",
+                        createGenericRows(workers, profession))));
 
         return Optional.of(new ProfessionalStorageSnapshot(
                 syncId,
@@ -72,7 +74,24 @@ public final class ProfessionalStorageSnapshotFactory {
                 workers.size(),
                 title,
                 preserveCustomTitle,
-                rows));
+                tabs));
+    }
+
+    private static boolean withinBounds(List<ProfessionalStorageTab> tabs) {
+        if (tabs.isEmpty() || tabs.size() > ProfessionalStorageSnapshot.MAX_TABS) {
+            return false;
+        }
+        Set<String> ids = new java.util.HashSet<>();
+        boolean hasRows = false;
+        for (ProfessionalStorageTab tab : tabs) {
+            if (tab.id().isBlank()
+                    || !ids.add(tab.id())
+                    || tab.rows().size() > ProfessionalStorageSnapshot.MAX_ROWS_PER_TAB) {
+                return false;
+            }
+            hasRows |= !tab.rows().isEmpty();
+        }
+        return hasRows;
     }
 
     private static List<ProfessionalStorageRow> createGenericRows(

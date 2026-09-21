@@ -21,10 +21,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
-/** Six-row Farmer profile assembled from persisted career totals and read-only live goal state. */
+/** Two-tab Farmer profile assembled from persisted career totals and read-only live goal state. */
 public final class FarmerProfessionalStorageProfileProvider implements ProfessionalStorageProfileProvider {
     @Override
-    public Optional<List<ProfessionalStorageRow>> createRows(
+    public Optional<List<ProfessionalStorageTab>> createTabs(
             ServerWorld world,
             StorageIdentity storage,
             List<ProfessionalStorageResolution> resolutions
@@ -60,14 +60,23 @@ public final class FarmerProfessionalStorageProfileProvider implements Professio
                 .map(resolution -> resolution.pairing().workerUuid())
                 .toList();
         ProfessionalWorkStatsState stats = ProfessionalWorkStatsState.get(world.getServer());
-        FarmerCareerTotals totals = new FarmerCareerTotals(
-                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.CROPS_HARVESTED),
-                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.CROPS_PLANTED),
-                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.GROUND_TILLED));
-        return Optional.of(buildRows(workers, storageHasUsableHoe(world, storage), totals));
+        FarmerCareerTotals totals = aggregateCareerTotals(stats, workerUuids, farmerRole);
+        return Optional.of(buildTabs(workers, storageHasUsableHoe(world, storage), totals));
     }
 
-    static List<ProfessionalStorageRow> buildRows(
+    static FarmerCareerTotals aggregateCareerTotals(
+            ProfessionalWorkStatsState stats,
+            List<UUID> workerUuids,
+            ProfessionalRoleId farmerRole
+    ) {
+        return new FarmerCareerTotals(
+                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.CROPS_HARVESTED),
+                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.CROPS_PLANTED),
+                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.GROUND_TILLED),
+                stats.aggregate(workerUuids, farmerRole, FarmerWorkMetrics.MATERIALS_CRAFTED));
+    }
+
+    static List<ProfessionalStorageTab> buildTabs(
             List<FarmerWorkerView> workers,
             boolean storageHasHoe,
             FarmerCareerTotals totals
@@ -101,24 +110,41 @@ public final class FarmerProfessionalStorageProfileProvider implements Professio
 
         CoverageDisplay coverage = aggregateCoverage(workers);
         return List.of(
-                new ProfessionalStorageRow("Status", status, statusTone),
-                new ProfessionalStorageRow(
-                        "Hoe available",
-                        hoeAvailable ? "Yes" : "No",
-                        hoeAvailable ? ProfessionalStorageRow.Tone.PAIRED : ProfessionalStorageRow.Tone.WARNING),
-                new ProfessionalStorageRow("Farmland coverage", coverage.value(), coverage.tone()),
-                new ProfessionalStorageRow(
-                        "Crops harvested",
-                        Long.toString(totals.cropsHarvested()),
-                        ProfessionalStorageRow.Tone.NORMAL),
-                new ProfessionalStorageRow(
-                        "Crops planted",
-                        Long.toString(totals.cropsPlanted()),
-                        ProfessionalStorageRow.Tone.NORMAL),
-                new ProfessionalStorageRow(
-                        "Ground tilled",
-                        Long.toString(totals.groundTilled()),
-                        ProfessionalStorageRow.Tone.NORMAL));
+                new ProfessionalStorageTab(
+                        "overview",
+                        "Overview",
+                        List.of(
+                                new ProfessionalStorageRow("Status", status, statusTone),
+                                new ProfessionalStorageRow(
+                                        "Hoe available",
+                                        hoeAvailable ? "Yes" : "No",
+                                        hoeAvailable
+                                                ? ProfessionalStorageRow.Tone.PAIRED
+                                                : ProfessionalStorageRow.Tone.WARNING),
+                                new ProfessionalStorageRow(
+                                        "Farmland coverage",
+                                        coverage.value(),
+                                        coverage.tone()))),
+                new ProfessionalStorageTab(
+                        "statistics",
+                        "Statistics",
+                        List.of(
+                                new ProfessionalStorageRow(
+                                        "Crops harvested",
+                                        Long.toString(totals.cropsHarvested()),
+                                        ProfessionalStorageRow.Tone.NORMAL),
+                                new ProfessionalStorageRow(
+                                        "Crops planted",
+                                        Long.toString(totals.cropsPlanted()),
+                                        ProfessionalStorageRow.Tone.NORMAL),
+                                new ProfessionalStorageRow(
+                                        "Ground tilled",
+                                        Long.toString(totals.groundTilled()),
+                                        ProfessionalStorageRow.Tone.NORMAL),
+                                new ProfessionalStorageRow(
+                                        "Materials crafted",
+                                        Long.toString(totals.materialsCrafted()),
+                                        ProfessionalStorageRow.Tone.NORMAL))));
     }
 
     private static CoverageDisplay aggregateCoverage(List<FarmerWorkerView> workers) {
@@ -195,9 +221,14 @@ public final class FarmerProfessionalStorageProfileProvider implements Professio
         }
     }
 
-    record FarmerCareerTotals(long cropsHarvested, long cropsPlanted, long groundTilled) {
+    record FarmerCareerTotals(
+            long cropsHarvested,
+            long cropsPlanted,
+            long groundTilled,
+            long materialsCrafted
+    ) {
         FarmerCareerTotals {
-            if (cropsHarvested < 0L || cropsPlanted < 0L || groundTilled < 0L) {
+            if (cropsHarvested < 0L || cropsPlanted < 0L || groundTilled < 0L || materialsCrafted < 0L) {
                 throw new IllegalArgumentException("Farmer career totals must be nonnegative");
             }
         }

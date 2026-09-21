@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.network;
 
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRow;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageSnapshot;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageTab;
 import net.minecraft.network.RegistryByteBuf;
 import net.minecraft.network.codec.PacketCodec;
 import net.minecraft.network.packet.CustomPayload;
@@ -27,11 +28,16 @@ public record ProfessionalStorageSnapshotPacket(ProfessionalStorageSnapshot snap
         buffer.writeVarInt(snapshot.workerCount());
         buffer.writeString(snapshot.title());
         buffer.writeBoolean(snapshot.customTitlePreserved());
-        buffer.writeVarInt(snapshot.rows().size());
-        for (ProfessionalStorageRow row : snapshot.rows()) {
-            buffer.writeString(row.label());
-            buffer.writeString(row.value());
-            buffer.writeEnumConstant(row.tone());
+        buffer.writeVarInt(snapshot.tabs().size());
+        for (ProfessionalStorageTab tab : snapshot.tabs()) {
+            buffer.writeString(tab.id());
+            buffer.writeString(tab.title());
+            buffer.writeVarInt(tab.rows().size());
+            for (ProfessionalStorageRow row : tab.rows()) {
+                buffer.writeString(row.label());
+                buffer.writeString(row.value());
+                buffer.writeEnumConstant(row.tone());
+            }
         }
     }
 
@@ -46,16 +52,26 @@ public record ProfessionalStorageSnapshotPacket(ProfessionalStorageSnapshot snap
         int workerCount = buffer.readVarInt();
         String title = buffer.readString();
         boolean customTitlePreserved = buffer.readBoolean();
-        int rowCount = buffer.readVarInt();
-        if (rowCount < 0 || rowCount > ProfessionalStorageSnapshot.MAX_ROWS) {
-            throw new IllegalArgumentException("Invalid professional storage row count: " + rowCount);
+        int tabCount = buffer.readVarInt();
+        if (tabCount < 1 || tabCount > ProfessionalStorageSnapshot.MAX_TABS) {
+            throw new IllegalArgumentException("Invalid professional storage tab count: " + tabCount);
         }
-        List<ProfessionalStorageRow> rows = new ArrayList<>(rowCount);
-        for (int index = 0; index < rowCount; index++) {
-            rows.add(new ProfessionalStorageRow(
-                    buffer.readString(),
-                    buffer.readString(),
-                    buffer.readEnumConstant(ProfessionalStorageRow.Tone.class)));
+        List<ProfessionalStorageTab> tabs = new ArrayList<>(tabCount);
+        for (int tabIndex = 0; tabIndex < tabCount; tabIndex++) {
+            String tabId = buffer.readString();
+            String tabTitle = buffer.readString();
+            int rowCount = buffer.readVarInt();
+            if (rowCount < 0 || rowCount > ProfessionalStorageSnapshot.MAX_ROWS_PER_TAB) {
+                throw new IllegalArgumentException("Invalid professional storage row count: " + rowCount);
+            }
+            List<ProfessionalStorageRow> rows = new ArrayList<>(rowCount);
+            for (int rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                rows.add(new ProfessionalStorageRow(
+                        buffer.readString(),
+                        buffer.readString(),
+                        buffer.readEnumConstant(ProfessionalStorageRow.Tone.class)));
+            }
+            tabs.add(new ProfessionalStorageTab(tabId, tabTitle, rows));
         }
         return new ProfessionalStorageSnapshotPacket(new ProfessionalStorageSnapshot(
                 syncId,
@@ -66,7 +82,7 @@ public record ProfessionalStorageSnapshotPacket(ProfessionalStorageSnapshot snap
                 workerCount,
                 title,
                 customTitlePreserved,
-                rows));
+                tabs));
     }
 
     @Override

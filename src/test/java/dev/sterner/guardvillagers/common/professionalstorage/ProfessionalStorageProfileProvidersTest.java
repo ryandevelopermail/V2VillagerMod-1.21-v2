@@ -20,7 +20,7 @@ class ProfessionalStorageProfileProvidersTest {
                 resolution("30000000-0000-0000-0000-000000000001", "minecraft:farmer"),
                 resolution("30000000-0000-0000-0000-000000000002", "minecraft:librarian"));
 
-        assertTrue(ProfessionalStorageProfileProviders.createRows(null, STORAGE, mixed).isEmpty());
+        assertTrue(ProfessionalStorageProfileProviders.createTabs(null, STORAGE, mixed).isEmpty());
     }
 
     @Test
@@ -28,7 +28,7 @@ class ProfessionalStorageProfileProvidersTest {
         List<ProfessionalStorageResolution> unsupported = List.of(
                 resolution("30000000-0000-0000-0000-000000000003", "example:beekeeper"));
 
-        assertTrue(ProfessionalStorageProfileProviders.createRows(null, STORAGE, unsupported).isEmpty());
+        assertTrue(ProfessionalStorageProfileProviders.createTabs(null, STORAGE, unsupported).isEmpty());
     }
 
     private static ProfessionalStorageResolution resolution(String uuid, String role) {

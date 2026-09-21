@@ -47,30 +47,43 @@ class ProfessionalStorageSnapshotFactoryTest {
 
         assertEquals("Rare Books", snapshot.title());
         assertTrue(snapshot.customTitlePreserved());
-        assertEquals("Profession", snapshot.rows().getFirst().label());
-        assertEquals("Librarian", snapshot.rows().getFirst().value());
+        assertEquals(List.of("Overview"), snapshot.tabs().stream().map(ProfessionalStorageTab::title).toList());
+        assertEquals("Profession", rows(snapshot).getFirst().label());
+        assertEquals("Librarian", rows(snapshot).getFirst().value());
     }
 
     @Test
     void rowsAreOrderedBoundedAndUseSemanticTones() {
         ProfessionalStorageSnapshot paired = snapshot(worker("minecraft:farmer"));
-        assertEquals(List.of("Profession", "Status"), paired.rows().stream().map(ProfessionalStorageRow::label).toList());
-        assertEquals(ProfessionalStorageRow.Tone.PAIRED, paired.rows().getLast().tone());
+        assertEquals(List.of("Profession", "Status"), rows(paired).stream().map(ProfessionalStorageRow::label).toList());
+        assertEquals(ProfessionalStorageRow.Tone.PAIRED, rows(paired).getLast().tone());
 
         ProfessionalStorageSnapshot unavailable = snapshot(new ProfessionalStorageSnapshotFactory.WorkerView(
                 role("minecraft:farmer"),
                 ProfessionalStorageResolution.WorkerAvailability.UNLOADED,
                 true));
-        assertEquals("Worker unavailable", unavailable.rows().getLast().value());
-        assertEquals(ProfessionalStorageRow.Tone.WARNING, unavailable.rows().getLast().tone());
+        assertEquals("Worker unavailable", rows(unavailable).getLast().value());
+        assertEquals(ProfessionalStorageRow.Tone.WARNING, rows(unavailable).getLast().tone());
 
         ProfessionalStorageSnapshot unsupported = snapshot(new ProfessionalStorageSnapshotFactory.WorkerView(
                 role("example:beekeeper"),
                 ProfessionalStorageResolution.WorkerAvailability.LOADED,
                 false));
-        assertEquals("No V2 behavior configured", unsupported.rows().getLast().value());
-        assertEquals(ProfessionalStorageRow.Tone.BLOCKER, unsupported.rows().getLast().tone());
-        assertTrue(unsupported.rows().size() <= ProfessionalStorageSnapshot.MAX_ROWS);
+        assertEquals("No V2 behavior configured", rows(unsupported).getLast().value());
+        assertEquals(ProfessionalStorageRow.Tone.BLOCKER, rows(unsupported).getLast().tone());
+        assertEquals(1, unsupported.tabs().size());
+    }
+
+    @Test
+    void genericFallbackUsesOneOverviewTabAndIncludesSharedWorkerCount() {
+        ProfessionalStorageSnapshot shared = snapshot(
+                worker("minecraft:farmer"),
+                worker("minecraft:farmer"));
+
+        assertEquals(List.of("overview"), shared.tabs().stream().map(ProfessionalStorageTab::id).toList());
+        assertEquals(List.of("Profession", "Workers", "Status"),
+                rows(shared).stream().map(ProfessionalStorageRow::label).toList());
+        assertEquals("2", rows(shared).get(1).value());
     }
 
     @Test
@@ -117,9 +130,12 @@ class ProfessionalStorageSnapshotFactoryTest {
 
     @Test
     void optionalProfessionRowsReplaceGenericRowsWithoutChangingTitleLogic() {
-        List<ProfessionalStorageRow> farmerRows = List.of(
-                new ProfessionalStorageRow("Status", "Idle", ProfessionalStorageRow.Tone.PAIRED),
-                new ProfessionalStorageRow("Hoe available", "Yes", ProfessionalStorageRow.Tone.PAIRED));
+        List<ProfessionalStorageTab> farmerTabs = List.of(
+                new ProfessionalStorageTab("overview", "Overview", List.of(
+                        new ProfessionalStorageRow("Status", "Idle", ProfessionalStorageRow.Tone.PAIRED),
+                        new ProfessionalStorageRow("Hoe available", "Yes", ProfessionalStorageRow.Tone.PAIRED))),
+                new ProfessionalStorageTab("statistics", "Statistics", List.of(
+                        new ProfessionalStorageRow("Crops harvested", "9", ProfessionalStorageRow.Tone.NORMAL))));
 
         ProfessionalStorageSnapshot snapshot = ProfessionalStorageSnapshotFactory.create(
                 44,
@@ -128,15 +144,16 @@ class ProfessionalStorageSnapshotFactoryTest {
                 List.of(worker("minecraft:farmer")),
                 "Chest",
                 false,
-                Optional.of(farmerRows)).orElseThrow();
+                Optional.of(farmerTabs)).orElseThrow();
 
-        assertEquals(farmerRows, snapshot.rows());
+        assertEquals(farmerTabs, snapshot.tabs());
         assertEquals("Farmer Storage", snapshot.title());
     }
 
     @Test
-    void oversizedProfessionRowsFallBackToGenericProfile() {
-        List<ProfessionalStorageRow> oversized = java.util.stream.IntStream.range(0, 7)
+    void oversizedProfessionTabFallsBackToGenericProfile() {
+        List<ProfessionalStorageRow> oversized = java.util.stream.IntStream
+                .range(0, ProfessionalStorageSnapshot.MAX_ROWS_PER_TAB + 1)
                 .mapToObj(index -> new ProfessionalStorageRow(
                         "Metric " + index,
                         "0",
@@ -150,10 +167,10 @@ class ProfessionalStorageSnapshotFactoryTest {
                 List.of(worker("minecraft:farmer")),
                 "Chest",
                 false,
-                Optional.of(oversized)).orElseThrow();
+                Optional.of(List.of(new ProfessionalStorageTab("oversized", "Oversized", oversized)))).orElseThrow();
 
         assertEquals(List.of("Profession", "Status"),
-                snapshot.rows().stream().map(ProfessionalStorageRow::label).toList());
+                rows(snapshot).stream().map(ProfessionalStorageRow::label).toList());
     }
 
     private static ProfessionalStorageSnapshot snapshot(ProfessionalStorageSnapshotFactory.WorkerView... workers) {
@@ -179,6 +196,10 @@ class ProfessionalStorageSnapshotFactoryTest {
                 role(id),
                 ProfessionalStorageResolution.WorkerAvailability.LOADED,
                 true);
+    }
+
+    private static List<ProfessionalStorageRow> rows(ProfessionalStorageSnapshot snapshot) {
+        return snapshot.tabs().getFirst().rows();
     }
 
     private static ProfessionalRoleId role(String id) {
