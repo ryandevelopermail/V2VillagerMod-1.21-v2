@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
 import dev.sterner.guardvillagers.common.util.ToolsmithCraftingMemoryHolder;
+import dev.sterner.guardvillagers.common.professionalstorage.ToolsmithWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.behavior.ToolsmithBehavior;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
@@ -34,6 +35,7 @@ import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 public class ToolsmithCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -190,20 +192,38 @@ public class ToolsmithCraftingGoal extends Goal {
         }
 
         ToolRecipe recipe = craftable.getFirst();
-        if (!canInsertOutput(inventory, recipe.output)) {
+        if (!executeConfirmedCraft(
+                () -> canInsertOutput(inventory, recipe.output),
+                () -> consumeIngredients(inventory, recipe.recipe),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                () -> {
+                    inventory.markDirty();
+                    craftedToday++;
+                    recordLastCrafted(recipe.output);
+                    requestImmediateDistributionForCraftedOutput(villager, recipe.output);
+                    ToolsmithWorkMetrics.recordToolsCrafted(world, villager.getUuid(), recipe.output.getCount());
+                })) {
             return;
         }
-        if (consumeIngredients(inventory, recipe.recipe)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
-            craftedToday++;
-            recordLastCrafted(recipe.output);
-            requestImmediateDistributionForCraftedOutput(villager, recipe.output);
-            CraftingCheckLogger.report(world, "Toolsmith", formatCraftedResult(lastCheckCount, recipe.output));
-            if (recipe.output.isOf(Items.FISHING_ROD)) {
-                CraftingCheckLogger.report(world, "Toolsmith", "crafted fishing rod due to fisherman recipient demand");
-            }
+        CraftingCheckLogger.report(world, "Toolsmith", formatCraftedResult(lastCheckCount, recipe.output));
+        if (recipe.output.isOf(Items.FISHING_ROD)) {
+            CraftingCheckLogger.report(world, "Toolsmith", "crafted fishing rod due to fisherman recipient demand");
         }
+    }
+
+    static boolean executeConfirmedCraft(
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier consumedIngredients,
+            BooleanSupplier insertedCompleteOutput,
+            Runnable confirmedCompletion
+    ) {
+        if (!hasOutputCapacity.getAsBoolean()
+                || !consumedIngredients.getAsBoolean()
+                || !insertedCompleteOutput.getAsBoolean()) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
     }
 
     static boolean requestImmediateDistributionForCraftedOutput(VillagerEntity villager, ItemStack craftedOutput) {

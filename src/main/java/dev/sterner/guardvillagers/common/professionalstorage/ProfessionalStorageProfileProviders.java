@@ -1,7 +1,7 @@
 package dev.sterner.guardvillagers.common.professionalstorage;
 
 import net.minecraft.server.world.ServerWorld;
-import net.minecraft.village.VillagerProfession;
+import net.minecraft.util.Identifier;
 
 import java.util.HashMap;
 import java.util.List;
@@ -17,12 +17,17 @@ public final class ProfessionalStorageProfileProviders {
 
     public static void registerDefaults() {
         register(
-                ProfessionalRoleId.fromVillagerProfession(VillagerProfession.FARMER),
+                new ProfessionalRoleId(Identifier.of("minecraft", "farmer")),
                 new FarmerProfessionalStorageProfileProvider());
+        register(ToolsmithWorkMetrics.TOOLSMITH_ROLE, new ToolsmithProfessionalStorageProfileProvider());
     }
 
     public static void register(ProfessionalRoleId role, ProfessionalStorageProfileProvider provider) {
         PROVIDERS.put(role, provider);
+    }
+
+    static boolean hasProvider(ProfessionalRoleId role) {
+        return PROVIDERS.containsKey(role);
     }
 
     public static Optional<List<ProfessionalStorageTab>> createTabs(

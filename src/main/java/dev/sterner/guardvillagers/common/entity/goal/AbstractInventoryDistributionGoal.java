@@ -20,9 +20,12 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -42,6 +45,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected long nextCheckTime;
     protected boolean immediateCheckPending;
     protected ItemStack pendingItem = ItemStack.EMPTY;
+    private ItemStack pendingTransferSnapshot = ItemStack.EMPTY;
     protected UUID pendingTargetId;
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
@@ -143,6 +147,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                         stage = Stage.DONE;
                         return;
                     }
+                    pendingTransferSnapshot = pendingItem.copy();
                     stage = Stage.GO_TO_TARGET;
                     moveTo(pendingTargetPos);
                 } else {
@@ -176,6 +181,21 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                     return;
                 }
                 if (executePendingTransfer(world)) {
+                    ItemStack transferred = pendingTransferSnapshot.isEmpty()
+                            ? pendingItem.copy()
+                            : pendingTransferSnapshot.copy();
+                    UUID completedTargetId = pendingTargetId;
+                    BlockPos completedTargetPos = Objects.requireNonNull(
+                            pendingTargetPos,
+                            "Successful transfer requires a target position").toImmutable();
+                    notifyAfterComplete(
+                            true,
+                            () -> new CompletedTransfer(transferred, completedTargetId, completedTargetPos),
+                            completed -> onTransferCompleted(
+                                    world,
+                                    completed.stack(),
+                                    completed.targetId(),
+                                    completed.targetPos()));
                     clearPendingState();
                     stage = Stage.DONE;
                     return;
@@ -310,11 +330,40 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     protected void clearPendingState() {
         pendingItem = ItemStack.EMPTY;
+        pendingTransferSnapshot = ItemStack.EMPTY;
         pendingTargetId = null;
         pendingTargetPos = null;
         pendingUniversalRoute = false;
         pendingOverflowTransfer = false;
         clearPendingTargetState();
+    }
+
+    /** Called exactly once after a complete insertion and before pending state is cleared. */
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @Nullable UUID targetId,
+            BlockPos targetPos
+    ) {
+    }
+
+    static <T> boolean notifyAfterComplete(
+            boolean complete,
+            Supplier<T> completedValue,
+            Consumer<T> completionHook
+    ) {
+        if (!complete) {
+            return false;
+        }
+        completionHook.accept(completedValue.get());
+        return true;
+    }
+
+    private record CompletedTransfer(
+            ItemStack stack,
+            @Nullable UUID targetId,
+            BlockPos targetPos
+    ) {
     }
 
     protected boolean hasDistributableItem(Inventory inventory) {
