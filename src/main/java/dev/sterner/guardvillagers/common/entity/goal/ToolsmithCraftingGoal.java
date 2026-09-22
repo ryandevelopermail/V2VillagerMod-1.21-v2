@@ -251,7 +251,9 @@ public class ToolsmithCraftingGoal extends Goal {
             if (result.isEmpty() || !isToolItem(result)) {
                 continue;
             }
-            if (!canUseRecipeWithoutCraftingTable(recipe) && !hasValidCraftingTable(world)) {
+            if (!isRecipeAvailableForCraftingGrid(
+                    canUseRecipeWithoutCraftingTable(recipe),
+                    hasValidCraftingTable(world))) {
                 continue;
             }
             ToolsmithDemandPlanner.ToolType toolType = ToolsmithDemandPlanner.ToolType.fromStack(result);
@@ -325,6 +327,10 @@ public class ToolsmithCraftingGoal extends Goal {
 
     private boolean canUseRecipeWithoutCraftingTable(CraftingRecipe recipe) {
         return recipe.fits(NON_TABLE_GRID_SIZE, NON_TABLE_GRID_SIZE);
+    }
+
+    static boolean isRecipeAvailableForCraftingGrid(boolean fitsTwoByTwo, boolean craftingTableReady) {
+        return fitsTwoByTwo || craftingTableReady;
     }
 
     private boolean hasValidCraftingTable(@Nullable ServerWorld world) {

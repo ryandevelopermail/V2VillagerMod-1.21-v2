@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -175,27 +176,21 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                     stage = Stage.DONE;
                     return;
                 }
-                if (!refreshPendingTarget(world)) {
+                TransferAttemptOutcome outcome = attemptPendingTransfer(
+                        refreshPendingTarget(world),
+                        () -> executePendingTransfer(world),
+                        this::snapshotCompletedTransfer,
+                        completed -> onTransferCompleted(
+                                world,
+                                completed.stack(),
+                                completed.targetId(),
+                                completed.targetPos()));
+                if (outcome == TransferAttemptOutcome.TARGET_INVALID) {
                     returnPendingItem(world);
                     stage = Stage.DONE;
                     return;
                 }
-                if (executePendingTransfer(world)) {
-                    ItemStack transferred = pendingTransferSnapshot.isEmpty()
-                            ? pendingItem.copy()
-                            : pendingTransferSnapshot.copy();
-                    UUID completedTargetId = pendingTargetId;
-                    BlockPos completedTargetPos = Objects.requireNonNull(
-                            pendingTargetPos,
-                            "Successful transfer requires a target position").toImmutable();
-                    notifyAfterComplete(
-                            true,
-                            () -> new CompletedTransfer(transferred, completedTargetId, completedTargetPos),
-                            completed -> onTransferCompleted(
-                                    world,
-                                    completed.stack(),
-                                    completed.targetId(),
-                                    completed.targetPos()));
+                if (outcome == TransferAttemptOutcome.COMPLETE) {
                     clearPendingState();
                     stage = Stage.DONE;
                     return;
@@ -359,11 +354,41 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         return true;
     }
 
+    static <T> TransferAttemptOutcome attemptPendingTransfer(
+            boolean targetValid,
+            BooleanSupplier transferAttempt,
+            Supplier<T> completedValue,
+            Consumer<T> completionHook
+    ) {
+        if (!targetValid) {
+            return TransferAttemptOutcome.TARGET_INVALID;
+        }
+        return notifyAfterComplete(transferAttempt.getAsBoolean(), completedValue, completionHook)
+                ? TransferAttemptOutcome.COMPLETE
+                : TransferAttemptOutcome.INCOMPLETE;
+    }
+
+    private CompletedTransfer snapshotCompletedTransfer() {
+        ItemStack transferred = pendingTransferSnapshot.isEmpty()
+                ? pendingItem.copy()
+                : pendingTransferSnapshot.copy();
+        BlockPos completedTargetPos = Objects.requireNonNull(
+                pendingTargetPos,
+                "Successful transfer requires a target position").toImmutable();
+        return new CompletedTransfer(transferred, pendingTargetId, completedTargetPos);
+    }
+
     private record CompletedTransfer(
             ItemStack stack,
             @Nullable UUID targetId,
             BlockPos targetPos
     ) {
+    }
+
+    enum TransferAttemptOutcome {
+        TARGET_INVALID,
+        INCOMPLETE,
+        COMPLETE
     }
 
     protected boolean hasDistributableItem(Inventory inventory) {

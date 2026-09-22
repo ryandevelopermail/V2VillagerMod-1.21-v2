@@ -16,10 +16,18 @@ class ToolsmithCompletionSeamTest {
 
     @Test
     void confirmedCraftRunsAllSuccessEffectsOnce() {
-        AtomicInteger successEffects = new AtomicInteger();
+        AtomicInteger lastCraftedMemory = new AtomicInteger();
+        AtomicInteger immediateDistributionRequests = new AtomicInteger();
+        AtomicInteger metricWrites = new AtomicInteger();
         assertTrue(ToolsmithCraftingGoal.executeConfirmedCraft(
-                () -> true, () -> true, () -> true, successEffects::incrementAndGet));
-        assertEquals(1, successEffects.get());
+                () -> true, () -> true, () -> true, () -> {
+                    lastCraftedMemory.incrementAndGet();
+                    immediateDistributionRequests.incrementAndGet();
+                    metricWrites.incrementAndGet();
+                }));
+        assertEquals(1, lastCraftedMemory.get());
+        assertEquals(1, immediateDistributionRequests.get());
+        assertEquals(1, metricWrites.get());
     }
 
     @Test
@@ -64,6 +72,20 @@ class ToolsmithCompletionSeamTest {
     }
 
     @Test
+    void missingRequiredCraftingTableNeverEntersCompletionSeam() {
+        AtomicInteger recorded = new AtomicInteger();
+        boolean eligible = ToolsmithCraftingGoal.isRecipeAvailableForCraftingGrid(false, false);
+        if (eligible) {
+            ToolsmithCraftingGoal.executeConfirmedCraft(
+                    () -> true, () -> true, () -> true, recorded::incrementAndGet);
+        }
+        assertFalse(eligible);
+        assertEquals(0, recorded.get());
+        assertTrue(ToolsmithCraftingGoal.isRecipeAvailableForCraftingGrid(false, true));
+        assertTrue(ToolsmithCraftingGoal.isRecipeAvailableForCraftingGrid(true, false));
+    }
+
+    @Test
     void canceledCraftNeverEntersCompletionSeam() {
         AtomicInteger recorded = new AtomicInteger();
         assertEquals(0, recorded.get());
@@ -79,6 +101,26 @@ class ToolsmithCompletionSeamTest {
         assertTrue(ToolsmithSmithingGoal.executeConfirmedSmithing(
                 () -> true, () -> true, recorded::incrementAndGet));
         assertEquals(1, recorded.get());
+    }
+
+    @Test
+    void missingSmithingInputsDoNotRecord() {
+        AtomicInteger recorded = new AtomicInteger();
+        assertFalse(ToolsmithSmithingGoal.executeConfirmedSmithing(
+                () -> true, () -> false, recorded::incrementAndGet));
+        assertEquals(0, recorded.get());
+    }
+
+    @Test
+    void insufficientSmithingResultCapacityDoesNotConsumeOrRecord() {
+        AtomicInteger consumed = new AtomicInteger();
+        AtomicInteger recorded = new AtomicInteger();
+        assertFalse(ToolsmithSmithingGoal.executeConfirmedSmithing(
+                () -> false,
+                () -> { consumed.incrementAndGet(); return true; },
+                recorded::incrementAndGet));
+        assertEquals(0, consumed.get());
+        assertEquals(0, recorded.get());
     }
 
     @Test

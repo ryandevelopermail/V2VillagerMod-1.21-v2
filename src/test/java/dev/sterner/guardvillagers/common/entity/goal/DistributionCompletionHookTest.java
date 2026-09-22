@@ -8,8 +8,6 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DistributionCompletionHookTest {
     private static final UUID WORKER = UUID.fromString("60000000-0000-0000-0000-000000000001");
@@ -17,42 +15,68 @@ class DistributionCompletionHookTest {
     @Test
     void completeTransferInvokesHookExactlyOnce() {
         AtomicInteger hooks = new AtomicInteger();
-        assertTrue(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                true, () -> "delivered", ignored -> hooks.incrementAndGet()));
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.COMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true,
+                        () -> true,
+                        () -> "delivered",
+                        ignored -> hooks.incrementAndGet()));
         assertEquals(1, hooks.get());
     }
 
     @Test
-    void partialFailureInvalidationReturnAndCancellationDoNotInvokeHook() {
+    void partialInsertionDoesNotInvokeHookOrSnapshot() {
         AtomicInteger hooks = new AtomicInteger();
-        for (int ignored = 0; ignored < 5; ignored++) {
-            assertFalse(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                    false, () -> "not delivered", value -> hooks.incrementAndGet()));
-        }
+        AtomicInteger snapshots = new AtomicInteger();
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.INCOMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true,
+                        () -> false,
+                        () -> { snapshots.incrementAndGet(); return "not delivered"; },
+                        value -> hooks.incrementAndGet()));
+        assertEquals(0, hooks.get());
+        assertEquals(0, snapshots.get());
+    }
+
+    @Test
+    void targetInvalidationReturnsWithoutAttemptOrHook() {
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicInteger hooks = new AtomicInteger();
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.TARGET_INVALID,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        false,
+                        () -> { attempts.incrementAndGet(); return true; },
+                        () -> "not delivered",
+                        value -> hooks.incrementAndGet()));
+        assertEquals(0, attempts.get());
         assertEquals(0, hooks.get());
     }
 
     @Test
     void retryInvokesHookOnceWithOriginalFullTransferQuantity() {
         AtomicInteger hooks = new AtomicInteger();
-        assertFalse(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                false, () -> 4, value -> hooks.addAndGet(value)));
-        assertTrue(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                true, () -> 4, value -> hooks.addAndGet(value)));
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.INCOMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true, () -> false, () -> 4, hooks::addAndGet));
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.COMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true, () -> true, () -> 4, hooks::addAndGet));
         assertEquals(4, hooks.get());
     }
 
     @Test
     void successfulSupportedDeliveryRecordsDeliveredStackCount() {
         ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
-        assertTrue(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                true,
-                () -> 3L,
-                count -> state.increment(
-                        WORKER,
-                        ToolsmithWorkMetrics.TOOLSMITH_ROLE,
-                        ToolsmithWorkMetrics.TOOLS_DISTRIBUTED,
-                        count)));
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.COMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true,
+                        () -> true,
+                        () -> 3L,
+                        count -> state.increment(
+                                WORKER,
+                                ToolsmithWorkMetrics.TOOLSMITH_ROLE,
+                                ToolsmithWorkMetrics.TOOLS_DISTRIBUTED,
+                                count)));
         assertEquals(3, state.read(
                 WORKER,
                 ToolsmithWorkMetrics.TOOLSMITH_ROLE,
@@ -62,14 +86,16 @@ class DistributionCompletionHookTest {
     @Test
     void unsupportedSelectionNeverEntersSuccessfulToolsmithCompletion() {
         ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
-        assertFalse(AbstractInventoryDistributionGoal.notifyAfterComplete(
-                false,
-                () -> 1L,
-                count -> state.increment(
-                        WORKER,
-                        ToolsmithWorkMetrics.TOOLSMITH_ROLE,
-                        ToolsmithWorkMetrics.TOOLS_DISTRIBUTED,
-                        count)));
+        assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.INCOMPLETE,
+                AbstractInventoryDistributionGoal.attemptPendingTransfer(
+                        true,
+                        () -> false,
+                        () -> 1L,
+                        count -> state.increment(
+                                WORKER,
+                                ToolsmithWorkMetrics.TOOLSMITH_ROLE,
+                                ToolsmithWorkMetrics.TOOLS_DISTRIBUTED,
+                                count)));
         assertEquals(0, state.read(
                 WORKER,
                 ToolsmithWorkMetrics.TOOLSMITH_ROLE,

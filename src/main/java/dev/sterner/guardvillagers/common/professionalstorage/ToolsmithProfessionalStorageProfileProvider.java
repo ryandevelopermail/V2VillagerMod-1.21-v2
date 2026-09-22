@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /** Three-tab Toolsmith profile assembled from one read-only open-time snapshot. */
 public final class ToolsmithProfessionalStorageProfileProvider implements ProfessionalStorageProfileProvider {
@@ -186,26 +187,45 @@ public final class ToolsmithProfessionalStorageProfileProvider implements Profes
         return count;
     }
 
+    static long countResolvedStorageContents(Supplier<List<StorageStackView>> resolvedContents) {
+        return countDisplayedTools(resolvedContents.get());
+    }
+
     private static long countDisplayedTools(Inventory inventory) {
-        List<StorageStackView> stacks = new ArrayList<>(inventory.size());
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            stacks.add(new StorageStackView(classify(stack), stack.getCount()));
-        }
-        return countDisplayedTools(stacks);
+        return countResolvedStorageContents(() -> {
+            List<StorageStackView> stacks = new ArrayList<>(inventory.size());
+            for (int slot = 0; slot < inventory.size(); slot++) {
+                ItemStack stack = inventory.getStack(slot);
+                stacks.add(new StorageStackView(classify(stack), stack.getCount()));
+            }
+            return stacks;
+        });
     }
 
     private static StorageToolKind classify(ItemStack stack) {
-        if (stack.getItem() instanceof PickaxeItem) {
+        return classifyToolShape(
+                stack.getItem() instanceof PickaxeItem,
+                stack.getItem() instanceof HoeItem,
+                stack.getItem() instanceof ShearsItem,
+                stack.isOf(Items.FISHING_ROD));
+    }
+
+    static StorageToolKind classifyToolShape(
+            boolean pickaxe,
+            boolean hoe,
+            boolean shears,
+            boolean fishingRod
+    ) {
+        if (pickaxe) {
             return StorageToolKind.PICKAXE;
         }
-        if (stack.getItem() instanceof HoeItem) {
+        if (hoe) {
             return StorageToolKind.HOE;
         }
-        if (stack.getItem() instanceof ShearsItem) {
+        if (shears) {
             return StorageToolKind.SHEARS;
         }
-        if (stack.isOf(Items.FISHING_ROD)) {
+        if (fishingRod) {
             return StorageToolKind.FISHING_ROD;
         }
         return StorageToolKind.OTHER;

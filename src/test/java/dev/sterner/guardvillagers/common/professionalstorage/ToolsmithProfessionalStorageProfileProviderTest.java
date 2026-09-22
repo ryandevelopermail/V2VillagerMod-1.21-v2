@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,6 +46,17 @@ class ToolsmithProfessionalStorageProfileProviderTest {
 
     @Test
     void displayedToolCountExcludesShovelsArmorAndUnrelatedContents() {
+        assertEquals(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.PICKAXE,
+                ToolsmithProfessionalStorageProfileProvider.classifyToolShape(true, false, false, false));
+        assertEquals(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.HOE,
+                ToolsmithProfessionalStorageProfileProvider.classifyToolShape(false, true, false, false));
+        assertEquals(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.SHEARS,
+                ToolsmithProfessionalStorageProfileProvider.classifyToolShape(false, false, true, false));
+        assertEquals(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.FISHING_ROD,
+                ToolsmithProfessionalStorageProfileProvider.classifyToolShape(false, false, false, true));
+        assertEquals(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.OTHER,
+                ToolsmithProfessionalStorageProfileProvider.classifyToolShape(false, false, false, false));
+
         long count = ToolsmithProfessionalStorageProfileProvider.countDisplayedTools(List.of(
                 stack(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.PICKAXE, 2),
                 stack(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.HOE, 3),
@@ -58,11 +70,16 @@ class ToolsmithProfessionalStorageProfileProviderTest {
 
     @Test
     void oneCombinedDoubleChestViewIsCountedOnce() {
+        AtomicInteger resolutions = new AtomicInteger();
         List<ToolsmithProfessionalStorageProfileProvider.StorageStackView> combinedContents = List.of(
                 stack(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.PICKAXE, 2),
                 stack(ToolsmithProfessionalStorageProfileProvider.StorageToolKind.FISHING_ROD, 1));
 
-        assertEquals(3L, ToolsmithProfessionalStorageProfileProvider.countDisplayedTools(combinedContents));
+        assertEquals(3L, ToolsmithProfessionalStorageProfileProvider.countResolvedStorageContents(() -> {
+            resolutions.incrementAndGet();
+            return combinedContents;
+        }));
+        assertEquals(1, resolutions.get());
     }
 
     @Test
@@ -110,6 +127,25 @@ class ToolsmithProfessionalStorageProfileProviderTest {
         assertEquals("Unknown", value(unavailable, "Crafting table"));
         assertEquals("Not measured", value(unavailable, "Recipient demand"));
         assertEquals("Not measured", value(unavailable, "Fishing rods needed"));
+    }
+
+    @Test
+    void singleWorkerReadyAndMissingTableFormattingIsExact() {
+        List<ProfessionalStorageTab> ready = tabs(
+                List.of(loaded(FIRST, true)),
+                0,
+                new ToolsmithProfessionalStorageProfileProvider.ToolsmithDemandView(0, 0, 0, 0));
+        assertEquals("Ready", value(ready, "Status"));
+        assertEquals(ProfessionalStorageRow.Tone.PAIRED, row(ready, "Status").tone());
+        assertEquals("Yes", value(ready, "Crafting table"));
+
+        List<ProfessionalStorageTab> missing = tabs(
+                List.of(loaded(FIRST, false)),
+                0,
+                new ToolsmithProfessionalStorageProfileProvider.ToolsmithDemandView(0, 0, 0, 0));
+        assertEquals("Ready", value(missing, "Status"));
+        assertEquals("No", value(missing, "Crafting table"));
+        assertEquals(ProfessionalStorageRow.Tone.WARNING, row(missing, "Crafting table").tone());
     }
 
     @Test
@@ -162,11 +198,14 @@ class ToolsmithProfessionalStorageProfileProviderTest {
     }
 
     private static String value(List<ProfessionalStorageTab> tabs, String label) {
+        return row(tabs, label).value();
+    }
+
+    private static ProfessionalStorageRow row(List<ProfessionalStorageTab> tabs, String label) {
         return tabs.stream()
                 .flatMap(tab -> tab.rows().stream())
                 .filter(row -> row.label().equals(label))
                 .findFirst()
-                .orElseThrow()
-                .value();
+                .orElseThrow();
     }
 }
