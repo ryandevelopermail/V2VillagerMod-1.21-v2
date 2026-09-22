@@ -24,6 +24,7 @@ public final class ProfessionalStorageProfileProviders {
         register(FletcherWorkMetrics.FLETCHER_ROLE, new FletcherProfessionalStorageProfileProvider());
         register(LeatherworkerWorkMetrics.LEATHERWORKER_ROLE, new LeatherworkerProfessionalStorageProfileProvider());
         register(ArmorerWorkMetrics.ARMORER_ROLE, new ArmorerProfessionalStorageProfileProvider());
+        register(ButcherWorkMetrics.BUTCHER_ROLE, new ButcherProfessionalStorageProfileProvider());
     }
 
     public static void register(ProfessionalRoleId role, ProfessionalStorageProfileProvider provider) {
