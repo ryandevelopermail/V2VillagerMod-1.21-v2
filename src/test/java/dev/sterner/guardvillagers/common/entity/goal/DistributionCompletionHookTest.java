@@ -13,6 +13,18 @@ class DistributionCompletionHookTest {
     private static final UUID WORKER = UUID.fromString("60000000-0000-0000-0000-000000000001");
 
     @Test
+    void completedTransferRouteClassificationUsesOverflowPrecedence() {
+        assertEquals(AbstractInventoryDistributionGoal.TransferRoute.DIRECT,
+                AbstractInventoryDistributionGoal.classifyTransferRoute(false, false));
+        assertEquals(AbstractInventoryDistributionGoal.TransferRoute.UNIVERSAL,
+                AbstractInventoryDistributionGoal.classifyTransferRoute(false, true));
+        assertEquals(AbstractInventoryDistributionGoal.TransferRoute.OVERFLOW,
+                AbstractInventoryDistributionGoal.classifyTransferRoute(true, false));
+        assertEquals(AbstractInventoryDistributionGoal.TransferRoute.OVERFLOW,
+                AbstractInventoryDistributionGoal.classifyTransferRoute(true, true));
+    }
+
+    @Test
     void completeTransferInvokesHookExactlyOnce() {
         AtomicInteger hooks = new AtomicInteger();
         assertEquals(AbstractInventoryDistributionGoal.TransferAttemptOutcome.COMPLETE,

@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.FletcherWorkMetrics;
 import dev.sterner.guardvillagers.common.util.GearGradeComparator;
 import dev.sterner.guardvillagers.common.util.IngredientDemandResolver;
 import net.minecraft.entity.EquipmentSlot;
@@ -32,6 +33,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
     private static final RecipientScope RECIPIENT_SCOPE = RecipientScope.GUARDS_ONLY;
     private ItemStack recentlyUndeliverable = ItemStack.EMPTY;
     private long retryUndeliverableAfterTick;
+    private DirectCompletionKind pendingDirectCompletion = DirectCompletionKind.NONE;
 
     public FletcherDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
@@ -67,6 +69,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         if (inventory == null) {
             return false;
         }
+        pendingDirectCompletion = DirectCompletionKind.NONE;
         if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
             LOGGER.info("Fletcher {} selected {} for librarian overflow at {}",
                     villager.getUuidAsString(),
@@ -97,6 +100,8 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             pendingItem = extracted;
             pendingTargetId = recipient.targetId();
             pendingTargetPos = recipient.targetPos();
+            pendingUniversalRoute = false;
+            pendingOverflowTransfer = false;
 
             LOGGER.info("Fletcher {} selected {} for {} {} at {} [{}]",
                     villager.getUuidAsString(),
@@ -157,6 +162,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
             targetInventory.get().markDirty();
             if (remaining.isEmpty()) {
+                pendingDirectCompletion = DirectCompletionKind.STICK;
                 return true;
             }
             pendingItem = remaining;
@@ -180,6 +186,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             }
 
             guard.equipStack(EquipmentSlot.MAINHAND, pendingItem.copy());
+            pendingDirectCompletion = DirectCompletionKind.RANGED_WEAPON;
             LOGGER.info("Fletcher {} equipped guard {} with {} (replaced {})",
                     villager.getUuidAsString(),
                     guard.getUuidAsString(),
@@ -202,6 +209,7 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             ItemStack remaining = insertStack(guard.guardInventory, pendingItem);
             guard.guardInventory.markDirty();
             if (remaining.isEmpty()) {
+                pendingDirectCompletion = DirectCompletionKind.ARROW;
                 LOGGER.info("Fletcher {} transferred {} to guard {} inventory",
                         villager.getUuidAsString(),
                         pendingItem.getItem(),
@@ -234,6 +242,87 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected void clearPendingTargetState() {
+        pendingDirectCompletion = DirectCompletionKind.NONE;
+    }
+
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        FletcherDeliveryMetric metric = classifyCompletedDelivery(
+                route,
+                pendingDirectCompletion,
+                isRangedWeapon(transferred),
+                isArrow(transferred),
+                transferred.isOf(Items.STICK),
+                isValidCompletedTarget(world, transferred, targetId, targetPos, route));
+        switch (metric) {
+            case RANGED_WEAPON -> FletcherWorkMetrics.recordRangedWeaponEquipped(world, villager.getUuid());
+            case ARROW -> FletcherWorkMetrics.recordArrowsDelivered(
+                    world, villager.getUuid(), transferred.getCount());
+            case STICK -> FletcherWorkMetrics.recordSticksDelivered(
+                    world, villager.getUuid(), transferred.getCount());
+            case NONE -> {
+            }
+        }
+    }
+
+    private boolean isValidCompletedTarget(
+            ServerWorld world,
+            ItemStack transferred,
+            UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        if (route == TransferRoute.OVERFLOW || targetId == null) {
+            return false;
+        }
+        if (transferred.isOf(Items.STICK)) {
+            return world.getEntity(targetId) instanceof VillagerEntity recipient
+                    && recipient.isAlive()
+                    && getChestInventoryAt(world, targetPos).isPresent();
+        }
+        if (!(world.getEntity(targetId) instanceof GuardEntity guard) || !guard.isAlive()) {
+            return false;
+        }
+        if (isRangedWeapon(transferred)) {
+            return transferred.getItem() instanceof RangedWeaponItem rangedWeapon
+                    && guard.canUseRangedWeapon(rangedWeapon)
+                    && ItemStack.areItemsAndComponentsEqual(guard.getMainHandStack(), transferred);
+        }
+        return isArrow(transferred) && usesBowOrCrossbow(guard.getMainHandStack());
+    }
+
+    static FletcherDeliveryMetric classifyCompletedDelivery(
+            TransferRoute route,
+            DirectCompletionKind directCompletion,
+            boolean rangedWeapon,
+            boolean arrow,
+            boolean stick,
+            boolean targetValid
+    ) {
+        if (!targetValid || route == TransferRoute.OVERFLOW) {
+            return FletcherDeliveryMetric.NONE;
+        }
+        if (route == TransferRoute.DIRECT
+                && directCompletion == DirectCompletionKind.RANGED_WEAPON
+                && rangedWeapon) {
+            return FletcherDeliveryMetric.RANGED_WEAPON;
+        }
+        if (route == TransferRoute.DIRECT
+                && directCompletion == DirectCompletionKind.ARROW
+                && arrow) {
+            return FletcherDeliveryMetric.ARROW;
+        }
+        if (stick && ((route == TransferRoute.DIRECT && directCompletion == DirectCompletionKind.STICK)
+                || route == TransferRoute.UNIVERSAL)) {
+            return FletcherDeliveryMetric.STICK;
+        }
+        return FletcherDeliveryMetric.NONE;
     }
 
     private boolean isCoolingDownUndeliverable(ServerWorld world, ItemStack candidate) {
@@ -299,17 +388,29 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         }
 
         if (isArrow(stack)) {
-            return usesBowOrCrossbow(guard.getMainHandStack()) && canInsertArrow(guard.guardInventory, stack);
+            return isArrowTransferEligible(
+                    guard.isAlive(),
+                    usesBowOrCrossbow(guard.getMainHandStack()),
+                    canInsertArrow(guard.guardInventory, stack));
         }
 
         return false;
     }
 
     private boolean canEquipRangedWeapon(GuardEntity guard, ItemStack candidate, ItemStack currentMainHand) {
-        if (!(candidate.getItem() instanceof RangedWeaponItem rangedWeaponItem) || !guard.canUseRangedWeapon(rangedWeaponItem)) {
-            return false;
-        }
-        return GearGradeComparator.isUpgrade(candidate, currentMainHand, EquipmentSlot.MAINHAND);
+        boolean compatible = candidate.getItem() instanceof RangedWeaponItem rangedWeaponItem
+                && guard.canUseRangedWeapon(rangedWeaponItem);
+        boolean upgrade = compatible
+                && GearGradeComparator.isUpgrade(candidate, currentMainHand, EquipmentSlot.MAINHAND);
+        return isRangedWeaponTransferEligible(guard.isAlive(), compatible, upgrade);
+    }
+
+    static boolean isRangedWeaponTransferEligible(boolean alive, boolean compatible, boolean upgrade) {
+        return alive && compatible && upgrade;
+    }
+
+    static boolean isArrowTransferEligible(boolean alive, boolean holdingRangedWeapon, boolean completeCapacity) {
+        return alive && holdingRangedWeapon && completeCapacity;
     }
 
     private boolean canInsertArrow(Inventory inventory, ItemStack stack) {
@@ -331,11 +432,17 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
         return false;
     }
 
-    private boolean isRangedWeapon(ItemStack stack) {
-        return stack.getItem() instanceof BowItem || stack.getItem() instanceof CrossbowItem;
+    public static boolean isRangedWeapon(ItemStack stack) {
+        return isRangedWeaponShape(
+                stack.getItem() instanceof BowItem,
+                stack.getItem() instanceof CrossbowItem);
     }
 
-    private boolean isArrow(ItemStack stack) {
+    static boolean isRangedWeaponShape(boolean bow, boolean crossbow) {
+        return bow || crossbow;
+    }
+
+    public static boolean isArrow(ItemStack stack) {
         return stack.isIn(ItemTags.ARROWS);
     }
 
@@ -346,6 +453,20 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
     private enum RecipientScope {
         GUARDS_ONLY,
         GUARDS_AND_VILLAGERS
+    }
+
+    enum DirectCompletionKind {
+        NONE,
+        RANGED_WEAPON,
+        ARROW,
+        STICK
+    }
+
+    enum FletcherDeliveryMetric {
+        NONE,
+        RANGED_WEAPON,
+        ARROW,
+        STICK
     }
 
     private record TransferTarget(UUID targetId, BlockPos targetPos, double sourceSquaredDistance, String type) {

@@ -387,8 +387,15 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         BlockPos completedTargetPos = Objects.requireNonNull(
                 pendingTargetPos,
                 "Successful transfer requires a target position").toImmutable();
-        TransferRoute route = pendingUniversalRoute ? TransferRoute.UNIVERSAL : TransferRoute.DIRECT;
+        TransferRoute route = classifyTransferRoute(pendingOverflowTransfer, pendingUniversalRoute);
         return new CompletedTransfer(transferred, pendingTargetId, completedTargetPos, route);
+    }
+
+    static TransferRoute classifyTransferRoute(boolean overflow, boolean universal) {
+        if (overflow) {
+            return TransferRoute.OVERFLOW;
+        }
+        return universal ? TransferRoute.UNIVERSAL : TransferRoute.DIRECT;
     }
 
     private record CompletedTransfer(
@@ -407,7 +414,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     protected enum TransferRoute {
         DIRECT,
-        UNIVERSAL
+        UNIVERSAL,
+        OVERFLOW
     }
 
     protected boolean hasDistributableItem(Inventory inventory) {

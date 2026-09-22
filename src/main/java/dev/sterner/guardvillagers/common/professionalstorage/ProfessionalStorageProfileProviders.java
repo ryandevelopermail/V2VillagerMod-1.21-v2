@@ -21,6 +21,7 @@ public final class ProfessionalStorageProfileProviders {
                 new FarmerProfessionalStorageProfileProvider());
         register(ToolsmithWorkMetrics.TOOLSMITH_ROLE, new ToolsmithProfessionalStorageProfileProvider());
         register(WeaponsmithWorkMetrics.WEAPONSMITH_ROLE, new WeaponsmithProfessionalStorageProfileProvider());
+        register(FletcherWorkMetrics.FLETCHER_ROLE, new FletcherProfessionalStorageProfileProvider());
     }
 
     public static void register(ProfessionalRoleId role, ProfessionalStorageProfileProvider provider) {

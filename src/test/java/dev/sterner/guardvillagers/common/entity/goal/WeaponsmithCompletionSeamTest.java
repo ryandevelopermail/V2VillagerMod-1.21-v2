@@ -104,6 +104,8 @@ class WeaponsmithCompletionSeamTest {
         assertFalse(WeaponsmithDistributionGoal.isConfirmedEquipmentCompletion(
                 AbstractInventoryDistributionGoal.TransferRoute.UNIVERSAL, true));
         assertFalse(WeaponsmithDistributionGoal.isConfirmedEquipmentCompletion(
+                AbstractInventoryDistributionGoal.TransferRoute.OVERFLOW, true));
+        assertFalse(WeaponsmithDistributionGoal.isConfirmedEquipmentCompletion(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, false));
     }
 
