@@ -1,9 +1,12 @@
 package dev.sterner.guardvillagers.common.professionalstorage;
 
+import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
+import dev.sterner.guardvillagers.common.entity.goal.FishermanGuardFishingGoal;
 import dev.sterner.guardvillagers.common.villager.behavior.FishermanBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -20,14 +23,16 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 
-/** Read-only native-Fisherman professional-storage profile. */
+/** Read-only native-Fisherman and converted Fisherman Guard professional-storage profile. */
 public final class FishermanProfessionalStorageProfileProvider implements ProfessionalStorageProfileProvider {
     @Override
     public Optional<List<ProfessionalStorageTab>> createTabs(
             ServerWorld world, StorageIdentity storage, List<ProfessionalStorageResolution> resolutions
     ) {
-        if (resolutions.isEmpty() || resolutions.stream().anyMatch(r ->
-                !r.pairing().role().equals(FishermanWorkMetrics.FISHERMAN_ROLE))) return Optional.empty();
+        if (resolutions.isEmpty()) return Optional.empty();
+        ProfessionalRoleId role = resolutions.getFirst().pairing().role();
+        if (!isSupportedRole(role)
+                || resolutions.stream().anyMatch(r -> !r.pairing().role().equals(role))) return Optional.empty();
         Inventory inventory = resolveStorageInventory(world, storage);
         if (inventory == null) return Optional.empty();
 
@@ -40,21 +45,41 @@ public final class FishermanProfessionalStorageProfileProvider implements Profes
                 continue;
             }
             Entity entity = world.getEntity(uuid);
-            if (!(entity instanceof VillagerEntity villager)) return Optional.empty();
-            Optional<FishermanBehavior.FishermanLiveSnapshot> snapshot =
-                    FishermanBehavior.getLiveStorageSnapshot(world, villager, inventory);
-            if (snapshot.isEmpty()) return Optional.empty();
-            FishermanBehavior.FishermanLiveSnapshot live = snapshot.get();
-            workers.add(new FishermanWorkerView(uuid, resolution.workerAvailability(), live.craftingTableReady(),
-                    live.barrelReady(), live.craftableRecipes(), live.eligibleButchers()));
+            if (role.equals(FishermanWorkMetrics.FISHERMAN_ROLE)) {
+                if (!(entity instanceof VillagerEntity villager)) return Optional.empty();
+                Optional<FishermanBehavior.FishermanLiveSnapshot> snapshot =
+                        FishermanBehavior.getLiveStorageSnapshot(world, villager, inventory);
+                if (snapshot.isEmpty()) return Optional.empty();
+                FishermanBehavior.FishermanLiveSnapshot live = snapshot.get();
+                workers.add(new FishermanWorkerView(uuid, resolution.workerAvailability(), live.craftingTableReady(),
+                        live.barrelReady(), live.craftableRecipes(), live.eligibleButchers()));
+            } else {
+                if (!(entity instanceof FishermanGuardEntity guard)) return Optional.empty();
+                BlockPos chestPos = guard.getPairedChestPos();
+                BlockPos jobPos = guard.getPairedJobPos();
+                boolean barrelReady = jobPos != null && world.getBlockState(jobPos).isOf(Blocks.BARREL);
+                boolean chestMatches = chestPos != null && StorageIdentityResolver.resolve(world, chestPos)
+                        .filter(storage::equals).isPresent();
+                boolean barrelMatches = barrelReady && StorageIdentityResolver.resolve(world, jobPos)
+                        .filter(storage::equals).isPresent();
+                if (!chestMatches && !barrelMatches) return Optional.empty();
+                workers.add(new FishermanWorkerView(uuid, resolution.workerAvailability(), null,
+                        barrelReady, null,
+                        FishermanGuardFishingGoal.countEligibleButcherRecipientsReadOnly(world, guard)));
+            }
         }
         FishermanWorkerView representative = selectRepresentative(workers).flatMap(uuid -> workers.stream()
                 .filter(worker -> worker.loaded() && worker.workerUuid().equals(uuid)).findFirst()).orElse(null);
         FishermanCareerTotals totals = aggregateCareerTotals(ProfessionalWorkStatsState.get(world.getServer()),
-                resolutions.stream().map(r -> r.pairing().workerUuid()).toList(), FishermanWorkMetrics.FISHERMAN_ROLE);
+                resolutions.stream().map(r -> r.pairing().workerUuid()).toList(), role);
         return Optional.of(buildTabs(workers, storageCounts,
                 representative == null ? null : representative.craftableRecipes(),
                 representative == null ? null : representative.eligibleButchers(), totals));
+    }
+
+    static boolean isSupportedRole(ProfessionalRoleId role) {
+        return role.equals(FishermanWorkMetrics.FISHERMAN_ROLE)
+                || role.equals(ProfessionalRoleId.FISHERMAN_GUARD);
     }
 
     static FishermanCareerTotals aggregateCareerTotals(
@@ -131,11 +156,14 @@ public final class FishermanProfessionalStorageProfileProvider implements Profes
     private static WorksiteDisplay worksiteDisplay(List<FishermanWorkerView> workers, boolean table) {
         List<FishermanWorkerView> loaded = workers.stream().filter(FishermanWorkerView::loaded).toList();
         if (loaded.isEmpty()) return new WorksiteDisplay("Unknown", toneWarn());
-        long ready = loaded.stream().filter(worker -> Boolean.TRUE.equals(table
-                ? worker.craftingTableReady() : worker.barrelReady())).count();
-        String value = loaded.size() == 1 ? (ready == 1 ? "Yes" : "No") : ready + " / " + loaded.size() + " ready";
+        List<Boolean> measured = loaded.stream().map(worker -> table
+                ? worker.craftingTableReady() : worker.barrelReady()).filter(java.util.Objects::nonNull).toList();
+        if (measured.isEmpty()) return new WorksiteDisplay("Not measured", toneWarn());
+        long ready = measured.stream().filter(Boolean.TRUE::equals).count();
+        String value = measured.size() == 1 ? (ready == 1 ? "Yes" : "No") : ready + " / " + measured.size() + " ready";
+        if (measured.size() < loaded.size()) return new WorksiteDisplay("Partial: " + value, toneWarn());
         if (loaded.size() < workers.size()) return new WorksiteDisplay("Partial: " + value, toneWarn());
-        return new WorksiteDisplay(value, ready == loaded.size() ? tonePaired() : toneWarn());
+        return new WorksiteDisplay(value, ready == measured.size() ? tonePaired() : toneWarn());
     }
 
     private static MeasuredDisplay measuredDisplay(@Nullable Integer value, boolean partial) {

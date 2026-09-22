@@ -15,13 +15,31 @@ class FishermanProfessionalStorageProfileProviderTest {
     private static final UUID SECOND = UUID.fromString("92000000-0000-0000-0000-000000000002");
 
     @Test
-    void nativeFishermanRegistersWithoutRegisteringFishermanGuard() {
+    void sameRoleAwareProviderRegistersForNativeFishermanAndFishermanGuard() {
         ProfessionalStorageProfileProviders.registerDefaults();
         assertTrue(ProfessionalStorageProfileProviders.hasProvider(FishermanWorkMetrics.FISHERMAN_ROLE));
-        assertFalse(ProfessionalStorageProfileProviders.hasProvider(ProfessionalRoleId.FISHERMAN_GUARD));
+        assertTrue(ProfessionalStorageProfileProviders.hasProvider(ProfessionalRoleId.FISHERMAN_GUARD));
+        assertTrue(FishermanProfessionalStorageProfileProvider.isSupportedRole(FishermanWorkMetrics.FISHERMAN_ROLE));
+        assertTrue(FishermanProfessionalStorageProfileProvider.isSupportedRole(ProfessionalRoleId.FISHERMAN_GUARD));
+        assertFalse(FishermanProfessionalStorageProfileProvider.isSupportedRole(ProfessionalRoleId.BUTCHER_GUARD));
         assertEquals("minecraft:fisherman", FishermanWorkMetrics.FISHERMAN_ROLE.toString());
         assertEquals("Fisherman Storage", ProfessionalStorageSnapshotFactory.titleFor(
                 FishermanWorkMetrics.FISHERMAN_ROLE, 1, 1));
+    }
+
+    @Test
+    void guardOnlyNativeMeasurementsRenderAsNotMeasured() {
+        List<ProfessionalStorageTab> tabs = tabs(
+                List.of(new FishermanProfessionalStorageProfileProvider.FishermanWorkerView(
+                        FIRST, ProfessionalStorageResolution.WorkerAvailability.LOADED,
+                        null, true, null, 2)),
+                new FishermanProfessionalStorageProfileProvider.FishermanStorageCounts(0, 0, 0, 0),
+                null,
+                2);
+        assertEquals("Not measured", value(tabs, "Crafting table"));
+        assertEquals("Yes", value(tabs, "Barrel"));
+        assertEquals("Not measured", value(tabs, "Craftable recipes"));
+        assertEquals("2", value(tabs, "Eligible Butchers"));
     }
 
     @Test
