@@ -21,7 +21,16 @@ public class ArmorerDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return !stack.isEmpty() && stack.getItem() instanceof ArmorItem;
+        return isDistributableArmor(stack);
+    }
+
+    public static boolean isDistributableArmor(ItemStack stack) {
+        boolean nonempty = !stack.isEmpty();
+        return isDistributableArmorShape(nonempty, nonempty && stack.getItem() instanceof ArmorItem);
+    }
+
+    static boolean isDistributableArmorShape(boolean nonempty, boolean armorItem) {
+        return nonempty && armorItem;
     }
 
     @Override
