@@ -69,7 +69,7 @@ public final class ProfessionalWorkStatsState extends PersistentState {
     }
 
     @Override
-    public NbtCompound writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
+    public synchronized NbtCompound writeNbt(NbtCompound nbt, RegistryWrapper.WrapperLookup lookup) {
         NbtList entries = new NbtList();
         counters.entrySet().stream().sorted(ENTRY_ORDER).forEach(counterEntry -> {
             NbtCompound entry = new NbtCompound();
@@ -87,11 +87,11 @@ public final class ProfessionalWorkStatsState extends PersistentState {
         return nbt;
     }
 
-    public long increment(UUID workerUuid, ProfessionalRoleId role, ProfessionalMetricId metric) {
+    public synchronized long increment(UUID workerUuid, ProfessionalRoleId role, ProfessionalMetricId metric) {
         return increment(workerUuid, role, metric, 1L);
     }
 
-    public long increment(
+    public synchronized long increment(
             UUID workerUuid,
             ProfessionalRoleId role,
             ProfessionalMetricId metric,
@@ -111,11 +111,11 @@ public final class ProfessionalWorkStatsState extends PersistentState {
         return updated;
     }
 
-    public long read(UUID workerUuid, ProfessionalRoleId role, ProfessionalMetricId metric) {
+    public synchronized long read(UUID workerUuid, ProfessionalRoleId role, ProfessionalMetricId metric) {
         return counters.getOrDefault(new WorkerRoleKey(workerUuid, role), Map.of()).getOrDefault(metric, 0L);
     }
 
-    public long aggregate(
+    public synchronized long aggregate(
             Collection<UUID> workerUuids,
             ProfessionalRoleId role,
             ProfessionalMetricId metric
@@ -125,6 +125,50 @@ public final class ProfessionalWorkStatsState extends PersistentState {
             total = saturatingAdd(total, read(workerUuid, role, metric));
         }
         return total;
+    }
+
+    /** Moves only the requested counters as one state mutation. */
+    synchronized boolean transferMetrics(
+            UUID sourceWorkerUuid,
+            ProfessionalRoleId sourceRole,
+            UUID destinationWorkerUuid,
+            ProfessionalRoleId destinationRole,
+            Collection<ProfessionalMetricId> metrics
+    ) {
+        WorkerRoleKey sourceKey = new WorkerRoleKey(sourceWorkerUuid, sourceRole);
+        WorkerRoleKey destinationKey = new WorkerRoleKey(destinationWorkerUuid, destinationRole);
+        if (sourceKey.equals(destinationKey)) {
+            return false;
+        }
+        Map<ProfessionalMetricId, Long> sourceCounters = counters.get(sourceKey);
+        if (sourceCounters == null) {
+            return false;
+        }
+
+        Map<ProfessionalMetricId, Long> destinationCounters = null;
+        boolean changed = false;
+        for (ProfessionalMetricId metric : metrics) {
+            Long sourceTotal = sourceCounters.remove(metric);
+            if (sourceTotal == null) {
+                continue;
+            }
+            changed = true;
+            if (sourceTotal > 0L) {
+                if (destinationCounters == null) {
+                    destinationCounters = counters.computeIfAbsent(destinationKey, ignored -> new HashMap<>());
+                }
+                long destinationTotal = destinationCounters.getOrDefault(metric, 0L);
+                destinationCounters.put(metric, saturatingAdd(destinationTotal, sourceTotal));
+            }
+        }
+        if (!changed) {
+            return false;
+        }
+        if (sourceCounters.isEmpty()) {
+            counters.remove(sourceKey);
+        }
+        markDirty();
+        return true;
     }
 
     private static Optional<WorkerRoleKey> readKey(NbtCompound entry) {

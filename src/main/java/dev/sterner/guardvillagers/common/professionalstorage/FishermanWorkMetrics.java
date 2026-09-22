@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.professionalstorage;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.Identifier;
 
+import java.util.List;
 import java.util.UUID;
 
 /** Stable native-Fisherman career metrics recorded only after confirmed completion. */
@@ -19,6 +20,25 @@ public final class FishermanWorkMetrics {
             new ProfessionalRoleId(Identifier.of("minecraft", "fisherman"));
 
     private FishermanWorkMetrics() {
+    }
+
+    private static final List<ProfessionalMetricId> TRANSFERRED_METRICS = List.of(
+            FISHING_RODS_CRAFTED, BUCKETS_CRAFTED, BOATS_CRAFTED, FISH_DELIVERED);
+
+    /** Transfers the native Fisherman's recorded career totals after a confirmed guard conversion. */
+    public static boolean transferToGuard(
+            ProfessionalWorkStatsState state, UUID fishermanUuid, UUID guardUuid
+    ) {
+        return state.transferMetrics(
+                fishermanUuid,
+                FISHERMAN_ROLE,
+                guardUuid,
+                ProfessionalRoleId.FISHERMAN_GUARD,
+                TRANSFERRED_METRICS);
+    }
+
+    public static boolean transferToGuard(ServerWorld world, UUID fishermanUuid, UUID guardUuid) {
+        return transferToGuard(ProfessionalWorkStatsState.get(world.getServer()), fishermanUuid, guardUuid);
     }
 
     public static void recordFishingRodsCrafted(ServerWorld world, UUID workerUuid, long amount) {

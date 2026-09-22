@@ -148,6 +148,21 @@ class FishermanProfessionalStorageProfileProviderTest {
                         FishermanWorkMetrics.FISHERMAN_ROLE));
     }
 
+    @Test
+    void careerTotalsUseTheResolvedGuardRole() {
+        ProfessionalWorkStatsState state = new ProfessionalWorkStatsState();
+        state.increment(FIRST, FishermanWorkMetrics.FISHERMAN_ROLE,
+                FishermanWorkMetrics.FISH_DELIVERED, 5);
+        state.increment(FIRST, ProfessionalRoleId.FISHERMAN_GUARD,
+                FishermanWorkMetrics.FISH_DELIVERED, 13);
+
+        assertEquals(new FishermanProfessionalStorageProfileProvider.FishermanCareerTotals(0, 0, 0, 13),
+                FishermanProfessionalStorageProfileProvider.aggregateCareerTotals(
+                        state,
+                        List.of(FIRST),
+                        ProfessionalRoleId.FISHERMAN_GUARD));
+    }
+
     private static List<ProfessionalStorageTab> tabs(
             List<FishermanProfessionalStorageProfileProvider.FishermanWorkerView> workers,
             FishermanProfessionalStorageProfileProvider.FishermanStorageCounts storage,

@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.FishermanWorkMetrics;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanCraftingGoal;
@@ -255,6 +256,7 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
             LOGGER.warn("Fisherman {} conversion aborted: guard spawn failed", villager.getUuidAsString());
             return;
         }
+        FishermanWorkMetrics.transferToGuard(world, villager.getUuid(), guard.getUuid());
         BlockPos pairedStoragePos = chestPos != null
                 ? chestPos
                 : (JobBlockPairingHelper.isPairingBlock(world.getBlockState(jobPos)) ? jobPos : null);
