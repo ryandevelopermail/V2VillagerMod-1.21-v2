@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.FishermanWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
@@ -27,6 +28,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 public class FishermanCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -78,7 +80,12 @@ public class FishermanCraftingGoal extends Goal {
         return craftingTablePos != null && world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
     }
 
-    private boolean canUseRecipeWithoutCraftingTable(net.minecraft.recipe.CraftingRecipe recipe) {
+    /** Pure readiness check used by the server-authored professional-storage snapshot. */
+    public boolean hasValidCraftingTableReadOnly(ServerWorld world) {
+        return hasValidCraftingTable(world);
+    }
+
+    private static boolean canUseRecipeWithoutCraftingTable(net.minecraft.recipe.CraftingRecipe recipe) {
         return recipe.fits(NON_TABLE_GRID_SIZE, NON_TABLE_GRID_SIZE);
     }
 
@@ -215,12 +222,16 @@ public class FishermanCraftingGoal extends Goal {
         }
 
         FishermanRecipe recipe = craftable.get(selectedIndex);
-        if (!canInsertOutput(inventory, recipe.output)) {
+        if (!canInsertOutputReadOnly(inventory, recipe.output)) {
             return;
         }
-        if (consumeIngredients(inventory, recipe.recipe)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
+        CraftedOutputKind outputKind = classifyCraftedOutput(recipe.output);
+        boolean crafted = executeConfirmedCraft(
+                () -> consumeIngredients(inventory, recipe.recipe),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                () -> recordCraftedOutput(world, recipe.output.getCount(), outputKind));
+        inventory.markDirty();
+        if (crafted) {
             craftedToday++;
             CraftingCheckLogger.report(world, "Fisherman", formatCraftedResult(lastCheckCount, recipe.output));
         }
@@ -257,8 +268,25 @@ public class FishermanCraftingGoal extends Goal {
         return count;
     }
 
+    /** Counts the exact production recipes from the live registry without changing worker or storage state. */
+    public static int countCraftableRecipesReadOnly(
+            ServerWorld world,
+            Inventory inventory,
+            boolean hasCraftingTable
+    ) {
+        return inventory == null ? 0 : findCraftableRecipes(world, inventory, hasCraftingTable, true).size();
+    }
+
     private List<FishermanRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
-        boolean hasCraftingTable = hasValidCraftingTable(world);
+        return findCraftableRecipes(world, inventory, hasValidCraftingTable(world), false);
+    }
+
+    private static List<FishermanRecipe> findCraftableRecipes(
+            ServerWorld world,
+            Inventory inventory,
+            boolean hasCraftingTable,
+            boolean requireCompleteOutputCapacity
+    ) {
         List<FishermanRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
@@ -270,14 +298,15 @@ public class FishermanCraftingGoal extends Goal {
             if (!hasCraftingTable && !canUseRecipeWithoutCraftingTable(recipe)) {
                 continue;
             }
-            if (canCraft(inventory, recipe)) {
+            if (canCraft(inventory, recipe)
+                    && (!requireCompleteOutputCapacity || canInsertOutputReadOnly(inventory, result))) {
                 recipes.add(new FishermanRecipe(recipe, result));
             }
         }
         return recipes;
     }
 
-    private boolean isFishermanOutput(ItemStack stack) {
+    static boolean isFishermanOutput(ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
@@ -288,7 +317,7 @@ public class FishermanCraftingGoal extends Goal {
         return stack.isIn(ItemTags.BOATS) || stack.isIn(ItemTags.CHEST_BOATS);
     }
 
-    private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
+    private static boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
         List<ItemStack> available = new ArrayList<>();
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
@@ -315,7 +344,7 @@ public class FishermanCraftingGoal extends Goal {
         return true;
     }
 
-    private int findMatchingStack(List<ItemStack> available, Ingredient ingredient) {
+    private static int findMatchingStack(List<ItemStack> available, Ingredient ingredient) {
         for (int i = 0; i < available.size(); i++) {
             if (ingredient.test(available.get(i))) {
                 return i;
@@ -347,6 +376,65 @@ public class FishermanCraftingGoal extends Goal {
         }
 
         return true;
+    }
+
+    static boolean executeConfirmedCraft(
+            BooleanSupplier ingredientsConsumed,
+            BooleanSupplier completeOutputInserted,
+            Runnable confirmedSuccess
+    ) {
+        if (!ingredientsConsumed.getAsBoolean() || !completeOutputInserted.getAsBoolean()) {
+            return false;
+        }
+        confirmedSuccess.run();
+        return true;
+    }
+
+    private void recordCraftedOutput(ServerWorld world, long outputCount, CraftedOutputKind outputKind) {
+        if (outputCount <= 0L) {
+            return;
+        }
+        switch (outputKind) {
+            case FISHING_ROD -> FishermanWorkMetrics.recordFishingRodsCrafted(world, villager.getUuid(), outputCount);
+            case BUCKET -> FishermanWorkMetrics.recordBucketsCrafted(world, villager.getUuid(), outputCount);
+            case BOAT -> FishermanWorkMetrics.recordBoatsCrafted(world, villager.getUuid(), outputCount);
+            case NONE -> {
+            }
+        }
+    }
+
+    static CraftedOutputKind classifyCraftedOutput(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return CraftedOutputKind.NONE;
+        }
+        if (stack.isOf(Items.FISHING_ROD)) {
+            return CraftedOutputKind.FISHING_ROD;
+        }
+        if (stack.isOf(Items.BUCKET)) {
+            return CraftedOutputKind.BUCKET;
+        }
+        return stack.isIn(ItemTags.BOATS) || stack.isIn(ItemTags.CHEST_BOATS)
+                ? CraftedOutputKind.BOAT
+                : CraftedOutputKind.NONE;
+    }
+
+    static CraftedOutputKind classifyCraftedOutputShape(
+            boolean nonempty,
+            boolean fishingRod,
+            boolean emptyBucket,
+            boolean boat,
+            boolean chestBoat
+    ) {
+        if (!nonempty) {
+            return CraftedOutputKind.NONE;
+        }
+        if (fishingRod) {
+            return CraftedOutputKind.FISHING_ROD;
+        }
+        if (emptyBucket) {
+            return CraftedOutputKind.BUCKET;
+        }
+        return boat || chestBoat ? CraftedOutputKind.BOAT : CraftedOutputKind.NONE;
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
@@ -429,7 +517,7 @@ public class FishermanCraftingGoal extends Goal {
         return remaining;
     }
 
-    private boolean canInsertOutput(Inventory inventory, ItemStack stack) {
+    private static boolean canInsertOutputReadOnly(Inventory inventory, ItemStack stack) {
         ItemStack remaining = stack.copy();
         for (int slot = 0; slot < inventory.size(); slot++) {
             if (remaining.isEmpty()) {
@@ -474,6 +562,13 @@ public class FishermanCraftingGoal extends Goal {
     }
 
     private record FishermanRecipe(CraftingRecipe recipe, ItemStack output) {
+    }
+
+    enum CraftedOutputKind {
+        NONE,
+        FISHING_ROD,
+        BUCKET,
+        BOAT
     }
 
     private String formatCheckResult(int craftableCount) {
