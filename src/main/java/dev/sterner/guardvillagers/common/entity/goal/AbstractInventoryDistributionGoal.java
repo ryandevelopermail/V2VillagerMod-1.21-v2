@@ -184,7 +184,8 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                                 world,
                                 completed.stack(),
                                 completed.targetId(),
-                                completed.targetPos()));
+                                completed.targetPos(),
+                                completed.route()));
                 if (outcome == TransferAttemptOutcome.TARGET_INVALID) {
                     returnPendingItem(world);
                     stage = Stage.DONE;
@@ -342,6 +343,17 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     ) {
     }
 
+    /** Route-aware completion boundary; delegates to the original hook for compatible subclasses. */
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        onTransferCompleted(world, transferred, targetId, targetPos);
+    }
+
     static <T> boolean notifyAfterComplete(
             boolean complete,
             Supplier<T> completedValue,
@@ -375,13 +387,15 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         BlockPos completedTargetPos = Objects.requireNonNull(
                 pendingTargetPos,
                 "Successful transfer requires a target position").toImmutable();
-        return new CompletedTransfer(transferred, pendingTargetId, completedTargetPos);
+        TransferRoute route = pendingUniversalRoute ? TransferRoute.UNIVERSAL : TransferRoute.DIRECT;
+        return new CompletedTransfer(transferred, pendingTargetId, completedTargetPos, route);
     }
 
     private record CompletedTransfer(
             ItemStack stack,
             @Nullable UUID targetId,
-            BlockPos targetPos
+            BlockPos targetPos,
+            TransferRoute route
     ) {
     }
 
@@ -389,6 +403,11 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
         TARGET_INVALID,
         INCOMPLETE,
         COMPLETE
+    }
+
+    protected enum TransferRoute {
+        DIRECT,
+        UNIVERSAL
     }
 
     protected boolean hasDistributableItem(Inventory inventory) {

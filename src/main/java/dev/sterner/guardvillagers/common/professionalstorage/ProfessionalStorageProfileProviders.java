@@ -20,6 +20,7 @@ public final class ProfessionalStorageProfileProviders {
                 new ProfessionalRoleId(Identifier.of("minecraft", "farmer")),
                 new FarmerProfessionalStorageProfileProvider());
         register(ToolsmithWorkMetrics.TOOLSMITH_ROLE, new ToolsmithProfessionalStorageProfileProvider());
+        register(WeaponsmithWorkMetrics.WEAPONSMITH_ROLE, new WeaponsmithProfessionalStorageProfileProvider());
     }
 
     public static void register(ProfessionalRoleId role, ProfessionalStorageProfileProvider provider) {

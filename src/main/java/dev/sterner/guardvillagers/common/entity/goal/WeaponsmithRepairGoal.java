@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.WeaponsmithWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
@@ -25,8 +26,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 public class WeaponsmithRepairGoal extends Goal {
     private static final Logger LOGGER = LoggerFactory.getLogger(WeaponsmithRepairGoal.class);
@@ -73,7 +77,8 @@ public class WeaponsmithRepairGoal extends Goal {
         if (villager.getVillagerData().getProfession() != VillagerProfession.WEAPONSMITH) {
             return false;
         }
-        if (chestPos == null || !ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.WEAPONSMITH, world.getBlockState(jobPos))) {
+        if (chestPos == null || !isRepairWorksiteValid(
+                ProfessionDefinitions.isExpectedJobBlock(VillagerProfession.WEAPONSMITH, world.getBlockState(jobPos)))) {
             return false;
         }
 
@@ -167,29 +172,27 @@ public class WeaponsmithRepairGoal extends Goal {
         }
 
         ItemStack repaired = createRepairedStack(plan.firstStack(), plan.secondStack());
-        if (!canInsertAfterConsume(inventory, plan.firstSlot(), plan.secondSlot(), repaired)) {
-            LOGGER.info("Weaponsmith {} skipped repair: output insertion failure for {}",
-                    villager.getUuidAsString(),
-                    repaired.getName().getString());
+        ItemStack[] remainder = {ItemStack.EMPTY};
+        boolean completed = executeConfirmedRepair(
+                () -> canInsertAfterConsume(inventory, plan.firstSlot(), plan.secondSlot(), repaired),
+                () -> consumeRepairInputs(inventory, plan),
+                () -> {
+                    remainder[0] = insertStack(inventory, repaired.copy());
+                    return remainder[0].isEmpty();
+                },
+                () -> {
+                    inventory.markDirty();
+                    repairedToday++;
+                    WeaponsmithWorkMetrics.recordWeaponRepaired(world, villager.getUuid());
+                });
+        if (!completed) {
+            if (!remainder[0].isEmpty()) {
+                insertStack(inventory, remainder[0]);
+            }
+            LOGGER.info("Weaponsmith {} skipped repair before confirmed completion for {}",
+                    villager.getUuidAsString(), repaired.getName().getString());
             return;
         }
-
-        if (!consumeRepairInputs(inventory, plan.firstSlot(), plan.secondSlot())) {
-            LOGGER.info("Weaponsmith {} skipped repair: input stacks changed before consume", villager.getUuidAsString());
-            return;
-        }
-
-        ItemStack remaining = insertStack(inventory, repaired.copy());
-        if (!remaining.isEmpty()) {
-            LOGGER.info("Weaponsmith {} skipped repair: output insertion failure for {}",
-                    villager.getUuidAsString(),
-                    repaired.getName().getString());
-            insertStack(inventory, remaining);
-            return;
-        }
-
-        inventory.markDirty();
-        repairedToday++;
         LOGGER.info("Weaponsmith {} completed repair: {}",
                 villager.getUuidAsString(),
                 repaired.getName().getString());
@@ -222,14 +225,14 @@ public class WeaponsmithRepairGoal extends Goal {
         return Optional.empty();
     }
 
-    private boolean isRepairInput(ItemStack stack) {
+    private static boolean isRepairInput(ItemStack stack) {
         if (stack.isEmpty() || !stack.isDamageable() || !stack.isDamaged()) {
             return false;
         }
         return supportsRepairType(stack.getItem());
     }
 
-    private boolean supportsRepairType(Item item) {
+    private static boolean supportsRepairType(Item item) {
         return item instanceof SwordItem
                 || item instanceof AxeItem
                 || item instanceof BowItem
@@ -251,21 +254,69 @@ public class WeaponsmithRepairGoal extends Goal {
         return repaired;
     }
 
-    private boolean consumeRepairInputs(Inventory inventory, int slotA, int slotB) {
-        ItemStack a = inventory.getStack(slotA);
-        ItemStack b = inventory.getStack(slotB);
-        if (a.isEmpty() || b.isEmpty()) {
+    private boolean consumeRepairInputs(Inventory inventory, RepairPlan plan) {
+        ItemStack a = inventory.getStack(plan.firstSlot());
+        ItemStack b = inventory.getStack(plan.secondSlot());
+        if (!matchesPlannedInput(a, plan.firstStack()) || !matchesPlannedInput(b, plan.secondStack())) {
             return false;
         }
         a.decrement(1);
         b.decrement(1);
         if (a.isEmpty()) {
-            inventory.setStack(slotA, ItemStack.EMPTY);
+            inventory.setStack(plan.firstSlot(), ItemStack.EMPTY);
         }
         if (b.isEmpty()) {
-            inventory.setStack(slotB, ItemStack.EMPTY);
+            inventory.setStack(plan.secondSlot(), ItemStack.EMPTY);
         }
         return true;
+    }
+
+    private static boolean matchesPlannedInput(ItemStack current, ItemStack planned) {
+        return isRepairInput(current)
+                && current.getItem() == planned.getItem()
+                && ItemStack.areItemsAndComponentsEqual(current, planned);
+    }
+
+    public static int countRepairPairs(Inventory inventory) {
+        List<RepairInputView> candidates = new ArrayList<>(inventory.size());
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            candidates.add(new RepairInputView(
+                    stack.getItem(),
+                    !stack.isEmpty() && stack.isDamageable(),
+                    !stack.isEmpty() && stack.isDamaged(),
+                    !stack.isEmpty() && supportsRepairType(stack.getItem())));
+        }
+        return countRepairPairs(candidates);
+    }
+
+    static int countRepairPairs(List<RepairInputView> candidates) {
+        Map<Object, Integer> counts = new HashMap<>();
+        for (RepairInputView candidate : candidates) {
+            if (candidate.damageable() && candidate.damaged() && candidate.supported()) {
+                counts.merge(candidate.itemType(), 1, Integer::sum);
+            }
+        }
+        return counts.values().stream().mapToInt(count -> count / 2).sum();
+    }
+
+    static boolean executeConfirmedRepair(
+            BooleanSupplier hasResultCapacity,
+            BooleanSupplier consumedInputs,
+            BooleanSupplier insertedCompleteOutput,
+            Runnable confirmedCompletion
+    ) {
+        if (!hasResultCapacity.getAsBoolean()
+                || !consumedInputs.getAsBoolean()
+                || !insertedCompleteOutput.getAsBoolean()) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
+    }
+
+    static boolean isRepairWorksiteValid(boolean expectedGrindstone) {
+        return expectedGrindstone;
     }
 
     private boolean canInsertAfterConsume(Inventory inventory, int slotA, int slotB, ItemStack output) {
@@ -374,5 +425,8 @@ public class WeaponsmithRepairGoal extends Goal {
     }
 
     private record RepairPlan(int firstSlot, int secondSlot, ItemStack firstStack, ItemStack secondStack) {
+    }
+
+    record RepairInputView(Object itemType, boolean damageable, boolean damaged, boolean supported) {
     }
 }
