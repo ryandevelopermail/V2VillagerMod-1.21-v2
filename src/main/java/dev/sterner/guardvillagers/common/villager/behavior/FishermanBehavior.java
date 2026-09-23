@@ -251,12 +251,13 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.FISHERMAN, "fisherman conversion");
 
-        if (!world.spawnNewEntityAndPassengers(guard)) {
+        if (!completeSpawnAndTransfer(
+                () -> world.spawnNewEntityAndPassengers(guard),
+                () -> FishermanWorkMetrics.transferToGuard(world, villager.getUuid(), guard.getUuid()))) {
             ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "fisherman spawn failed");
             LOGGER.warn("Fisherman {} conversion aborted: guard spawn failed", villager.getUuidAsString());
             return;
         }
-        FishermanWorkMetrics.transferToGuard(world, villager.getUuid(), guard.getUuid());
         BlockPos pairedStoragePos = chestPos != null
                 ? chestPos
                 : (JobBlockPairingHelper.isPairingBlock(world.getBlockState(jobPos)) ? jobPos : null);
@@ -277,6 +278,12 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
                 GuardConversionHelper.buildConversionMetadata(villager, guard, jobPos, chestPos, "fisherman paired storage"));
 
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
+    }
+
+    public static boolean completeSpawnAndTransfer(java.util.function.BooleanSupplier spawn, Runnable transferMetrics) {
+        if (!spawn.getAsBoolean()) return false;
+        transferMetrics.run();
+        return true;
     }
 
     private static ItemStack takeRodFromStorage(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {

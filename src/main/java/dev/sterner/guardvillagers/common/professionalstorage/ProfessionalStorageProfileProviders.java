@@ -46,6 +46,17 @@ public final class ProfessionalStorageProfileProviders {
             StorageIdentity storage,
             List<ProfessionalStorageResolution> resolutions
     ) {
+        return createTabs(world, storage, resolutions,
+                (provider, selectedWorld, selectedStorage, selectedResolutions) ->
+                        provider.createTabs(selectedWorld, selectedStorage, selectedResolutions));
+    }
+
+    static Optional<List<ProfessionalStorageTab>> createTabs(
+            ServerWorld world,
+            StorageIdentity storage,
+            List<ProfessionalStorageResolution> resolutions,
+            ProviderInvocation invocation
+    ) {
         if (resolutions.isEmpty()) {
             return Optional.empty();
         }
@@ -57,9 +68,18 @@ public final class ProfessionalStorageProfileProviders {
         if (provider == null) {
             return Optional.empty();
         }
-        return provider.createTabs(world, storage, List.copyOf(resolutions))
+        return invocation.createTabs(provider, world, storage, List.copyOf(resolutions))
                 .map(List::copyOf)
                 .filter(ProfessionalStorageProfileProviders::withinBounds);
+    }
+
+    @FunctionalInterface
+    interface ProviderInvocation {
+        Optional<List<ProfessionalStorageTab>> createTabs(
+                ProfessionalStorageProfileProvider provider,
+                ServerWorld world,
+                StorageIdentity storage,
+                List<ProfessionalStorageResolution> resolutions);
     }
 
     private static boolean withinBounds(List<ProfessionalStorageTab> tabs) {

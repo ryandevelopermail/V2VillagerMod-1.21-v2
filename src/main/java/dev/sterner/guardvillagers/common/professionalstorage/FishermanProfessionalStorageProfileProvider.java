@@ -77,6 +77,46 @@ public final class FishermanProfessionalStorageProfileProvider implements Profes
                 representative == null ? null : representative.eligibleButchers(), totals));
     }
 
+    /** Package-private read-only seam used to exercise real provider selection without mocking a ServerWorld. */
+    Optional<List<ProfessionalStorageTab>> createTabs(
+            StorageIdentity storage,
+            List<ProfessionalStorageResolution> resolutions,
+            ReadOnlyResolution resolution
+    ) {
+        if (resolutions.isEmpty()) return Optional.empty();
+        ProfessionalRoleId role = resolutions.getFirst().pairing().role();
+        if (!isSupportedRole(role)
+                || resolutions.stream().anyMatch(value -> !value.pairing().role().equals(role))) {
+            return Optional.empty();
+        }
+        FishermanStorageCounts counts = resolution.storageCounts(storage);
+        if (counts == null) return Optional.empty();
+        List<FishermanWorkerView> workers = new ArrayList<>(resolutions.size());
+        for (ProfessionalStorageResolution value : resolutions) {
+            if (value.workerAvailability() == ProfessionalStorageResolution.WorkerAvailability.UNLOADED) {
+                workers.add(FishermanWorkerView.unloaded(value.pairing().workerUuid(), value.workerAvailability()));
+                continue;
+            }
+            FishermanWorkerView worker = resolution.loadedWorker(value, storage);
+            if (worker == null || !worker.workerUuid().equals(value.pairing().workerUuid()) || !worker.loaded()) {
+                return Optional.empty();
+            }
+            workers.add(worker);
+        }
+        FishermanWorkerView representative = selectRepresentative(workers).flatMap(uuid -> workers.stream()
+                .filter(worker -> worker.loaded() && worker.workerUuid().equals(uuid)).findFirst()).orElse(null);
+        return Optional.of(buildTabs(workers, counts,
+                representative == null ? null : representative.craftableRecipes(),
+                representative == null ? null : representative.eligibleButchers(),
+                resolution.careerTotals(resolutions.stream().map(value -> value.pairing().workerUuid()).toList(), role)));
+    }
+
+    interface ReadOnlyResolution {
+        @Nullable FishermanStorageCounts storageCounts(StorageIdentity storage);
+        @Nullable FishermanWorkerView loadedWorker(ProfessionalStorageResolution resolution, StorageIdentity storage);
+        FishermanCareerTotals careerTotals(List<UUID> workers, ProfessionalRoleId role);
+    }
+
     static boolean isSupportedRole(ProfessionalRoleId role) {
         return role.equals(FishermanWorkMetrics.FISHERMAN_ROLE)
                 || role.equals(ProfessionalRoleId.FISHERMAN_GUARD);

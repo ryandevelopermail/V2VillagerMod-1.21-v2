@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.villager.behavior.FishermanBehavior;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -51,5 +52,14 @@ class FishermanCompletionSeamTest {
         assertFalse(FishermanDistributionGoal.recordConfirmedDirectFishDelivery(
                 true, true, true, 0, amount -> delivered.addAndGet((int) amount)));
         assertEquals(1, delivered.get());
+    }
+
+    @Test
+    void conversionTransfersMetricsOnlyAfterSuccessfulSpawn() {
+        AtomicInteger transfers = new AtomicInteger();
+        assertFalse(FishermanBehavior.completeSpawnAndTransfer(() -> false, transfers::incrementAndGet));
+        assertEquals(0, transfers.get());
+        assertTrue(FishermanBehavior.completeSpawnAndTransfer(() -> true, transfers::incrementAndGet));
+        assertEquals(1, transfers.get());
     }
 }
