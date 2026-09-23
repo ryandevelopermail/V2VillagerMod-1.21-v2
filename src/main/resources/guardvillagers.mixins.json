@@ -5,6 +5,8 @@
   "mixins": [
     "ChestBlockEntityMixin",
     "BarrelBlockEntityMixin",
+    "ProfessionalChestBlockMixin",
+    "ProfessionalBarrelBlockMixin",
     "BellBlockMixin",
     "ArmorStandEntityMixin",
     "MobEntityMixin",
@@ -14,6 +16,9 @@
     "TakeJobSiteTaskMixin",
     "VillagerTaskListProviderMixin",
     "StructureTemplateMixin"
+  ],
+  "client": [
+    "client.GenericContainerScreenMixin"
   ],
   "injectors": {
     "defaultRequire": 1

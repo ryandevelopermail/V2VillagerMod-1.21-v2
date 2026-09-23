@@ -15,6 +15,8 @@ import dev.sterner.guardvillagers.common.network.GuardPatrolPacket;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupRequestPacket;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
 import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
+import dev.sterner.guardvillagers.common.network.ProfessionalStorageSnapshotPacket;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageProfileProviders;
 import dev.sterner.guardvillagers.common.screenhandler.GuardVillagerScreenHandler;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -171,6 +173,7 @@ public class GuardVillagers implements ModInitializer {
         FabricDefaultAttributeRegistry.register(FISHERMAN_GUARD_VILLAGER, GuardEntity.createAttributes());
         FabricDefaultAttributeRegistry.register(LUMBERJACK_GUARD_VILLAGER, GuardEntity.createAttributes());
         ProfessionDefinitions.registerAll();
+        ProfessionalStorageProfileProviders.registerDefaults();
         DeveloperCommands.register();
 
         if (FabricLoader.getInstance().isModLoaded("morevillagers")) {
@@ -200,6 +203,7 @@ public class GuardVillagers implements ModInitializer {
         PayloadTypeRegistry.playS2C().register(GuardPatrolPacket.ID, GuardPatrolPacket.PACKET_CODEC);
         PayloadTypeRegistry.playS2C().register(OpenDeveloperPanelPacket.ID, OpenDeveloperPanelPacket.PACKET_CODEC);
         PayloadTypeRegistry.playS2C().register(DeveloperSetupStatusPacket.ID, DeveloperSetupStatusPacket.PACKET_CODEC);
+        PayloadTypeRegistry.playS2C().register(ProfessionalStorageSnapshotPacket.ID, ProfessionalStorageSnapshotPacket.PACKET_CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(GuardFollowPacket.ID, GuardFollowPacket::handle);
         ServerPlayNetworking.registerGlobalReceiver(GuardPatrolPacket.ID, GuardPatrolPacket::handle);
@@ -270,7 +274,7 @@ public class GuardVillagers implements ModInitializer {
         });
         ServerEntityEvents.ENTITY_UNLOAD.register((entity, world) -> {
             if (entity instanceof VillagerEntity villagerEntity && world instanceof ServerWorld serverWorld) {
-                JobBlockPairingHelper.invalidateVillagerChestPairing(serverWorld, villagerEntity.getUuid());
+                JobBlockPairingHelper.evictVillagerChestPairingCache(serverWorld, villagerEntity.getUuid());
             }
         });
 

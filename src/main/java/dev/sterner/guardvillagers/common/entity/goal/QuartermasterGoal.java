@@ -351,6 +351,15 @@ public class QuartermasterGoal extends Goal {
         }
     }
 
+    /** Returns whether the loaded Librarian currently has the Quartermaster role installed. */
+    public static boolean isActiveQuartermaster(ServerWorld world, UUID villagerId) {
+        Map<BlockPos, Set<UUID>> byAnchor = ACTIVE_QM_BY_WORLD_ANCHOR.get(world.getRegistryKey());
+        if (byAnchor == null) {
+            return false;
+        }
+        return byAnchor.values().stream().anyMatch(ids -> ids.contains(villagerId));
+    }
+
     public static void clearBootstrapState(ServerWorld world, UUID villagerId) {
         BOOTSTRAP_COMPLETE_BY_QM.remove(new QmBootstrapKey(world.getRegistryKey(), villagerId));
     }

@@ -2,6 +2,9 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.FishermanWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanDistributionGoal;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
@@ -52,6 +55,59 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
     private static final Map<BlockPos, Set<VillagerEntity>> BARREL_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
     private static final long STORAGE_SCAN_COOLDOWN_TICKS = 20L;
+
+    /**
+     * Read-only live data for the professional-storage snapshot. This intentionally never touches
+     * mutation listeners or conversion hooks: opening storage must not turn a native Fisherman
+     * into a Fisherman Guard.
+     */
+    public static Optional<FishermanLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive()
+                || villager.getWorld() != world
+                || villager.getVillagerData().getProfession() != VillagerProfession.FISHERMAN) {
+            return Optional.empty();
+        }
+        Optional<net.minecraft.util.math.GlobalPos> jobSite = villager.getBrain()
+                .getOptionalMemory(MemoryModuleType.JOB_SITE);
+        BlockPos jobPos = jobSite
+                .filter(global -> global.dimension().equals(world.getRegistryKey()))
+                .map(net.minecraft.util.math.GlobalPos::pos)
+                .orElse(null);
+        FishermanCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        boolean craftingTableReady = craftingGoal != null && craftingGoal.hasValidCraftingTableReadOnly(world);
+        boolean barrelReady = jobPos != null && world.getBlockState(jobPos).isOf(Blocks.BARREL);
+        int craftableRecipes = FishermanCraftingGoal.countCraftableRecipesReadOnly(
+                world,
+                storageInventory,
+                craftingTableReady);
+        int eligibleButchers = (int) FishermanDistributionGoal
+                .findEligibleButcherRecipientsReadOnly(world, villager)
+                .stream()
+                .map(recipient -> recipient.recipient().getUuid())
+                .distinct()
+                .count();
+        return Optional.of(new FishermanLiveSnapshot(
+                craftingTableReady,
+                barrelReady,
+                craftableRecipes,
+                eligibleButchers));
+    }
+
+    public record FishermanLiveSnapshot(
+            boolean craftingTableReady,
+            boolean barrelReady,
+            int craftableRecipes,
+            int eligibleButchers
+    ) {
+        public FishermanLiveSnapshot {
+            craftableRecipes = Math.max(0, craftableRecipes);
+            eligibleButchers = Math.max(0, eligibleButchers);
+        }
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -195,13 +251,39 @@ public class FishermanBehavior implements VillagerProfessionBehavior {
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.FISHERMAN, "fisherman conversion");
 
-        world.spawnEntityAndPassengers(guard);
+        if (!completeSpawnAndTransfer(
+                () -> world.spawnNewEntityAndPassengers(guard),
+                () -> FishermanWorkMetrics.transferToGuard(world, villager.getUuid(), guard.getUuid()))) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "fisherman spawn failed");
+            LOGGER.warn("Fisherman {} conversion aborted: guard spawn failed", villager.getUuidAsString());
+            return;
+        }
+        BlockPos pairedStoragePos = chestPos != null
+                ? chestPos
+                : (JobBlockPairingHelper.isPairingBlock(world.getBlockState(jobPos)) ? jobPos : null);
+        if (pairedStoragePos != null) {
+            ProfessionalStorageRegistry.transferToSpecialist(
+                    world,
+                    villager.getUuid(),
+                    guard.getUuid(),
+                    ProfessionalRoleId.FISHERMAN_GUARD,
+                    pairedStoragePos,
+                    jobPos);
+        } else {
+            JobBlockPairingHelper.removeConfirmedVillagerChestPairing(world, villager.getUuid());
+        }
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Fisherman converted into guard using fishing rod ({})",
                 GuardConversionHelper.buildConversionMetadata(villager, guard, jobPos, chestPos, "fisherman paired storage"));
 
         GuardConversionHelper.cleanupVillagerAfterConversion(villager);
+    }
+
+    public static boolean completeSpawnAndTransfer(java.util.function.BooleanSupplier spawn, Runnable transferMetrics) {
+        if (!spawn.getAsBoolean()) return false;
+        transferMetrics.run();
+        return true;
     }
 
     private static ItemStack takeRodFromStorage(ServerWorld world, BlockPos jobPos, BlockPos chestPos) {

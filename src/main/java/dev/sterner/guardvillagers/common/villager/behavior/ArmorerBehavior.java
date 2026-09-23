@@ -3,11 +3,14 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerBlastFurnaceGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerDistributionGoal;
+import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -18,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -35,6 +39,57 @@ public class ArmorerBehavior extends AbstractPairedProfessionBehavior {
 
     public static BlockPos getPairedChestPos(VillagerEntity villager) {
         return PAIRED_CHESTS.get(villager);
+    }
+
+    /** Immutable read-only values used by the open-time professional-storage snapshot. */
+    public static Optional<ArmorerLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        ArmorerCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        ArmorerBlastFurnaceGoal furnaceGoal = GOALS.get(villager);
+        BlockPos tablePos = craftingGoal == null ? null : craftingGoal.getCraftingTablePos();
+        BlockPos furnacePos = furnaceGoal == null ? null : furnaceGoal.getBlastFurnacePos();
+        boolean tableReady = tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        boolean furnaceReady = furnacePos != null && world.getBlockState(furnacePos).isOf(Blocks.BLAST_FURNACE);
+        int craftableArmor = tableReady && craftingGoal != null
+                ? craftingGoal.countCraftableArmorRecipesReadOnly(world, storageInventory)
+                : 0;
+        Set<BlockPos> standCenters = new HashSet<>();
+        BlockPos chestPos = PAIRED_CHESTS.get(villager);
+        if (chestPos != null) {
+            standCenters.add(chestPos);
+        }
+        if (tablePos != null) {
+            standCenters.add(tablePos);
+        }
+        int eligibleArmorSlots = ArmorerStandManager.countEligibleArmorSlotsReadOnly(
+                world,
+                villager,
+                standCenters);
+        return Optional.of(new ArmorerLiveSnapshot(
+                tableReady,
+                furnaceReady,
+                ArmorerBlastFurnaceGoal.inspectFurnaceStateReadOnly(world, furnacePos),
+                craftableArmor,
+                eligibleArmorSlots));
+    }
+
+    public record ArmorerLiveSnapshot(
+            boolean craftingTableReady,
+            boolean blastFurnaceReady,
+            ArmorerBlastFurnaceGoal.FurnaceState furnaceState,
+            int craftableArmor,
+            int eligibleArmorSlots
+    ) {
+        public ArmorerLiveSnapshot {
+            craftableArmor = Math.max(0, craftableArmor);
+            eligibleArmorSlots = Math.max(0, eligibleArmorSlots);
+        }
     }
 
     @Override

@@ -374,30 +374,42 @@ public class FishermanGuardFishingGoal extends Goal {
         BlockPos center = this.guard.getBlockPos();
         ButcherTransferTarget bestTarget = null;
         double nearestDistance = Double.MAX_VALUE;
-        int pairingRange = MathHelper.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
-
-        for (BlockPos smokerPos : BlockPos.iterate(center.add(-WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS),
-                center.add(WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS))) {
-            if (!world.getBlockState(smokerPos).isOf(Blocks.SMOKER)) {
-                continue;
-            }
-
-            BlockPos pairedChest = findPairedChestForSmoker(world, smokerPos.toImmutable(), pairingRange);
-            if (pairedChest == null) {
-                continue;
-            }
-
-            double distance = center.getSquaredDistance(smokerPos);
+        for (ButcherTransferTarget target : findEligibleButcherRecipientsReadOnly(world, center)) {
+            double distance = center.getSquaredDistance(target.smokerPos());
             if (distance < nearestDistance) {
                 nearestDistance = distance;
-                bestTarget = new ButcherTransferTarget(smokerPos.toImmutable(), pairedChest);
+                bestTarget = target;
             }
         }
 
         return bestTarget;
     }
 
-    private @Nullable BlockPos findPairedChestForSmoker(ServerWorld world, BlockPos smokerPos, int pairingRange) {
+    /**
+     * Counts the same valid smoker/chest destinations considered by delivery, without touching
+     * goal lifecycle, navigation, cooldowns, inventories, or guard state.
+     */
+    public static int countEligibleButcherRecipientsReadOnly(ServerWorld world, FishermanGuardEntity guard) {
+        return findEligibleButcherRecipientsReadOnly(world, guard.getBlockPos()).size();
+    }
+
+    private static List<ButcherTransferTarget> findEligibleButcherRecipientsReadOnly(
+            ServerWorld world, BlockPos center
+    ) {
+        List<ButcherTransferTarget> targets = new ArrayList<>();
+        int pairingRange = MathHelper.ceil(JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE);
+        for (BlockPos smokerPos : BlockPos.iterate(center.add(-WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS, -WATER_SEARCH_RADIUS),
+                center.add(WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS, WATER_SEARCH_RADIUS))) {
+            if (!world.getBlockState(smokerPos).isOf(Blocks.SMOKER)) continue;
+            BlockPos chestPos = findPairedChestForSmoker(world, smokerPos, pairingRange);
+            if (chestPos != null) {
+                targets.add(new ButcherTransferTarget(smokerPos.toImmutable(), chestPos));
+            }
+        }
+        return List.copyOf(targets);
+    }
+
+    private static @Nullable BlockPos findPairedChestForSmoker(ServerWorld world, BlockPos smokerPos, int pairingRange) {
         BlockPos nearestChest = null;
         double nearestDistance = Double.MAX_VALUE;
 

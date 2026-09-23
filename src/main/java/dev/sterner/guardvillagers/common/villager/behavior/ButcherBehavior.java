@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
@@ -13,6 +15,7 @@ import dev.sterner.guardvillagers.common.villager.GuardConversionHelper;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.villager.VillagerConversionCandidateIndex;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.EquipmentSlot;
@@ -49,6 +52,44 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<VillagerEntity, ButcherToLeatherworkerDistributionGoal> LEATHER_DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
+
+    /** Immutable read-only values used by the open-time native-Butcher storage snapshot. */
+    public static Optional<ButcherLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive()
+                || villager.getWorld() != world
+                || villager.getVillagerData().getProfession() != VillagerProfession.BUTCHER) {
+            return Optional.empty();
+        }
+        ButcherCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        ButcherSmokerGoal smokerGoal = GOALS.get(villager);
+        BlockPos tablePos = craftingGoal == null ? null : craftingGoal.getCraftingTablePos();
+        BlockPos smokerPos = smokerGoal == null ? null : smokerGoal.getSmokerPos();
+        boolean tableReady = tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        boolean smokerReady = smokerPos != null && world.getBlockState(smokerPos).isOf(Blocks.SMOKER);
+        int craftableSmokers = tableReady && craftingGoal != null
+                ? craftingGoal.countCraftableSmokerRecipesReadOnly(world, storageInventory)
+                : 0;
+        return Optional.of(new ButcherLiveSnapshot(
+                tableReady,
+                smokerReady,
+                ButcherSmokerGoal.inspectSmokerStateReadOnly(world, smokerPos),
+                craftableSmokers));
+    }
+
+    public record ButcherLiveSnapshot(
+            boolean craftingTableReady,
+            boolean smokerReady,
+            ButcherSmokerGoal.SmokerState smokerState,
+            int craftableSmokers
+    ) {
+        public ButcherLiveSnapshot {
+            craftableSmokers = Math.max(0, craftableSmokers);
+        }
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -209,7 +250,18 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, jobPos, guard.getUuid(), VillagerProfession.BUTCHER, "butcher conversion");
 
-        world.spawnEntityAndPassengers(guard);
+        if (!world.spawnNewEntityAndPassengers(guard)) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "butcher spawn failed");
+            LOGGER.warn("Butcher {} conversion aborted: guard spawn failed", villager.getUuidAsString());
+            return;
+        }
+        ProfessionalStorageRegistry.transferToSpecialist(
+                world,
+                villager.getUuid(),
+                guard.getUuid(),
+                ProfessionalRoleId.BUTCHER_GUARD,
+                chestPos,
+                jobPos);
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Butcher converted into guard using chest weapon ({})",

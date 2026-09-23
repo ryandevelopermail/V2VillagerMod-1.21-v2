@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.LeatherworkerWorkMetrics;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import dev.sterner.guardvillagers.common.util.LeatherworkerCraftingMemoryHolder;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
@@ -29,6 +30,8 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
+import java.util.function.IntUnaryOperator;
 
 public class LeatherworkerCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -205,40 +208,60 @@ public class LeatherworkerCraftingGoal extends Goal {
                 villager.getRandom()
         );
         LeatherRecipe recipe = craftable.get(recipeIndex);
-        if (!canInsertOutput(inventory, recipe.output)) {
-            return;
-        }
-        if (consumeIngredients(inventory, recipe.recipe)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
-            craftedToday++;
-            recordLastCrafted(recipe.output);
-            if (framePriority && recipe.output.isOf(Items.ITEM_FRAME)) {
-                CraftingCheckLogger.report(world, "Leatherworker", "frame-priority", formatCraftedResult(lastCheckCount, recipe.output));
-            } else {
-                CraftingCheckLogger.report(world, "Leatherworker", formatCraftedResult(lastCheckCount, recipe.output));
-            }
-        }
+        executeConfirmedCraft(
+                () -> hasValidCraftingTable(world),
+                () -> canInsertOutput(inventory, recipe.output),
+                () -> consumeIngredients(inventory, recipe.recipe),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                inventory::markDirty,
+                () -> {
+                    LeatherworkerWorkMetrics.recordGoodsCrafted(
+                            world,
+                            villager.getUuid(),
+                            recipe.output.getCount());
+                    craftedToday++;
+                    recordLastCrafted(recipe.output);
+                    if (framePriority && recipe.output.isOf(Items.ITEM_FRAME)) {
+                        CraftingCheckLogger.report(
+                                world,
+                                "Leatherworker",
+                                "frame-priority",
+                                formatCraftedResult(lastCheckCount, recipe.output));
+                    } else {
+                        CraftingCheckLogger.report(
+                                world,
+                                "Leatherworker",
+                                formatCraftedResult(lastCheckCount, recipe.output));
+                    }
+                });
     }
 
     static int selectRecipeIndex(List<ItemStack> craftableOutputs, boolean framePriority, net.minecraft.util.math.random.Random random) {
         if (craftableOutputs.isEmpty()) {
             throw new IllegalArgumentException("craftableOutputs must not be empty");
         }
-        Optional<Integer> prioritizedIndex = selectRecipe(craftableOutputs, framePriority);
-        return prioritizedIndex.orElseGet(() -> random.nextInt(craftableOutputs.size()));
+        return selectRecipeIndexByFrameShape(
+                craftableOutputs.stream().map(stack -> stack.isOf(Items.ITEM_FRAME)).toList(),
+                framePriority,
+                random::nextInt);
     }
 
-    private static Optional<Integer> selectRecipe(List<ItemStack> craftableOutputs, boolean framePriority) {
-        if (!framePriority) {
-            return Optional.empty();
+    static int selectRecipeIndexByFrameShape(
+            List<Boolean> itemFrameOutputs,
+            boolean framePriority,
+            IntUnaryOperator randomIndex
+    ) {
+        if (itemFrameOutputs.isEmpty()) {
+            throw new IllegalArgumentException("itemFrameOutputs must not be empty");
         }
-        for (int i = 0; i < craftableOutputs.size(); i++) {
-            if (craftableOutputs.get(i).isOf(Items.ITEM_FRAME)) {
-                return Optional.of(i);
+        if (framePriority) {
+            for (int i = 0; i < itemFrameOutputs.size(); i++) {
+                if (itemFrameOutputs.get(i)) {
+                    return i;
+                }
             }
         }
-        return Optional.empty();
+        return randomIndex.applyAsInt(itemFrameOutputs.size());
     }
 
     private boolean hasNearbyCartographerFrameDemand(ServerWorld world) {
@@ -252,6 +275,10 @@ public class LeatherworkerCraftingGoal extends Goal {
             }
         }
         return false;
+    }
+
+    private boolean hasValidCraftingTable(ServerWorld world) {
+        return craftingTablePos != null && world.getBlockState(craftingTablePos).isOf(Blocks.CRAFTING_TABLE);
     }
 
     private void startCraftCountdown(String reason) {
@@ -297,14 +324,19 @@ public class LeatherworkerCraftingGoal extends Goal {
     }
 
     private List<LeatherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+        return filterLastCrafted(discoverCraftableRecipesReadOnly(world, inventory));
+    }
+
+    public int countCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return discoverCraftableRecipesReadOnly(world, inventory).size();
+    }
+
+    private List<LeatherRecipe> discoverCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
         List<LeatherRecipe> recipes = new ArrayList<>();
         ItemStack leather = new ItemStack(Items.LEATHER);
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (result.isEmpty()) {
-                continue;
-            }
             boolean usesLeather = false;
             for (Ingredient ingredient : recipe.getIngredients()) {
                 if (ingredient.isEmpty()) {
@@ -315,14 +347,20 @@ public class LeatherworkerCraftingGoal extends Goal {
                     break;
                 }
             }
-            if (!usesLeather) {
-                continue;
-            }
-            if (canCraft(inventory, recipe)) {
+            boolean ingredientsAvailable = !result.isEmpty() && usesLeather && canCraft(inventory, recipe);
+            if (isCraftableLeatherRecipe(!result.isEmpty(), usesLeather, ingredientsAvailable)) {
                 recipes.add(new LeatherRecipe(recipe, result));
             }
         }
-        return filterLastCrafted(recipes);
+        return recipes;
+    }
+
+    static boolean isCraftableLeatherRecipe(
+            boolean hasOutput,
+            boolean usesLeather,
+            boolean ingredientsAvailable
+    ) {
+        return hasOutput && usesLeather && ingredientsAvailable;
     }
 
     private List<LeatherRecipe> filterLastCrafted(List<LeatherRecipe> recipes) {
@@ -462,6 +500,25 @@ public class LeatherworkerCraftingGoal extends Goal {
 
     private boolean isNear(BlockPos target) {
         return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    static boolean executeConfirmedCraft(
+            BooleanSupplier validCraftingTable,
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier consumedIngredients,
+            BooleanSupplier insertedCompleteOutput,
+            Runnable markInventoryDirty,
+            Runnable confirmedSuccess
+    ) {
+        if (!validCraftingTable.getAsBoolean()
+                || !hasOutputCapacity.getAsBoolean()
+                || !consumedIngredients.getAsBoolean()
+                || !insertedCompleteOutput.getAsBoolean()) {
+            return false;
+        }
+        markInventoryDirty.run();
+        confirmedSuccess.run();
+        return true;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {

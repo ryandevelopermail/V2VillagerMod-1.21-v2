@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ButcherWorkMetrics;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -11,6 +12,7 @@ import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoal.Recipe> {
@@ -38,7 +40,7 @@ public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoa
     protected List<Recipe> discoverRecipes(ServerWorld world, Inventory inventory) {
         List<Recipe> recipes = new ArrayList<>();
         for (Recipe recipe : Recipe.values()) {
-            if (hasIngredients(inventory, recipe.requirements)) {
+            if (hasIngredients(inventory, recipe)) {
                 recipes.add(recipe);
             }
         }
@@ -47,16 +49,19 @@ public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoa
 
     @Override
     protected boolean canStillCraftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
-        return hasIngredients(inventory, recipe.requirements);
+        return hasIngredients(inventory, recipe);
     }
 
     @Override
     protected boolean craftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
-        if (!consumeIngredients(inventory, recipe.requirements)) {
-            return false;
-        }
-        insertStack(inventory, recipe.output.copy());
-        return true;
+        return executeConfirmedSmokerCraft(
+                () -> canInsertOutput(inventory, recipe.output),
+                () -> consumeIngredients(inventory, recipe),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                () -> ButcherWorkMetrics.recordSmokersCrafted(
+                        world,
+                        villager.getUuid(),
+                        recipe.output.getCount()));
     }
 
     @Override
@@ -64,21 +69,28 @@ public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoa
         return recipe.output;
     }
 
-    private boolean hasIngredients(Inventory inventory, IngredientRequirement[] requirements) {
-        for (IngredientRequirement requirement : requirements) {
-            if (countMatching(inventory, requirement.matcher) < requirement.count) {
-                return false;
-            }
-        }
-        return true;
+    public int countCraftableSmokerRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return discoverRecipes(world, inventory).size();
     }
 
-    private boolean consumeIngredients(Inventory inventory, IngredientRequirement[] requirements) {
-        if (!hasIngredients(inventory, requirements)) {
+    private boolean hasIngredients(Inventory inventory, Recipe recipe) {
+        IngredientRequirement furnace = recipe.requirements[0];
+        IngredientRequirement logs = recipe.requirements[1];
+        return isConfiguredSmokerRecipeCraftable(
+                countMatching(inventory, furnace.matcher),
+                countMatching(inventory, logs.matcher));
+    }
+
+    static boolean isConfiguredSmokerRecipeCraftable(int furnaceCount, int burnableLogCount) {
+        return furnaceCount >= 1 && burnableLogCount >= 4;
+    }
+
+    private boolean consumeIngredients(Inventory inventory, Recipe recipe) {
+        if (!hasIngredients(inventory, recipe)) {
             return false;
         }
 
-        for (IngredientRequirement requirement : requirements) {
+        for (IngredientRequirement requirement : recipe.requirements) {
             int remaining = requirement.count;
             for (int slot = 0; slot < inventory.size(); slot++) {
                 if (remaining <= 0) {
@@ -97,6 +109,21 @@ public class ButcherCraftingGoal extends AbstractCraftingGoal<ButcherCraftingGoa
             }
         }
 
+        return true;
+    }
+
+    static boolean executeConfirmedSmokerCraft(
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier ingredientsConsumed,
+            BooleanSupplier completeOutputInserted,
+            Runnable confirmedSuccess
+    ) {
+        if (!hasOutputCapacity.getAsBoolean()
+                || !ingredientsConsumed.getAsBoolean()
+                || !completeOutputInserted.getAsBoolean()) {
+            return false;
+        }
+        confirmedSuccess.run();
         return true;
     }
 

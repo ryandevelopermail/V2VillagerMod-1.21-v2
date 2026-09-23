@@ -3,6 +3,7 @@ package dev.sterner.guardvillagers.common.villager.behavior;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.util.QuartermasterPrerequisiteHelper;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
@@ -237,6 +238,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         QUARTERMASTER_GOALS.put(villager, qmGoal);
         villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
         QuartermasterGoal.registerActiveQuartermaster(world, chestPos, villager.getUuid());
+        ProfessionalStorageRegistry.promoteQuartermaster(world, villager, jobPos, chestPos);
         LOGGER.info("Librarian {} promoted to Quartermaster (reason={}, chest={} second_chest={} job_site={})",
                 villager.getUuidAsString(),
                 reason,
@@ -248,6 +250,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private void demoteQuartermaster(ServerWorld world, VillagerEntity villager, String reason) {
         QuartermasterGoal qmGoal = QUARTERMASTER_GOALS.remove(villager);
         if (qmGoal == null) {
+            ProfessionalStorageRegistry.demoteQuartermaster(world, villager);
             return;
         }
         villager.goalSelector.remove(qmGoal);
@@ -261,6 +264,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         }
         PAIRED_CHEST_POS.remove(villager);
         LAST_QUARTERMASTER_PAIR.remove(villager);
+        ProfessionalStorageRegistry.demoteQuartermaster(world, villager);
         LOGGER.info("Librarian {} removed from Quartermaster role (reason={})",
                 villager.getUuidAsString(),
                 reason);

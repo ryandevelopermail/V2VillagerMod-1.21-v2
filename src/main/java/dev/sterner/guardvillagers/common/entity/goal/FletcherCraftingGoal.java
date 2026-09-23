@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.FletcherWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 public class FletcherCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -105,7 +107,7 @@ public class FletcherCraftingGoal extends Goal {
         if (inventory == null) {
             return false;
         }
-        List<FletcherRecipe> craftableRecipes = getCraftableRecipes(world, inventory);
+        List<FletcherRecipe> craftableRecipes = discoverCraftableRecipesReadOnly(world, inventory);
         lastCheckCount = craftableRecipes.size();
         CraftingCheckLogger.report(world, "Fletcher", immediateCheckPending ? "immediate request" : "natural interval", formatCheckResult(lastCheckCount));
         nextCheckTime = world.getTime() + CHECK_INTERVAL_TICKS;
@@ -201,52 +203,72 @@ public class FletcherCraftingGoal extends Goal {
 
         FletcherRecipe recipe = selectedRecipe;
         if (recipe == null) {
-            List<FletcherRecipe> craftable = getCraftableRecipes(world, inventory);
+            List<FletcherRecipe> craftable = discoverCraftableRecipesReadOnly(world, inventory);
             if (craftable.isEmpty()) {
                 return;
             }
             recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
         }
 
-        if (!hasCraftingTable(world)) {
-            return;
-        }
-
-        if (!canInsertOutput(inventory, recipe.output)) {
-            return;
-        }
-        if (consumeIngredients(inventory, recipe.recipe)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
-            craftedToday++;
-            CraftingCheckLogger.report(world, "Fletcher", formatCraftedResult(lastCheckCount, recipe.output));
-        }
+        FletcherRecipe confirmedRecipe = recipe;
+        executeConfirmedCraft(
+                () -> hasCraftingTable(world),
+                () -> canInsertOutput(inventory, confirmedRecipe.output),
+                () -> consumeIngredients(inventory, confirmedRecipe.recipe),
+                () -> insertStack(inventory, confirmedRecipe.output.copy()).isEmpty(),
+                () -> {
+                    FletcherWorkMetrics.recordGoodsCrafted(
+                            world,
+                            villager.getUuid(),
+                            confirmedRecipe.output.getCount());
+                    inventory.markDirty();
+                    craftedToday++;
+                    CraftingCheckLogger.report(
+                            world,
+                            "Fletcher",
+                            formatCraftedResult(lastCheckCount, confirmedRecipe.output));
+                });
     }
 
-    private List<FletcherRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {
+    public int countCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return discoverCraftableRecipesReadOnly(world, inventory).size();
+    }
+
+    private List<FletcherRecipe> discoverCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
         List<FletcherRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (!isFletcherOutput(result)) {
-                continue;
-            }
-            if (canCraft(inventory, recipe)) {
+            boolean supportedOutput = isFletcherOutput(result);
+            boolean ingredientsAvailable = supportedOutput && canCraft(inventory, recipe);
+            if (isCraftableRecipe(supportedOutput, ingredientsAvailable)) {
                 recipes.add(new FletcherRecipe(recipe, result));
             }
         }
         return recipes;
     }
 
-    private boolean isFletcherOutput(ItemStack stack) {
-        if (stack.isEmpty()) {
-            return false;
-        }
-        return stack.isOf(Items.BOW)
-                || stack.isOf(Items.CROSSBOW)
-                || stack.isOf(Items.ARROW)
-                || stack.isOf(Items.STICK)
-                || stack.isOf(Items.TARGET);
+    public static boolean isFletcherOutput(ItemStack stack) {
+        return !stack.isEmpty() && isFletcherOutputShape(
+                stack.isOf(Items.BOW),
+                stack.isOf(Items.CROSSBOW),
+                stack.isOf(Items.ARROW),
+                stack.isOf(Items.STICK),
+                stack.isOf(Items.TARGET));
+    }
+
+    static boolean isFletcherOutputShape(
+            boolean bow,
+            boolean crossbow,
+            boolean arrow,
+            boolean stick,
+            boolean target
+    ) {
+        return bow || crossbow || arrow || stick || target;
+    }
+
+    static boolean isCraftableRecipe(boolean supportedOutput, boolean ingredientsAvailable) {
+        return supportedOutput && ingredientsAvailable;
     }
 
     private boolean hasCraftingTable(ServerWorld world) {
@@ -347,6 +369,23 @@ public class FletcherCraftingGoal extends Goal {
 
     private boolean isNear(BlockPos target) {
         return villager.squaredDistanceTo(target.getX() + 0.5D, target.getY() + 0.5D, target.getZ() + 0.5D) <= TARGET_REACH_SQUARED;
+    }
+
+    static boolean executeConfirmedCraft(
+            BooleanSupplier validCraftingTable,
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier consumedIngredients,
+            BooleanSupplier insertedCompleteOutput,
+            Runnable confirmedCompletion
+    ) {
+        if (!validCraftingTable.getAsBoolean()
+                || !hasOutputCapacity.getAsBoolean()
+                || !consumedIngredients.getAsBoolean()
+                || !insertedCompleteOutput.getAsBoolean()) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
     }
 
     private ItemStack insertStack(Inventory inventory, ItemStack stack) {

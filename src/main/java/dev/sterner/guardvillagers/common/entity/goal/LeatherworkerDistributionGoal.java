@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.LeatherworkerWorkMetrics;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -22,6 +23,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class LeatherworkerDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerDistributionGoal.class);
@@ -34,18 +38,6 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
      * - Include leather and common leatherworker-crafted leather products.
      * - Include book-related products expected to be useful for librarians.
      */
-    private static final Set<Item> DISTRIBUTABLE_WHITELIST = Set.of(
-            Items.LEATHER,
-            Items.RABBIT_HIDE,
-            Items.SADDLE,
-            Items.ITEM_FRAME,
-            Items.GLOW_ITEM_FRAME,
-            Items.BOOK,
-            Items.WRITABLE_BOOK,
-            Items.WRITTEN_BOOK,
-            Items.ENCHANTED_BOOK
-    );
-
     private final Set<UUID> pendingRejectedRecipients = new HashSet<>();
 
     public LeatherworkerDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
@@ -54,13 +46,34 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        if (stack.isEmpty()) {
-            return false;
-        }
-        if (DISTRIBUTABLE_WHITELIST.contains(stack.getItem())) {
-            return true;
-        }
-        return stack.getItem() instanceof ArmorItem armorItem && armorItem.getMaterial() == ArmorMaterials.LEATHER;
+        return isSupportedDistributionGood(stack);
+    }
+
+    public static boolean isSupportedDistributionGood(ItemStack stack) {
+        boolean whitelisted = !stack.isEmpty() && DistributableWhitelist.ITEMS.contains(stack.getItem());
+        boolean leatherArmor = !stack.isEmpty()
+                && stack.getItem() instanceof ArmorItem armorItem
+                && armorItem.getMaterial() == ArmorMaterials.LEATHER;
+        return isSupportedDistributionShape(whitelisted, leatherArmor);
+    }
+
+    static boolean isSupportedDistributionShape(boolean whitelisted, boolean leatherArmor) {
+        return whitelisted || leatherArmor;
+    }
+
+    /** Defers Minecraft item-registry access until the real stack predicate is used. */
+    private static final class DistributableWhitelist {
+        private static final Set<Item> ITEMS = Set.of(
+                Items.LEATHER,
+                Items.RABBIT_HIDE,
+                Items.SADDLE,
+                Items.ITEM_FRAME,
+                Items.GLOW_ITEM_FRAME,
+                Items.BOOK,
+                Items.WRITABLE_BOOK,
+                Items.WRITTEN_BOOK,
+                Items.ENCHANTED_BOOK
+        );
     }
 
     @Override
@@ -102,6 +115,8 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             pendingItem = extracted;
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
+            pendingUniversalRoute = false;
+            pendingOverflowTransfer = false;
             pendingRejectedRecipients.clear();
             return true;
         }
@@ -163,6 +178,67 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
     }
 
     @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        if (route != TransferRoute.DIRECT || !isSupportedDistributionGood(transferred)) {
+            return;
+        }
+        boolean storageValid = getChestInventory(world, targetPos).isPresent();
+        boolean recipientValid = isValidCompletedRecipient(world, transferred, targetId, targetPos);
+        if (isConfirmedDirectDelivery(
+                route,
+                isSupportedDistributionGood(transferred),
+                recipientValid,
+                storageValid)) {
+            LeatherworkerWorkMetrics.recordGoodsDelivered(
+                    world,
+                    villager.getUuid(),
+                    transferred.getCount());
+        }
+    }
+
+    static boolean isConfirmedDirectDelivery(
+            TransferRoute route,
+            boolean supportedGood,
+            boolean recipientValid,
+            boolean storageValid
+    ) {
+        return route == TransferRoute.DIRECT && supportedGood && recipientValid && storageValid;
+    }
+
+    private boolean isValidCompletedRecipient(
+            ServerWorld world,
+            ItemStack transferred,
+            UUID targetId,
+            BlockPos targetPos
+    ) {
+        if (targetId == null) {
+            return false;
+        }
+        List<DistributionRecipientHelper.RecipientRecord> recipients;
+        if (isFrame(transferred)) {
+            recipients = java.util.stream.Stream.concat(
+                            DistributionRecipientHelper.findEligibleV2CartographerRecipients(
+                                    world, villager, RECIPIENT_SCAN_RANGE).stream(),
+                            DistributionRecipientHelper.findEligibleLibrarianRecipients(
+                                    world, villager, RECIPIENT_SCAN_RANGE).stream())
+                    .toList();
+        } else {
+            recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(
+                    world, villager, RECIPIENT_SCAN_RANGE);
+        }
+        return recipients.stream().anyMatch(recipient -> recipient.recipient() != null
+                && recipient.recipient().isAlive()
+                && recipient.recipient().getUuid().equals(targetId)
+                && recipient.chestPos().equals(targetPos));
+    }
+
+    @Override
     protected boolean matchesProfession(VillagerEntity villager) {
         return villager.getVillagerData().getProfession() == VillagerProfession.LEATHERWORKER;
     }
@@ -190,7 +266,7 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
         // Item frames go to v2 cartographers (for map display walls) first; librarians are an explicit fallback.
         // All other leatherworker items route to librarians only.
         List<DistributionRecipientHelper.RecipientRecord> candidates;
-        if (stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME)) {
+        if (isFrame(stack)) {
             List<DistributionRecipientHelper.RecipientRecord> allCartographers =
                     DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
             List<DistributionRecipientHelper.RecipientRecord> v2Cartographers =
@@ -215,6 +291,68 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
                 .toList();
     }
 
+    private static boolean isFrame(ItemStack stack) {
+        return stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME);
+    }
+
+    public static int countFrameDemandReadOnly(ServerWorld world, VillagerEntity source) {
+        List<DistributionRecipientHelper.RecipientRecord> allCartographers =
+                DistributionRecipientHelper.findEligibleCartographerRecipients(world, source, RECIPIENT_SCAN_RANGE);
+        Set<UUID> v2Ids = DistributionRecipientHelper.findEligibleV2CartographerRecipients(
+                        world, source, RECIPIENT_SCAN_RANGE).stream()
+                .filter(recipient -> recipient.recipient() != null)
+                .map(recipient -> recipient.recipient().getUuid())
+                .collect(Collectors.toSet());
+        List<FrameDemandView> views = allCartographers.stream()
+                .filter(recipient -> recipient.recipient() != null)
+                .map(recipient -> new FrameDemandView(
+                        recipient.recipient().getUuid(),
+                        v2Ids.contains(recipient.recipient().getUuid()),
+                        v2Ids.contains(recipient.recipient().getUuid())
+                                ? getChestInventoryReadOnly(world, recipient.chestPos())
+                                        .map(LeatherworkerDistributionGoal::countItemFrames)
+                                        .orElse(CartographerMapWallGoal.FRAMES_NEEDED)
+                                : 0))
+                .toList();
+        return countUniqueFrameDemand(views, CartographerMapWallGoal.FRAMES_NEEDED);
+    }
+
+    static int countUniqueFrameDemand(List<FrameDemandView> recipients, int framesNeeded) {
+        java.util.Map<UUID, Integer> framesByRecipient = new java.util.HashMap<>();
+        for (FrameDemandView recipient : recipients) {
+            if (recipient.eligibleV2()) {
+                framesByRecipient.merge(
+                        recipient.recipientId(),
+                        Math.max(0, recipient.itemFrames()),
+                        Math::max);
+            }
+        }
+        long total = 0L;
+        for (int frames : framesByRecipient.values()) {
+            total += Math.max(0, framesNeeded - frames);
+        }
+        return (int) Math.min(Integer.MAX_VALUE, total);
+    }
+
+    private static int countItemFrames(Inventory inventory) {
+        int total = 0;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.isOf(Items.ITEM_FRAME)) {
+                total += stack.getCount();
+            }
+        }
+        return total;
+    }
+
+    private static Optional<Inventory> getChestInventoryReadOnly(ServerWorld world, BlockPos position) {
+        BlockState state = world.getBlockState(position);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
+    }
+
     static List<DistributionRecipientHelper.RecipientRecord> resolveItemFrameRecipients(
             ItemStack stack,
             List<DistributionRecipientHelper.RecipientRecord> allCartographers,
@@ -226,23 +364,37 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
         if (!(stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME))) {
             return librarians;
         }
-
-        Set<UUID> v2CartographerIds = v2Cartographers.stream()
-                .map(LeatherworkerDistributionGoal::recipientId)
-                .collect(java.util.stream.Collectors.toSet());
-        for (DistributionRecipientHelper.RecipientRecord recipient : allCartographers) {
-            if (!v2CartographerIds.contains(recipientId(recipient))) {
-                logger.debug("Leatherworker {} rejected non-v2 cartographer recipient={} jobPos={} chestPos={} for stack={}",
+        return resolveItemFrameRecipients(
+                true,
+                allCartographers,
+                v2Cartographers,
+                librarians,
+                LeatherworkerDistributionGoal::recipientId,
+                recipient -> logger.debug(
+                        "Leatherworker {} rejected non-v2 cartographer recipient={} jobPos={} chestPos={} for stack={}",
                         leatherworkerId,
                         recipientId(recipient),
                         recipient.jobPos().toShortString(),
                         recipient.chestPos().toShortString(),
-                        stack.getItem().toString());
-            }
-        }
+                        stack.getItem().toString()));
+    }
 
-        return java.util.stream.Stream.concat(v2Cartographers.stream(), librarians.stream())
-                .toList();
+    static <T> List<T> resolveItemFrameRecipients(
+            boolean frame,
+            List<T> allCartographers,
+            List<T> v2Cartographers,
+            List<T> librarians,
+            Function<T, UUID> id,
+            Consumer<T> rejectedCartographer
+    ) {
+        if (!frame) {
+            return List.copyOf(librarians);
+        }
+        Set<UUID> v2Ids = v2Cartographers.stream().map(id).collect(Collectors.toSet());
+        allCartographers.stream()
+                .filter(recipient -> !v2Ids.contains(id.apply(recipient)))
+                .forEach(rejectedCartographer);
+        return java.util.stream.Stream.concat(v2Cartographers.stream(), librarians.stream()).toList();
     }
 
     private static UUID recipientId(DistributionRecipientHelper.RecipientRecord recipient) {
@@ -288,10 +440,9 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world, BlockPos position) {
-        BlockState state = world.getBlockState(position);
-        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
-            return Optional.empty();
-        }
-        return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, position, false));
+        return getChestInventoryReadOnly(world, position);
+    }
+
+    record FrameDemandView(UUID recipientId, boolean eligibleV2, int itemFrames) {
     }
 }

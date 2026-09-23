@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ClericWorkMetrics;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
@@ -17,6 +18,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClericDistributionGoal.class);
@@ -28,9 +30,17 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return stack.isOf(Items.POTION)
+        return isSupportedPotion(stack);
+    }
+
+    public static boolean isSupportedPotion(ItemStack stack) {
+        return !stack.isEmpty() && (stack.isOf(Items.POTION)
                 || stack.isOf(Items.SPLASH_POTION)
-                || stack.isOf(Items.LINGERING_POTION);
+                || stack.isOf(Items.LINGERING_POTION));
+    }
+
+    static boolean isSupportedPotionShape(boolean nonempty, boolean potionItem) {
+        return nonempty && potionItem;
     }
 
     @Override
@@ -172,6 +182,64 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
     protected void clearPendingTargetState() {
     }
 
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        boolean supported = isSupportedPotion(transferred);
+        boolean targetStorageValid = route == TransferRoute.DIRECT
+                && getChestInventoryAt(world, targetPos).isPresent();
+        boolean recipientValid = route == TransferRoute.DIRECT
+                && isValidCompletedLibrarian(world, targetId, targetPos);
+        boolean reserveValid = !isHealingSplashPotion(transferred)
+                || getChestInventoryAt(world, chestPos)
+                .map(inventory -> countHealingSplashPotions(inventory) >= 1L)
+                .orElse(false);
+        if (isConfirmedDirectLibrarianDelivery(
+                route,
+                supported,
+                recipientValid,
+                targetStorageValid,
+                reserveValid)) {
+            ClericWorkMetrics.recordPotionsDelivered(
+                    world,
+                    villager.getUuid(),
+                    transferred.getCount());
+        }
+    }
+
+    static boolean isConfirmedDirectLibrarianDelivery(
+            TransferRoute route,
+            boolean supportedPotion,
+            boolean recipientValid,
+            boolean targetStorageValid,
+            boolean reserveValid
+    ) {
+        return route == TransferRoute.DIRECT
+                && supportedPotion
+                && recipientValid
+                && targetStorageValid
+                && reserveValid;
+    }
+
+    private boolean isValidCompletedLibrarian(ServerWorld world, UUID targetId, BlockPos targetPos) {
+        if (targetId == null) {
+            return false;
+        }
+        return DistributionRecipientHelper.findEligibleLibrarianRecipientsForClerics(
+                        world,
+                        villager,
+                        RECIPIENT_SCAN_RANGE).stream()
+                .anyMatch(recipient -> recipient.recipient() != null
+                        && recipient.recipient().isAlive()
+                        && recipient.recipient().getUuid().equals(targetId)
+                        && recipient.chestPos().equals(targetPos));
+    }
+
     private boolean isTransferCandidate(Inventory inventory, int slot) {
         ItemStack stack = inventory.getStack(slot);
         if (!isDistributableItem(stack)) {
@@ -183,20 +251,51 @@ public class ClericDistributionGoal extends AbstractInventoryDistributionGoal {
         return countHealingSplashPotions(inventory) > 1;
     }
 
-    private int countHealingSplashPotions(Inventory inventory) {
-        int count = 0;
+    public static long countHealingSplashPotions(Inventory inventory) {
+        long count = 0L;
         for (int i = 0; i < inventory.size(); i++) {
             ItemStack stack = inventory.getStack(i);
             if (isHealingSplashPotion(stack)) {
-                count += stack.getCount();
+                count = saturatingAdd(count, stack.getCount());
             }
         }
         return count;
     }
 
-    private boolean isHealingSplashPotion(ItemStack stack) {
-        return stack.isOf(Items.SPLASH_POTION)
+    public static boolean isHealingSplashPotion(ItemStack stack) {
+        return !stack.isEmpty() && stack.isOf(Items.SPLASH_POTION)
                 && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
+    }
+
+    static boolean isHealingSplashPotionShape(boolean nonempty, boolean splashItem, boolean healingContents) {
+        return nonempty && splashItem && healingContents;
+    }
+
+    public static long countPotionsAwaitingDeliveryReadOnly(Inventory inventory) {
+        long otherPotions = 0L;
+        long healingSplash = 0L;
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!isSupportedPotion(stack)) {
+                continue;
+            }
+            if (isHealingSplashPotion(stack)) {
+                healingSplash = saturatingAdd(healingSplash, stack.getCount());
+            } else {
+                otherPotions = saturatingAdd(otherPotions, stack.getCount());
+            }
+        }
+        return countAwaitingPotionUnits(otherPotions, healingSplash);
+    }
+
+    public static long countAwaitingPotionUnits(long otherPotionUnits, long healingSplashUnits) {
+        long other = Math.max(0L, otherPotionUnits);
+        long healing = Math.max(0L, healingSplashUnits);
+        return saturatingAdd(other, Math.max(0L, healing - 1L));
+    }
+
+    private static long saturatingAdd(long current, long amount) {
+        return current >= Long.MAX_VALUE - amount ? Long.MAX_VALUE : current + amount;
     }
 
     @Override
