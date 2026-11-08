@@ -6,8 +6,11 @@ import dev.sterner.guardvillagers.client.model.GuardVillagerModel;
 import dev.sterner.guardvillagers.client.renderer.GuardRenderer;
 import dev.sterner.guardvillagers.client.screen.GuardVillagerScreen;
 import dev.sterner.guardvillagers.client.screen.developer.DeveloperPanelScreen;
+import dev.sterner.guardvillagers.client.professionalstorage.ProfessionalStorageSnapshotCache;
 import dev.sterner.guardvillagers.common.network.DeveloperSetupStatusPacket;
 import dev.sterner.guardvillagers.common.network.OpenDeveloperPanelPacket;
+import dev.sterner.guardvillagers.common.network.ProfessionalStorageSnapshotPacket;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.fabricmc.fabric.api.client.rendering.v1.EntityModelLayerRegistry;
@@ -36,6 +39,9 @@ public class GuardVillagersClient implements ClientModInitializer {
                         screen.onSetupStatus(payload.message(), payload.progressPercent(), payload.finished(), payload.success());
                     }
                 }));
+        ClientPlayNetworking.registerGlobalReceiver(ProfessionalStorageSnapshotPacket.ID, (payload, context) ->
+                context.client().execute(() -> ProfessionalStorageSnapshotCache.store(payload.snapshot())));
+        ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> ProfessionalStorageSnapshotCache.clear());
         HandledScreens.register(GUARD_SCREEN_HANDLER, GuardVillagerScreen::new);
         EntityModelLayerRegistry.registerModelLayer(GUARD, GuardVillagerModel::createBodyLayer);
         EntityModelLayerRegistry.registerModelLayer(GUARD_STEVE, GuardSteveModel::createMesh);

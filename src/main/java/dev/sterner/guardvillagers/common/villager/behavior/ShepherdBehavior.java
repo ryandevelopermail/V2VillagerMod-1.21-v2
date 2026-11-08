@@ -66,6 +66,18 @@ public class ShepherdBehavior implements VillagerProfessionBehavior {
         return craftingTablePaired ? FenceCraftingOwner.DEDICATED_FENCE_GOAL : FenceCraftingOwner.NONE;
     }
 
+    /** Returns an ingredient-based recipe count, or null when the goal is unavailable. */
+    public static Integer countRecipesReadOnly(ServerWorld world, VillagerEntity villager, Inventory inventory) {
+        ShepherdCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        return goal == null ? null : goal.countRecipesReadOnly(world, inventory);
+    }
+
+    /** Returns the installed goal's paired table without waking or changing the worker. */
+    public static BlockPos getCraftingTablePos(VillagerEntity villager) {
+        ShepherdCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        return goal == null ? null : goal.getCraftingTablePos();
+    }
+
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
         if (!villager.isAlive()) {

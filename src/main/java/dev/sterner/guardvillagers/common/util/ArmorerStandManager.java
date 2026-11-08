@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.util;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ArmorerWorkMetrics;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -11,6 +12,7 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.Comparator;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -107,8 +109,97 @@ public final class ArmorerStandManager {
         ItemStack toPlace = stack.copy();
         toPlace.setCount(1);
         stand.equipStack(slot, toPlace);
+        if (stand.getEquippedStack(slot).isEmpty()) {
+            return false;
+        }
         markSlotPlaced(villager, stand.getUuid(), slot);
+        return recordConfirmedPlacement(
+                true,
+                () -> ArmorerWorkMetrics.recordArmorEquipped(world, villager.getUuid()));
+    }
+
+    public static int countEligibleArmorSlotsReadOnly(
+            ServerWorld world,
+            VillagerEntity villager,
+            Collection<BlockPos> scanCenters
+    ) {
+        Map<UUID, ArmorStandEntity> uniqueStands = new HashMap<>();
+        for (BlockPos center : scanCenters) {
+            if (center == null) {
+                continue;
+            }
+            for (ArmorStandEntity stand : world.getEntitiesByClass(
+                    ArmorStandEntity.class,
+                    new Box(center).expand(STAND_SCAN_RANGE),
+                    ArmorStandEntity::isAlive)) {
+                uniqueStands.putIfAbsent(stand.getUuid(), stand);
+            }
+        }
+        Map<UUID, Integer> memoryMasks = copyStandMemoryMasks(getStandMemory(villager));
+        List<StandReadOnlyView> views = uniqueStands.values().stream()
+                .map(stand -> new StandReadOnlyView(
+                        stand.getUuid(),
+                        stand.isAlive(),
+                        memoryMasks.getOrDefault(stand.getUuid(), 0),
+                        equippedArmorMask(stand)))
+                .toList();
+        return countEligibleArmorSlots(views);
+    }
+
+    static Map<UUID, Integer> copyStandMemoryMasks(Map<UUID, StandProgress> memory) {
+        Map<UUID, Integer> copy = new HashMap<>();
+        memory.forEach((id, progress) -> copy.put(id, progress == null ? 0 : progress.getArmorMask()));
+        return Map.copyOf(copy);
+    }
+
+    static int countEligibleArmorSlots(List<StandReadOnlyView> stands) {
+        Map<UUID, Integer> blockedMasks = new HashMap<>();
+        Map<UUID, Boolean> aliveById = new HashMap<>();
+        for (StandReadOnlyView stand : stands) {
+            blockedMasks.merge(
+                    stand.standId(),
+                    (stand.persistedMask() | stand.equippedMask()) & ARMOR_MASK_COMPLETE,
+                    (left, right) -> left | right);
+            aliveById.merge(stand.standId(), stand.alive(), Boolean::logicalOr);
+        }
+        int total = 0;
+        for (Map.Entry<UUID, Integer> entry : blockedMasks.entrySet()) {
+            if (aliveById.getOrDefault(entry.getKey(), false)) {
+                total += 4 - Integer.bitCount(entry.getValue() & ARMOR_MASK_COMPLETE);
+            }
+        }
+        return total;
+    }
+
+    public static boolean recordConfirmedPlacement(boolean placed, Runnable confirmedSuccess) {
+        if (!placed) {
+            return false;
+        }
+        confirmedSuccess.run();
         return true;
+    }
+
+    private static int equippedArmorMask(ArmorStandEntity stand) {
+        int mask = 0;
+        for (EquipmentSlot slot : EquipmentSlot.values()) {
+            if (slot.isArmorSlot() && !stand.getEquippedStack(slot).isEmpty()) {
+                mask |= maskForArmorSlot(slot);
+            }
+        }
+        return mask;
+    }
+
+    private static int maskForArmorSlot(EquipmentSlot slot) {
+        return switch (slot) {
+            case HEAD -> 0b0001;
+            case CHEST -> 0b0010;
+            case LEGS -> 0b0100;
+            case FEET -> 0b1000;
+            default -> 0;
+        };
+    }
+
+    record StandReadOnlyView(UUID standId, boolean alive, int persistedMask, int equippedMask) {
     }
 
     public static Map<UUID, StandProgress> getStandMemory(VillagerEntity villager) {
@@ -142,13 +233,7 @@ public final class ArmorerStandManager {
         }
 
         private int maskForSlot(EquipmentSlot slot) {
-            return switch (slot) {
-                case HEAD -> 0b0001;
-                case CHEST -> 0b0010;
-                case LEGS -> 0b0100;
-                case FEET -> 0b1000;
-                default -> 0;
-            };
+            return maskForArmorSlot(slot);
         }
     }
 }

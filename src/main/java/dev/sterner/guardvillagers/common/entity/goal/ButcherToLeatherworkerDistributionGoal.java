@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ButcherWorkMetrics;
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -14,22 +15,34 @@ import net.minecraft.village.VillagerProfession;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 
 public class ButcherToLeatherworkerDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
-    private static final Set<Item> LEATHER_OUTPUTS = Set.of(
-            Items.LEATHER,
-            // Rabbit hide is a butcher byproduct and can be useful to leatherworker crafting chains.
-            Items.RABBIT_HIDE
-    );
-
     public ButcherToLeatherworkerDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
         super(villager, jobPos, chestPos, craftingTablePos);
     }
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return !stack.isEmpty() && LEATHER_OUTPUTS.contains(stack.getItem());
+        return isLeatherOrHide(stack);
+    }
+
+    public static boolean isLeatherOrHide(ItemStack stack) {
+        boolean nonempty = !stack.isEmpty();
+        return isLeatherOrHideShape(nonempty, nonempty && LeatherOutputs.ITEMS.contains(stack.getItem()));
+    }
+
+    static boolean isLeatherOrHideShape(boolean nonempty, boolean configuredOutput) {
+        return nonempty && configuredOutput;
+    }
+
+    /** Defers Minecraft item-registry access until the real predicate is used. */
+    private static final class LeatherOutputs {
+        private static final Set<Item> ITEMS = Set.of(
+                Items.LEATHER,
+                Items.RABBIT_HIDE
+        );
     }
 
     @Override
@@ -77,6 +90,8 @@ public class ButcherToLeatherworkerDistributionGoal extends AbstractInventoryDis
             pendingItem = extracted;
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
+            pendingUniversalRoute = false;
+            pendingOverflowTransfer = false;
             return true;
         }
 
@@ -138,6 +153,54 @@ public class ButcherToLeatherworkerDistributionGoal extends AbstractInventoryDis
 
     @Override
     protected void clearPendingTargetState() {
+    }
+
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        boolean supported = isLeatherOrHide(transferred);
+        boolean storageValid = route == TransferRoute.DIRECT
+                && getChestInventoryAt(world, targetPos).isPresent();
+        boolean recipientValid = route == TransferRoute.DIRECT
+                && isValidCompletedLeatherworker(world, targetId, targetPos);
+        if (isConfirmedDirectLeatherworkerDelivery(route, supported, recipientValid, storageValid)) {
+            ButcherWorkMetrics.recordLeatherHideDelivered(
+                    world,
+                    villager.getUuid(),
+                    transferred.getCount());
+        }
+    }
+
+    static boolean isConfirmedDirectLeatherworkerDelivery(
+            TransferRoute route,
+            boolean supportedOutput,
+            boolean recipientValid,
+            boolean storageValid
+    ) {
+        return route == TransferRoute.DIRECT && supportedOutput && recipientValid && storageValid;
+    }
+
+    private boolean isValidCompletedLeatherworker(
+            ServerWorld world,
+            UUID targetId,
+            BlockPos targetPos
+    ) {
+        if (targetId == null) {
+            return false;
+        }
+        return DistributionRecipientHelper.findEligibleLeatherworkerRecipients(
+                        world,
+                        villager,
+                        RECIPIENT_SCAN_RANGE).stream()
+                .anyMatch(recipient -> recipient.recipient() != null
+                        && recipient.recipient().isAlive()
+                        && recipient.recipient().getUuid().equals(targetId)
+                        && recipient.chestPos().equals(targetPos));
     }
 
     @Override

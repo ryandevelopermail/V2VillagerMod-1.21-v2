@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.FarmerWorkMetrics;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -11,6 +12,7 @@ import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public class FarmerCraftingGoal extends AbstractCraftingGoal<FarmerCraftingGoal.Recipe> {
@@ -76,16 +78,34 @@ public class FarmerCraftingGoal extends AbstractCraftingGoal<FarmerCraftingGoal.
 
     @Override
     protected boolean craftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
-        if (!consumeIngredients(inventory, recipe.requirements)) {
-            return false;
-        }
-        insertStack(inventory, recipe.output.copy());
-        return true;
+        ItemStack output = getRecipeOutput(recipe).copy();
+        return executeCraftTransaction(
+                () -> canInsertOutput(inventory, output),
+                () -> consumeIngredients(inventory, recipe.requirements),
+                () -> insertStack(inventory, output).isEmpty());
+    }
+
+    static boolean executeCraftTransaction(
+            BooleanSupplier hasCompleteOutputCapacity,
+            BooleanSupplier consumeIngredients,
+            BooleanSupplier insertCompleteOutput
+    ) {
+        return hasCompleteOutputCapacity.getAsBoolean()
+                && consumeIngredients.getAsBoolean()
+                && insertCompleteOutput.getAsBoolean();
     }
 
     @Override
     protected ItemStack getRecipeOutput(Recipe recipe) {
         return recipe.output;
+    }
+
+    @Override
+    protected void onCraftSucceeded(ServerWorld world, Recipe recipe) {
+        FarmerWorkMetrics.recordMaterialsCrafted(
+                world,
+                villager.getUuid(),
+                getRecipeOutput(recipe).getCount());
     }
 
     private boolean hasIngredients(Inventory inventory, IngredientRequirement[] requirements) {

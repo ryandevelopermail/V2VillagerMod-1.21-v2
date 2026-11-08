@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.CartographerWorkMetrics;
 import net.minecraft.block.BarrelBlock;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Cluster 6 — Cartographer Map Wall.
@@ -42,7 +44,7 @@ public class CartographerMapWallGoal extends Goal {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerMapWallGoal.class);
 
-    private static final int MAPS_NEEDED = 8;
+    public static final int MAPS_NEEDED = 8;
     public static final int FRAMES_NEEDED = 4;
     private static final int FRAMES_TO_PLACE = 4;
     private static final int SCAN_RADIUS = 20;
@@ -181,8 +183,7 @@ public class CartographerMapWallGoal extends Goal {
 
         ItemStack map = takeOne(inv, Items.FILLED_MAP);
         if (map.isEmpty()) {
-            // Return the frame we just took
-            insertStack(inv, frame);
+            preserveConsumedMaterial(inv, frame);
             LOGGER.debug("CartographerMapWall {}: no filled maps left", villager.getUuidAsString());
             stage = Stage.DONE;
             return;
@@ -192,13 +193,43 @@ public class CartographerMapWallGoal extends Goal {
         // Spawn item frame entity on the wall face
         ItemFrameEntity entity = new ItemFrameEntity(world, slot.wallBlock(), slot.facing());
         entity.setHeldItemStack(map, false);
-        world.spawnEntity(entity);
+        boolean placed = executeConfirmedMapDisplay(
+                false,
+                () -> world.spawnEntity(entity),
+                () -> {
+                    preserveConsumedMaterial(inv, map);
+                    preserveConsumedMaterial(inv, frame);
+                },
+                () -> CartographerWorkMetrics.recordMapsDisplayed(world, villager.getUuid(), 1L));
+        if (!placed) {
+            LOGGER.warn("CartographerMapWall {}: failed to spawn item frame at {}; materials preserved",
+                    villager.getUuidAsString(), slot.wallBlock().toShortString());
+            stage = Stage.DONE;
+            return;
+        }
 
         LOGGER.info("CartographerMapWall {}: placed item frame with map at {} facing {}",
                 villager.getUuidAsString(), slot.wallBlock().toShortString(), slot.facing());
 
         currentSlotIndex++;
         stage = Stage.MOVE_TO_FRAME;
+    }
+
+    static boolean executeConfirmedMapDisplay(
+            boolean existingFrame,
+            BooleanSupplier spawnAttempt,
+            Runnable preserveMaterials,
+            Runnable confirmedDisplay
+    ) {
+        if (existingFrame) {
+            return false;
+        }
+        if (!spawnAttempt.getAsBoolean()) {
+            preserveMaterials.run();
+            return false;
+        }
+        confirmedDisplay.run();
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -287,8 +318,29 @@ public class CartographerMapWallGoal extends Goal {
         Optional<Inventory> invOpt = getChestInventory(world);
         if (invOpt.isEmpty()) return false;
         Inventory inv = invOpt.get();
-        return countItem(inv, Items.FILLED_MAP) >= MAPS_NEEDED
-                && countItem(inv, Items.ITEM_FRAME) >= FRAMES_NEEDED;
+        return hasRequiredWallMaterials(
+                countItem(inv, Items.FILLED_MAP),
+                countItem(inv, Items.ITEM_FRAME));
+    }
+
+    public static boolean isWallMap(ItemStack stack) {
+        return !stack.isEmpty() && stack.isOf(Items.FILLED_MAP);
+    }
+
+    static boolean isWallMapShape(boolean nonempty, boolean filledMapItem) {
+        return nonempty && filledMapItem;
+    }
+
+    public static boolean isWallItemFrame(ItemStack stack) {
+        return !stack.isEmpty() && stack.isOf(Items.ITEM_FRAME);
+    }
+
+    static boolean isWallItemFrameShape(boolean nonempty, boolean ordinaryFrame, boolean glowFrame) {
+        return nonempty && ordinaryFrame && !glowFrame;
+    }
+
+    public static boolean hasRequiredWallMaterials(long filledMaps, long itemFrames) {
+        return filledMaps >= MAPS_NEEDED && itemFrames >= FRAMES_NEEDED;
     }
 
     private int countItem(Inventory inv, net.minecraft.item.Item item) {
@@ -312,14 +364,47 @@ public class CartographerMapWallGoal extends Goal {
         return ItemStack.EMPTY;
     }
 
-    private void insertStack(Inventory inv, ItemStack stack) {
+    private ItemStack insertStack(Inventory inv, ItemStack stack) {
+        ItemStack remaining = stack.copy();
         for (int i = 0; i < inv.size(); i++) {
-            if (inv.getStack(i).isEmpty()) {
-                inv.setStack(i, stack.copy());
-                inv.markDirty();
-                return;
+            if (remaining.isEmpty()) {
+                return ItemStack.EMPTY;
+            }
+            ItemStack existing = inv.getStack(i);
+            if (existing.isEmpty()) {
+                if (!inv.isValid(i, remaining)) {
+                    continue;
+                }
+                int moved = Math.min(remaining.getCount(), remaining.getMaxCount());
+                ItemStack inserted = remaining.copy();
+                inserted.setCount(moved);
+                inv.setStack(i, inserted);
+                remaining.decrement(moved);
+                continue;
+            }
+            if (!ItemStack.areItemsAndComponentsEqual(existing, remaining) || !inv.isValid(i, remaining)) {
+                continue;
+            }
+            int space = existing.getMaxCount() - existing.getCount();
+            if (space > 0) {
+                int moved = Math.min(space, remaining.getCount());
+                existing.increment(moved);
+                remaining.decrement(moved);
             }
         }
+        return remaining;
+    }
+
+    private void preserveConsumedMaterial(Inventory inventory, ItemStack material) {
+        ItemStack remaining = insertStack(inventory, material);
+        if (!remaining.isEmpty()) {
+            remaining = insertStack(villager.getInventory(), remaining);
+            villager.getInventory().markDirty();
+        }
+        if (!remaining.isEmpty()) {
+            villager.dropStack(remaining);
+        }
+        inventory.markDirty();
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {

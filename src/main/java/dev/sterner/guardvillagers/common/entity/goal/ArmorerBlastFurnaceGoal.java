@@ -1,9 +1,13 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ArmorerWorkMetrics;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.Optional;
+import java.util.function.IntConsumer;
+import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlastFurnaceBlockEntity;
@@ -56,6 +60,10 @@ public class ArmorerBlastFurnaceGoal extends Goal {
 
     public void requestImmediateCheck() {
         this.nextCheckTime = 0L;
+    }
+
+    public BlockPos getBlastFurnacePos() {
+        return jobPos;
     }
 
     @Override
@@ -193,24 +201,24 @@ public class ArmorerBlastFurnaceGoal extends Goal {
 
     private Optional<ItemStack> findBestOre(ServerWorld world, Inventory inventory) {
         return inventoryToStream(inventory)
-                .filter(stack -> isBlastable(world, stack))
+                .filter(stack -> isProcessableMaterial(world, stack))
                 .sorted(stackComparator(false))
                 .findFirst();
     }
 
     private Optional<ItemStack> findBestFuel(Inventory inventory) {
         return inventoryToStream(inventory)
-                .filter(this::isFuel)
+                .filter(ArmorerBlastFurnaceGoal::isFuelStack)
                 .sorted(stackComparator(true))
                 .findFirst();
     }
 
     private ItemStack extractBestOre(ServerWorld world, Inventory inventory) {
-        return extractBestStack(inventory, stack -> isBlastable(world, stack), false);
+        return extractBestStack(inventory, stack -> isProcessableMaterial(world, stack), false);
     }
 
     private ItemStack extractBestFuel(Inventory inventory) {
-        return extractBestStack(inventory, this::isFuel, true);
+        return extractBestStack(inventory, ArmorerBlastFurnaceGoal::isFuelStack, true);
     }
 
     private java.util.stream.Stream<ItemStack> inventoryToStream(Inventory inventory) {
@@ -262,19 +270,29 @@ public class ArmorerBlastFurnaceGoal extends Goal {
         return 3;
     }
 
-    private boolean isFuel(ItemStack stack) {
-        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
+    public static boolean isFuelStack(ItemStack stack) {
+        return isFuelShape(!stack.isEmpty() && AbstractFurnaceBlockEntity.canUseAsFuel(stack));
     }
 
-    private boolean isBlastable(ServerWorld world, ItemStack stack) {
+    static boolean isFuelShape(boolean acceptedByFurnace) {
+        return acceptedByFurnace;
+    }
+
+    public static boolean isProcessableMaterial(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
         if (stack.isIn(ORES_TAG)) {
-            return true;
+            return isProcessableShape(true, false);
         }
         SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
-        return world.getRecipeManager().getFirstMatch(RecipeType.BLASTING, input, world).isPresent();
+        return isProcessableShape(
+                false,
+                world.getRecipeManager().getFirstMatch(RecipeType.BLASTING, input, world).isPresent());
+    }
+
+    static boolean isProcessableShape(boolean configuredOre, boolean hasBlastingRecipe) {
+        return configuredOre || hasBlastingRecipe;
     }
 
     private ItemStack insertIntoFurnace(BlastFurnaceBlockEntity furnace, ItemStack stack, int slot) {
@@ -304,10 +322,84 @@ public class ArmorerBlastFurnaceGoal extends Goal {
             return;
         }
         ItemStack remaining = insertIntoInventory(chestInventory, output.copy());
+        recordMovedOutput(
+                output.getCount(),
+                remaining.getCount(),
+                moved -> ArmorerWorkMetrics.recordSmeltedOutputCollected(
+                        (ServerWorld) villager.getWorld(),
+                        villager.getUuid(),
+                        moved));
         if (remaining.isEmpty()) {
             furnace.setStack(2, ItemStack.EMPTY);
         } else if (remaining.getCount() != output.getCount()) {
             furnace.setStack(2, remaining);
+        }
+    }
+
+    static int recordMovedOutput(int originalCount, int remainingCount, IntConsumer confirmedTransfer) {
+        int moved = Math.max(0, originalCount - Math.max(0, remainingCount));
+        if (moved > 0) {
+            confirmedTransfer.accept(moved);
+        }
+        return moved;
+    }
+
+    public static FurnaceState inspectFurnaceStateReadOnly(ServerWorld world, BlockPos furnacePos) {
+        if (furnacePos == null
+                || !world.getBlockState(furnacePos).isOf(Blocks.BLAST_FURNACE)
+                || !(world.getBlockEntity(furnacePos) instanceof BlastFurnaceBlockEntity furnace)) {
+            return FurnaceState.MISSING;
+        }
+        BlockState state = world.getBlockState(furnacePos);
+        return classifyFurnaceState(
+                true,
+                !furnace.getStack(2).isEmpty(),
+                state.contains(AbstractFurnaceBlock.LIT) && state.get(AbstractFurnaceBlock.LIT),
+                !furnace.getStack(0).isEmpty(),
+                !furnace.getStack(1).isEmpty());
+    }
+
+    static FurnaceState classifyFurnaceState(
+            boolean furnacePresent,
+            boolean hasOutput,
+            boolean lit,
+            boolean hasInput,
+            boolean hasFuel
+    ) {
+        if (!furnacePresent) {
+            return FurnaceState.MISSING;
+        }
+        if (hasOutput) {
+            return FurnaceState.OUTPUT_READY;
+        }
+        if (lit) {
+            return FurnaceState.SMELTING;
+        }
+        if (hasInput && !hasFuel) {
+            return FurnaceState.NEEDS_FUEL;
+        }
+        if (hasInput) {
+            return FurnaceState.LOADED;
+        }
+        return FurnaceState.IDLE;
+    }
+
+    public enum FurnaceState {
+        MISSING("Missing"),
+        OUTPUT_READY("Output ready"),
+        SMELTING("Smelting"),
+        NEEDS_FUEL("Needs fuel"),
+        LOADED("Loaded"),
+        IDLE("Idle");
+
+        private final String displayName;
+
+        FurnaceState(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String displayName() {
+            return displayName;
         }
     }
 

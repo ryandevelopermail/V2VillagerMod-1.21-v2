@@ -1,80 +1,77 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
-import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.util.math.BlockPos;
 import org.junit.jupiter.api.Test;
-import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class LeatherworkerDistributionGoalRecipientResolutionTest {
+    private static final UUID NON_V2 = UUID.fromString("7a000000-0000-0000-0000-000000000001");
+    private static final UUID V2 = UUID.fromString("7a000000-0000-0000-0000-000000000002");
+    private static final UUID LIBRARIAN = UUID.fromString("7a000000-0000-0000-0000-000000000003");
 
     @Test
-    void resolveItemFrameRecipients_selectsV2CartographerChestFirst() {
-        DistributionRecipientHelper.RecipientRecord nonV2Cartographer =
-                recipient(new BlockPos(0, 64, 0), new BlockPos(1, 64, 1));
-        DistributionRecipientHelper.RecipientRecord v2Cartographer =
-                recipient(new BlockPos(10, 64, 10), new BlockPos(11, 64, 11));
-        DistributionRecipientHelper.RecipientRecord librarian =
-                recipient(new BlockPos(20, 64, 20), new BlockPos(21, 64, 21));
-
-        List<DistributionRecipientHelper.RecipientRecord> resolved = LeatherworkerDistributionGoal.resolveItemFrameRecipients(
-                new ItemStack(Items.ITEM_FRAME),
-                List.of(nonV2Cartographer, v2Cartographer),
-                List.of(v2Cartographer),
-                List.of(librarian),
-                LoggerFactory.getLogger(LeatherworkerDistributionGoalRecipientResolutionTest.class),
-                "test-leatherworker"
-        );
-
-        assertEquals(v2Cartographer.chestPos(), resolved.getFirst().chestPos());
+    void resolveItemFrameRecipients_selectsV2CartographerFirst() {
+        List<UUID> resolved = resolve(
+                List.of(NON_V2, V2),
+                List.of(V2),
+                List.of(LIBRARIAN),
+                new ArrayList<>());
+        assertEquals(List.of(V2, LIBRARIAN), resolved);
     }
 
     @Test
-    void resolveItemFrameRecipients_excludesNonV2Cartographers() {
-        DistributionRecipientHelper.RecipientRecord nonV2Cartographer =
-                recipient(new BlockPos(0, 64, 0), new BlockPos(1, 64, 1));
-        DistributionRecipientHelper.RecipientRecord v2Cartographer =
-                recipient(new BlockPos(10, 64, 10), new BlockPos(11, 64, 11));
-        DistributionRecipientHelper.RecipientRecord librarian =
-                recipient(new BlockPos(20, 64, 20), new BlockPos(21, 64, 21));
-
-        List<DistributionRecipientHelper.RecipientRecord> resolved = LeatherworkerDistributionGoal.resolveItemFrameRecipients(
-                new ItemStack(Items.ITEM_FRAME),
-                List.of(nonV2Cartographer, v2Cartographer),
-                List.of(v2Cartographer),
-                List.of(librarian),
-                LoggerFactory.getLogger(LeatherworkerDistributionGoalRecipientResolutionTest.class),
-                "test-leatherworker"
-        );
-
-        assertEquals(List.of(v2Cartographer.chestPos(), librarian.chestPos()), resolved.stream().map(DistributionRecipientHelper.RecipientRecord::chestPos).toList());
+    void resolveItemFrameRecipients_excludesAndReportsNonV2Cartographers() {
+        List<UUID> rejected = new ArrayList<>();
+        List<UUID> resolved = resolve(
+                List.of(NON_V2, V2),
+                List.of(V2),
+                List.of(LIBRARIAN),
+                rejected);
+        assertEquals(List.of(V2, LIBRARIAN), resolved);
+        assertEquals(List.of(NON_V2), rejected);
     }
 
     @Test
-    void resolveItemFrameRecipients_fallsBackToLibrariansWhenNoEligibleV2CartographerExists() {
-        DistributionRecipientHelper.RecipientRecord nonV2Cartographer =
-                recipient(new BlockPos(0, 64, 0), new BlockPos(1, 64, 1));
-        DistributionRecipientHelper.RecipientRecord librarian =
-                recipient(new BlockPos(20, 64, 20), new BlockPos(21, 64, 21));
-
-        List<DistributionRecipientHelper.RecipientRecord> resolved = LeatherworkerDistributionGoal.resolveItemFrameRecipients(
-                new ItemStack(Items.ITEM_FRAME),
-                List.of(nonV2Cartographer),
+    void resolveItemFrameRecipients_fallsBackToLibrariansWhenNoV2Exists() {
+        List<UUID> rejected = new ArrayList<>();
+        List<UUID> resolved = resolve(
+                List.of(NON_V2),
                 List.of(),
-                List.of(librarian),
-                LoggerFactory.getLogger(LeatherworkerDistributionGoalRecipientResolutionTest.class),
-                "test-leatherworker"
-        );
-
-        assertEquals(List.of(librarian.chestPos()), resolved.stream().map(DistributionRecipientHelper.RecipientRecord::chestPos).toList());
+                List.of(LIBRARIAN),
+                rejected);
+        assertEquals(List.of(LIBRARIAN), resolved);
+        assertEquals(List.of(NON_V2), rejected);
     }
 
-    private static DistributionRecipientHelper.RecipientRecord recipient(BlockPos jobPos, BlockPos chestPos) {
-        return new DistributionRecipientHelper.RecipientRecord(null, jobPos, chestPos, 0.0D);
+    @Test
+    void nonFrameGoodsUseLibrariansOnly() {
+        List<UUID> resolved = LeatherworkerDistributionGoal.resolveItemFrameRecipients(
+                false,
+                List.of(NON_V2, V2),
+                List.of(V2),
+                List.of(LIBRARIAN),
+                id -> id,
+                ignored -> {
+                });
+        assertEquals(List.of(LIBRARIAN), resolved);
+    }
+
+    private static List<UUID> resolve(
+            List<UUID> allCartographers,
+            List<UUID> v2Cartographers,
+            List<UUID> librarians,
+            List<UUID> rejected
+    ) {
+        return LeatherworkerDistributionGoal.resolveItemFrameRecipients(
+                true,
+                allCartographers,
+                v2Cartographers,
+                librarians,
+                id -> id,
+                rejected::add);
     }
 }

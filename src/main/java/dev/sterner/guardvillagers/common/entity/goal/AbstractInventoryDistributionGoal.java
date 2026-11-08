@@ -20,9 +20,13 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -42,6 +46,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
     protected long nextCheckTime;
     protected boolean immediateCheckPending;
     protected ItemStack pendingItem = ItemStack.EMPTY;
+    private ItemStack pendingTransferSnapshot = ItemStack.EMPTY;
     protected UUID pendingTargetId;
     protected BlockPos pendingTargetPos;
     protected @Nullable BlockPos currentNavigationTarget;
@@ -143,6 +148,7 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                         stage = Stage.DONE;
                         return;
                     }
+                    pendingTransferSnapshot = pendingItem.copy();
                     stage = Stage.GO_TO_TARGET;
                     moveTo(pendingTargetPos);
                 } else {
@@ -170,12 +176,22 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
                     stage = Stage.DONE;
                     return;
                 }
-                if (!refreshPendingTarget(world)) {
+                TransferAttemptOutcome outcome = attemptPendingTransfer(
+                        refreshPendingTarget(world),
+                        () -> executePendingTransfer(world),
+                        this::snapshotCompletedTransfer,
+                        completed -> onTransferCompleted(
+                                world,
+                                completed.stack(),
+                                completed.targetId(),
+                                completed.targetPos(),
+                                completed.route()));
+                if (outcome == TransferAttemptOutcome.TARGET_INVALID) {
                     returnPendingItem(world);
                     stage = Stage.DONE;
                     return;
                 }
-                if (executePendingTransfer(world)) {
+                if (outcome == TransferAttemptOutcome.COMPLETE) {
                     clearPendingState();
                     stage = Stage.DONE;
                     return;
@@ -310,11 +326,96 @@ public abstract class AbstractInventoryDistributionGoal extends Goal {
 
     protected void clearPendingState() {
         pendingItem = ItemStack.EMPTY;
+        pendingTransferSnapshot = ItemStack.EMPTY;
         pendingTargetId = null;
         pendingTargetPos = null;
         pendingUniversalRoute = false;
         pendingOverflowTransfer = false;
         clearPendingTargetState();
+    }
+
+    /** Called exactly once after a complete insertion and before pending state is cleared. */
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @Nullable UUID targetId,
+            BlockPos targetPos
+    ) {
+    }
+
+    /** Route-aware completion boundary; delegates to the original hook for compatible subclasses. */
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        onTransferCompleted(world, transferred, targetId, targetPos);
+    }
+
+    static <T> boolean notifyAfterComplete(
+            boolean complete,
+            Supplier<T> completedValue,
+            Consumer<T> completionHook
+    ) {
+        if (!complete) {
+            return false;
+        }
+        completionHook.accept(completedValue.get());
+        return true;
+    }
+
+    static <T> TransferAttemptOutcome attemptPendingTransfer(
+            boolean targetValid,
+            BooleanSupplier transferAttempt,
+            Supplier<T> completedValue,
+            Consumer<T> completionHook
+    ) {
+        if (!targetValid) {
+            return TransferAttemptOutcome.TARGET_INVALID;
+        }
+        return notifyAfterComplete(transferAttempt.getAsBoolean(), completedValue, completionHook)
+                ? TransferAttemptOutcome.COMPLETE
+                : TransferAttemptOutcome.INCOMPLETE;
+    }
+
+    private CompletedTransfer snapshotCompletedTransfer() {
+        ItemStack transferred = pendingTransferSnapshot.isEmpty()
+                ? pendingItem.copy()
+                : pendingTransferSnapshot.copy();
+        BlockPos completedTargetPos = Objects.requireNonNull(
+                pendingTargetPos,
+                "Successful transfer requires a target position").toImmutable();
+        TransferRoute route = classifyTransferRoute(pendingOverflowTransfer, pendingUniversalRoute);
+        return new CompletedTransfer(transferred, pendingTargetId, completedTargetPos, route);
+    }
+
+    static TransferRoute classifyTransferRoute(boolean overflow, boolean universal) {
+        if (overflow) {
+            return TransferRoute.OVERFLOW;
+        }
+        return universal ? TransferRoute.UNIVERSAL : TransferRoute.DIRECT;
+    }
+
+    private record CompletedTransfer(
+            ItemStack stack,
+            @Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+    }
+
+    enum TransferAttemptOutcome {
+        TARGET_INVALID,
+        INCOMPLETE,
+        COMPLETE
+    }
+
+    protected enum TransferRoute {
+        DIRECT,
+        UNIVERSAL,
+        OVERFLOW
     }
 
     protected boolean hasDistributableItem(Inventory inventory) {

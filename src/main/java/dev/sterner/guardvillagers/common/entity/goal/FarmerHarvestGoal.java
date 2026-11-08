@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.professionalstorage.FarmerWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
@@ -22,6 +24,7 @@ import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.village.VillagerProfession;
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -135,6 +138,8 @@ public class FarmerHarvestGoal extends Goal {
     // to avoid multiple expensive scans per tick (e.g. from ensureWheatSeedStartup + logSeedReserveStatus chains).
     private static final int COVERAGE_CACHE_TTL = 200;
     private FarmlandCoverageStats cachedCoverage = null;
+    /** Last completed normal-behavior scan, retained for UI reads after the short logic cache expires. */
+    private FarmlandCoverageStats lastKnownCoverage = null;
     private long coverageCacheTime = -1L;
     private long adaptiveThrottleUntilTick = 0L;
     private long adaptiveScanVolumeWindow = 0L;
@@ -234,6 +239,7 @@ public class FarmerHarvestGoal extends Goal {
         this.tinyTerritoryMatureDetectionStreak = 0;
         this.nextForcedTerritoryRescanTick = 0L;
         this.cachedCoverage = null;
+        this.lastKnownCoverage = null;
         this.coverageCacheTime = -1L;
         this.chestWakePending = false;
         this.startFollowingChestWake = false;
@@ -546,9 +552,17 @@ public class FarmerHarvestGoal extends Goal {
                 }
 
                 BlockState harvestedState = serverWorld.getBlockState(target);
-                serverWorld.breakBlock(target, true, villager);
-                attemptReplant(serverWorld, target, harvestedState);
-                collectNearbyDrops(serverWorld, target);
+                boolean harvested = serverWorld.breakBlock(target, true, villager);
+                FarmerWorkMetrics.recordConfirmed(
+                        serverWorld,
+                        villager.getUuid(),
+                        ProfessionalRoleId.fromVillagerProfession(VillagerProfession.FARMER),
+                        FarmerWorkMetrics.CROPS_HARVESTED,
+                        harvested);
+                if (harvested) {
+                    attemptReplant(serverWorld, target, harvestedState);
+                    collectNearbyDrops(serverWorld, target);
+                }
                 harvestTargets.removeFirst();
                 currentTarget = null;
             }
@@ -704,7 +718,15 @@ public class FarmerHarvestGoal extends Goal {
                     collectNearbyDrops(serverWorld, above);
                 }
 
-                serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
+                boolean wasFarmland = serverWorld.getBlockState(target).isOf(Blocks.FARMLAND);
+                boolean tilled = !wasFarmland
+                        && serverWorld.setBlockState(target, Blocks.FARMLAND.getDefaultState());
+                FarmerWorkMetrics.recordConfirmed(
+                        serverWorld,
+                        villager.getUuid(),
+                        ProfessionalRoleId.fromVillagerProfession(VillagerProfession.FARMER),
+                        FarmerWorkMetrics.GROUND_TILLED,
+                        tilled);
                 hoeTargets.removeFirst();
                 hoeTargetRetryAfterTick.remove(target);
                 currentHoeTarget = null;
@@ -751,11 +773,19 @@ public class FarmerHarvestGoal extends Goal {
                     if (cropBlock != null) {
                         BlockState plantedState = cropBlock.getDefaultState();
                         if (plantedState.canPlaceAt(serverWorld, above)) {
-                            if (consumeSeed(villager.getInventory(), seedItem)) {
-                                serverWorld.setBlockState(above, plantedState);
+                            boolean planted = serverWorld.setBlockState(above, plantedState);
+                            if (planted && consumeSeed(villager.getInventory(), seedItem)) {
+                                FarmerWorkMetrics.recordConfirmed(
+                                        serverWorld,
+                                        villager.getUuid(),
+                                        ProfessionalRoleId.fromVillagerProfession(VillagerProfession.FARMER),
+                                        FarmerWorkMetrics.CROPS_PLANTED,
+                                        true);
                                 if (prioritizeWheatSeedsForPlanting && seedItem == Items.WHEAT_SEEDS && !hasRequiredWheatSeedReserve(serverWorld)) {
                                     prioritizeWheatSeedsForPlanting = false;
                                 }
+                            } else if (planted) {
+                                serverWorld.removeBlock(above, false);
                             }
                         }
                     }
@@ -909,6 +939,34 @@ public class FarmerHarvestGoal extends Goal {
         setStage(startedStage());
     }
 
+    /** Read-only UI state. This method deliberately never refreshes farmland coverage. */
+    public FarmerLiveSnapshot getLiveSnapshot(ServerWorld world) {
+        FarmerCoverageSnapshot coverage = lastKnownCoverage == null
+                ? null
+                : new FarmerCoverageSnapshot(
+                        lastKnownCoverage.seededCells(),
+                        lastKnownCoverage.accessibleCells());
+        return new FarmerLiveSnapshot(
+                friendlyActivity(stage),
+                hasHoeInInventory() || hasHoeInChest(world),
+                coverage);
+    }
+
+    static FarmerActivity friendlyActivity(Stage stage) {
+        return switch (stage) {
+            case IDLE, DONE -> FarmerActivity.IDLE;
+            case GO_TO_JOB -> FarmerActivity.TRAVELING_TO_FARM;
+            case HARVEST -> FarmerActivity.HARVESTING;
+            case GO_TO_GATE, WALK_TO_BANNER, FEED_ANIMALS, OPEN_GATE_EXIT, EXIT_PEN, CLOSE_GATE_EXIT ->
+                    FarmerActivity.FEEDING_ANIMALS;
+            case RETURN_TO_CHEST, DEPOSIT, SEED_GATHER_END_RETURN_TO_CHEST, SEED_GATHER_END_DEPOSIT ->
+                    FarmerActivity.DEPOSITING;
+            case HOE_GROUND -> FarmerActivity.TILLING;
+            case GATHER_WHEAT_SEEDS -> FarmerActivity.GATHERING_SEEDS;
+            case PLANT_FARMLAND -> FarmerActivity.PLANTING;
+        };
+    }
+
     private String villagerDebugName() {
         return villager == null ? "unbound" : villager.getUuidAsString();
     }
@@ -1004,31 +1062,42 @@ public class FarmerHarvestGoal extends Goal {
         }
     }
 
-    private void attemptReplant(ServerWorld world, BlockPos pos, BlockState harvestedState) {
+    private boolean attemptReplant(ServerWorld world, BlockPos pos, BlockState harvestedState) {
         if (!(harvestedState.getBlock() instanceof CropBlock crop)) {
-            return;
+            return false;
         }
 
         if (!world.getBlockState(pos).isAir()) {
-            return;
+            return false;
         }
 
         Item seedItem = getSeedItem(crop);
         if (seedItem == null) {
-            return;
-        }
-
-        Inventory inventory = villager.getInventory();
-        if (!consumeSeed(inventory, seedItem) && !consumeSeedFromChest(world, seedItem)) {
-            return;
+            return false;
         }
 
         BlockState replantedState = crop.getDefaultState();
         if (!replantedState.canPlaceAt(world, pos)) {
-            return;
+            return false;
         }
-
-        world.setBlockState(pos, replantedState);
+        Inventory inventory = villager.getInventory();
+        if (!containsItem(inventory, seedItem) && !containsSeedInChest(world, seedItem)) {
+            return false;
+        }
+        if (!world.setBlockState(pos, replantedState)) {
+            return false;
+        }
+        if (!consumeSeed(inventory, seedItem) && !consumeSeedFromChest(world, seedItem)) {
+            world.removeBlock(pos, false);
+            return false;
+        }
+        FarmerWorkMetrics.recordConfirmed(
+                world,
+                villager.getUuid(),
+                ProfessionalRoleId.fromVillagerProfession(VillagerProfession.FARMER),
+                FarmerWorkMetrics.CROPS_PLANTED,
+                true);
+        return true;
     }
 
     private void collectNearbyDrops(ServerWorld world, BlockPos pos) {
@@ -1091,6 +1160,25 @@ public class FarmerHarvestGoal extends Goal {
             return false;
         }
         return consumeSeed(chestInventory, seedItem);
+    }
+
+    private boolean containsSeedInChest(ServerWorld world, Item seedItem) {
+        BlockState state = world.getBlockState(chestPos);
+        if (!(state.getBlock() instanceof ChestBlock chestBlock)) {
+            return false;
+        }
+        Inventory chestInventory = ChestBlock.getInventory(chestBlock, state, world, chestPos, false);
+        return chestInventory != null && containsItem(chestInventory, seedItem);
+    }
+
+    private static boolean containsItem(Inventory inventory, Item item) {
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void depositInventory(ServerWorld world) {
@@ -1397,6 +1485,42 @@ public class FarmerHarvestGoal extends Goal {
         DONE
     }
 
+    public enum FarmerActivity {
+        IDLE("Idle"),
+        TRAVELING_TO_FARM("Traveling to farm"),
+        HARVESTING("Harvesting"),
+        FEEDING_ANIMALS("Feeding animals"),
+        DEPOSITING("Depositing"),
+        TILLING("Tilling"),
+        GATHERING_SEEDS("Gathering seeds"),
+        PLANTING("Planting");
+
+        private final String displayName;
+
+        FarmerActivity(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String displayName() {
+            return displayName;
+        }
+    }
+
+    public record FarmerCoverageSnapshot(int seededCells, int accessibleCells) {
+        public FarmerCoverageSnapshot {
+            if (seededCells < 0 || accessibleCells < 0 || seededCells > accessibleCells) {
+                throw new IllegalArgumentException("Invalid Farmer coverage snapshot");
+            }
+        }
+    }
+
+    public record FarmerLiveSnapshot(
+            FarmerActivity activity,
+            boolean hoeAvailable,
+            FarmerCoverageSnapshot coverage
+    ) {
+    }
+
     private boolean prepareFeeding(ServerWorld world) {
         // Use VillagePenRegistry (geometry-based) instead of banner tracker.
         VillagePenRegistry.PenEntry pen = VillagePenRegistry.get(world.getServer())
@@ -1685,7 +1809,7 @@ public class FarmerHarvestGoal extends Goal {
 
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
-            if (stack.isEmpty() || !(stack.getItem() instanceof HoeItem)) {
+            if (!isUsableHoe(stack)) {
                 continue;
             }
             ItemStack remaining = insertStack(villager.getInventory(), stack);
@@ -1701,7 +1825,7 @@ public class FarmerHarvestGoal extends Goal {
         Inventory inventory = villager.getInventory();
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
+            if (isUsableHoe(stack)) {
                 return true;
             }
         }
@@ -1720,11 +1844,15 @@ public class FarmerHarvestGoal extends Goal {
 
         for (int slot = 0; slot < chestInventory.size(); slot++) {
             ItemStack stack = chestInventory.getStack(slot);
-            if (!stack.isEmpty() && stack.getItem() instanceof HoeItem) {
+            if (isUsableHoe(stack)) {
                 return true;
             }
         }
         return false;
+    }
+
+    public static boolean isUsableHoe(ItemStack stack) {
+        return !stack.isEmpty() && stack.getItem() instanceof HoeItem;
     }
 
     private boolean hasHoeableGroundInRange(ServerWorld world) {
@@ -1887,6 +2015,7 @@ public class FarmerHarvestGoal extends Goal {
             }
         }
         cachedCoverage = new FarmlandCoverageStats(accessible, seeded);
+        lastKnownCoverage = cachedCoverage;
         coverageCacheTime = now;
         return cachedCoverage;
     }

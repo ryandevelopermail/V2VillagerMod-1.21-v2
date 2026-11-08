@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import net.minecraft.block.BedBlock;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
@@ -369,6 +371,7 @@ public class ShepherdBedPlacerGoal extends Goal {
         boolean placedHead = world.setBlockState(headPos, bedHeadState, Block.NOTIFY_ALL);
 
         if (placedFoot && placedHead) {
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.BEDS_PLACED, 1);
             world.playSound(null, targetBedSite, SoundEvents.BLOCK_WOOL_PLACE, SoundCategory.BLOCKS, 1.0F, 1.0F);
             heldBed.decrement(1);
             if (heldBed.isEmpty()) {

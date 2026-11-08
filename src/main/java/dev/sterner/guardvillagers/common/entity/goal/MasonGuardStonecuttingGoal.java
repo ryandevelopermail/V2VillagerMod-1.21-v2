@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.WallProjectPolicyResolver;
@@ -148,6 +151,7 @@ public class MasonGuardStonecuttingGoal extends Goal {
                 if (consumeIngredient(inventory, recipe.recipe(), recipe.batchInputCount())
                         && insertOutputCount(inventory, recipe.output(), recipe.batchOutputCount())) {
                     this.lastCraftedOutputItem = recipe.output().getItem();
+                    RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD, RemainingProfessionWorkMetrics.MASON_CUT, recipe.batchOutputCount());
                     inventory.markDirty();
                 }
                 stage = Stage.DONE;

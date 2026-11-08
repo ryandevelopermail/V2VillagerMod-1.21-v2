@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ClericWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public class ClericCraftingGoal extends Goal {
@@ -151,6 +153,14 @@ public class ClericCraftingGoal extends Goal {
         return getCraftableRecipes(inventory).size();
     }
 
+    public BlockPos getCraftingTablePos() {
+        return craftingTablePos == null ? null : craftingTablePos.toImmutable();
+    }
+
+    public int countCraftableBrewingStandRecipesReadOnly(Inventory inventory) {
+        return inventory == null ? 0 : getCraftableRecipes(inventory).size();
+    }
+
     private void craftOnce(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
@@ -163,18 +173,39 @@ public class ClericCraftingGoal extends Goal {
         }
 
         Recipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
-        if (consumeIngredients(inventory, recipe.requirements)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
+        boolean crafted = executeConfirmedBrewingStandCraft(
+                () -> consumeIngredients(inventory, recipe.requirements),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                () -> ClericWorkMetrics.recordBrewingStandsCrafted(
+                        world,
+                        villager.getUuid(),
+                        recipe.output.getCount()));
+        inventory.markDirty();
+        if (crafted) {
             craftedToday++;
             CraftingCheckLogger.report(world, "Cleric", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
+    static boolean executeConfirmedBrewingStandCraft(
+            BooleanSupplier ingredientsConsumed,
+            BooleanSupplier completeOutputInserted,
+            Runnable confirmedSuccess
+    ) {
+        if (!ingredientsConsumed.getAsBoolean()
+                || !completeOutputInserted.getAsBoolean()) {
+            return false;
+        }
+        confirmedSuccess.run();
+        return true;
+    }
+
     private List<Recipe> getCraftableRecipes(Inventory inventory) {
         List<Recipe> recipes = new ArrayList<>();
         for (Recipe recipe : Recipe.values()) {
-            if (hasIngredients(inventory, recipe.requirements)) {
+            if (isConfiguredBrewingStandRecipeCraftable(
+                    countMatching(inventory, recipe.requirements[0].matcher),
+                    countMatching(inventory, recipe.requirements[1].matcher))) {
                 recipes.add(recipe);
             }
         }
@@ -188,6 +219,10 @@ public class ClericCraftingGoal extends Goal {
             }
         }
         return true;
+    }
+
+    static boolean isConfiguredBrewingStandRecipeCraftable(int blazeRodCount, int cobblestoneCount) {
+        return blazeRodCount >= 1 && cobblestoneCount >= 3;
     }
 
     private boolean consumeIngredients(Inventory inventory, IngredientRequirement[] requirements) {

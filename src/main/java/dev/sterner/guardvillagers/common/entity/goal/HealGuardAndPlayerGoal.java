@@ -1,10 +1,10 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ClericWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.behavior.ClericBehavior;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
-import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.PotionContentsComponent;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.ai.TargetPredicate;
@@ -19,6 +19,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.potion.Potions;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -27,8 +28,13 @@ import net.minecraft.world.World;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.UUID;
 
 public class HealGuardAndPlayerGoal extends Goal {
+    public static final double GUARD_SCAN_HORIZONTAL_RANGE = 14.0D;
+    public static final double GUARD_SCAN_VERTICAL_RANGE = 4.0D;
     private final MobEntity healer;
     private LivingEntity mob;
     private int rangedAttackTime = -1;
@@ -120,7 +126,8 @@ public class HealGuardAndPlayerGoal extends Goal {
     }
 
     public void throwPotion(LivingEntity target, float distanceFactor) {
-        if (!consumeHealingPotion()) {
+        boolean validTarget = isEligibleInjuredGuard(target);
+        if (!validTarget || !consumeHealingPotion()) {
             return;
         }
         Vec3d vec3d = target.getVelocity();
@@ -133,16 +140,35 @@ public class HealGuardAndPlayerGoal extends Goal {
         potionentity.setPitch(-20.0F);
         potionentity.setVelocity(d0, d1 + (double) (f * 0.2F), d2, 0.75F, 8.0F);
         healer.getWorld().playSound(null, healer.getX(), healer.getY(), healer.getZ(), SoundEvents.ENTITY_SPLASH_POTION_THROW, healer.getSoundCategory(), 1.0F, 0.8F + healer.getRandom().nextFloat() * 0.4F);
-        healer.getWorld().spawnEntity(potionentity);
+        boolean spawned = healer.getWorld().spawnEntity(potionentity);
+        recordConfirmedHealingThrow(
+                true,
+                validTarget,
+                spawned,
+                () -> {
+                    if (healer.getWorld() instanceof ServerWorld world) {
+                        ClericWorkMetrics.recordHealingPotionsThrown(world, healer.getUuid(), 1L);
+                    }
+                });
+    }
+
+
+    static boolean recordConfirmedHealingThrow(
+            boolean potionConsumed,
+            boolean validInjuredGuard,
+            boolean projectileSpawned,
+            Runnable confirmedSuccess
+    ) {
+        if (!potionConsumed || !validInjuredGuard || !projectileSpawned) {
+            return false;
+        }
+        confirmedSuccess.run();
+        return true;
     }
 
 
     private LivingEntity findLowestHealthGuardTarget() {
-        List<GuardEntity> guards = this.healer.getWorld().getEntitiesByClass(
-                GuardEntity.class,
-                this.healer.getBoundingBox().expand(14.0D, 4.0D, 14.0D),
-                guard -> guard.isAlive() && guard.getHealth() < guard.getMaxHealth()
-        );
+        List<GuardEntity> guards = findEligibleInjuredGuards(healer);
 
         if (guards.isEmpty()) {
             return null;
@@ -153,6 +179,32 @@ public class HealGuardAndPlayerGoal extends Goal {
                 .thenComparingDouble(this.healer::squaredDistanceTo));
 
         return guards.get(0);
+    }
+
+    public static int countEligibleInjuredGuardsReadOnly(MobEntity healer) {
+        Set<UUID> unique = new HashSet<>();
+        for (GuardEntity guard : findEligibleInjuredGuards(healer)) {
+            unique.add(guard.getUuid());
+        }
+        return unique.size();
+    }
+
+    private static List<GuardEntity> findEligibleInjuredGuards(MobEntity healer) {
+        return healer.getWorld().getEntitiesByClass(
+                GuardEntity.class,
+                healer.getBoundingBox().expand(
+                        GUARD_SCAN_HORIZONTAL_RANGE,
+                        GUARD_SCAN_VERTICAL_RANGE,
+                        GUARD_SCAN_HORIZONTAL_RANGE),
+                HealGuardAndPlayerGoal::isEligibleInjuredGuard);
+    }
+
+    public static boolean isEligibleInjuredGuard(LivingEntity entity) {
+        return entity instanceof GuardEntity && entity.isAlive() && entity.getHealth() < entity.getMaxHealth();
+    }
+
+    static boolean isEligibleInjuredGuardShape(boolean guard, boolean alive, float health, float maxHealth) {
+        return guard && alive && health < maxHealth;
     }
 
     private boolean hasHealingPotionAvailable() {
@@ -201,9 +253,24 @@ public class HealGuardAndPlayerGoal extends Goal {
         return null;
     }
 
-    private boolean isHealingSplashPotion(ItemStack stack) {
-        return !stack.isEmpty() && stack.isOf(Items.SPLASH_POTION)
-                && stack.getOrDefault(DataComponentTypes.POTION_CONTENTS, PotionContentsComponent.DEFAULT).matches(Potions.HEALING);
+    public static boolean isHealingSplashPotion(ItemStack stack) {
+        return ClericDistributionGoal.isHealingSplashPotion(stack);
+    }
+
+    public static long countHealingPotionsReadOnly(Inventory inventory) {
+        long count = 0L;
+        if (inventory == null) {
+            return count;
+        }
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (isHealingSplashPotion(stack)) {
+                count = count >= Long.MAX_VALUE - stack.getCount()
+                        ? Long.MAX_VALUE
+                        : count + stack.getCount();
+            }
+        }
+        return count;
     }
 
     private Inventory getPairedChestInventory(VillagerEntity villager) {

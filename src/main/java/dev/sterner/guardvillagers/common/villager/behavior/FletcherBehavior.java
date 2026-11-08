@@ -6,6 +6,7 @@ import dev.sterner.guardvillagers.common.entity.goal.FletcherFletchingTableGoal;
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -19,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 
 public class FletcherBehavior implements VillagerProfessionBehavior {
@@ -30,6 +32,30 @@ public class FletcherBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, FletcherDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, FletcherFletchingTableGoal> FLETCHING_TABLE_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+
+    /** Immutable, read-only state used by the open-time professional-storage snapshot. */
+    public static Optional<FletcherLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        FletcherCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        BlockPos tablePos = goal == null ? null : goal.getCraftingTablePos();
+        boolean tableReady = tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        int craftableOutputs = tableReady && goal != null
+                ? goal.countCraftableRecipesReadOnly(world, storageInventory)
+                : 0;
+        return Optional.of(new FletcherLiveSnapshot(tableReady, craftableOutputs));
+    }
+
+    public record FletcherLiveSnapshot(boolean craftingTableReady, int craftableOutputs) {
+        public FletcherLiveSnapshot {
+            craftableOutputs = Math.max(0, craftableOutputs);
+        }
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {

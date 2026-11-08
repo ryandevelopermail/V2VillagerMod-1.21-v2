@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.WeaponsmithWorkMetrics;
 import dev.sterner.guardvillagers.common.util.WeaponsmithCraftingMemoryHolder;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -26,6 +27,7 @@ import net.minecraft.village.VillagerProfession;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 public class WeaponsmithCraftingGoal extends AbstractCraftingGoal<WeaponsmithCraftingGoal.WeaponRecipe> {
 
@@ -50,18 +52,25 @@ public class WeaponsmithCraftingGoal extends AbstractCraftingGoal<WeaponsmithCra
 
     @Override
     protected List<WeaponRecipe> discoverRecipes(ServerWorld world, Inventory inventory) {
+        return filterLastCrafted(discoverCraftableRecipesReadOnly(world, inventory));
+    }
+
+    public int countCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return discoverCraftableRecipesReadOnly(world, inventory).size();
+    }
+
+    private List<WeaponRecipe> discoverCraftableRecipesReadOnly(ServerWorld world, Inventory inventory) {
         List<WeaponRecipe> recipes = new ArrayList<>();
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (result.isEmpty() || !isWeaponItem(result)) {
-                continue;
-            }
-            if (canCraft(inventory, recipe)) {
+            boolean supportedOutput = !result.isEmpty() && isCraftedWeapon(result);
+            boolean ingredientsAvailable = supportedOutput && canCraft(inventory, recipe);
+            if (isRecipeAvailable(supportedOutput, ingredientsAvailable)) {
                 recipes.add(new WeaponRecipe(recipe, result));
             }
         }
-        return filterLastCrafted(recipes);
+        return recipes;
     }
 
     @Override
@@ -71,19 +80,20 @@ public class WeaponsmithCraftingGoal extends AbstractCraftingGoal<WeaponsmithCra
 
     @Override
     protected boolean craftRecipe(ServerWorld world, Inventory inventory, WeaponRecipe recipe) {
-        if (!canInsertOutput(inventory, recipe.output)) {
-            return false;
-        }
-        if (!consumeIngredients(inventory, recipe.recipe)) {
-            return false;
-        }
-        insertStack(inventory, recipe.output.copy());
-        return true;
+        return executeConfirmedCraft(
+                () -> canInsertOutput(inventory, recipe.output),
+                () -> consumeIngredients(inventory, recipe.recipe),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty());
     }
 
     @Override
     protected void onCraftSucceeded(ServerWorld world, WeaponRecipe recipe) {
-        recordLastCrafted(recipe.output);
+        runConfirmedCraftEffects(
+                () -> recordLastCrafted(recipe.output),
+                () -> WeaponsmithWorkMetrics.recordWeaponsCrafted(
+                        world,
+                        villager.getUuid(),
+                        recipe.output.getCount()));
     }
 
     @Override
@@ -91,23 +101,55 @@ public class WeaponsmithCraftingGoal extends AbstractCraftingGoal<WeaponsmithCra
         return recipe.output;
     }
 
-    private boolean isWeaponItem(ItemStack stack) {
-        if (stack.getItem() instanceof SwordItem
-                || stack.getItem() instanceof AxeItem
-                || stack.getItem() instanceof BowItem
-                || stack.getItem() instanceof CrossbowItem
-                || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof MaceItem) {
+    public static boolean isCraftedWeapon(ItemStack stack) {
+        return isCraftedWeaponShape(
+                stack.getItem() instanceof SwordItem,
+                stack.getItem() instanceof AxeItem,
+                stack.getItem() instanceof BowItem,
+                stack.getItem() instanceof CrossbowItem,
+                stack.getItem() instanceof TridentItem,
+                stack.getItem() instanceof MaceItem,
+                stack.getItem() instanceof ToolItem,
+                stack.getItem() instanceof PickaxeItem,
+                stack.getItem() instanceof ShovelItem,
+                stack.getItem() instanceof HoeItem);
+    }
+
+    static boolean isCraftedWeaponShape(
+            boolean sword,
+            boolean axe,
+            boolean bow,
+            boolean crossbow,
+            boolean trident,
+            boolean mace,
+            boolean tool,
+            boolean pickaxe,
+            boolean shovel,
+            boolean hoe
+    ) {
+        if (sword || axe || bow || crossbow || trident || mace) {
             return true;
         }
+        return tool && !pickaxe && !shovel && !hoe;
+    }
 
-        if (stack.getItem() instanceof ToolItem) {
-            return !(stack.getItem() instanceof PickaxeItem
-                    || stack.getItem() instanceof ShovelItem
-                    || stack.getItem() instanceof HoeItem);
-        }
+    static boolean isRecipeAvailable(boolean supportedOutput, boolean ingredientsAvailable) {
+        return supportedOutput && ingredientsAvailable;
+    }
 
-        return false;
+    static boolean executeConfirmedCraft(
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier consumedIngredients,
+            BooleanSupplier insertedCompleteOutput
+    ) {
+        return hasOutputCapacity.getAsBoolean()
+                && consumedIngredients.getAsBoolean()
+                && insertedCompleteOutput.getAsBoolean();
+    }
+
+    static void runConfirmedCraftEffects(Runnable lastCraftedMemory, Runnable metricWrite) {
+        lastCraftedMemory.run();
+        metricWrite.run();
     }
 
     private List<WeaponRecipe> filterLastCrafted(List<WeaponRecipe> recipes) {

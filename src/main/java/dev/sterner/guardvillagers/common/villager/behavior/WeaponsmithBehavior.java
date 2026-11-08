@@ -4,7 +4,9 @@ import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.WeaponsmithRepairGoal;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import net.minecraft.block.Blocks;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -12,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 
 public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
@@ -29,6 +32,29 @@ public class WeaponsmithBehavior extends AbstractPairedProfessionBehavior {
     /** Returns all currently-paired weaponsmith chest positions (for QM plank delivery). */
     public static java.util.Collection<BlockPos> getPairedChestPositions() {
         return PAIRED_CHESTS.values();
+    }
+
+    public static Optional<WeaponsmithLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        WeaponsmithCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        BlockPos tablePos = goal == null ? null : goal.getCraftingTablePos();
+        boolean tableReady = tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        int craftableWeapons = tableReady && goal != null
+                ? goal.countCraftableRecipesReadOnly(world, storageInventory)
+                : 0;
+        return Optional.of(new WeaponsmithLiveSnapshot(tableReady, craftableWeapons));
+    }
+
+    public record WeaponsmithLiveSnapshot(boolean craftingTableReady, int craftableWeapons) {
+        public WeaponsmithLiveSnapshot {
+            craftableWeapons = Math.max(0, craftableWeapons);
+        }
     }
 
     @Override

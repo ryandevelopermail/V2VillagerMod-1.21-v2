@@ -1,6 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.FletcherWorkMetrics;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -14,8 +16,11 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Countdown-based goal that lets a Fletcher use their fletching-table job block
@@ -34,7 +39,7 @@ public class FletcherFletchingTableGoal extends Goal {
     private static final int COUNTDOWN_MIN_TICKS = 600;
     private static final int COUNTDOWN_MAX_TICKS = 1200;
     // How many arrows one craft yields (matches vanilla 1 flint + 1 stick + 1 feather → 4 arrows)
-    private static final int ARROWS_PER_CRAFT = 4;
+    static final int ARROWS_PER_CRAFT = 4;
     // Maximum arrow batches per day
     private static final int MAX_CRAFTS_PER_DAY = 6;
     private static final double MOVE_SPEED = 0.6D;
@@ -85,6 +90,9 @@ public class FletcherFletchingTableGoal extends Goal {
             return false;
         }
         if (jobPos == null || chestPos == null) {
+            return false;
+        }
+        if (!isFletchingTableValid(world)) {
             return false;
         }
 
@@ -165,24 +173,28 @@ public class FletcherFletchingTableGoal extends Goal {
         if (inventory == null) {
             return;
         }
-        if (!consumeArrowIngredients(inventory)) {
-            LOGGER.debug("Fletcher {} fletching-table craft failed: missing materials at execution time",
-                    villager.getUuidAsString());
-            return;
-        }
-
         ItemStack arrows = new ItemStack(Items.ARROW, ARROWS_PER_CRAFT);
-        insertStack(inventory, arrows);
-        inventory.markDirty();
-        craftsToday++;
+        executeConfirmedBatch(
+                () -> isFletchingTableValid(world),
+                () -> isArrowBatchReady(inventory),
+                () -> consumeArrowIngredients(inventory),
+                () -> insertStack(inventory, arrows).isEmpty(),
+                () -> {
+                    FletcherWorkMetrics.recordGoodsCrafted(world, villager.getUuid(), ARROWS_PER_CRAFT);
+                    inventory.markDirty();
+                    craftsToday++;
 
-        // Reset countdown for next batch
-        int delay = COUNTDOWN_MIN_TICKS
-                + villager.getRandom().nextInt(COUNTDOWN_MAX_TICKS - COUNTDOWN_MIN_TICKS + 1);
-        countdownEndTick = world.getTime() + delay;
+                    int delay = COUNTDOWN_MIN_TICKS
+                            + villager.getRandom().nextInt(COUNTDOWN_MAX_TICKS - COUNTDOWN_MIN_TICKS + 1);
+                    countdownEndTick = world.getTime() + delay;
+                    LOGGER.info(
+                            "Fletcher {} crafted {}x arrow at fletching table (craftsToday={}/{}); next countdown in {} ticks",
+                            villager.getUuidAsString(), ARROWS_PER_CRAFT, craftsToday, MAX_CRAFTS_PER_DAY, delay);
+                });
+    }
 
-        LOGGER.info("Fletcher {} crafted {}x arrow at fletching table (craftsToday={}/{}); next countdown in {} ticks",
-                villager.getUuidAsString(), ARROWS_PER_CRAFT, craftsToday, MAX_CRAFTS_PER_DAY, delay);
+    private boolean isFletchingTableValid(ServerWorld world) {
+        return jobPos != null && world.getBlockState(jobPos).isOf(Blocks.FLETCHING_TABLE);
     }
 
     private boolean hasArrowMaterials(ServerWorld world) {
@@ -257,7 +269,90 @@ public class FletcherFletchingTableGoal extends Goal {
         return Optional.ofNullable(ChestBlock.getInventory(chestBlock, state, world, chestPos, false));
     }
 
-    private void insertStack(Inventory inventory, ItemStack stack) {
+    public static boolean isArrowBatchReady(Inventory inventory) {
+        ItemStack arrows = new ItemStack(Items.ARROW, ARROWS_PER_CRAFT);
+        List<ArrowBatchSlotView> slots = new ArrayList<>(inventory.size());
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            boolean acceptsArrows = inventory.isValid(slot, arrows);
+            int emptyCapacity = acceptsArrows ? arrows.getMaxCount() : 0;
+            int mergeCapacity = acceptsArrows && ItemStack.areItemsAndComponentsEqual(stack, arrows)
+                    ? Math.max(0, stack.getMaxCount() - stack.getCount())
+                    : 0;
+            slots.add(new ArrowBatchSlotView(
+                    classifyBatchItem(stack),
+                    stack.getCount(),
+                    emptyCapacity,
+                    mergeCapacity));
+        }
+        return isArrowBatchReady(slots);
+    }
+
+    static boolean isArrowBatchReady(List<ArrowBatchSlotView> slots) {
+        List<MutableArrowBatchSlot> simulated = slots.stream()
+                .map(MutableArrowBatchSlot::new)
+                .toList();
+        if (!consumeOne(simulated, ArrowBatchItem.FLINT)
+                || !consumeOne(simulated, ArrowBatchItem.STICK)
+                || !consumeOne(simulated, ArrowBatchItem.FEATHER)) {
+            return false;
+        }
+
+        int remaining = ARROWS_PER_CRAFT;
+        for (MutableArrowBatchSlot slot : simulated) {
+            if (remaining == 0) {
+                return true;
+            }
+            int capacity = slot.count == 0 ? slot.emptyArrowCapacity : slot.arrowMergeCapacity;
+            remaining -= Math.min(remaining, Math.max(0, capacity));
+        }
+        return remaining == 0;
+    }
+
+    private static boolean consumeOne(List<MutableArrowBatchSlot> slots, ArrowBatchItem item) {
+        for (MutableArrowBatchSlot slot : slots) {
+            if (slot.item == item && slot.count > 0) {
+                slot.count--;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ArrowBatchItem classifyBatchItem(ItemStack stack) {
+        if (stack.isOf(Items.FLINT)) {
+            return ArrowBatchItem.FLINT;
+        }
+        if (stack.isOf(Items.STICK)) {
+            return ArrowBatchItem.STICK;
+        }
+        if (stack.isOf(Items.FEATHER)) {
+            return ArrowBatchItem.FEATHER;
+        }
+        if (stack.isOf(Items.ARROW)) {
+            return ArrowBatchItem.ARROW;
+        }
+        return stack.isEmpty() ? ArrowBatchItem.EMPTY : ArrowBatchItem.OTHER;
+    }
+
+    static boolean executeConfirmedBatch(
+            BooleanSupplier validFletchingTable,
+            BooleanSupplier hasOutputCapacity,
+            BooleanSupplier consumedIngredients,
+            BooleanSupplier insertedCompleteOutput,
+            Runnable confirmedCompletion
+    ) {
+        if (!validFletchingTable.getAsBoolean()
+                || !hasOutputCapacity.getAsBoolean()
+                || !consumedIngredients.getAsBoolean()
+                || !insertedCompleteOutput.getAsBoolean()) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
+    }
+
+    private ItemStack insertStack(Inventory inventory, ItemStack stack) {
         ItemStack remaining = stack.copy();
         for (int slot = 0; slot < inventory.size() && !remaining.isEmpty(); slot++) {
             ItemStack existing = inventory.getStack(slot);
@@ -277,6 +372,7 @@ public class FletcherFletchingTableGoal extends Goal {
                 }
             }
         }
+        return remaining;
     }
 
     private void moveTo(BlockPos target) {
@@ -301,5 +397,36 @@ public class FletcherFletchingTableGoal extends Goal {
         GO_TO_TABLE,
         CRAFT,
         DONE
+    }
+
+    enum ArrowBatchItem {
+        EMPTY,
+        FLINT,
+        STICK,
+        FEATHER,
+        ARROW,
+        OTHER
+    }
+
+    record ArrowBatchSlotView(
+            ArrowBatchItem item,
+            int count,
+            int emptyArrowCapacity,
+            int arrowMergeCapacity
+    ) {
+    }
+
+    private static final class MutableArrowBatchSlot {
+        private final ArrowBatchItem item;
+        private final int emptyArrowCapacity;
+        private final int arrowMergeCapacity;
+        private int count;
+
+        private MutableArrowBatchSlot(ArrowBatchSlotView view) {
+            item = view.item();
+            count = Math.max(0, view.count());
+            emptyArrowCapacity = Math.max(0, view.emptyArrowCapacity());
+            arrowMergeCapacity = Math.max(0, view.arrowMergeCapacity());
+        }
     }
 }

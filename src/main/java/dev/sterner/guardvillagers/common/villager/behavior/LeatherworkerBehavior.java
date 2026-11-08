@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.goal.LeatherworkerDistributionGo
 import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -18,6 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 
 public class LeatherworkerBehavior implements VillagerProfessionBehavior {
@@ -27,6 +29,36 @@ public class LeatherworkerBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, LeatherworkerCraftingGoal> CRAFTING_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LeatherworkerDistributionGoal> DISTRIBUTION_GOALS = new WeakHashMap<>();
     private static final Map<VillagerEntity, ChestListener> CHEST_LISTENERS = new WeakHashMap<>();
+
+    /** Immutable, read-only state used by the open-time professional-storage snapshot. */
+    public static Optional<LeatherworkerLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        LeatherworkerCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        BlockPos tablePos = goal == null ? null : goal.getCraftingTablePos();
+        boolean tableReady = tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        int craftableRecipes = tableReady && goal != null
+                ? goal.countCraftableRecipesReadOnly(world, storageInventory)
+                : 0;
+        int frameDemand = LeatherworkerDistributionGoal.countFrameDemandReadOnly(world, villager);
+        return Optional.of(new LeatherworkerLiveSnapshot(tableReady, craftableRecipes, frameDemand));
+    }
+
+    public record LeatherworkerLiveSnapshot(
+            boolean craftingTableReady,
+            int craftableRecipes,
+            int frameDemand
+    ) {
+        public LeatherworkerLiveSnapshot {
+            craftableRecipes = Math.max(0, craftableRecipes);
+            frameDemand = Math.max(0, frameDemand);
+        }
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {

@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.ToolsmithDemandPlanner;
+import dev.sterner.guardvillagers.common.professionalstorage.ToolsmithWorkMetrics;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.PairedStorageHelper;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(ToolsmithDistributionGoal.class);
@@ -360,6 +362,18 @@ public class ToolsmithDistributionGoal extends AbstractInventoryDistributionGoal
 
         pendingItem = remaining;
         return false;
+    }
+
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos
+    ) {
+        if (isDistributableItem(transferred)) {
+            ToolsmithWorkMetrics.recordToolsDistributed(world, villager.getUuid(), transferred.getCount());
+        }
     }
 
     @Override

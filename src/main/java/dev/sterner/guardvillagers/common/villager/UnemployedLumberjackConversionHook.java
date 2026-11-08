@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.villager;
 
 import dev.sterner.guardvillagers.GuardVillagers;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
 import dev.sterner.guardvillagers.common.util.ConvertedWorkerJobSiteReservationManager;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillageGuardStandManager;
@@ -239,12 +241,30 @@ public final class UnemployedLumberjackConversionHook {
         GuardConversionHelper.applyStandardEquipmentDropChances(guard);
         clearAllEquipment(guard);
         guard.setPairedCraftingTablePos(tablePos);
-        JobBlockPairingHelper.findNearbyChest(world, tablePos).ifPresent(guard::setPairedChestPos);
+        BlockPos pairedStoragePos = JobBlockPairingHelper.findNearbyChest(world, tablePos).orElse(null);
+        if (pairedStoragePos != null) {
+            guard.setPairedChestPos(pairedStoragePos);
+        }
         guard.startChopCountdown(world.getTime(), 0L);
 
         ConvertedWorkerJobSiteReservationManager.reserve(world, tablePos, guard.getUuid(), VillagerProfession.NONE, "unemployed lumberjack conversion");
 
-        world.spawnEntityAndPassengers(guard);
+        if (!world.spawnNewEntityAndPassengers(guard)) {
+            ConvertedWorkerJobSiteReservationManager.unreserveByGuard(world, guard.getUuid(), "lumberjack spawn failed");
+            LOGGER.warn("Unemployed villager {} lumberjack conversion aborted: guard spawn failed", villager.getUuidAsString());
+            return null;
+        }
+        if (pairedStoragePos != null) {
+            ProfessionalStorageRegistry.transferToSpecialist(
+                    world,
+                    villager.getUuid(),
+                    guard.getUuid(),
+                    ProfessionalRoleId.LUMBERJACK,
+                    pairedStoragePos,
+                    tablePos);
+        } else {
+            JobBlockPairingHelper.removeConfirmedVillagerChestPairing(world, villager.getUuid());
+        }
         LOGGER.info("Converted unemployed villager {} into lumberjack guard {} at crafting table {}",
                 villager.getUuidAsString(),
                 guard.getUuidAsString(),

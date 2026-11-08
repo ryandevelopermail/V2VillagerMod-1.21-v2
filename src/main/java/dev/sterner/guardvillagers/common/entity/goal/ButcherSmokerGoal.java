@@ -1,9 +1,13 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ButcherWorkMetrics;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.Optional;
+import java.util.function.IntConsumer;
+import net.minecraft.block.AbstractFurnaceBlock;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.entity.AbstractFurnaceBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
@@ -51,6 +55,10 @@ public class ButcherSmokerGoal extends Goal {
 
     public void requestImmediateCheck() {
         this.nextCheckTime = 0L;
+    }
+
+    public BlockPos getSmokerPos() {
+        return jobPos;
     }
 
     @Override
@@ -157,7 +165,7 @@ public class ButcherSmokerGoal extends Goal {
         }
         SmokerBlockEntity smoker = smokerOpt.get();
         if (smoker.getStack(0).isEmpty()) {
-            extractSmokerOutput(chestInventory, smoker);
+            extractSmokerOutput(world, chestInventory, smoker);
         }
         if (smoker.getStack(0).isEmpty()) {
             ItemStack meatStack = extractBestMeat(world, chestInventory);
@@ -183,24 +191,24 @@ public class ButcherSmokerGoal extends Goal {
 
     private Optional<ItemStack> findBestMeat(ServerWorld world, Inventory inventory) {
         return inventoryToStream(inventory)
-                .filter(stack -> isSmokable(world, stack))
+                .filter(stack -> isSmokableFood(world, stack))
                 .sorted(stackComparator(false))
                 .findFirst();
     }
 
     private Optional<ItemStack> findBestFuel(Inventory inventory) {
         return inventoryToStream(inventory)
-                .filter(this::isFuel)
+                .filter(ButcherSmokerGoal::isFuelStack)
                 .sorted(stackComparator(true))
                 .findFirst();
     }
 
     private ItemStack extractBestMeat(ServerWorld world, Inventory inventory) {
-        return extractBestStack(inventory, stack -> isSmokable(world, stack), false);
+        return extractBestStack(inventory, stack -> isSmokableFood(world, stack), false);
     }
 
     private ItemStack extractBestFuel(Inventory inventory) {
-        return extractBestStack(inventory, this::isFuel, true);
+        return extractBestStack(inventory, ButcherSmokerGoal::isFuelStack, true);
     }
 
     private java.util.stream.Stream<ItemStack> inventoryToStream(Inventory inventory) {
@@ -252,16 +260,25 @@ public class ButcherSmokerGoal extends Goal {
         return 3;
     }
 
-    private boolean isFuel(ItemStack stack) {
-        return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
+    public static boolean isFuelStack(ItemStack stack) {
+        return isFuelShape(!stack.isEmpty() && AbstractFurnaceBlockEntity.canUseAsFuel(stack));
     }
 
-    private boolean isSmokable(ServerWorld world, ItemStack stack) {
+    static boolean isFuelShape(boolean acceptedBySmoker) {
+        return acceptedBySmoker;
+    }
+
+    public static boolean isSmokableFood(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
         SingleStackRecipeInput input = new SingleStackRecipeInput(stack.copy());
-        return world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent();
+        return isSmokableShape(
+                world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent());
+    }
+
+    static boolean isSmokableShape(boolean hasSmokingRecipe) {
+        return hasSmokingRecipe;
     }
 
     private ItemStack insertIntoSmoker(SmokerBlockEntity smoker, ItemStack stack, int slot) {
@@ -285,16 +302,94 @@ public class ButcherSmokerGoal extends Goal {
         return remaining;
     }
 
-    private void extractSmokerOutput(Inventory chestInventory, SmokerBlockEntity smoker) {
+    private void extractSmokerOutput(
+            ServerWorld world,
+            Inventory chestInventory,
+            SmokerBlockEntity smoker
+    ) {
         ItemStack output = smoker.getStack(2);
         if (output.isEmpty()) {
             return;
         }
         ItemStack remaining = insertIntoInventory(chestInventory, output.copy());
+        recordMovedOutput(
+                output.getCount(),
+                remaining.getCount(),
+                moved -> ButcherWorkMetrics.recordCookedFoodCollected(
+                        world,
+                        villager.getUuid(),
+                        moved));
         if (remaining.isEmpty()) {
             smoker.setStack(2, ItemStack.EMPTY);
         } else if (remaining.getCount() != output.getCount()) {
             smoker.setStack(2, remaining);
+        }
+    }
+
+    static int recordMovedOutput(int originalCount, int remainingCount, IntConsumer confirmedTransfer) {
+        int moved = Math.max(0, originalCount - Math.max(0, remainingCount));
+        if (moved > 0) {
+            confirmedTransfer.accept(moved);
+        }
+        return moved;
+    }
+
+    public static SmokerState inspectSmokerStateReadOnly(ServerWorld world, BlockPos smokerPos) {
+        if (smokerPos == null
+                || !world.getBlockState(smokerPos).isOf(Blocks.SMOKER)
+                || !(world.getBlockEntity(smokerPos) instanceof SmokerBlockEntity smoker)) {
+            return SmokerState.MISSING;
+        }
+        BlockState state = world.getBlockState(smokerPos);
+        return classifySmokerState(
+                true,
+                !smoker.getStack(2).isEmpty(),
+                state.contains(AbstractFurnaceBlock.LIT) && state.get(AbstractFurnaceBlock.LIT),
+                !smoker.getStack(0).isEmpty(),
+                !smoker.getStack(1).isEmpty());
+    }
+
+    static SmokerState classifySmokerState(
+            boolean smokerPresent,
+            boolean hasOutput,
+            boolean lit,
+            boolean hasInput,
+            boolean hasFuel
+    ) {
+        if (!smokerPresent) {
+            return SmokerState.MISSING;
+        }
+        if (hasOutput) {
+            return SmokerState.OUTPUT_READY;
+        }
+        if (lit) {
+            return SmokerState.SMOKING;
+        }
+        if (hasInput && !hasFuel) {
+            return SmokerState.NEEDS_FUEL;
+        }
+        if (hasInput) {
+            return SmokerState.LOADED;
+        }
+        return SmokerState.IDLE;
+    }
+
+    public enum SmokerState {
+        MISSING("Missing"),
+        OUTPUT_READY("Output ready"),
+        SMOKING("Smoking"),
+        NEEDS_FUEL("Needs fuel"),
+        LOADED("Loaded"),
+        IDLE("Idle");
+
+        private final String displayName;
+
+        SmokerState(String displayName) {
+            this.displayName = displayName;
+        }
+
+        public String displayName() {
+            return displayName;
         }
     }
 

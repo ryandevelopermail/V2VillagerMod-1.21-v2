@@ -14,9 +14,11 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 public final class WeaponsmithStandManager {
@@ -58,6 +60,77 @@ public final class WeaponsmithStandManager {
 
     public static boolean isStandAvailableForWeapon(VillagerEntity villager, ArmorStandEntity stand, EquipmentSlot slot, ItemStack candidate) {
         return isStandAvailableForHand(stand, getStandMemory(villager), slot, candidate);
+    }
+
+    /** Read-only open-time query; never synchronizes or marks stand memory. */
+    public static int countEligibleStandsReadOnly(
+            ServerWorld world,
+            VillagerEntity villager,
+            BlockPos center,
+            List<ItemStack> candidates
+    ) {
+        List<ArmorStandEntity> stands = world.getEntitiesByClass(
+                ArmorStandEntity.class,
+                new Box(center).expand(STAND_SCAN_RANGE),
+                stand -> stand.isAlive()
+                        && stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG));
+        Map<UUID, StandProgress> memory = getStandMemory(villager);
+        List<StandEligibilityView> views = stands.stream().map(stand -> {
+            ItemStack equipped = stand.getEquippedStack(EquipmentSlot.MAINHAND);
+            boolean validUpgrade = !equipped.isEmpty() && candidates.stream()
+                    .anyMatch(candidate -> canReplaceWeapon(candidate, equipped, EquipmentSlot.MAINHAND));
+            return snapshotStandEligibility(
+                    stand.getUuid(),
+                    stand.isAlive(),
+                    stand.getCommandTags().contains(VillageGuardStandManager.GUARD_STAND_TAG),
+                    equipped.isEmpty(),
+                    memory.get(stand.getUuid()),
+                    !candidates.isEmpty(),
+                    validUpgrade);
+        }).toList();
+        return countUniqueEligibleStandViews(views);
+    }
+
+    static StandEligibilityView snapshotStandEligibility(
+            UUID standId,
+            boolean alive,
+            boolean tagged,
+            boolean emptyMainHand,
+            StandProgress progress,
+            boolean supportedCandidateAvailable,
+            boolean validUpgrade
+    ) {
+        return new StandEligibilityView(
+                standId,
+                alive,
+                tagged,
+                emptyMainHand,
+                progress != null && progress.hasSlot(EquipmentSlot.MAINHAND),
+                progress != null && progress.isComplete(),
+                supportedCandidateAvailable,
+                validUpgrade);
+    }
+
+    static int countUniqueEligibleStandViews(List<StandEligibilityView> views) {
+        Set<UUID> eligible = new HashSet<>();
+        for (StandEligibilityView view : views) {
+            if (isStandEligibleReadOnly(view)) {
+                eligible.add(view.standId());
+            }
+        }
+        return eligible.size();
+    }
+
+    static boolean isStandEligibleReadOnly(StandEligibilityView view) {
+        if (!view.alive() || !view.tagged()) {
+            return false;
+        }
+        if (!view.emptyMainHand()) {
+            return view.validUpgrade();
+        }
+        return view.supportedCandidateAvailable()
+                && !view.rememberedMainHand()
+                && !view.memoryComplete();
     }
 
     private static boolean isStandAvailableForHand(ArmorStandEntity stand, Map<UUID, StandProgress> memory, EquipmentSlot slot, ItemStack candidate) {
@@ -212,5 +285,17 @@ public final class WeaponsmithStandManager {
                 default -> 0;
             };
         }
+    }
+
+    record StandEligibilityView(
+            UUID standId,
+            boolean alive,
+            boolean tagged,
+            boolean emptyMainHand,
+            boolean rememberedMainHand,
+            boolean memoryComplete,
+            boolean supportedCandidateAvailable,
+            boolean validUpgrade
+    ) {
     }
 }

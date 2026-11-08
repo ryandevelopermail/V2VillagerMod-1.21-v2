@@ -17,7 +17,7 @@ public final class CartographerMapChestUtil {
     private CartographerMapChestUtil() {
     }
 
-    static final class MapSignature {
+    public static final class MapSignature {
         private final int centerX;
         private final int centerZ;
         private final int scale;
@@ -28,7 +28,7 @@ public final class CartographerMapChestUtil {
             this.scale = scale;
         }
 
-        static MapSignature of(int centerX, int centerZ, int scale) {
+        public static MapSignature of(int centerX, int centerZ, int scale) {
             return new MapSignature(centerX, centerZ, scale);
         }
 
@@ -60,6 +60,14 @@ public final class CartographerMapChestUtil {
             result = 31 * result + Integer.hashCode(this.scale);
             return result;
         }
+    }
+
+    public static MapSignature signatureOf(MapState state) {
+        return MapSignature.of(state.centerX, state.centerZ, state.scale);
+    }
+
+    public static int countUniqueSignatures(List<MapSignature> signatures) {
+        return new HashSet<>(signatures).size();
     }
 
     public static int countFilledMapsInChest(ServerWorld world, BlockPos chestPos) {

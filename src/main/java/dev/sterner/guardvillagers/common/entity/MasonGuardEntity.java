@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerRepairGuardArmorGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FollowShieldGuards;
@@ -260,6 +262,10 @@ public class MasonGuardEntity extends GuardEntity {
     @Override
     public void tick() {
         super.tick();
+        if (this.age % 100 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+            ProfessionalStorageRegistry
+                    .refreshSpecialistPairing(serverWorld, this);
+        }
         if (!this.getWorld().isClient && !this.loggedSpawnValidation && this.age > 1) {
             this.loggedSpawnValidation = true;
             LOGGER.info("Mason Guard {} spawn validation: selectedChestTool={}, equippedItem={}, pairedChestPos={}, pairedJobPos={}, roleType={}",

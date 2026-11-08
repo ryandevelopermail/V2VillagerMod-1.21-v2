@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.ButcherWorkMetrics;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.LongConsumer;
 
 public class ButcherMeatDistributionGoal extends Goal {
     private static final double MOVE_SPEED = 0.6D;
@@ -28,16 +30,6 @@ public class ButcherMeatDistributionGoal extends Goal {
     private static final double RECIPIENT_SCAN_RANGE = 20.0D;
     private static final int MIN_INTERVAL_TICKS = 160;
     private static final int MAX_INTERVAL_TICKS = 320;
-    private static final Set<Item> COOKED_MEATS = Set.of(
-            Items.COOKED_BEEF,
-            Items.COOKED_PORKCHOP,
-            Items.COOKED_CHICKEN,
-            Items.COOKED_MUTTON,
-            Items.COOKED_RABBIT,
-            Items.COOKED_COD,
-            Items.COOKED_SALMON
-    );
-
     private final VillagerEntity villager;
     private BlockPos currentNavigationTarget;
     private long lastPathRequestTick = Long.MIN_VALUE;
@@ -190,18 +182,48 @@ public class ButcherMeatDistributionGoal extends Goal {
     }
 
     private boolean transferToGuard(GuardEntity guard) {
-        if (pendingItem.isEmpty()) {
+        if (pendingItem.isEmpty() || !guard.isAlive()) {
             return false;
         }
 
         if (guard.getOffHandStack().isEmpty() && GuardEatFoodGoal.isConsumable(pendingItem)) {
             guard.equipStack(net.minecraft.entity.EquipmentSlot.OFFHAND, pendingItem.copy());
-            return true;
+            ItemStack equipped = guard.getOffHandStack();
+            boolean complete = ItemStack.areItemsAndComponentsEqual(equipped, pendingItem)
+                    && equipped.getCount() == pendingItem.getCount();
+            return recordCompletedMealDelivery(
+                    guard.isAlive(),
+                    complete,
+                    pendingItem.getCount(),
+                    amount -> ButcherWorkMetrics.recordMealsDelivered(
+                            (ServerWorld) villager.getWorld(),
+                            villager.getUuid(),
+                            amount));
         }
 
         ItemStack remaining = insertStack(guard.guardInventory, pendingItem.copy());
         guard.guardInventory.markDirty();
-        return remaining.isEmpty();
+        return recordCompletedMealDelivery(
+                guard.isAlive(),
+                remaining.isEmpty(),
+                pendingItem.getCount(),
+                amount -> ButcherWorkMetrics.recordMealsDelivered(
+                        (ServerWorld) villager.getWorld(),
+                        villager.getUuid(),
+                        amount));
+    }
+
+    static boolean recordCompletedMealDelivery(
+            boolean livingGuard,
+            boolean transferComplete,
+            long transferredCount,
+            LongConsumer confirmedTransfer
+    ) {
+        if (!livingGuard || !transferComplete || transferredCount <= 0L) {
+            return false;
+        }
+        confirmedTransfer.accept(transferredCount);
+        return true;
     }
 
     private List<GuardEntity> findEligibleRecipients(ServerWorld world, ItemStack candidateStack) {
@@ -226,11 +248,33 @@ public class ButcherMeatDistributionGoal extends Goal {
     private int findCookedMeatSlot(Inventory inventory) {
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && COOKED_MEATS.contains(stack.getItem())) {
+            if (isCookedMeat(stack)) {
                 return slot;
             }
         }
         return -1;
+    }
+
+    public static boolean isCookedMeat(ItemStack stack) {
+        boolean nonempty = !stack.isEmpty();
+        return isCookedMeatShape(nonempty, nonempty && CookedMeats.ITEMS.contains(stack.getItem()));
+    }
+
+    static boolean isCookedMeatShape(boolean nonempty, boolean configuredCookedMeat) {
+        return nonempty && configuredCookedMeat;
+    }
+
+    /** Defers Minecraft item-registry access until the real predicate is used. */
+    private static final class CookedMeats {
+        private static final Set<Item> ITEMS = Set.of(
+                Items.COOKED_BEEF,
+                Items.COOKED_PORKCHOP,
+                Items.COOKED_CHICKEN,
+                Items.COOKED_MUTTON,
+                Items.COOKED_RABBIT,
+                Items.COOKED_COD,
+                Items.COOKED_SALMON
+        );
     }
 
     private void scheduleNextCheck(ServerWorld world) {

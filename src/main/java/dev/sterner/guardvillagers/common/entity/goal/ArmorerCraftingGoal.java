@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ArmorerWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.util.ArmorerStandManager;
 import net.minecraft.block.BlockState;
@@ -26,6 +27,10 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 public class ArmorerCraftingGoal extends Goal {
     private static final int CHECK_INTERVAL_TICKS = CraftingCheckLogger.MATERIAL_CHECK_INTERVAL_TICKS;
@@ -225,6 +230,10 @@ public class ArmorerCraftingGoal extends Goal {
         if (inventory == null) {
             return 0;
         }
+        return countCraftableArmorRecipesReadOnly(world, inventory);
+    }
+
+    public int countCraftableArmorRecipesReadOnly(ServerWorld world, Inventory inventory) {
         return getCraftableRecipes(world, inventory).size();
     }
 
@@ -247,35 +256,56 @@ public class ArmorerCraftingGoal extends Goal {
 
             EquipmentSlot slot = remainingSlots.get(0);
             ArmorRecipe recipe = findCraftableRecipeForSlot(world, inventory, plannedMaterial, slot);
-            if (recipe == null || !consumeIngredients(inventory, recipe.recipe)) {
+            if (recipe == null) {
                 clearCraftingSession();
                 return;
             }
-
-            ItemStack crafted = recipe.output.copy();
-            if (crafted.getItem() instanceof ArmorItem armorItem) {
-                Optional<ArmorStandEntity> stand = ArmorerStandManager.findPlacementStand(world, villager, craftingTablePos, armorItem.getSlotType());
-                if (stand.isPresent()) {
-                    pendingStandItem = crafted.copy();
-                    pendingStandItem.setCount(1);
-                    pendingSlot = armorItem.getSlotType();
-                    pendingStandId = stand.get().getUuid();
-                    standTargetPos = stand.get().getBlockPos();
-                    crafted.decrement(1);
-                }
+            boolean craftedSuccessfully = executeConfirmedCraft(
+                    () -> consumeIngredients(inventory, recipe.recipe),
+                    () -> {
+                        ItemStack crafted = recipe.output.copy();
+                        if (crafted.getItem() instanceof ArmorItem armorItem) {
+                            Optional<ArmorStandEntity> stand = ArmorerStandManager.findPlacementStand(
+                                    world,
+                                    villager,
+                                    craftingTablePos,
+                                    armorItem.getSlotType());
+                            if (stand.isPresent()) {
+                                pendingStandItem = crafted.copy();
+                                pendingStandItem.setCount(1);
+                                pendingSlot = armorItem.getSlotType();
+                                pendingStandId = stand.get().getUuid();
+                                standTargetPos = stand.get().getBlockPos();
+                                crafted.decrement(1);
+                            }
+                        }
+                        ItemStack remaining = insertStack(inventory, crafted);
+                        if (!remaining.isEmpty()) {
+                            ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
+                            if (!villagerRemaining.isEmpty()) {
+                                villager.dropStack(villagerRemaining);
+                            }
+                            villager.getInventory().markDirty();
+                        }
+                        return true;
+                    },
+                    inventory::markDirty,
+                    () -> {
+                        ArmorerWorkMetrics.recordArmorCrafted(
+                                world,
+                                villager.getUuid(),
+                                recipe.output.getCount());
+                        craftedToday++;
+                        remainingSlots.remove(0);
+                        CraftingCheckLogger.report(
+                                world,
+                                "Armorer",
+                                formatCraftedResult(lastCheckCount, recipe.output));
+                    });
+            if (!craftedSuccessfully) {
+                clearCraftingSession();
+                return;
             }
-            ItemStack remaining = insertStack(inventory, crafted);
-            if (!remaining.isEmpty()) {
-                ItemStack villagerRemaining = insertStack(villager.getInventory(), remaining);
-                if (!villagerRemaining.isEmpty()) {
-                    villager.dropStack(villagerRemaining);
-                }
-                villager.getInventory().markDirty();
-            }
-            inventory.markDirty();
-            craftedToday++;
-            remainingSlots.remove(0);
-            CraftingCheckLogger.report(world, "Armorer", formatCraftedResult(lastCheckCount, recipe.output));
 
             if (!pendingStandItem.isEmpty()) {
                 return;
@@ -290,50 +320,85 @@ public class ArmorerCraftingGoal extends Goal {
         for (RecipeEntry<CraftingRecipe> entry : world.getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
             CraftingRecipe recipe = entry.value();
             ItemStack result = recipe.getResult(world.getRegistryManager());
-            if (result.isEmpty() || !(result.getItem() instanceof ArmorItem)) {
-                continue;
-            }
-            if (canCraft(inventory, recipe)) {
+            boolean ingredientsAvailable = !result.isEmpty()
+                    && result.getItem() instanceof ArmorItem
+                    && canCraft(inventory, recipe);
+            if (isCraftableArmorRecipe(
+                    !result.isEmpty() && result.getItem() instanceof ArmorItem,
+                    ingredientsAvailable)) {
                 recipes.add(new ArmorRecipe(recipe, result));
             }
         }
         return recipes;
     }
 
-    private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
-        List<ItemStack> available = new ArrayList<>();
-        for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty()) {
-                available.add(stack.copy());
-            }
-        }
+    static boolean isCraftableArmorRecipe(boolean armorOutput, boolean ingredientsAvailable) {
+        return armorOutput && ingredientsAvailable;
+    }
 
-        for (Ingredient ingredient : recipe.getIngredients()) {
-            if (ingredient.isEmpty()) {
-                continue;
-            }
-            int matchIndex = findMatchingStack(available, ingredient);
-            if (matchIndex < 0) {
-                return false;
-            }
-            ItemStack matched = available.get(matchIndex);
-            matched.decrement(1);
-            if (matched.isEmpty()) {
-                available.remove(matchIndex);
-            }
+    static boolean executeConfirmedCraft(
+            BooleanSupplier ingredientsConsumed,
+            BooleanSupplier resultCommitted,
+            Runnable markInventoryDirty,
+            Runnable confirmedSuccess
+    ) {
+        if (!ingredientsConsumed.getAsBoolean() || !resultCommitted.getAsBoolean()) {
+            return false;
         }
-
+        markInventoryDirty.run();
+        confirmedSuccess.run();
         return true;
     }
 
-    private int findMatchingStack(List<ItemStack> available, Ingredient ingredient) {
-        for (int i = 0; i < available.size(); i++) {
-            if (ingredient.test(available.get(i))) {
-                return i;
+    private boolean canCraft(Inventory inventory, CraftingRecipe recipe) {
+        List<ItemStack> storedStacks = new ArrayList<>();
+        for (int slot = 0; slot < inventory.size(); slot++) {
+            ItemStack stack = inventory.getStack(slot);
+            if (!stack.isEmpty()) {
+                storedStacks.add(stack);
             }
         }
-        return -1;
+        List<Predicate<ItemStack>> ingredients = new ArrayList<>();
+        for (Ingredient ingredient : recipe.getIngredients()) {
+            if (!ingredient.isEmpty()) {
+                ingredients.add(ingredient::test);
+            }
+        }
+        return canSatisfyIngredientsReadOnly(
+                storedStacks,
+                ingredients,
+                ItemStack::copy,
+                ItemStack::isEmpty,
+                stack -> stack.decrement(1));
+    }
+
+    static <T> boolean canSatisfyIngredientsReadOnly(
+            List<T> storedStacks,
+            List<Predicate<T>> ingredients,
+            Function<T, T> copyStack,
+            Predicate<T> isEmpty,
+            Consumer<T> consumeOne
+    ) {
+        List<T> available = storedStacks.stream().map(copyStack).filter(isEmpty.negate()).collect(
+                java.util.stream.Collectors.toCollection(ArrayList::new));
+        for (Predicate<T> ingredient : ingredients) {
+            int matchIndex = -1;
+            for (int i = 0; i < available.size(); i++) {
+                if (ingredient.test(available.get(i))) {
+                    matchIndex = i;
+                    break;
+                }
+            }
+            if (matchIndex < 0) {
+                return false;
+            }
+            T matched = available.get(matchIndex);
+            consumeOne.accept(matched);
+            if (isEmpty.test(matched)) {
+                available.remove(matchIndex);
+            }
+        }
+        return true;
     }
 
     private boolean consumeIngredients(Inventory inventory, CraftingRecipe recipe) {

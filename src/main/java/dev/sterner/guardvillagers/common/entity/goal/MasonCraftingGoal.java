@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import dev.sterner.guardvillagers.common.util.WallProjectPolicyResolver;
@@ -156,6 +158,7 @@ public class MasonCraftingGoal extends AbstractCraftingGoal<MasonCraftingGoal.Ma
     @Override
     protected void onCraftSucceeded(ServerWorld world, MasonRecipe recipe) {
         this.lastCraftedOutputItem = recipe.output.getItem();
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.MASON, RemainingProfessionWorkMetrics.MASON_CUT, recipe.output.getCount());
     }
 
     @Override

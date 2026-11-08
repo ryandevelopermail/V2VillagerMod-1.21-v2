@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.CartographerWorkMetrics;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 
 public class CartographerCraftingGoal extends Goal {
@@ -153,6 +155,10 @@ public class CartographerCraftingGoal extends Goal {
         return getCraftableRecipes(inventory).size();
     }
 
+    public int countCraftableRecipesReadOnly(Inventory inventory) {
+        return inventory == null ? 0 : countConfiguredRecipes(inspectMaterialCounts(inventory));
+    }
+
     private void craftOnce(ServerWorld world) {
         Inventory inventory = getChestInventory(world).orElse(null);
         if (inventory == null) {
@@ -165,22 +171,72 @@ public class CartographerCraftingGoal extends Goal {
         }
 
         Recipe recipe = craftable.get(villager.getRandom().nextInt(craftable.size()));
-        if (consumeIngredients(inventory, recipe.requirements)) {
-            insertStack(inventory, recipe.output.copy());
-            inventory.markDirty();
+        boolean crafted = executeConfirmedCraft(
+                () -> consumeIngredients(inventory, recipe.requirements),
+                () -> insertStack(inventory, recipe.output.copy()).isEmpty(),
+                () -> CartographerWorkMetrics.recordMaterialsCrafted(
+                        world,
+                        villager.getUuid(),
+                        recipe.output.getCount()));
+        inventory.markDirty();
+        if (crafted) {
             craftedToday++;
             CraftingCheckLogger.report(world, "Cartographer", formatCraftedResult(lastCheckCount, recipe.output));
         }
     }
 
+    static boolean executeConfirmedCraft(
+            BooleanSupplier ingredientsConsumed,
+            BooleanSupplier completeOutputInserted,
+            Runnable confirmedSuccess
+    ) {
+        if (!ingredientsConsumed.getAsBoolean() || !completeOutputInserted.getAsBoolean()) {
+            return false;
+        }
+        confirmedSuccess.run();
+        return true;
+    }
+
     private List<Recipe> getCraftableRecipes(Inventory inventory) {
         List<Recipe> recipes = new ArrayList<>();
+        MaterialCounts counts = inspectMaterialCounts(inventory);
+        boolean[] craftable = configuredRecipeShapes(counts);
         for (Recipe recipe : Recipe.values()) {
-            if (hasIngredients(inventory, recipe.requirements)) {
+            if (craftable[recipe.ordinal()]) {
                 recipes.add(recipe);
             }
         }
         return recipes;
+    }
+
+    private MaterialCounts inspectMaterialCounts(Inventory inventory) {
+        return new MaterialCounts(
+                countMatching(inventory, stack -> stack.isOf(Items.SUGAR_CANE)),
+                countMatching(inventory, stack -> stack.isOf(Items.PAPER)),
+                countMatching(inventory, stack -> stack.isOf(Items.COMPASS)),
+                countMatching(inventory, stack -> stack.isOf(Items.MAP)),
+                countMatching(inventory, stack -> stack.isOf(Items.IRON_INGOT)),
+                countMatching(inventory, stack -> stack.isOf(Items.REDSTONE)),
+                countMatching(inventory, stack -> stack.isOf(Items.STICK)),
+                countMatching(inventory, stack -> stack.isOf(Items.LEATHER)));
+    }
+
+    private static boolean[] configuredRecipeShapes(MaterialCounts counts) {
+        return new boolean[] {
+                counts.sugarCane() >= 3,
+                counts.paper() >= 8,
+                counts.compass() >= 1 && counts.emptyMap() >= 1,
+                counts.iron() >= 4 && counts.redstone() >= 1,
+                counts.sticks() >= 8 && counts.leather() >= 1
+        };
+    }
+
+    static int countConfiguredRecipes(MaterialCounts counts) {
+        int craftable = 0;
+        for (boolean recipeCraftable : configuredRecipeShapes(counts)) {
+            if (recipeCraftable) craftable++;
+        }
+        return craftable;
     }
 
     private boolean hasIngredients(Inventory inventory, IngredientRequirement[] requirements) {
@@ -311,6 +367,18 @@ public class CartographerCraftingGoal extends Goal {
         GO_TO_TABLE,
         CRAFT,
         DONE
+    }
+
+    record MaterialCounts(
+            int sugarCane,
+            int paper,
+            int compass,
+            int emptyMap,
+            int iron,
+            int redstone,
+            int sticks,
+            int leather
+    ) {
     }
 
     private record IngredientRequirement(Predicate<ItemStack> matcher, int count) {

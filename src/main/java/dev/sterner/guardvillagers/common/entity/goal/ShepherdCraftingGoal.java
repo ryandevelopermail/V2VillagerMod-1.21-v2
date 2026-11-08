@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -44,6 +46,11 @@ public class ShepherdCraftingGoal extends AbstractCraftingGoal<ShepherdCraftingG
         return recipes;
     }
 
+    /** Ingredient-only recipe count; does not advance the goal or alter its cooldown. */
+    public int countRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return discoverRecipes(world, inventory).size();
+    }
+
     @Override
     protected boolean canStillCraftRecipe(ServerWorld world, Inventory inventory, Recipe recipe) {
         return hasIngredients(inventory, recipe.requirements);
@@ -54,7 +61,8 @@ public class ShepherdCraftingGoal extends AbstractCraftingGoal<ShepherdCraftingG
         if (!consumeIngredients(inventory, recipe.requirements)) {
             return false;
         }
-        insertStack(inventory, recipe.output.copy());
+        ItemStack remaining = insertStack(inventory, recipe.output.copy());
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEPHERD_CRAFTED, recipe.output.getCount() - remaining.getCount());
         return true;
     }
 

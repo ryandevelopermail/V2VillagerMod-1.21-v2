@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import dev.sterner.guardvillagers.common.util.VillagePenRegistry;
 import net.minecraft.block.BlockState;
@@ -1415,6 +1417,7 @@ public class ShepherdSpecialGoal extends Goal {
         }
 
         sheep.setSheared(true);
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEEP_SHEARED, 1);
         sheep.playSound(SoundEvents.ENTITY_SHEEP_SHEAR, 1.0F, 1.0F);
         int dropCount = 1 + sheep.getRandom().nextInt(3);
         ItemStack woolStack = new ItemStack(woolFromColor(sheep.getColor()), dropCount);

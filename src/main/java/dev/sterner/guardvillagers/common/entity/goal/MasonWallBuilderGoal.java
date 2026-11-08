@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
@@ -2273,6 +2276,7 @@ public class MasonWallBuilderGoal extends Goal {
             return;
         }
 
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD, RemainingProfessionWorkMetrics.MASON_WALLS, 1);
         recordPlacementProgress(world, target);
         clearPlaceBlockFailureTracking();
         clearLastPlantClearedTracking();
@@ -4166,6 +4170,7 @@ public class MasonWallBuilderGoal extends Goal {
                     failureReason = !writeSuccess ? "set_block_state_failed" : "post_verify_failed";
                     continue;
                 }
+                RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD, RemainingProfessionWorkMetrics.MASON_WALLS, 1);
                 recordPlacementProgress(world, segment);
                 resetSortieAbortBackoffAfterBandPlacement(world, segment);
                 filled = true;

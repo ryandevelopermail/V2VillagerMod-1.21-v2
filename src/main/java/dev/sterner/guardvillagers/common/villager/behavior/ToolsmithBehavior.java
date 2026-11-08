@@ -5,6 +5,7 @@ import dev.sterner.guardvillagers.common.entity.goal.ToolsmithDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ToolsmithSmithingGoal;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.block.Blocks;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.village.VillagerProfession;
@@ -12,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.WeakHashMap;
 
 public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
@@ -29,6 +31,22 @@ public class ToolsmithBehavior extends AbstractPairedProfessionBehavior {
         if (distributionGoal != null) {
             distributionGoal.requestImmediateDistribution();
         }
+    }
+
+    public static Optional<ToolsmithLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        ToolsmithCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        BlockPos tablePos = goal == null ? null : goal.getCraftingTablePos();
+        return Optional.of(new ToolsmithLiveSnapshot(
+                tablePos != null && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE)));
+    }
+
+    public record ToolsmithLiveSnapshot(boolean craftingTableReady) {
     }
 
     @Override

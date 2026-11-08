@@ -8,9 +8,11 @@ import dev.sterner.guardvillagers.common.villager.VillagerProfessionBehavior;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.enums.ChestType;
 import net.minecraft.entity.ai.goal.GoalSelector;
 import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.inventory.Inventory;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.Optional;
 
 public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final Logger LOGGER = LoggerFactory.getLogger(CartographerBehavior.class);
@@ -40,6 +43,43 @@ public class CartographerBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, ChestRegistration> CHEST_REGISTRATIONS = new WeakHashMap<>();
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, CartographerPairing> ACTIVE_PAIRINGS = new WeakHashMap<>();
+
+    public static Optional<CartographerLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager,
+            Inventory storageInventory
+    ) {
+        if (!villager.isAlive()
+                || villager.getWorld() != world
+                || villager.getVillagerData().getProfession() != VillagerProfession.CARTOGRAPHER) {
+            return Optional.empty();
+        }
+        CartographerPairing pairing = ACTIVE_PAIRINGS.get(villager);
+        CartographerCraftingGoal craftingGoal = CRAFTING_GOALS.get(villager);
+        BlockPos jobPos = pairing == null ? null : pairing.jobPos();
+        BlockPos tablePos = craftingGoal == null ? null : craftingGoal.getCraftingTablePos();
+        boolean craftingTableReady = tablePos != null
+                && world.getBlockState(tablePos).isOf(Blocks.CRAFTING_TABLE);
+        boolean cartographyTableReady = jobPos != null
+                && world.getBlockState(jobPos).isOf(Blocks.CARTOGRAPHY_TABLE);
+        int craftableRecipes = craftingTableReady && craftingGoal != null
+                ? craftingGoal.countCraftableRecipesReadOnly(storageInventory)
+                : 0;
+        return Optional.of(new CartographerLiveSnapshot(
+                craftingTableReady,
+                cartographyTableReady,
+                craftableRecipes));
+    }
+
+    public record CartographerLiveSnapshot(
+            boolean craftingTableReady,
+            boolean cartographyTableReady,
+            int craftableRecipes
+    ) {
+        public CartographerLiveSnapshot {
+            craftableRecipes = Math.max(0, craftableRecipes);
+        }
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {

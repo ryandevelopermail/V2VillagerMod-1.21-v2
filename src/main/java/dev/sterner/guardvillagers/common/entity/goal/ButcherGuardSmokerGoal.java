@@ -1,5 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ButcherWorkMetrics;
+
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -149,7 +153,7 @@ public class ButcherGuardSmokerGoal extends Goal {
         }
         SmokerBlockEntity smoker = smokerOpt.get();
         if (smoker.getStack(0).isEmpty()) {
-            extractSmokerOutput(chestInventory, smoker);
+            extractSmokerOutput(world, chestInventory, smoker);
         }
         ItemStack meatStack = extractBestMeat(world, chestInventory);
         if (!meatStack.isEmpty()) {
@@ -176,7 +180,7 @@ public class ButcherGuardSmokerGoal extends Goal {
     }
 
     private Optional<ItemStack> findBestFuel(Inventory inventory) {
-        return getSortedStacks(inventory, this::isFuel, true)
+        return getSortedStacks(inventory, ButcherGuardSmokerGoal::isFuel, true)
                 .stream()
                 .findFirst();
     }
@@ -186,7 +190,7 @@ public class ButcherGuardSmokerGoal extends Goal {
     }
 
     private ItemStack extractBestFuel(Inventory inventory) {
-        return extractBestStack(inventory, this::isFuel, true);
+        return extractBestStack(inventory, ButcherGuardSmokerGoal::isFuel, true);
     }
 
     private List<ItemStack> getSortedStacks(Inventory inventory, java.util.function.Predicate<ItemStack> predicate, boolean fuel) {
@@ -246,7 +250,7 @@ public class ButcherGuardSmokerGoal extends Goal {
         return 3;
     }
 
-    private boolean isSmokable(ServerWorld world, ItemStack stack) {
+    public static boolean isSmokable(ServerWorld world, ItemStack stack) {
         if (stack.isEmpty()) {
             return false;
         }
@@ -254,7 +258,7 @@ public class ButcherGuardSmokerGoal extends Goal {
         return world.getRecipeManager().getFirstMatch(RecipeType.SMOKING, input, world).isPresent();
     }
 
-    private boolean isFuel(ItemStack stack) {
+    public static boolean isFuel(ItemStack stack) {
         return AbstractFurnaceBlockEntity.canUseAsFuel(stack);
     }
 
@@ -279,12 +283,15 @@ public class ButcherGuardSmokerGoal extends Goal {
         return remaining;
     }
 
-    private void extractSmokerOutput(Inventory chestInventory, SmokerBlockEntity smoker) {
+    private void extractSmokerOutput(ServerWorld world, Inventory chestInventory, SmokerBlockEntity smoker) {
         ItemStack output = smoker.getStack(2);
         if (output.isEmpty()) {
             return;
         }
         ItemStack remaining = insertIntoInventory(chestInventory, output.copy());
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.BUTCHER_GUARD,
+                ButcherWorkMetrics.COOKED_FOOD_COLLECTED,
+                output.getCount() - remaining.getCount());
         if (remaining.isEmpty()) {
             smoker.setStack(2, ItemStack.EMPTY);
         } else if (remaining.getCount() != output.getCount()) {

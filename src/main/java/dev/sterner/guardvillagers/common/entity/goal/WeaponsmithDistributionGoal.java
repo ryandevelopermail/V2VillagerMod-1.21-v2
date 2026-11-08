@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.GuardVillagersConfig;
+import dev.sterner.guardvillagers.common.professionalstorage.WeaponsmithWorkMetrics;
 import dev.sterner.guardvillagers.common.util.WeaponsmithStandManager;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -19,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
+import java.util.UUID;
 
 public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final Logger LOGGER = LoggerFactory.getLogger(WeaponsmithDistributionGoal.class);
@@ -65,12 +67,45 @@ public class WeaponsmithDistributionGoal extends AbstractInventoryDistributionGo
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
-        return stack.getItem() instanceof SwordItem
-                || stack.getItem() instanceof AxeItem
-                || stack.getItem() instanceof BowItem
-                || stack.getItem() instanceof CrossbowItem
-                || stack.getItem() instanceof TridentItem
-                || stack.getItem() instanceof MaceItem;
+        return isDistributableWeapon(stack);
+    }
+
+    public static boolean isDistributableWeapon(ItemStack stack) {
+        return isDistributableWeaponShape(
+                stack.getItem() instanceof SwordItem,
+                stack.getItem() instanceof AxeItem,
+                stack.getItem() instanceof BowItem,
+                stack.getItem() instanceof CrossbowItem,
+                stack.getItem() instanceof TridentItem,
+                stack.getItem() instanceof MaceItem);
+    }
+
+    static boolean isDistributableWeaponShape(
+            boolean sword,
+            boolean axe,
+            boolean bow,
+            boolean crossbow,
+            boolean trident,
+            boolean mace
+    ) {
+        return sword || axe || bow || crossbow || trident || mace;
+    }
+
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            @org.jetbrains.annotations.Nullable UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        if (isConfirmedEquipmentCompletion(route, isDistributableWeapon(transferred))) {
+            WeaponsmithWorkMetrics.recordWeaponsEquipped(world, villager.getUuid(), transferred.getCount());
+        }
+    }
+
+    static boolean isConfirmedEquipmentCompletion(TransferRoute route, boolean supportedWeapon) {
+        return route == TransferRoute.DIRECT && supportedWeapon;
     }
 
     @Override

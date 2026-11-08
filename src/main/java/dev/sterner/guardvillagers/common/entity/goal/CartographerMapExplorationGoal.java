@@ -1,5 +1,6 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.CartographerWorkMetrics;
 import dev.sterner.guardvillagers.common.util.VillageAnchorState;
 import dev.sterner.guardvillagers.common.util.VillageMappedBoundsState;
 import net.minecraft.block.BarrelBlock;
@@ -395,7 +396,7 @@ public class CartographerMapExplorationGoal extends Goal {
                 && !activeMap.isEmpty()
                 && activeMap.isOf(Items.FILLED_MAP)) {
             forceCompleteMapStack(world, activeMap);
-            completedWorkflowIndices.add(workflowIndex);
+            recordWorkflowCompletion(world, workflowIndex);
         }
 
         LOGGER.warn("Cartographer {} mapping batch exceeded {} ticks (completed {}/{}); returning to chest with partial maps",
@@ -435,7 +436,7 @@ public class CartographerMapExplorationGoal extends Goal {
         mappedTargets.add(currentTarget.key());
         markSlotCompleted(currentTarget.key());
         forceCompleteMapStack(world, activeMap);
-        completedWorkflowIndices.add(workflowIndex);
+        recordWorkflowCompletion(world, workflowIndex);
         LOGGER.info("Cartographer {} completed territory {}/{} at {} (timeout={})",
                 villager.getUuidAsString(),
                 workflowIndex + 1,
@@ -462,6 +463,25 @@ public class CartographerMapExplorationGoal extends Goal {
 
     static boolean shouldAbortMappingBatch(long worldTime, long batchStartTick) {
         return batchStartTick > 0L && hasTimedOut(worldTime, batchStartTick, MAPPING_BATCH_TIMEOUT_TICKS);
+    }
+
+    private boolean recordWorkflowCompletion(ServerWorld world, int index) {
+        return recordNewWorkflowCompletion(
+                completedWorkflowIndices,
+                index,
+                () -> CartographerWorkMetrics.recordMapsCompleted(world, villager.getUuid(), 1L));
+    }
+
+    static boolean recordNewWorkflowCompletion(
+            Set<Integer> completedIndices,
+            int index,
+            Runnable confirmedCompletion
+    ) {
+        if (index < 0 || !completedIndices.add(index)) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
     }
 
     private void recoverStalledTravel(ServerWorld world, BlockPos destination) {
@@ -921,7 +941,28 @@ public class CartographerMapExplorationGoal extends Goal {
         if (tokenStack.isEmpty()) {
             inventory.setStack(tokenSlot, ItemStack.EMPTY);
         }
+        int previousCursor = copyCursor;
         copyCursor = (copyCursor + 1) % MAP_SET_SIZE;
+        recordConfirmedMapCopy(
+                canonicalBaseLocked,
+                true,
+                true,
+                copyCursor != previousCursor,
+                () -> CartographerWorkMetrics.recordMapsCopied(world, villager.getUuid(), 1L));
+        return true;
+    }
+
+    static boolean recordConfirmedMapCopy(
+            boolean canonicalSourceComplete,
+            boolean copyInserted,
+            boolean tokenConsumed,
+            boolean cursorAdvanced,
+            Runnable confirmedCopy
+    ) {
+        if (!canonicalSourceComplete || !copyInserted || !tokenConsumed || !cursorAdvanced) {
+            return false;
+        }
+        confirmedCopy.run();
         return true;
     }
 
@@ -1071,14 +1112,17 @@ public class CartographerMapExplorationGoal extends Goal {
         return taken;
     }
 
-    private boolean isEmptyMap(ItemStack stack, ServerWorld world) {
-        if (stack.isOf(Items.MAP)) {
-            return true;
-        }
-        if (!stack.isOf(Items.FILLED_MAP)) {
-            return false;
-        }
-        return FilledMapItem.getMapState(stack, world) == null;
+    public static boolean isEmptyMap(ItemStack stack, ServerWorld world) {
+        boolean plainMap = stack.isOf(Items.MAP);
+        boolean filledMap = stack.isOf(Items.FILLED_MAP);
+        return isEmptyMapShape(
+                plainMap,
+                filledMap,
+                filledMap && FilledMapItem.getMapState(stack, world) != null);
+    }
+
+    static boolean isEmptyMapShape(boolean plainMap, boolean filledMap, boolean hasMapState) {
+        return plainMap || (filledMap && !hasMapState);
     }
 
     private Optional<Inventory> getChestInventory(ServerWorld world) {
@@ -1103,7 +1147,7 @@ public class CartographerMapExplorationGoal extends Goal {
         if (inventory == null) {
             return;
         }
-        if (!hasItem(inventory, Items.LEATHER_BOOTS)) {
+        if (!hasColdProtectionReadOnly(inventory)) {
             return;
         }
 
@@ -1113,14 +1157,21 @@ public class CartographerMapExplorationGoal extends Goal {
         }
     }
 
-    private boolean hasItem(Inventory inventory, net.minecraft.item.Item item) {
+    public static boolean hasColdProtectionReadOnly(Inventory inventory) {
         for (int slot = 0; slot < inventory.size(); slot++) {
-            ItemStack stack = inventory.getStack(slot);
-            if (!stack.isEmpty() && stack.isOf(item)) {
+            if (isColdProtectionItem(inventory.getStack(slot))) {
                 return true;
             }
         }
         return false;
+    }
+
+    public static boolean isColdProtectionItem(ItemStack stack) {
+        return !stack.isEmpty() && stack.isOf(Items.LEATHER_BOOTS);
+    }
+
+    static boolean isColdProtectionItemShape(boolean leatherBoots, boolean nonempty) {
+        return nonempty && leatherBoots;
     }
 
     /** Inserts stack into inventory; silently discards any remainder. */

@@ -2,6 +2,7 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.villager.ProfessionDefinitions;
+import dev.sterner.guardvillagers.common.professionalstorage.ToolsmithWorkMetrics;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.ai.goal.Goal;
@@ -24,6 +25,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Comparator;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /**
  * Toolsmith smithing supports both smithing-transform (e.g. netherite upgrades)
@@ -174,27 +176,35 @@ public class ToolsmithSmithingGoal extends Goal {
             return;
         }
 
-        if (!canReinsertResult(inventory, plan)) {
-            LOGGER.info("Toolsmith {} skipped smithing {} because output could not be reinserted",
-                    villager.getUuidAsString(),
-                    plan.output.getName().getString());
+        if (!executeConfirmedSmithing(
+                () -> canReinsertResult(inventory, plan),
+                () -> consumeAndReplace(inventory, plan),
+                () -> {
+                    inventory.markDirty();
+                    smithedToday++;
+                    ToolsmithWorkMetrics.recordSmithingJobCompleted(world, villager.getUuid());
+                })) {
+            LOGGER.info("Toolsmith {} skipped or failed smithing recipe {} before confirmed reinsertion",
+                    villager.getUuidAsString(), plan.recipeEntry.id());
             return;
         }
-
-        if (!consumeAndReplace(inventory, plan)) {
-            LOGGER.info("Toolsmith {} failed to apply smithing recipe {} due to inventory mutation",
-                    villager.getUuidAsString(),
-                    plan.recipeEntry.id());
-            return;
-        }
-
-        inventory.markDirty();
-        smithedToday++;
         CraftingCheckLogger.report(world, "Toolsmith", formatSmithResult(lastCheckCount, plan.output));
         LOGGER.info("Toolsmith {} smithed {} via {}",
                 villager.getUuidAsString(),
                 plan.output.getName().getString(),
                 plan.recipeEntry.id());
+    }
+
+    static boolean executeConfirmedSmithing(
+            BooleanSupplier hasResultCapacity,
+            BooleanSupplier consumedAndReplaced,
+            Runnable confirmedCompletion
+    ) {
+        if (!hasResultCapacity.getAsBoolean() || !consumedAndReplaced.getAsBoolean()) {
+            return false;
+        }
+        confirmedCompletion.run();
+        return true;
     }
 
     private SmithingPlan findFirstValidPlan(ServerWorld world, Inventory inventory) {

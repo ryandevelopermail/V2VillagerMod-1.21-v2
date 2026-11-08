@@ -176,6 +176,44 @@ class FarmerHarvestGoalLifecycleTest {
         assertTrue(schedule.consumePriorityScanRequest());
     }
 
+    @Test
+    void everyStageMapsExhaustivelyToFriendlyPlayerFacingActivity() {
+        assertEquals(FarmerHarvestGoal.FarmerActivity.IDLE,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.IDLE));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.IDLE,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.DONE));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.TRAVELING_TO_FARM,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.GO_TO_JOB));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.HARVESTING,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.HARVEST));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.TILLING,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.HOE_GROUND));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.GATHERING_SEEDS,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.GATHER_WHEAT_SEEDS));
+        assertEquals(FarmerHarvestGoal.FarmerActivity.PLANTING,
+                FarmerHarvestGoal.friendlyActivity(FarmerHarvestGoal.Stage.PLANT_FARMLAND));
+
+        for (FarmerHarvestGoal.Stage stage : new FarmerHarvestGoal.Stage[]{
+                FarmerHarvestGoal.Stage.GO_TO_GATE,
+                FarmerHarvestGoal.Stage.WALK_TO_BANNER,
+                FarmerHarvestGoal.Stage.FEED_ANIMALS,
+                FarmerHarvestGoal.Stage.OPEN_GATE_EXIT,
+                FarmerHarvestGoal.Stage.EXIT_PEN,
+                FarmerHarvestGoal.Stage.CLOSE_GATE_EXIT}) {
+            assertEquals(FarmerHarvestGoal.FarmerActivity.FEEDING_ANIMALS,
+                    FarmerHarvestGoal.friendlyActivity(stage), stage.name());
+        }
+        for (FarmerHarvestGoal.Stage stage : new FarmerHarvestGoal.Stage[]{
+                FarmerHarvestGoal.Stage.RETURN_TO_CHEST,
+                FarmerHarvestGoal.Stage.DEPOSIT,
+                FarmerHarvestGoal.Stage.SEED_GATHER_END_RETURN_TO_CHEST,
+                FarmerHarvestGoal.Stage.SEED_GATHER_END_DEPOSIT}) {
+            assertEquals(FarmerHarvestGoal.FarmerActivity.DEPOSITING,
+                    FarmerHarvestGoal.friendlyActivity(stage), stage.name());
+        }
+        assertEquals(17, FarmerHarvestGoal.Stage.values().length);
+    }
+
     private static FarmerHarvestGoal newGoal() {
         return new FarmerHarvestGoal(null, JOB, CHEST);
     }

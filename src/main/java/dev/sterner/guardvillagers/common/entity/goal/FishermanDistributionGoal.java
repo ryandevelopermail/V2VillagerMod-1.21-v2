@@ -1,6 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
+import dev.sterner.guardvillagers.common.professionalstorage.FishermanWorkMetrics;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
@@ -12,6 +13,8 @@ import net.minecraft.village.VillagerProfession;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.LongConsumer;
 
 public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal {
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
@@ -22,10 +25,23 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean isDistributableItem(ItemStack stack) {
+        return isDistributableFish(stack);
+    }
+
+    /** Shared production predicate for read-only storage profiles. */
+    public static boolean isDistributableFish(ItemStack stack) {
         return stack.isOf(Items.COD)
                 || stack.isOf(Items.SALMON)
                 || stack.isOf(Items.TROPICAL_FISH)
                 || stack.isOf(Items.PUFFERFISH);
+    }
+
+    /** Uses the identical direct-recipient rules without selecting or changing a transfer target. */
+    public static List<DistributionRecipientHelper.RecipientRecord> findEligibleButcherRecipientsReadOnly(
+            ServerWorld world,
+            VillagerEntity fisherman
+    ) {
+        return DistributionRecipientHelper.findEligibleButcherRecipients(world, fisherman, RECIPIENT_SCAN_RANGE);
     }
 
     @Override
@@ -38,7 +54,7 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
             if (!isDistributableItem(stack)) {
                 continue;
             }
-            if (!DistributionRecipientHelper.findEligibleButcherRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty()) {
+            if (!findEligibleButcherRecipientsReadOnly(world, villager).isEmpty()) {
                 return true;
             }
         }
@@ -54,7 +70,7 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
             return true;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleButcherRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = findEligibleButcherRecipientsReadOnly(world, villager);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -83,7 +99,7 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
         if (refreshOverflowTarget(world, this::isDistributableItem)) {
             return true;
         }
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleButcherRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = findEligibleButcherRecipientsReadOnly(world, villager);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -125,6 +141,45 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
         pendingItem = remaining;
         return false;
+    }
+
+    @Override
+    protected void onTransferCompleted(
+            ServerWorld world,
+            ItemStack transferred,
+            UUID targetId,
+            BlockPos targetPos,
+            TransferRoute route
+    ) {
+        if (route != TransferRoute.DIRECT
+                || targetId == null
+                || !isDistributableFish(transferred)
+                || transferred.getCount() <= 0) {
+            return;
+        }
+        boolean targetStillEligible = findEligibleButcherRecipientsReadOnly(world, villager).stream()
+                .anyMatch(recipient -> recipient.recipient().getUuid().equals(targetId)
+                        && recipient.chestPos().equals(targetPos));
+        recordConfirmedDirectFishDelivery(
+                true,
+                true,
+                targetStillEligible,
+                transferred.getCount(),
+                amount -> FishermanWorkMetrics.recordFishDelivered(world, villager.getUuid(), amount));
+    }
+
+    static boolean recordConfirmedDirectFishDelivery(
+            boolean directRoute,
+            boolean supportedRawFish,
+            boolean validEligibleRecipient,
+            long completedAmount,
+            LongConsumer confirmedDelivery
+    ) {
+        if (!directRoute || !supportedRawFish || !validEligibleRecipient || completedAmount <= 0L) {
+            return false;
+        }
+        confirmedDelivery.accept(completedAmount);
+        return true;
     }
 
     @Override

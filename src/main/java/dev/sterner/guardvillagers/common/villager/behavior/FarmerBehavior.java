@@ -17,6 +17,7 @@ import net.minecraft.village.VillagerProfession;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -38,6 +39,18 @@ public class FarmerBehavior extends AbstractPairedProfessionBehavior {
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> LAST_HARVEST_WAKE_TICKS = new WeakHashMap<>();
     private static final Map<VillagerEntity, Long> LAST_CRAFT_WAKE_TICKS = new WeakHashMap<>();
+
+    /** Narrow read-only bridge used by the Farmer storage profile. */
+    public static Optional<FarmerHarvestGoal.FarmerLiveSnapshot> getLiveStorageSnapshot(
+            ServerWorld world,
+            VillagerEntity villager
+    ) {
+        if (!villager.isAlive() || villager.getWorld() != world) {
+            return Optional.empty();
+        }
+        FarmerHarvestGoal goal = GOALS.get(villager);
+        return goal == null ? Optional.empty() : Optional.of(goal.getLiveSnapshot(world));
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {

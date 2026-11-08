@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.LibrarianBellChestDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.QuartermasterGoal;
@@ -39,6 +41,18 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private static final Map<VillagerEntity, Long> LAST_IMMEDIATE_REQUEST_TICK = new WeakHashMap<>();
     private static final Map<VillagerEntity, Boolean> INVENTORY_DIRTY_FLAGS = new WeakHashMap<>();
     private static final Map<VillagerEntity, LastQuartermasterPair> LAST_QUARTERMASTER_PAIR = new WeakHashMap<>();
+
+    /** Returns an ingredient-based recipe count, or null when the goal is unavailable. */
+    public static Integer countRecipesReadOnly(ServerWorld world, VillagerEntity villager, Inventory inventory) {
+        LibrarianCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        return goal == null ? null : goal.countRecipesReadOnly(world, inventory);
+    }
+
+    /** Returns the installed goal's paired table without waking or changing the worker. */
+    public static BlockPos getCraftingTablePos(VillagerEntity villager) {
+        LibrarianCraftingGoal goal = CRAFTING_GOALS.get(villager);
+        return goal == null ? null : goal.getCraftingTablePos();
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -237,6 +251,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         QUARTERMASTER_GOALS.put(villager, qmGoal);
         villager.goalSelector.add(QUARTERMASTER_GOAL_PRIORITY, qmGoal);
         QuartermasterGoal.registerActiveQuartermaster(world, chestPos, villager.getUuid());
+        ProfessionalStorageRegistry.promoteQuartermaster(world, villager, jobPos, chestPos);
         LOGGER.info("Librarian {} promoted to Quartermaster (reason={}, chest={} second_chest={} job_site={})",
                 villager.getUuidAsString(),
                 reason,
@@ -248,6 +263,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
     private void demoteQuartermaster(ServerWorld world, VillagerEntity villager, String reason) {
         QuartermasterGoal qmGoal = QUARTERMASTER_GOALS.remove(villager);
         if (qmGoal == null) {
+            ProfessionalStorageRegistry.demoteQuartermaster(world, villager);
             return;
         }
         villager.goalSelector.remove(qmGoal);
@@ -261,6 +277,7 @@ public class LibrarianBehavior implements VillagerProfessionBehavior {
         }
         PAIRED_CHEST_POS.remove(villager);
         LAST_QUARTERMASTER_PAIR.remove(villager);
+        ProfessionalStorageRegistry.demoteQuartermaster(world, villager);
         LOGGER.info("Librarian {} removed from Quartermaster role (reason={})",
                 villager.getUuidAsString(),
                 reason);

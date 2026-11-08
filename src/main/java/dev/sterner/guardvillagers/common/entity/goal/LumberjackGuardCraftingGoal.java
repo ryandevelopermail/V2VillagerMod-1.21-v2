@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -350,6 +353,8 @@ public class LumberjackGuardCraftingGoal extends Goal {
             }
 
             guard.setPairedChestPos(candidate);
+            ProfessionalStorageRegistry.recordSpecialistPairing(
+                    world, guard.getUuid(), ProfessionalRoleId.LUMBERJACK, candidate, tablePos);
             guard.setBootstrapComplete(false);
             return true;
         }
