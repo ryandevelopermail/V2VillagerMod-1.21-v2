@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
@@ -283,7 +286,10 @@ public class MasonGuardChestDistributionGoal extends Goal {
             return;
         }
 
+        int beforeTransfer = pendingItem.getCount();
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem.copy());
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD,
+                RemainingProfessionWorkMetrics.MASON_DELIVERED, beforeTransfer - remaining.getCount());
         if (remaining.isEmpty()) {
             List<RecipientRecord> refreshedRecipients = pendingOverflowTransfer
                     ? findRecipients(world, VillagerProfession.LIBRARIAN, Blocks.LECTERN)
@@ -304,7 +310,10 @@ public class MasonGuardChestDistributionGoal extends Goal {
     }
 
     private void executeBatchTransfer(ServerWorld world) {
+        int beforeTransfer = pendingItem.getCount();
         BatchTransferOutcome outcome = executeBatchTransferPass(target -> getChestInventory(world, target));
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD,
+                RemainingProfessionWorkMetrics.MASON_DELIVERED, beforeTransfer - pendingItem.getCount());
         if (outcome == BatchTransferOutcome.COMPLETE) {
             clearPendingState();
             return;

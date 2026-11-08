@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.MasonMiningRecoveryPolicy.FailureSubtype;
@@ -1098,6 +1101,7 @@ public class MasonMiningStairGoal extends Goal {
             return false;
         }
         minedBlockCount++;
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD, RemainingProfessionWorkMetrics.MASON_MINED, 1);
         collectNearbyDrops(world, pos);
         return true;
     }

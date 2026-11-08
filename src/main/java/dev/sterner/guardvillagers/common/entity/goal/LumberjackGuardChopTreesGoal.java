@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.CartographerMapChestUtil;
@@ -3000,6 +3003,9 @@ public class LumberjackGuardChopTreesGoal extends Goal {
             return false;
         }
 
+        if (state.isIn(BlockTags.LOGS)) {
+            RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.LUMBERJACK, RemainingProfessionWorkMetrics.LUMBERJACK_LOGS, 1);
+        }
         for (ItemStack drop : drops) {
             if (!drop.isEmpty()) {
                 bufferStack(drop.copy());

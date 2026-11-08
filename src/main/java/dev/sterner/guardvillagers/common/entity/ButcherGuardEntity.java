@@ -1,5 +1,9 @@
 package dev.sterner.guardvillagers.common.entity;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -188,6 +192,10 @@ public class ButcherGuardEntity extends GuardEntity {
     @Override
     public void tick() {
         super.tick();
+        if (this.age % 100 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+            ProfessionalStorageRegistry
+                    .refreshSpecialistPairing(serverWorld, this);
+        }
         if (this.getWorld().isClient) {
             return;
         }
@@ -218,6 +226,8 @@ public class ButcherGuardEntity extends GuardEntity {
     public boolean onKilledOther(ServerWorld world, LivingEntity other) {
         boolean result = super.onKilledOther(world, other);
         if (this.huntSessionActive && other instanceof AnimalEntity) {
+            RemainingProfessionWorkMetrics.record(world, getUuid(), ProfessionalRoleId.BUTCHER_GUARD,
+                    RemainingProfessionWorkMetrics.BUTCHER_GUARD_HUNTED, 1);
             collectLootNear(other.getBoundingBox().expand(2.0D));
             this.huntTargetsRemaining--;
             if (this.huntTargetsRemaining <= 0) {
@@ -387,6 +397,8 @@ public class ButcherGuardEntity extends GuardEntity {
         List<ItemStack> remaining = new ArrayList<>();
         for (ItemStack stack : this.collectedLoot) {
             ItemStack remainder = insertIntoInventory(inventory, stack);
+            RemainingProfessionWorkMetrics.record(serverWorld, getUuid(), ProfessionalRoleId.BUTCHER_GUARD,
+                    RemainingProfessionWorkMetrics.BUTCHER_GUARD_LOOT, stack.getCount() - remainder.getCount());
             if (!remainder.isEmpty()) {
                 remaining.add(remainder);
             }

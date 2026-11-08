@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import dev.sterner.guardvillagers.common.villager.behavior.MasonBehavior;
@@ -180,7 +182,11 @@ public class MasonTableCraftingGoal extends Goal {
 
         Recipe recipe = pickRecipe(craftable);
         if (consumeIngredients(inventory, recipe.requirements)) {
-            insertStack(inventory, recipe.output.copy());
+            ItemStack remaining = insertStack(inventory, recipe.output.copy());
+            RemainingProfessionWorkMetrics.record(
+                    world, villager.getUuid(), RemainingProfessionWorkMetrics.MASON,
+                    RemainingProfessionWorkMetrics.MASON_TOOLS,
+                    recipe.output.getCount() - remaining.getCount());
             inventory.markDirty();
             MasonBehavior.onChestInventoryMutated(world, chestPos);
             craftedToday++;

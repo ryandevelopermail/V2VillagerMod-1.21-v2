@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.common.villager.CraftingCheckLogger;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
@@ -183,11 +185,17 @@ public class LibrarianCraftingGoal extends Goal {
             return;
         }
         if (consumeIngredients(inventory, recipe.recipe)) {
-            insertStack(inventory, recipe.output.copy());
+            ItemStack remaining = insertStack(inventory, recipe.output.copy());
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.LIBRARIAN, RemainingProfessionWorkMetrics.LIBRARIAN_CRAFTED, recipe.output.getCount() - remaining.getCount());
             inventory.markDirty();
             craftedToday++;
             CraftingCheckLogger.report(world, "Librarian", formatCraftedResult(lastCheckCount, recipe.output));
         }
+    }
+
+    /** Count recipes using the goal's actual ingredient rules without starting the goal. */
+    public int countRecipesReadOnly(ServerWorld world, Inventory inventory) {
+        return getCraftableRecipes(world, inventory).size();
     }
 
     private List<LibrarianRecipe> getCraftableRecipes(ServerWorld world, Inventory inventory) {

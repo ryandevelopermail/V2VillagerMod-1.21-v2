@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.common.entity.AxeGuardEntity;
 import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.GuardEntity;
@@ -226,6 +228,10 @@ public class GuardVillagers implements ModInitializer {
         JobBlockPlacementHandler.register();
         UseItemCallback.EVENT.register(this::onUseItem);
         ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            if (world instanceof ServerWorld serverWorld) {
+                ProfessionalStorageRegistry
+                        .refreshSpecialistPairing(serverWorld, entity);
+            }
             if (entity instanceof VillagerEntity villagerEntity) {
                 if (world instanceof ServerWorld serverWorld) {
                     JobBlockPairingHelper.refreshVillagerPairings(serverWorld, villagerEntity);

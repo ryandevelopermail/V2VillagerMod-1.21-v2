@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.common.util.DistributionRecipientHelper;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.passive.VillagerEntity;
@@ -125,7 +127,9 @@ public class ShepherdToLibrarianDistributionGoal extends AbstractInventoryDistri
             return false;
         }
 
+        int beforeTransfer = pendingItem.getCount();
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEPHERD_DELIVERED, beforeTransfer - remaining.getCount());
         targetInventory.get().markDirty();
         if (remaining.isEmpty()) {
             return true;

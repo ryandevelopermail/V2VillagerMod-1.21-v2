@@ -1,9 +1,11 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
-import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
+import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.MasonCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonTableCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.MasonToLibrarianDistributionGoal;
@@ -50,6 +52,12 @@ public class MasonBehavior implements VillagerProfessionBehavior {
     private static final Map<BlockPos, Set<VillagerEntity>> CHEST_WATCHERS_BY_POS = new HashMap<>();
     private static final Map<VillagerEntity, Long> NEXT_CONVERSION_SCAN_TICK = new WeakHashMap<>();
     private static final long CHEST_SCAN_COOLDOWN_TICKS = 10L;
+
+    /** Returns the installed goal's paired table without waking or changing the worker. */
+    public static BlockPos getCraftingTablePos(VillagerEntity villager) {
+        MasonToLibrarianDistributionGoal goal = DISTRIBUTION_GOALS.get(villager);
+        return goal == null ? null : goal.getCraftingTablePos();
+    }
 
     @Override
     public void onChestPaired(ServerWorld world, VillagerEntity villager, BlockPos jobPos, BlockPos chestPos) {
@@ -352,6 +360,7 @@ public class MasonBehavior implements VillagerProfessionBehavior {
                 ProfessionalRoleId.MASON_GUARD,
                 chestPos,
                 jobPos);
+        RemainingProfessionWorkMetrics.transferMason(world, villager.getUuid(), guard.getUuid());
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Mason converted into guard using tool {} from {} slot {} ({}) ({})",

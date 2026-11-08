@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.villager.behavior.ShepherdPenLifecycle;
 import net.minecraft.block.ChestBlock;
@@ -169,12 +171,14 @@ public class ShepherdFenceCraftingGoal extends AbstractCraftingGoal<ShepherdFenc
             int fencesCrafted = batchCraftCount * FENCES_PER_CRAFT;
             lastFenceBatchCraftCount = batchCraftCount;
             ItemStack fenceStack = new ItemStack(chooseFenceItem(inventory), fencesCrafted);
-            insertStack(inventory, fenceStack);
+            ItemStack remaining = insertStack(inventory, fenceStack);
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEPHERD_CRAFTED, fencesCrafted - remaining.getCount());
         } else {
             if (!consumeMatching(inventory, stack -> stack.isIn(ItemTags.PLANKS), PLANKS_PER_GATE_CRAFT)) return false;
             if (!consumeMatching(inventory, stack -> stack.isOf(Items.STICK), STICKS_PER_GATE_CRAFT)) return false;
             ItemStack gateStack = new ItemStack(chooseGateItem(inventory), 1);
-            insertStack(inventory, gateStack);
+            ItemStack remaining = insertStack(inventory, gateStack);
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEPHERD_CRAFTED, 1 - remaining.getCount());
             lastFenceBatchCraftCount = 1;
         }
         return true;

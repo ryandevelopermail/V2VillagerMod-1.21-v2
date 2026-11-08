@@ -86,6 +86,45 @@ public final class ProfessionalStorageRegistry {
                 world.getTime()));
     }
 
+    /** Bind a specialist whose storage was created or replaced after conversion. */
+    public static void recordSpecialistPairing(ServerWorld world, UUID workerUuid, ProfessionalRoleId role,
+                                               BlockPos storagePos, BlockPos roleAnchorPos) {
+        if (storagePos == null || roleAnchorPos == null
+                || !storagePos.isWithinDistance(roleAnchorPos, JobBlockPairingHelper.JOB_BLOCK_PAIRING_RANGE)) {
+            return;
+        }
+        if (!world.isChunkLoaded(storagePos) || !world.isChunkLoaded(roleAnchorPos)) return;
+        Optional<ProfessionalStorageState> state = getState(world);
+        Optional<StorageIdentity> storage = StorageIdentityResolver.resolve(world, storagePos);
+        if (state.isEmpty() || storage.isEmpty()) return;
+        Optional<ProfessionalStoragePairing> previous = state.get().getByWorker(workerUuid);
+        if (previous.isPresent() && previous.get().storage().equals(storage.get())
+                && previous.get().physicalStoragePos().equals(storagePos)
+                && previous.get().role().equals(role)
+                && Objects.equals(previous.get().roleAnchorPos(), roleAnchorPos)) return;
+        state.get().upsert(new ProfessionalStoragePairing(storage.get(), storagePos, workerUuid,
+                role, roleAnchorPos, world.getTime()));
+    }
+
+    /** Restore pairings for specialists saved before the storage registry existed. */
+    public static void refreshSpecialistPairing(ServerWorld world, Entity entity) {
+        if (!entity.isAlive() || entity.isRemoved()) return;
+        if (entity instanceof ButcherGuardEntity guard) {
+            recordSpecialistPairing(world, guard.getUuid(), ProfessionalRoleId.BUTCHER_GUARD,
+                    guard.getPairedChestPos(), guard.getPairedSmokerPos());
+        } else if (entity instanceof MasonGuardEntity guard) {
+            recordSpecialistPairing(world, guard.getUuid(), ProfessionalRoleId.MASON_GUARD,
+                    guard.getPairedChestPos(), guard.getPairedJobPos());
+        } else if (entity instanceof FishermanGuardEntity guard) {
+            BlockPos storage = guard.getPairedChestPos() != null ? guard.getPairedChestPos() : guard.getPairedJobPos();
+            recordSpecialistPairing(world, guard.getUuid(), ProfessionalRoleId.FISHERMAN_GUARD,
+                    storage, guard.getPairedJobPos());
+        } else if (entity instanceof LumberjackGuardEntity guard) {
+            recordSpecialistPairing(world, guard.getUuid(), ProfessionalRoleId.LUMBERJACK,
+                    guard.getPairedChestPos(), guard.getPairedCraftingTablePos());
+        }
+    }
+
     public static void promoteQuartermaster(
             ServerWorld world,
             VillagerEntity villager,

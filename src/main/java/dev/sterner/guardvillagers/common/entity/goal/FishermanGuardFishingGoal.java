@@ -1,5 +1,11 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.FishermanWorkMetrics;
+
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.FishermanGuardEntity;
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
@@ -218,7 +224,12 @@ public class FishermanGuardFishingGoal extends Goal {
 
         BlockPos butcherChestPos = this.butcherTransferTarget.chestPos();
         if (isNear(butcherChestPos)) {
+            int beforeDelivery = this.butcherDeliveryLoot.stream().mapToInt(ItemStack::getCount).sum();
             List<ItemStack> remaining = depositLoot(world, butcherChestPos, this.butcherDeliveryLoot);
+            int delivered = beforeDelivery - remaining.stream().mapToInt(ItemStack::getCount).sum();
+            RemainingProfessionWorkMetrics.record(
+                    world, guard.getUuid(), ProfessionalRoleId.FISHERMAN_GUARD,
+                    FishermanWorkMetrics.FISH_DELIVERED, delivered);
             this.butcherDeliveryLoot.clear();
             if (!remaining.isEmpty()) {
                 LOGGER.info("fisherman [{}] butcher chest full/invalid, returning {} cookable fish stacks to local storage",

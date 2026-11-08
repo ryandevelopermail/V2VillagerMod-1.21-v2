@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
@@ -91,7 +93,8 @@ public class ShepherdBedCraftingGoal extends AbstractCraftingGoal<ShepherdBedCra
         if (!consumeWool(inventory, recipe.woolMatcher, 3)) {
             return false;
         }
-        insertStack(inventory, recipe.output.copy());
+        ItemStack remaining = insertStack(inventory, recipe.output.copy());
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.SHEPHERD, RemainingProfessionWorkMetrics.SHEPHERD_CRAFTED, recipe.output.getCount() - remaining.getCount());
         return true;
     }
 

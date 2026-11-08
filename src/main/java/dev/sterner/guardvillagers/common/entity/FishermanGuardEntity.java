@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity;
 
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.goal.ArmorerRepairGuardArmorGoal;
 import dev.sterner.guardvillagers.common.entity.goal.FishermanGuardFishingGoal;
@@ -101,6 +103,10 @@ public class FishermanGuardEntity extends GuardEntity {
     @Override
     public void tick() {
         super.tick();
+        if (this.age % 100 == 0 && this.getWorld() instanceof ServerWorld serverWorld) {
+            ProfessionalStorageRegistry
+                    .refreshSpecialistPairing(serverWorld, this);
+        }
         this.setTarget(null);
     }
 

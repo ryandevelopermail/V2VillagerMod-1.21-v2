@@ -31,6 +31,14 @@ public final class ProfessionalStorageProfileProviders {
                 new FishermanProfessionalStorageProfileProvider();
         register(FishermanWorkMetrics.FISHERMAN_ROLE, fishermanProvider);
         register(ProfessionalRoleId.FISHERMAN_GUARD, fishermanProvider);
+        RemainingProfessionalStorageProfileProvider remaining = new RemainingProfessionalStorageProfileProvider();
+        register(RemainingProfessionWorkMetrics.SHEPHERD, remaining);
+        register(RemainingProfessionWorkMetrics.LIBRARIAN, remaining);
+        register(RemainingProfessionWorkMetrics.MASON, remaining);
+        register(ProfessionalRoleId.BUTCHER_GUARD, remaining);
+        register(ProfessionalRoleId.MASON_GUARD, remaining);
+        register(ProfessionalRoleId.LUMBERJACK, remaining);
+        register(ProfessionalRoleId.QUARTERMASTER, remaining);
     }
 
     public static void register(ProfessionalRoleId role, ProfessionalStorageProfileProvider provider) {

@@ -1,9 +1,11 @@
 package dev.sterner.guardvillagers.common.villager.behavior;
 
-import dev.sterner.guardvillagers.GuardVillagers;
-import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
 import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
+import dev.sterner.guardvillagers.GuardVillagers;
+import dev.sterner.guardvillagers.common.entity.ButcherGuardEntity;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherCraftingGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherMeatDistributionGoal;
 import dev.sterner.guardvillagers.common.entity.goal.ButcherSmokerGoal;
@@ -262,6 +264,7 @@ public class ButcherBehavior extends AbstractPairedProfessionBehavior {
                 ProfessionalRoleId.BUTCHER_GUARD,
                 chestPos,
                 jobPos);
+        RemainingProfessionWorkMetrics.transferButcher(world, villager.getUuid(), guard.getUuid());
         VillageGuardStandManager.handleGuardSpawn(world, guard, villager);
 
         LOGGER.info("Butcher converted into guard using chest weapon ({})",

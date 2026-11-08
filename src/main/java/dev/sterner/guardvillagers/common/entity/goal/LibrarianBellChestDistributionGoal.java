@@ -1,5 +1,7 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+
 import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -83,7 +85,9 @@ public class LibrarianBellChestDistributionGoal extends AbstractInventoryDistrib
             return false;
         }
 
+        int beforeTransfer = pendingItem.getCount();
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
+        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.LIBRARIAN, RemainingProfessionWorkMetrics.LIBRARIAN_DELIVERED, beforeTransfer - remaining.getCount());
         targetInventory.get().markDirty();
         if (remaining.isEmpty()) {
             return true;

@@ -1,5 +1,9 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalStorageRegistry;
+
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
 import dev.sterner.guardvillagers.common.util.LumberjackDemandPlanner;
 import net.minecraft.block.BlockState;
@@ -140,7 +144,10 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             if (stack.isEmpty()) {
                 continue;
             }
+            int beforeDeposit = stack.getCount();
             ItemStack remaining = insertIntoInventory(chestInventory, stack);
+            RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.LUMBERJACK,
+                    RemainingProfessionWorkMetrics.LUMBERJACK_STORED, beforeDeposit - remaining.getCount());
             buffer.set(i, remaining);
         }
         buffer.removeIf(ItemStack::isEmpty);
@@ -290,7 +297,9 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
             return Optional.empty();
         }
 
+        int attemptedCount = moved.getCount();
         ItemStack remaining = insertIntoInventory(recipientInventory.get(), moved);
+        RemainingProfessionWorkMetrics.record(world, guard.getUuid(), ProfessionalRoleId.LUMBERJACK, RemainingProfessionWorkMetrics.LUMBERJACK_DELIVERED, attemptedCount - remaining.getCount());
         recipientInventory.get().markDirty();
         if (remaining.isEmpty()) {
             return Optional.of(selected);
@@ -517,6 +526,8 @@ public class LumberjackGuardDepositLogsGoal extends Goal {
 
         if (clearInvalidPairing) {
             this.guard.setPairedChestPos(null);
+            ProfessionalStorageRegistry.removePersistentPairing(
+                    world, guard.getUuid());
         }
 
         Inventory pairedChestInventory = LumberjackGuardCraftingGoal.resolveChestInventoryForGuard(world, this.guard);

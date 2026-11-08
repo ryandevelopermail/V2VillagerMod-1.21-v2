@@ -1,5 +1,8 @@
 package dev.sterner.guardvillagers.common.entity.goal;
 
+import dev.sterner.guardvillagers.common.professionalstorage.RemainingProfessionWorkMetrics;
+import dev.sterner.guardvillagers.common.professionalstorage.ProfessionalRoleId;
+
 import dev.sterner.guardvillagers.GuardVillagersConfig;
 import dev.sterner.guardvillagers.common.entity.MasonGuardEntity;
 import dev.sterner.guardvillagers.common.entity.LumberjackGuardEntity;
@@ -1898,6 +1901,7 @@ public class QuartermasterGoal extends Goal {
                 }
             }
 
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), ProfessionalRoleId.QUARTERMASTER, RemainingProfessionWorkMetrics.QUARTERMASTER_DELIVERED, carrying.getCount() - remaining.getCount());
             // If dest chest was full, drop overflow at the villager's feet so items are never lost.
             if (!remaining.isEmpty()) {
                 if (LOGGER.isDebugEnabled()) {
