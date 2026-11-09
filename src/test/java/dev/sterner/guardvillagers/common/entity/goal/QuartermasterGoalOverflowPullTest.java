@@ -2,6 +2,8 @@ package dev.sterner.guardvillagers.common.entity.goal;
 
 import dev.sterner.guardvillagers.common.util.JobBlockPairingHelper;
 import net.minecraft.block.Blocks;
+import net.minecraft.entity.ai.brain.Brain;
+import net.minecraft.entity.ai.brain.MemoryModuleType;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.inventory.SimpleInventory;
@@ -9,6 +11,7 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.GlobalPos;
 import net.minecraft.village.VillagerProfession;
 import net.minecraft.village.VillagerData;
 import net.minecraft.world.World;
@@ -136,12 +139,20 @@ class QuartermasterGoalOverflowPullTest {
             goal = new TestQuartermasterGoal(quartermaster, qmJob, qmChest);
         }
 
+        @SuppressWarnings("unchecked")
         private void addWorker(VillagerProfession profession, BlockPos chestPos, Inventory inventory) {
             VillagerEntity worker = mock(VillagerEntity.class);
             VillagerData villagerData = mock(VillagerData.class);
-            when(worker.getUuid()).thenReturn(UUID.randomUUID());
+            Brain<VillagerEntity> brain = (Brain<VillagerEntity>) mock(Brain.class);
+            UUID workerId = UUID.randomUUID();
+            when(worker.isAlive()).thenReturn(true);
+            when(worker.getUuid()).thenReturn(workerId);
             when(worker.getVillagerData()).thenReturn(villagerData);
             when(villagerData.getProfession()).thenReturn(profession);
+            when(worker.getBrain()).thenReturn(brain);
+            when(brain.getOptionalMemory(MemoryModuleType.JOB_SITE))
+                    .thenReturn(Optional.of(GlobalPos.create(World.OVERWORLD, workerJob)));
+            when(world.getEntity(workerId)).thenReturn(worker);
             JobBlockPairingHelper.cacheVillagerChestPairing(world, worker, workerJob, chestPos);
             goal.setInventory(chestPos, inventory);
         }

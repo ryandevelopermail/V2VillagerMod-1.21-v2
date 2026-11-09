@@ -105,7 +105,7 @@ class OverflowRoutingOwnershipTest {
         TestClericDistributionGoal clericGoal = new TestClericDistributionGoal(cleric);
         TestShepherdDistributionGoal shepherdGoal = new TestShepherdDistributionGoal(shepherd);
         SimpleInventory clericInventory = new SimpleInventory(new ItemStack(Items.POTION));
-        SimpleInventory shepherdInventory = new SimpleInventory(new ItemStack(Items.WHITE_WOOL));
+        SimpleInventory shepherdInventory = new SimpleInventory(new ItemStack(Items.STRING));
 
         try (MockedStatic<DistributionRecipientHelper> recipients = Mockito.mockStatic(DistributionRecipientHelper.class)) {
             recipients.when(() -> DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, cleric, 24.0D))
