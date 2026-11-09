@@ -158,20 +158,20 @@ class ClericCompletionSeamTest {
     }
 
     @Test
-    void deliveryMetricRequiresDirectValidLibrarianStorageAndReserve() {
-        assertTrue(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+    void deliveryMetricRequiresDirectValidQuartermasterStorageAndReserve() {
+        assertTrue(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, true, true, true, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.OVERFLOW, true, true, true, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.UNIVERSAL, true, true, true, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, false, true, true, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, true, false, true, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, true, true, false, true));
-        assertFalse(ClericDistributionGoal.isConfirmedDirectLibrarianDelivery(
+        assertFalse(ClericDistributionGoal.isConfirmedDirectQuartermasterDelivery(
                 AbstractInventoryDistributionGoal.TransferRoute.DIRECT, true, true, true, false));
     }
 

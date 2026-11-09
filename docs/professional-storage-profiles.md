@@ -7,7 +7,7 @@ Opening a registered professional chest or barrel builds a server-side snapshot.
 | Role | Tabs | Main information |
 | --- | --- | --- |
 | Shepherd | Overview, Flock, Crafting, Distribution | Loom and table, shears, wheat, wool, banner recipes with inputs, beds, fences, gates, shearing, crafting, placement, and direct deliveries |
-| Librarian | Overview, Crafting, Distribution | Lectern and table, recipes with inputs, book materials and shelves, crafted items and direct deliveries |
+| Librarian | Overview, Crafting, Distribution | Lectern and table, recipes with inputs, book materials and shelves, crafted items and stored items |
 | Mason | Overview, Stonecutting, Crafting, Distribution | Stonecutter and table, stone and clay, stonecut output, tool materials and final tools crafted, direct deliveries |
 | Butcher Guard | Overview, Cooking, Hunting, Earlier career | Smoker state, smokable input and fuel, cooked output collected, animals hunted and loot stored; applicable native Butcher totals are preserved |
 | Mason Guard | Overview, Stonecutting, Construction, Distribution | Stonecutter, materials, stonecut output, mined blocks, placed walls, earlier tool crafting, deliveries |
@@ -16,7 +16,7 @@ Opening a registered professional chest or barrel builds a server-side snapshot.
 
 A recipe count reports ingredient availability from the installed native crafting goal; it does not promise that the table, daily quota, or space for the output is available. Shepherd's count covers banner recipes, while beds and pen materials have separate demand-driven workflows. The Butcher Guard uses the guard's actual smoking and fuel predicates. When multiple loaded workers share storage, the recipe and smoker-state details come from the lowest worker UUID, matching the existing profile convention.
 
-Counters record successful outcomes from the time this feature is installed; they cannot reconstruct earlier work. The native Mason and Butcher counters are transferred to their guards on a successful conversion. Librarian and Quartermaster totals remain separately keyed to their respective roles when the worker is promoted or demoted. Direct-delivery counters exclude generic overflow or universal routes; guard and Quartermaster delivery totals count the amount actually inserted, including partial insertions. A Lumberjack's harvested-log count is the number of log blocks removed, not the number of drops.
+Counters record successful outcomes from the time this feature is installed; they cannot reconstruct earlier work. The native Mason and Butcher counters are transferred to their guards on a successful conversion. Librarian and Quartermaster totals remain separately keyed to their respective roles when the worker is promoted or demoted. Librarian overflow is collected by the Quartermaster, whose delivery counter records the inserted items; it is not attributed to the Librarian. Direct-delivery counters exclude universal routes; guard and Quartermaster delivery totals count the amount actually inserted, including partial insertions. A Lumberjack's harvested-log count is the number of log blocks removed, not the number of drops.
 
 Existing saved specialist guards restore their registered pairing when the entity and its storage are loaded. Lumberjacks also register a chest created during recovery. Unpaired or invalid storage remains vanilla, and custom container names remain intact.
 

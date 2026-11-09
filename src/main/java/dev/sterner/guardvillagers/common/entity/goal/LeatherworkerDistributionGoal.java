@@ -31,13 +31,6 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
     private static final Logger LOGGER = LoggerFactory.getLogger(LeatherworkerDistributionGoal.class);
     private static final double RECIPIENT_SCAN_RANGE = 24.0D;
 
-    /**
-     * Crafted output whitelist for leatherworker-to-librarian distribution.
-     *
-     * Strategy:
-     * - Include leather and common leatherworker-crafted leather products.
-     * - Include book-related products expected to be useful for librarians.
-     */
     private final Set<UUID> pendingRejectedRecipients = new HashSet<>();
 
     public LeatherworkerDistributionGoal(VillagerEntity villager, BlockPos jobPos, BlockPos chestPos, BlockPos craftingTablePos) {
@@ -116,7 +109,6 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             pendingTargetId = recipient.recipient().getUuid();
             pendingTargetPos = recipient.chestPos();
             pendingUniversalRoute = false;
-            pendingOverflowTransfer = false;
             pendingRejectedRecipients.clear();
             return true;
         }
@@ -225,11 +217,14 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             recipients = java.util.stream.Stream.concat(
                             DistributionRecipientHelper.findEligibleV2CartographerRecipients(
                                     world, villager, RECIPIENT_SCAN_RANGE).stream(),
-                            DistributionRecipientHelper.findEligibleLibrarianRecipients(
+                            DistributionRecipientHelper.findEligibleQuartermasterRecipients(
                                     world, villager, RECIPIENT_SCAN_RANGE).stream())
                     .toList();
-        } else {
+        } else if (isLibrarianCraftingInput(transferred)) {
             recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(
+                    world, villager, RECIPIENT_SCAN_RANGE);
+        } else {
+            recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(
                     world, villager, RECIPIENT_SCAN_RANGE);
         }
         return recipients.stream().anyMatch(recipient -> recipient.recipient() != null
@@ -263,26 +258,28 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             return List.of();
         }
 
-        // Item frames go to v2 cartographers (for map display walls) first; librarians are an explicit fallback.
-        // All other leatherworker items route to librarians only.
+        // Item frames go to v2 cartographers first, then central storage. Only inputs
+        // consumed by Librarian recipes may target an ordinary Librarian chest.
         List<DistributionRecipientHelper.RecipientRecord> candidates;
         if (isFrame(stack)) {
             List<DistributionRecipientHelper.RecipientRecord> allCartographers =
                     DistributionRecipientHelper.findEligibleCartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
             List<DistributionRecipientHelper.RecipientRecord> v2Cartographers =
                     DistributionRecipientHelper.findEligibleV2CartographerRecipients(world, villager, RECIPIENT_SCAN_RANGE);
-            List<DistributionRecipientHelper.RecipientRecord> librarians =
-                    DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+            List<DistributionRecipientHelper.RecipientRecord> quartermasters =
+                    DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
             candidates = resolveItemFrameRecipients(
                     stack,
                     allCartographers,
                     v2Cartographers,
-                    librarians,
+                    quartermasters,
                     LOGGER,
                     villager.getUuidAsString()
             );
-        } else {
+        } else if (isLibrarianCraftingInput(stack)) {
             candidates = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        } else {
+            candidates = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         }
 
         return candidates.stream()
@@ -357,18 +354,18 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             ItemStack stack,
             List<DistributionRecipientHelper.RecipientRecord> allCartographers,
             List<DistributionRecipientHelper.RecipientRecord> v2Cartographers,
-            List<DistributionRecipientHelper.RecipientRecord> librarians,
+            List<DistributionRecipientHelper.RecipientRecord> centralStorageRecipients,
             Logger logger,
             String leatherworkerId
     ) {
         if (!(stack.isOf(Items.ITEM_FRAME) || stack.isOf(Items.GLOW_ITEM_FRAME))) {
-            return librarians;
+            return centralStorageRecipients;
         }
         return resolveItemFrameRecipients(
                 true,
                 allCartographers,
                 v2Cartographers,
-                librarians,
+                centralStorageRecipients,
                 LeatherworkerDistributionGoal::recipientId,
                 recipient -> logger.debug(
                         "Leatherworker {} rejected non-v2 cartographer recipient={} jobPos={} chestPos={} for stack={}",
@@ -383,18 +380,23 @@ public class LeatherworkerDistributionGoal extends AbstractInventoryDistribution
             boolean frame,
             List<T> allCartographers,
             List<T> v2Cartographers,
-            List<T> librarians,
+            List<T> centralStorageRecipients,
             Function<T, UUID> id,
             Consumer<T> rejectedCartographer
     ) {
         if (!frame) {
-            return List.copyOf(librarians);
+            return List.copyOf(centralStorageRecipients);
         }
         Set<UUID> v2Ids = v2Cartographers.stream().map(id).collect(Collectors.toSet());
         allCartographers.stream()
                 .filter(recipient -> !v2Ids.contains(id.apply(recipient)))
                 .forEach(rejectedCartographer);
-        return java.util.stream.Stream.concat(v2Cartographers.stream(), librarians.stream()).toList();
+        return java.util.stream.Stream.concat(v2Cartographers.stream(), centralStorageRecipients.stream())
+                .toList();
+    }
+
+    static boolean isLibrarianCraftingInput(ItemStack stack) {
+        return stack.isOf(Items.LEATHER) || stack.isOf(Items.BOOK);
     }
 
     private static UUID recipientId(DistributionRecipientHelper.RecipientRecord recipient) {

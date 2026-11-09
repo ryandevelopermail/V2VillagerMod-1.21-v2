@@ -55,11 +55,6 @@ public class CartographerToLibrarianDistributionGoal extends AbstractInventoryDi
     }
 
     @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.empty();
-    }
-
-    @Override
     protected boolean matchesProfession(VillagerEntity villager) {
         return villager.getVillagerData().getProfession() == VillagerProfession.CARTOGRAPHER;
     }

@@ -46,9 +46,6 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -66,10 +63,6 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
         if (inventory == null) {
             return false;
         }
-        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
-
         List<DistributionRecipientHelper.RecipientRecord> recipients = findEligibleButcherRecipientsReadOnly(world, villager);
         if (recipients.isEmpty()) {
             return false;
@@ -96,9 +89,6 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, this::isDistributableItem)) {
-            return true;
-        }
         List<DistributionRecipientHelper.RecipientRecord> recipients = findEligibleButcherRecipientsReadOnly(world, villager);
         if (recipients.isEmpty()) {
             return false;
@@ -121,9 +111,6 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
@@ -184,11 +171,6 @@ public class FishermanDistributionGoal extends AbstractInventoryDistributionGoal
 
     @Override
     protected void clearPendingTargetState() {
-    }
-
-    @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
     }
 
     @Override

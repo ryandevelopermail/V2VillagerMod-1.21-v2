@@ -49,9 +49,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
-        if (canStartOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -70,14 +67,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             return false;
         }
         pendingDirectCompletion = DirectCompletionKind.NONE;
-        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            LOGGER.info("Fletcher {} selected {} for librarian overflow at {}",
-                    villager.getUuidAsString(),
-                    pendingItem.getItem(),
-                    pendingTargetPos.toShortString());
-            return true;
-        }
-
         for (int slot = 0; slot < inventory.size(); slot++) {
             ItemStack stack = inventory.getStack(slot);
             if (!isDistributableItem(stack)) {
@@ -101,7 +90,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
             pendingTargetId = recipient.targetId();
             pendingTargetPos = recipient.targetPos();
             pendingUniversalRoute = false;
-            pendingOverflowTransfer = false;
 
             LOGGER.info("Fletcher {} selected {} for {} {} at {} [{}]",
                     villager.getUuidAsString(),
@@ -117,9 +105,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, this::isDistributableItem)) {
-            return true;
-        }
         List<TransferTarget> recipients = findRecipientForStack(world, pendingItem);
         if (recipients.isEmpty()) {
             return false;
@@ -148,9 +133,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
         if (pendingItem.isEmpty() || pendingTargetId == null) {
             return false;
         }
@@ -334,11 +316,6 @@ public class FletcherDistributionGoal extends AbstractInventoryDistributionGoal 
     private void markUndeliverable(ServerWorld world, ItemStack stack) {
         recentlyUndeliverable = stack.copy();
         retryUndeliverableAfterTick = world.getTime() + UNDELIVERABLE_RETRY_DELAY_TICKS;
-    }
-
-    @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
     }
 
     @Override

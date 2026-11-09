@@ -29,7 +29,7 @@ class QuartermasterGoalSurplusCacheTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void findSurplusChest_usesCachedPairingsWithoutPerVillagerJobSiteWorldScans() throws Exception {
+    void findOverflowTransfer_usesCachedPairingsWithoutPerVillagerJobSiteWorldScans() throws Exception {
         ServerWorld world = mock(ServerWorld.class);
         when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
         JobBlockPairingHelper.clearWorldCaches(world);
@@ -60,9 +60,9 @@ class QuartermasterGoalSurplusCacheTest {
             JobBlockPairingHelper.cacheVillagerChestPairing(world, worker, workerJob, workerChest);
         }
 
-        Method findSurplusChest = QuartermasterGoal.class.getDeclaredMethod("findSurplusChest", ServerWorld.class, BlockPos.class);
-        findSurplusChest.setAccessible(true);
-        Optional<BlockPos> result = (Optional<BlockPos>) findSurplusChest.invoke(goal, world, quartermasterChest);
+        Method findOverflowTransfer = QuartermasterGoal.class.getDeclaredMethod("findOverflowTransfer", ServerWorld.class, BlockPos.class);
+        findOverflowTransfer.setAccessible(true);
+        Optional<?> result = (Optional<?>) findOverflowTransfer.invoke(goal, world, quartermasterChest);
 
         assertTrue(result.isEmpty());
 
@@ -75,7 +75,7 @@ class QuartermasterGoalSurplusCacheTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void findSurplusChest_enforcesBoundedPerCycleBudgetWithLargePairingCache() throws Exception {
+    void findOverflowTransfer_enforcesBoundedPerCycleBudgetWithLargePairingCache() throws Exception {
         ServerWorld world = mock(ServerWorld.class);
         when(world.getRegistryKey()).thenReturn(World.OVERWORLD);
         when(world.getTime()).thenReturn(2000L);
@@ -105,9 +105,9 @@ class QuartermasterGoalSurplusCacheTest {
             JobBlockPairingHelper.cacheVillagerChestPairing(world, worker, workerJob, workerChest);
         }
 
-        Method findSurplusChest = QuartermasterGoal.class.getDeclaredMethod("findSurplusChest", ServerWorld.class, BlockPos.class);
-        findSurplusChest.setAccessible(true);
-        Optional<BlockPos> result = (Optional<BlockPos>) findSurplusChest.invoke(goal, world, quartermasterChest);
+        Method findOverflowTransfer = QuartermasterGoal.class.getDeclaredMethod("findOverflowTransfer", ServerWorld.class, BlockPos.class);
+        findOverflowTransfer.setAccessible(true);
+        Optional<?> result = (Optional<?>) findOverflowTransfer.invoke(goal, world, quartermasterChest);
         assertFalse(result.isPresent());
 
         QuartermasterGoal.SurplusScanMetrics metrics = QuartermasterGoal.getLastSurplusScanMetricsForTest(goal);

@@ -47,8 +47,10 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
     }
 
     @Override
-    protected double getSourceChestFullnessTrigger() {
-        return SOURCE_CHEST_FULLNESS_TRIGGER;
+    protected boolean canStartWithInventory(ServerWorld world, Inventory inventory) {
+        return isInventoryAtLeastFull(inventory, SOURCE_CHEST_FULLNESS_TRIGGER)
+                && hasDistributableItem(inventory)
+                && !DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE).isEmpty();
     }
 
     @Override
@@ -56,11 +58,7 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
         if (inventory == null) {
             return false;
         }
-        if (trySelectOverflowTransfer(world, inventory, this::isDistributableItem)) {
-            return true;
-        }
-
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -87,14 +85,11 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
 
     @Override
     protected boolean refreshTargetForPendingItem(ServerWorld world) {
-        if (refreshOverflowTarget(world, this::isDistributableItem)) {
-            return true;
-        }
         if (!isDistributableItem(pendingItem)) {
             return false;
         }
 
-        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleLibrarianRecipients(world, villager, RECIPIENT_SCAN_RANGE);
+        List<DistributionRecipientHelper.RecipientRecord> recipients = DistributionRecipientHelper.findEligibleQuartermasterRecipients(world, villager, RECIPIENT_SCAN_RANGE);
         if (recipients.isEmpty()) {
             return false;
         }
@@ -116,9 +111,6 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
 
     @Override
     protected boolean executeTransfer(ServerWorld world) {
-        if (pendingOverflowTransfer) {
-            return executeOverflowTransfer(world);
-        }
         if (pendingItem.isEmpty() || pendingTargetPos == null) {
             return false;
         }
@@ -128,9 +120,7 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
             return false;
         }
 
-        int beforeTransfer = pendingItem.getCount();
         ItemStack remaining = insertStack(targetInventory.get(), pendingItem);
-        RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.MASON, RemainingProfessionWorkMetrics.MASON_DELIVERED, beforeTransfer - remaining.getCount());
         targetInventory.get().markDirty();
         if (remaining.isEmpty()) {
             return true;
@@ -141,12 +131,16 @@ public class MasonToLibrarianDistributionGoal extends AbstractInventoryDistribut
     }
 
     @Override
-    protected void clearPendingTargetState() {
+    protected void onTransferCompleted(ServerWorld world, ItemStack transferred,
+                                       java.util.UUID targetId, BlockPos targetPos, TransferRoute route) {
+        if (route == TransferRoute.DIRECT) {
+            RemainingProfessionWorkMetrics.record(world, villager.getUuid(), RemainingProfessionWorkMetrics.MASON,
+                    RemainingProfessionWorkMetrics.MASON_DELIVERED, transferred.getCount());
+        }
     }
 
     @Override
-    protected Optional<OverflowRecipientType> getOverflowRecipientType() {
-        return Optional.of(OverflowRecipientType.LIBRARIAN);
+    protected void clearPendingTargetState() {
     }
 
     @Override

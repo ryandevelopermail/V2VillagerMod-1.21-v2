@@ -87,8 +87,7 @@ public final class RemainingProfessionalStorageProfileProvider implements Profes
                             count("Leather stored", inventory, s -> s.isOf(Items.LEATHER)),
                             count("Bookshelves stored", inventory, s -> s.isOf(Items.BOOKSHELF)),
                             metric("Items crafted", stats, workers, role, RemainingProfessionWorkMetrics.LIBRARIAN_CRAFTED)),
-                    tab("distribution", "Distribution", count("Items stored", inventory, s -> true),
-                            metric("Direct items delivered", stats, workers, role, RemainingProfessionWorkMetrics.LIBRARIAN_DELIVERED))));
+                    tab("distribution", "Distribution", count("Items stored", inventory, s -> true))));
         }
         if (role.equals(RemainingProfessionWorkMetrics.MASON) || role.equals(ProfessionalRoleId.MASON_GUARD)) {
             List<ProfessionalStorageTab> tabs = new ArrayList<>();

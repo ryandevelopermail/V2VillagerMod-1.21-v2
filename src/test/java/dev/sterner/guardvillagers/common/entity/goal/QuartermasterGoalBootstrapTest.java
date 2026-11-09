@@ -434,13 +434,13 @@ class QuartermasterGoalBootstrapTest {
     }
 
     private static void invokeTakeFromInventory(QuartermasterGoal goal, ServerWorld world, BlockPos sourcePos) throws Exception {
-        Method takeFromInventory = QuartermasterGoal.class.getDeclaredMethod("takeFromInventory", ServerWorld.class, BlockPos.class);
+        Method takeFromInventory = QuartermasterGoal.class.getDeclaredMethod("takePayloadFromInventory", ServerWorld.class, BlockPos.class);
         takeFromInventory.setAccessible(true);
         assertTrue((boolean) takeFromInventory.invoke(goal, world, sourcePos));
     }
 
     private static void invokeInsertToInventory(QuartermasterGoal goal, ServerWorld world, BlockPos destPos) throws Exception {
-        Method insertToInventory = QuartermasterGoal.class.getDeclaredMethod("insertToInventory", ServerWorld.class, BlockPos.class);
+        Method insertToInventory = QuartermasterGoal.class.getDeclaredMethod("insertPayloadToInventory", ServerWorld.class, BlockPos.class);
         insertToInventory.setAccessible(true);
         insertToInventory.invoke(goal, world, destPos);
     }
